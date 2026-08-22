@@ -1,0 +1,63 @@
+# Tender Agent monorepo — 按工程技术栈分层的 .gitignore
+# 依赖锁文件一律入库（package-lock.json / uv.lock / Cargo.lock），不要忽略。
+
+# ─── 根目录 / npm 编排 ────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+lerna-debug.log*
+
+# ─── frontend/：React 19 + Vite + TypeScript + Tailwind ──
+dist/
+dist-ssr/
+build/
+*.local
+*.tsbuildinfo
+.vite/
+coverage/
+
+# ─── sidecar/：Python 3.12 + uv + FastAPI + pytest ───────
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/
+
+# ─── 本地运行时数据（SQLite / workspace / 产物目录，绝不入库）─
+sidecar/data/
+
+# ─── src-tauri/：Tauri 2 / Rust（Cargo.lock 保留入库）─────
+src-tauri/target/
+src-tauri/gen/
+
+# ─── 环境变量 / 密钥（.env.example 保留模板）──────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ─── 日志 / 测试工具缓存 ──────────────────────────────────
+*.log
+logs/
+.playwright-mcp/
+
+# ─── 操作系统 / 编辑器 / 工具会话目录 ──────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.zcode/
+*.swp
+*.swo
+*~

@@ -1,0 +1,1 @@
+"""Tender Agent sidecar package."""

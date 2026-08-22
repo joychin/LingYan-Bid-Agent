@@ -1,0 +1,15 @@
+{
+  "name": "tender-agent",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev",
+    "tauri": "tauri",
+    "dev:browser": "concurrently -k -n sidecar,vite -c blue,green \"npm:sidecar\" \"npm:dev:frontend\"",
+    "sidecar": "cd sidecar && uv run --env-file .env python -m app.main --port 8765",
+    "dev:frontend": "cd frontend && npm run dev"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "concurrently": "^9.1.0"
+  }
+}

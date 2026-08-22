@@ -1,0 +1,16 @@
+# crates.io 镜像（国内网络：直连会超时）
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true
+
+[http]
+timeout = 120
+low-speed-limit = 1
