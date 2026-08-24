@@ -6,6 +6,13 @@
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { getSidecarInfo } from './client'
 
+export type TodoStatus = 'pending' | 'in_progress' | 'completed'
+
+export interface TodoItem {
+  content: string
+  status: TodoStatus
+}
+
 export interface AgentEventData {
   run_id: string
   conversation_id: string
@@ -15,6 +22,19 @@ export interface AgentEventData {
   summary?: string
   message_id?: string
   error?: string
+  // agent.reasoning（推理模型 chain-of-thought 增量，非推理模型无此事件）
+  reasoning?: string
+  // run.state（连接建立时的对账事件）
+  status?: 'running' | 'completed' | 'error'
+  // todo.updated
+  done?: number
+  total?: number
+  items?: TodoItem[]
+  // artifact.created
+  artifact_id?: string
+  name?: string
+  type?: string
+  size?: number
 }
 
 export interface SSEHandlers {

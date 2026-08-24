@@ -1,6 +1,6 @@
 """SQLite 持久化（标准库 sqlite3，WAL 模式）。
 
-三个表：conversations / messages / runs。与 DeepAgents 的 checkpointer（data/agent.db）分离，
+四个表：conversations / messages / runs / artifacts。与 DeepAgents 的 checkpointer（data/agent.db）分离，
 避免锁竞争。所有写操作在各自连接上执行，连接默认 autocommit（isolation_level=None）。
 """
 
@@ -24,8 +24,16 @@ CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('running','completed','error')),
   error TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS artifacts(
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT,
+  run_id TEXT,
+  name TEXT NOT NULL, path TEXT NOT NULL,
+  type TEXT NOT NULL CHECK(type IN ('html','json','md','other')),
+  size INTEGER, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_conv ON runs(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_conv ON artifacts(conversation_id);
 """
 
 
@@ -84,6 +92,36 @@ def get_conversation(cid: str) -> dict | None:
     finally:
         conn.close()
     return dict(row) if row else None
+
+
+def rename_conversation(cid: str, title: str) -> dict:
+    title = (title or "").strip()
+    if not title:
+        raise ValueError("标题不能为空")
+    conn = _conn()
+    try:
+        conn.execute("UPDATE conversations SET title=? WHERE id=?", (title, cid))
+    finally:
+        conn.close()
+    return {"id": cid, "title": title}
+
+
+def delete_conversation(cid: str) -> None:
+    """删除会话及其消息/run 记录；artifacts 保留为全局产物（conversation_id 置空）。
+
+    表之间无外键约束（PRAGMA foreign_keys=ON 对未声明 FKs 不生效），手动清理子表，
+    并把产物解绑以免留下指向已删会话的孤儿引用。
+    """
+    conn = _conn()
+    try:
+        conn.execute("DELETE FROM messages WHERE conversation_id=?", (cid,))
+        conn.execute("DELETE FROM runs WHERE conversation_id=?", (cid,))
+        conn.execute(
+            "UPDATE artifacts SET conversation_id=NULL WHERE conversation_id=?", (cid,)
+        )
+        conn.execute("DELETE FROM conversations WHERE id=?", (cid,))
+    finally:
+        conn.close()
 
 
 def create_user_message(cid: str, content: str) -> dict:
@@ -175,6 +213,21 @@ def active_run_exists(cid: str) -> bool:
     return row is not None
 
 
+def get_latest_run(cid: str) -> dict | None:
+    """该会话最近一条 run（任意状态）。SSE 连接建立时据此下发 run.state 对账事件，
+    供断线重连的客户端恢复 running（无 agent.started 补发）或收敛已结束的 run。"""
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT id, conversation_id, status, error, created_at FROM runs "
+            "WHERE conversation_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (cid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
 def load_recent_history(cid: str, limit: int = 20) -> list[dict]:
     """给 agent 做线程记忆预热的最近消息（role/content 对，不含 id）。"""
     conn = _conn()
@@ -187,3 +240,59 @@ def load_recent_history(cid: str, limit: int = 20) -> list[dict]:
     finally:
         conn.close()
     return [dict(r) for r in reversed(rows)]
+
+
+def create_artifact(
+    aid: str,
+    conversation_id: str,
+    run_id: str,
+    name: str,
+    path: str,
+    type_: str,
+    size: int,
+) -> dict:
+    created_at = _now()
+    conn = _conn()
+    try:
+        conn.execute(
+            "INSERT INTO artifacts(id, conversation_id, run_id, name, path, type, size, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (aid, conversation_id, run_id, name, path, type_, size, created_at),
+        )
+    finally:
+        conn.close()
+    return {
+        "id": aid,
+        "conversation_id": conversation_id,
+        "run_id": run_id,
+        "name": name,
+        "path": path,
+        "type": type_,
+        "size": size,
+        "created_at": created_at,
+    }
+
+
+def list_artifacts() -> list[dict]:
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, conversation_id, run_id, name, path, type, size, created_at "
+            "FROM artifacts ORDER BY created_at DESC, id DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_artifact(aid: str) -> dict | None:
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT id, conversation_id, run_id, name, path, type, size, created_at "
+            "FROM artifacts WHERE id=?",
+            (aid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None

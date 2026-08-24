@@ -10,7 +10,7 @@ import json
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from .. import bus, db
+from .. import bus, db, events
 
 router = APIRouter()
 
@@ -26,6 +26,20 @@ def _frame(event: str, data: dict) -> dict:
 async def _event_generator(cid: str):
     q = bus.subscribe(cid)
     try:
+        # 连接建立即对账：重连的客户端错过了 agent.started/completed（MVP 无补发），
+        # 先下发最新 run 的真实状态。订阅在查询之前，期间发布的事件进队列、
+        # 排在 run.state 之后，终态事件总能覆盖这里的中间态。
+        run = db.get_latest_run(cid)
+        if run:
+            yield _frame(
+                events.EVENT_RUN_STATE,
+                {
+                    "run_id": run["id"],
+                    "conversation_id": cid,
+                    "status": run["status"],
+                    "error": run["error"],
+                },
+            )
         while True:
             try:
                 event = await asyncio.wait_for(q.get(), timeout=PING_INTERVAL)

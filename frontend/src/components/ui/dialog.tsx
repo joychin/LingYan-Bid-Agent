@@ -16,7 +16,7 @@ export function Dialog({ open, onClose, title, children }: DialogProps) {
       <div className="absolute inset-0 bg-black/50" onClick={onClose} aria-hidden />
       <div
         className={cn(
-          'relative z-10 w-full max-w-md rounded-lg border bg-card p-6 shadow-lg',
+          'relative z-10 w-full max-w-md rounded-2xl border bg-card p-6 shadow-lg',
           'max-h-[85vh] overflow-y-auto',
         )}
       >

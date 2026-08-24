@@ -1,27 +1,51 @@
 @import "tailwindcss";
+@import "./styles/ai.css";
 
-/* 浅色主题基调（shadcn 风格 token，light only） */
+/* §1 设计 Tokens（Workspace Shell 设计系统，源 workspace-dna-prototype.html）。light only。 */
 :root {
-  --background: hsl(0 0% 100%);
-  --foreground: hsl(240 10% 3.9%);
-  --card: hsl(0 0% 100%);
-  --card-foreground: hsl(240 10% 3.9%);
-  --popover: hsl(0 0% 100%);
-  --popover-foreground: hsl(240 10% 3.9%);
-  --primary: hsl(240 5.9% 10%);
-  --primary-foreground: hsl(0 0% 98%);
-  --secondary: hsl(240 4.8% 95.9%);
-  --secondary-foreground: hsl(240 5.9% 10%);
-  --muted: hsl(240 4.8% 95.9%);
-  --muted-foreground: hsl(240 3.8% 46.1%);
-  --accent: hsl(240 4.8% 95.9%);
-  --accent-foreground: hsl(240 5.9% 10%);
-  --destructive: hsl(0 84.2% 60.2%);
-  --destructive-foreground: hsl(0 0% 98%);
-  --border: hsl(240 5.9% 90%);
-  --input: hsl(240 5.9% 90%);
-  --ring: hsl(240 5.9% 10%);
-  --radius: 0.5rem;
+  --background: #ffffff;          /* paper */
+  --foreground: #1a1d21;          /* ink */
+  --card: #ffffff;
+  --card-foreground: #1a1d21;
+  --primary: #2563eb;             /* accent 蓝 */
+  --primary-foreground: #ffffff;
+  --secondary: #f0f2f5;           /* panel-2（用户气泡底） */
+  --secondary-foreground: #1a1d21;
+  --muted: #f6f7f9;               /* panel（hover 底） */
+  --muted-foreground: #5b616b;    /* ink-2 次要文字 */
+  --accent: #f0f2f5;              /* hover 底 */
+  --accent-foreground: #1a1d21;
+  --border: #e6e8ec;              /* line */
+  --input: #e6e8ec;
+  --ring: #2563eb;
+  --radius: 0.625rem;             /* 10px */
+
+  /* §1 语义色 */
+  --success: #10b981;
+  --warning: #f59e0b;
+  --error: #ef4444;
+
+  /* 兼容：popover 用白卡；destructive 映射到 error 语义 */
+  --popover: #ffffff;
+  --popover-foreground: #1a1d21;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+
+  /* workspace 组件类引用的语义 token（与 workspace.css 同值，供真实 App 使用） */
+  --paper: #ffffff;
+  --panel: #f6f7f9;
+  --panel-2: #f0f2f5;
+  --ink: #1a1d21;
+  --ink-2: #5b616b;
+  --ink-3: #9aa1ab;
+  --brand: #2563eb;                 /* 品牌主色（workspace 组件用 --brand，不占 --accent） */
+  --accent-soft: #eaf1fe;
+  --line: #e6e8ec;
+  --line-2: #d9dde3;
+  --radius-sm: 7px;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
+    "Noto Sans SC", "Segoe UI", Roboto, system-ui, sans-serif;
 }
 
 @theme inline {
@@ -44,7 +68,14 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --radius-sm: calc(var(--radius) - 4px);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
@@ -58,7 +89,19 @@
     margin: 0;
     background: var(--background);
     color: var(--foreground);
-    font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+    /* 中性 grotesque：系统 CJK 栈（源 workspace-dna-prototype） */
+    font-family: var(--font);
+    font-size: 14px;
     -webkit-font-smoothing: antialiased;
   }
+}
+
+/* 流式光标：2px 主色竖线，单调闪烁 */
+@keyframes caret-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.caret-blink {
+  animation: caret-blink 1s step-end infinite;
 }

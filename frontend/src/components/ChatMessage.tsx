@@ -1,11 +1,11 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Message } from '@/api/client'
-import { cn } from '@/lib/utils'
+import { Message as WMessage } from '@/components/workspace/Message'
 
-const markdownComponents = {
+export const markdownComponents = {
   table: (props: React.ComponentPropsWithoutRef<'table'>) => (
-    <div className="my-2 overflow-x-auto">
+    <div className="my-2 overflow-x-auto rounded-xl border bg-card">
       <table className="w-full border-collapse text-sm" {...props} />
     </div>
   ),
@@ -16,52 +16,54 @@ const markdownComponents = {
     <td className="border px-3 py-1.5 align-top" {...props} />
   ),
   a: (props: React.ComponentPropsWithoutRef<'a'>) => (
-    <a className="text-blue-600 underline" target="_blank" rel="noreferrer" {...props} />
+    <a className="text-primary underline" target="_blank" rel="noreferrer" {...props} />
   ),
   code: (props: React.ComponentPropsWithoutRef<'code'>) => (
     <code className="rounded bg-muted px-1 py-0.5 text-[0.9em]" {...props} />
   ),
 }
 
-export function ChatMessage({ message }: { message: Message }) {
-  const isUser = message.role === 'user'
+const ASSISTANT_NAME = 'Tender Agent'
+
+function AssistantFrame({ status, children }: { status?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className={cn('flex w-full', isUser ? 'justify-end' : 'justify-start')}>
-      <div
-        className={cn(
-          'max-w-[85%] rounded-lg px-4 py-2.5 text-sm leading-relaxed',
-          isUser ? 'bg-primary text-primary-foreground' : 'border bg-card text-card-foreground',
-        )}
-      >
-        {isUser ? (
-          <p className="whitespace-pre-wrap">{message.content}</p>
-        ) : (
-          <div className="prose-sm">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-              {message.content}
-            </ReactMarkdown>
-          </div>
-        )}
-      </div>
-    </div>
+    <WMessage
+      role="assistant"
+      name={ASSISTANT_NAME}
+      avatar={<div className="msg-avatar">T</div>}
+      status={status}
+    >
+      {children}
+    </WMessage>
   )
 }
 
-/** 正在生成的 assistant 气泡（累积 SSE token）。 */
-export function StreamingMessage({ text }: { text: string }) {
+/** 用户消息：右对齐、panel-2 底、右上角小圆角气泡。 */
+export function UserBubble({ content }: { content: string }) {
   return (
-    <div className="flex w-full justify-start">
-      <div className="max-w-[85%] rounded-lg border bg-card px-4 py-2.5 text-sm leading-relaxed">
-        {text ? (
-          <div className="prose-sm">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-              {text}
-            </ReactMarkdown>
-          </div>
-        ) : (
-          <span className="text-muted-foreground">正在思考…</span>
-        )}
+    <WMessage role="user">
+      <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{content}</p>
+    </WMessage>
+  )
+}
+
+/** 助手消息：左对齐通栏（不套气泡），白底透明，15px 行高 1.7。 */
+export function AssistantMessage({ content }: { content: string }) {
+  return (
+    <AssistantFrame>
+      <div className="bubble">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+          {content}
+        </ReactMarkdown>
       </div>
-    </div>
+    </AssistantFrame>
+  )
+}
+
+export function ChatMessage({ message }: { message: Message }) {
+  return message.role === 'user' ? (
+    <UserBubble content={message.content} />
+  ) : (
+    <AssistantMessage content={message.content} />
   )
 }

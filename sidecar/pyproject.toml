@@ -12,7 +12,9 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "pydantic",
+    "python-multipart",
     "sse-starlette",
+    "langchain-deepseek>=1.1.0",
 ]
 
 # 国内网络必须（pypi.org 直连会 TLS 超时）

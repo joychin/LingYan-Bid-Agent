@@ -15,6 +15,10 @@ class NewConversationBody(BaseModel):
     title: str | None = None
 
 
+class RenameConversationBody(BaseModel):
+    title: str
+
+
 class NewMessageBody(BaseModel):
     content: str
 
@@ -29,11 +33,39 @@ async def create_conversation(body: NewConversationBody):
     return db.create_conversation(body.title)
 
 
+@router.patch("/conversations/{cid}")
+async def rename_conversation(cid: str, body: RenameConversationBody):
+    if not db.get_conversation(cid):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        return db.rename_conversation(cid, body.title)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.delete("/conversations/{cid}")
+async def delete_conversation(cid: str):
+    if not db.get_conversation(cid):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if db.active_run_exists(cid):
+        raise HTTPException(status_code=409, detail="该会话有进行中的任务，无法删除")
+    db.delete_conversation(cid)
+    return {"ok": True}
+
+
 @router.get("/conversations/{cid}/messages")
 async def get_messages(cid: str):
     if not db.get_conversation(cid):
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"messages": db.list_messages(cid)}
+
+
+@router.get("/conversations/{cid}/runs/latest")
+async def get_latest_run(cid: str):
+    """最新 run 状态（任意状态）：SSE 断线期间 run 结束时，前端据此收敛 running 态。"""
+    if not db.get_conversation(cid):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"run": db.get_latest_run(cid)}
 
 
 @router.post("/conversations/{cid}/messages", status_code=202)

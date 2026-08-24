@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 
 from . import config as cfg
 from . import db
-from .api import conversations, settings as settings_api, sse
+from .api import artifacts, conversations, files, settings as settings_api, sse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("sidecar")
@@ -31,6 +31,9 @@ CORS_ORIGINS = [
     "http://tauri.localhost",
     "tauri://localhost",
 ]
+# 本地开发兜底：放行任意 localhost/127.0.0.1 端口（Vite 直连、端口回退等），
+# 避免浏览器模式因为 origin 不在白名单而整段拦截 /api 与 SSE。
+CORS_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
 
 def _sync_skills() -> None:
@@ -67,6 +70,7 @@ app = FastAPI(title="Tender Agent Sidecar", version=VERSION, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -75,6 +79,10 @@ app.add_middleware(
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
+    # CORS 预检（OPTIONS）不带 Authorization，必须放行交给 CORSMiddleware 处理，
+    # 否则带 Bearer 的跨源请求会因预检 401 而整体失败（浏览器报 "Load failed"）。
+    if request.method == "OPTIONS":
+        return await call_next(request)
     token = cfg.sidecar_token()
     if token and request.url.path.startswith("/api") and request.url.path != "/api/healthz":
         auth = request.headers.get("Authorization", "")
@@ -96,6 +104,8 @@ async def healthz():
 app.include_router(conversations.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 app.include_router(sse.router, prefix="/api")
+app.include_router(files.router, prefix="/api")
+app.include_router(artifacts.router, prefix="/api")
 
 
 def main() -> None:

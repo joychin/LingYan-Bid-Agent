@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "tauri dev",
     "tauri": "tauri",
+    "dev:menu": "bash dev.sh",
     "dev:browser": "concurrently -k -n sidecar,vite -c blue,green \"npm:sidecar\" \"npm:dev:frontend\"",
     "sidecar": "cd sidecar && uv run --env-file .env python -m app.main --port 8765",
     "dev:frontend": "cd frontend && npm run dev"

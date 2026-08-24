@@ -11,9 +11,11 @@ import sqlite3
 
 from deepagents import create_deep_agent
 from deepagents.backends.filesystem import FilesystemBackend
-from langchain_openai import ChatOpenAI
+from langchain.agents.middleware import TodoListMiddleware
+from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from . import artifacts
 from . import config as cfg
 from . import db
 from . import events
@@ -44,7 +46,9 @@ def build_agent():
     if not api_key:
         raise RuntimeError("LLM_API_KEY 未设置（sidecar 只能通过环境变量拿到 key）")
 
-    model = ChatOpenAI(
+    # ChatDeepSeek 会提取 DeepSeek 的 reasoning_content 到 additional_kwargs，
+    # events._chunk_reasoning 据此发 agent.reasoning（非推理模型下与 ChatOpenAI 行为一致）。
+    model = ChatDeepSeek(
         api_key=api_key,
         base_url=cfg.llm_base_url(),
         model=cfg.llm_model(),
@@ -56,11 +60,13 @@ def build_agent():
         backend=FilesystemBackend(root_dir=str(cfg.workspace_dir())),
         tools=TOOLS,
         skills=["skills/"],  # 未加载时在 main 启动日志提示换写法（见 README）
+        middleware=[TodoListMiddleware()],  # 提供 write_todos 工具 + todos 状态（驱动 todo.updated）
         system_prompt=(
             "你是标书助理。方法论在 skills 目录中："
             "标书分析用 tender-analysis 技能；"
             "解析招标文件生成投标目录用 tender-toc 技能"
             "（按其 SKILL.md 与 references/prompts.md 执行，脚本步骤用提供的工具，不要自己编命令）。"
+            "用户上传的文件在工作区根目录，可直接按文件名引用（如 招标文件.docx）。"
         ),
         checkpointer=_get_saver(),
     )
@@ -94,7 +100,13 @@ def _run_agent_stream(agent, user_text: str, cid: str, rid: str, _publish) -> tu
     error = None
     try:
         for kind, payload in events.iter_stream(stream):
-            if kind == "token":
+            if kind == "reasoning":
+                # DeepSeek 推理模型的 chain-of-thought 增量；非推理模型不产生
+                _publish(
+                    events.EVENT_REASONING,
+                    {"run_id": rid, "conversation_id": cid, "text": payload},
+                )
+            elif kind == "token":
                 text_parts.append(payload)  # type: ignore[arg-type]
                 _publish(
                     events.EVENT_TOKEN,
@@ -108,7 +120,30 @@ def _run_agent_stream(agent, user_text: str, cid: str, rid: str, _publish) -> tu
             elif kind == "tool_result":
                 _publish(
                     events.EVENT_TOOL_RESULT,
-                    {"run_id": rid, "conversation_id": cid, "tool": payload["tool"], "summary": payload["summary"]},
+                    {
+                        "run_id": rid,
+                        "conversation_id": cid,
+                        "tool": payload["tool"],
+                        "summary": payload["summary"],
+                        # 失败工具必须透传 error（前端据 data.error 渲染失败卡），成功时为 null
+                        "error": payload.get("error"),
+                    },
+                )
+            elif kind == "todo_updated":
+                todos = payload  # type: ignore[arg-type]
+                done = sum(1 for t in todos if t.get("status") == "completed")
+                _publish(
+                    events.EVENT_TODO_UPDATED,
+                    {
+                        "run_id": rid,
+                        "conversation_id": cid,
+                        "done": done,
+                        "total": len(todos),
+                        "items": [
+                            {"content": t.get("content", ""), "status": t.get("status", "pending")}
+                            for t in todos
+                        ],
+                    },
                 )
     except Exception as e:  # 网络/API 错误等
         logger.exception("agent stream failed")
@@ -128,7 +163,25 @@ async def run_stream(cid: str, rid: str, user_text: str) -> None:
             fut = asyncio.run_coroutine_threadsafe(publish(cid, {"event": event, "data": data}), loop)
             fut.result()
 
+        snapshot = artifacts.snapshot_out()
         text, error = await asyncio.to_thread(_run_agent_stream, agent, user_text, cid, rid, _publish)
+
+        # run 结束（completed 或 error 都执行）登记产物，先于 completed/error 事件发出（PRD §4.2）
+        for art in artifacts.register_run_artifacts(cid, rid, snapshot):
+            await publish(
+                cid,
+                {
+                    "event": events.EVENT_ARTIFACT_CREATED,
+                    "data": {
+                        "run_id": rid,
+                        "conversation_id": cid,
+                        "artifact_id": art["id"],
+                        "name": art["name"],
+                        "type": art["type"],
+                        "size": art["size"],
+                    },
+                },
+            )
 
         if error:
             await publish(cid, {"event": events.EVENT_ERROR, "data": {"run_id": rid, "conversation_id": cid, "error": error}})

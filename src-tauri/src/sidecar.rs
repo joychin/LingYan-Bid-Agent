@@ -89,6 +89,12 @@ fn sidecar_dir() -> PathBuf {
     PathBuf::from("../sidecar")
 }
 
+/// 产物工作区目录（与 sidecar app/config.py 的 workspace_dir 一致）：`<sidecar>/data/workspace`。
+/// Tauri 不设 DATA_DIR，故与 Python 侧默认解析一致。仅用于 reveal_in_folder 的路径前缀校验。
+pub(crate) fn workspace_dir() -> PathBuf {
+    sidecar_dir().join("data/workspace")
+}
+
 fn sidecar_python() -> PathBuf {
     #[cfg(windows)]
     {
