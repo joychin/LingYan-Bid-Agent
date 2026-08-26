@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 
 from . import config as cfg
 from . import db
-from .api import artifacts, conversations, files, settings as settings_api, sse
+from .api import artifacts, conversations, files, runs, settings as settings_api, sse, tasks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("sidecar")
@@ -53,11 +53,24 @@ def _sync_skills() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     cfg.data_dir().mkdir(parents=True, exist_ok=True)
-    (cfg.workspace_dir() / "out").mkdir(parents=True, exist_ok=True)
+    # §16 任务分组目录：任务子目录（formal/threads/files/out/drafts）按需创建，启动不预建
     db.init_db()
+    # manifest 是权威、索引可重建：启动时全量重扫（运行态自然复位，emitted 置 1）
+    from . import artifact_store
+
+    rebuilt = db.rebuild_artifact_index(
+        artifact_store.list_from_disk(),
+        lambda m: str(artifact_store.content_path(m["artifact_id"], m)),
+    )
+    if rebuilt:
+        logger.info("artifact 索引已从 manifest 重建：%d 个", rebuilt)
     recovered = db.recover_stale_runs()
     if recovered:
         logger.warning("启动时标记 %d 条崩溃残留的 running run 为 error", recovered)
+    # checkpoint 是记忆真值，messages 表是恢复源：agent.db 丢失/损坏的会话在此重建记忆
+    from .agent import recover_agent_memory
+
+    await recover_agent_memory()
     _sync_skills()
     if not cfg.sidecar_token():
         logger.warning("SIDECAR_TOKEN 未设置：/api/* 将不要求鉴权（仅限本机开发，勿用于真实数据目录）")
@@ -101,7 +114,9 @@ async def healthz():
     }
 
 
+app.include_router(tasks.router, prefix="/api")
 app.include_router(conversations.router, prefix="/api")
+app.include_router(runs.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 app.include_router(sse.router, prefix="/api")
 app.include_router(files.router, prefix="/api")

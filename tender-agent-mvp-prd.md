@@ -366,7 +366,7 @@ npm install -D @tauri-apps/cli && npx tauri init && npx tauri dev
 1. **网络**：本机 pypi 直连会 TLS 超时，pyproject 已含清华镜像；npm 需要 `.npmrc`：`registry=https://registry.npmmirror.com`
 2. **Python ≥3.12** 是 deepagents 硬要求；用 uv 管理
 3. **skills 路径**两种写法（`["skills/"]` vs 带 root 前缀）官方文档自相矛盾，启动时打日志确认已加载，未加载即换写法
-4. `.doc/.pdf` 输入需要 soffice（本机已装）；`.docx` 不需要
+4. 解析支持 `.docx`（python-docx）与 `.pdf`（PyMuPDF 原生提取，不再需要 soffice）；`.doc` 不支持，上传/解析均提示另存为 .docx
 5. DeepAgents beta：以事件契约为锚，库内部格式变化只改 `events.py` 一个文件
 6. uvicorn 不要开 `--reload` 与 Tauri spawn 同时使用（进程树管理会乱）
 

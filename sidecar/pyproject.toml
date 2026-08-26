@@ -9,12 +9,15 @@ dependencies = [
     "langgraph",
     "langgraph-checkpoint-sqlite",
     "python-docx",
+    "pymupdf>=1.24",
     "fastapi",
     "uvicorn",
     "pydantic",
     "python-multipart",
     "sse-starlette",
     "langchain-deepseek>=1.1.0",
+    "httpx",
+    "trafilatura>=2.0",
 ]
 
 # 国内网络必须（pypi.org 直连会 TLS 超时）
@@ -25,5 +28,10 @@ default = true
 [dependency-groups]
 dev = [
     "pytest",
-    "httpx",
+]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not e2e'"
+markers = [
+    "e2e: 端到端冒烟（spawn 真实 sidecar + LLM 一轮；uv run pytest -m e2e）",
 ]

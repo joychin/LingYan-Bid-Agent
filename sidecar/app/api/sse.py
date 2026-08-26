@@ -31,15 +31,19 @@ async def _event_generator(cid: str):
         # 排在 run.state 之后，终态事件总能覆盖这里的中间态。
         run = db.get_latest_run(cid)
         if run:
-            yield _frame(
-                events.EVENT_RUN_STATE,
-                {
-                    "run_id": run["id"],
-                    "conversation_id": cid,
-                    "status": run["status"],
-                    "error": run["error"],
-                },
-            )
+            data = {
+                "run_id": run["id"],
+                "conversation_id": cid,
+                "status": run["status"],
+                "error": run["error"],
+            }
+            # HITL 对账：waiting_input 附审批/问答快照，客户端据此恢复 InterruptCard
+            if run["status"] == "waiting_input":
+                try:
+                    data["requests"] = json.loads(run["interrupt"] or "[]")
+                except ValueError:
+                    data["requests"] = []
+            yield _frame(events.EVENT_RUN_STATE, data)
         while True:
             try:
                 event = await asyncio.wait_for(q.get(), timeout=PING_INTERVAL)

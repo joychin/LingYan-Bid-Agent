@@ -1,5 +1,6 @@
 """SSE 端点：连接建立时下发的 run.state 对账事件。"""
 
+from tests.util import create_conversation
 import asyncio
 import json
 
@@ -22,7 +23,7 @@ def _first_frame(cid):
 def test_run_state_emitted_on_connect(client):
     from app import db
 
-    cid = client.post("/api/conversations", json={}).json()["id"]
+    cid = create_conversation(client)["id"]
     rid = db.create_run(cid)["id"]
 
     frame = _first_frame(cid)
@@ -39,7 +40,7 @@ def test_run_state_emitted_on_connect(client):
 def test_run_state_carries_terminal_status(client):
     from app import db
 
-    cid = client.post("/api/conversations", json={}).json()["id"]
+    cid = create_conversation(client)["id"]
     rid = db.create_run(cid)["id"]
     db.finish_run(rid, "error", "LLM_API_KEY 未设置")
 
@@ -54,7 +55,7 @@ def test_run_state_omitted_when_no_runs(client, monkeypatch):
     from app.api import sse as sse_mod
 
     monkeypatch.setattr(sse_mod, "PING_INTERVAL", 0.05)
-    cid = client.post("/api/conversations", json={}).json()["id"]
+    cid = create_conversation(client)["id"]
 
     frame = _first_frame(cid)
     assert frame["event"] == "ping"

@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://documentcopilot.local/schemas/agent-contract/artifact-envelope.schema.json",
+  "title": "Artifact Envelope and Shared Definitions v2",
+  "description": "Common envelope for every artifact revision plus shared reference/status definitions. Validate payload with the artifact-specific schema after this envelope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact_id", "artifact_type", "schema_version", "envelope_profile", "revision", "lifecycle_status", "project_id", "created_at", "created_by", "input_snapshot", "freshness", "policy_outcome", "content_hash", "payload"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "$id": {"type": "string"},
+    "artifact_id": {"type": "string", "pattern": "^art_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "artifact_type": {"type": "string", "minLength": 1},
+    "schema_version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"},
+    "envelope_profile": {"type": "string", "enum": ["source", "evidence", "system", "user", "policy"]},
+    "revision": {"type": "integer", "minimum": 1},
+    "lifecycle_status": {"$ref": "#/$defs/artifactStatus"},
+    "project_id": {"type": "string", "pattern": "^project_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+    "created_at": {"$ref": "#/$defs/utcTimestamp"},
+    "created_by": {"$ref": "#/$defs/createdBy"},
+    "input_snapshot": {"type": "array", "items": {"$ref": "#/$defs/artifactRef"}, "uniqueItems": true},
+    "evidence_bundle_refs": {"type": "array", "items": {"$ref": "#/$defs/evidenceBundleRef"}, "uniqueItems": true},
+    "freshness": {"$ref": "#/$defs/freshness"},
+    "policy_outcome": {"type": "string", "enum": ["auto_created", "approval_required", "auto_applied", "approved", "rejected", "not_applicable"]},
+    "content_hash": {"$ref": "#/$defs/hash"},
+    "payload": {"type": "object"}
+  },
+  "allOf": [
+    {"if": {"properties": {"envelope_profile": {"const": "evidence"}}}, "then": {"required": ["evidence_bundle_refs"], "properties": {"evidence_bundle_refs": {"minItems": 1}}}},
+    {"if": {"properties": {"envelope_profile": {"enum": ["source", "system", "user"]}}}, "then": {"properties": {"evidence_bundle_refs": {"maxItems": 0}}}}
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "utcTimestamp": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"},
+    "artifactStatus": {"type": "string", "enum": ["provisional", "approved", "superseded", "rejected", "invalid"]},
+    "analysisStatus": {"type": "string", "enum": ["completed", "partial", "failed", "blocked"]},
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "artifact_type", "revision", "content_hash"],
+      "properties": {
+        "artifact_id": {"type": "string", "pattern": "^art_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"},
+        "artifact_type": {"type": "string", "minLength": 1},
+        "revision": {"type": "integer", "minimum": 1},
+        "content_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "evidenceBundleRef": {
+      "allOf": [
+        {"$ref": "#/$defs/artifactRef"},
+        {"type": "object", "properties": {"artifact_type": {"const": "evidence_bundle"}}}
+      ]
+    },
+    "evidenceItemRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_ref", "evidence_id"],
+      "properties": {
+        "bundle_ref": {"$ref": "#/$defs/evidenceBundleRef"},
+        "evidence_id": {"type": "string", "pattern": "^ev_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"}
+      }
+    },
+    "itemRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_ref", "item_id"],
+      "properties": {
+        "artifact_ref": {"$ref": "#/$defs/artifactRef"},
+        "item_id": {"type": "string", "minLength": 1},
+        "relation": {"type": "string", "enum": ["same_obligation", "evidence_for_score", "coverage_dependency", "derived_from", "affected_by"]}
+      }
+    },
+    "createdBy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["skill", "user", "system", "importer"]},
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"}
+      },
+      "allOf": [
+        {"if": {"properties": {"kind": {"enum": ["skill", "importer"]}}}, "then": {"required": ["version"]}}
+      ]
+    },
+    "pageRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {"start": {"type": "integer", "minimum": 1}, "end": {"type": "integer", "minimum": 1}}
+    },
+    "charRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {"start": {"type": "integer", "minimum": 0}, "end": {"type": "integer", "minimum": 1}}
+    },
+    "freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "checked_at", "reasons"],
+      "properties": {
+        "state": {"type": "string", "enum": ["fresh", "needs_review", "stale", "historical"]},
+        "checked_at": {"$ref": "#/$defs/utcTimestamp"},
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": {"type": "string", "enum": ["input_superseded", "evidence_bundle_changed", "user_supplement_changed", "user_decision_changed", "source_selection_changed", "parse_quality_changed", "coverage_scope_changed", "precedence_changed", "evidence_excerpt_changed", "publication_drift", "legacy_projection_drift", "historical_snapshot"]},
+              "input_ref": {"$ref": "#/$defs/artifactRef"},
+              "message": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_kinds", "assertion_status", "method"],
+      "properties": {
+        "source_kinds": {"type": "array", "items": {"type": "string", "enum": ["source_document", "user_supplement", "user_decision", "system_derived", "model_inference"]}, "minItems": 1, "uniqueItems": true},
+        "assertion_status": {"type": "string", "enum": ["proposed", "confirmed", "unknown", "conflicting"]},
+        "method": {"type": "string", "enum": ["deterministic", "llm", "hybrid", "user_entered"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "allOf": [
+        {"if": {"properties": {"assertion_status": {"enum": ["unknown", "conflicting"]}}}, "then": {"not": {"required": ["confidence"]}}},
+        {"if": {"properties": {"method": {"enum": ["deterministic", "user_entered"]}}}, "then": {"not": {"required": ["confidence"]}}}
+      ]
+    }
+  }
+}

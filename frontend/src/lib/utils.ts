@@ -43,3 +43,14 @@ export function dayBucket(iso: string): DayBucket {
   if (t >= startYesterday) return '昨天'
   return '更早'
 }
+
+/** 毫秒 → 耗时文案："0.8s" / "12s" / "1m 03s" / "2m 41s"。 */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return ''
+  const s = ms / 1000
+  if (s < 1) return `${s.toFixed(1)}s`
+  if (s < 60) return `${Math.floor(s)}s`
+  const m = Math.floor(s / 60)
+  const rest = Math.floor(s % 60)
+  return `${m}m ${String(rest).padStart(2, '0')}s`
+}

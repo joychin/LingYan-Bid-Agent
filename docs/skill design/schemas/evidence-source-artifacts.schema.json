@@ -1,0 +1,1742 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://documentcopilot.local/schemas/agent-contract/evidence-source-artifacts.schema.json",
+  "title": "Evidence and Source Artifacts v2",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "artifact-envelope.schema.json"
+    },
+    {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sourceDocumentArtifact"
+        },
+        {
+          "$ref": "#/$defs/parseResultArtifact"
+        },
+        {
+          "$ref": "#/$defs/sourceSetArtifact"
+        },
+        {
+          "$ref": "#/$defs/documentMapArtifact"
+        },
+        {
+          "$ref": "#/$defs/evidenceBundleArtifact"
+        },
+        {
+          "$ref": "#/$defs/userSupplementArtifact"
+        },
+        {
+          "$ref": "#/$defs/userEditArtifact"
+        },
+        {
+          "$ref": "#/$defs/userDecisionArtifact"
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "sourceDocumentRef": {
+      "allOf": [
+        {
+          "$ref": "artifact-envelope.schema.json#/$defs/artifactRef"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "artifact_type": {
+              "const": "source_document"
+            }
+          }
+        }
+      ]
+    },
+    "parseResultRef": {
+      "allOf": [
+        {
+          "$ref": "artifact-envelope.schema.json#/$defs/artifactRef"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "artifact_type": {
+              "const": "parse_result"
+            }
+          }
+        }
+      ]
+    },
+    "sourceSetRef": {
+      "allOf": [
+        {
+          "$ref": "artifact-envelope.schema.json#/$defs/artifactRef"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "artifact_type": {
+              "const": "source_set"
+            }
+          }
+        }
+      ]
+    },
+    "userSupplementRef": {
+      "allOf": [
+        {
+          "$ref": "artifact-envelope.schema.json#/$defs/artifactRef"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "artifact_type": {
+              "const": "user_supplement"
+            }
+          }
+        }
+      ]
+    },
+    "userDecisionRef": {
+      "allOf": [
+        {
+          "$ref": "artifact-envelope.schema.json#/$defs/artifactRef"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "artifact_type": {
+              "const": "user_decision"
+            }
+          }
+        }
+      ]
+    },
+    "quality": {
+      "type": "string",
+      "enum": [
+        "acceptable",
+        "review_recommended",
+        "unreliable",
+        "unavailable"
+      ]
+    },
+    "sourceDocumentArtifact": {
+      "type": "object",
+      "required": [
+        "artifact_type",
+        "payload"
+      ],
+      "properties": {
+        "artifact_type": {
+          "const": "source_document"
+        },
+        "payload": {
+          "$ref": "#/$defs/sourceDocumentPayload"
+        }
+      }
+    },
+    "sourceDocumentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_document_id",
+        "display_name",
+        "media_type",
+        "file_hash",
+        "byte_size",
+        "storage_ref",
+        "logical_role",
+        "source_order",
+        "language_hint",
+        "ingestion_notes"
+      ],
+      "properties": {
+        "source_document_id": {
+          "type": "string",
+          "pattern": "^src_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "file_hash": {
+          "$ref": "artifact-envelope.schema.json#/$defs/hash"
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "storage_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "logical_role": {
+          "type": "string",
+          "enum": [
+            "primary_tender",
+            "amendment",
+            "attachment",
+            "clarification",
+            "other"
+          ]
+        },
+        "source_order": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "language_hint": {
+          "type": "string",
+          "minLength": 2
+        },
+        "ingestion_notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "parseResultArtifact": {
+      "type": "object",
+      "required": [
+        "artifact_type",
+        "payload"
+      ],
+      "properties": {
+        "artifact_type": {
+          "const": "parse_result"
+        },
+        "payload": {
+          "$ref": "#/$defs/parseResultPayload"
+        }
+      }
+    },
+    "parseResultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_document_ref",
+        "parser",
+        "parse_status",
+        "addressing_profile",
+        "pages",
+        "blocks",
+        "tables",
+        "sections",
+        "quality_report"
+      ],
+      "properties": {
+        "source_document_ref": {
+          "$ref": "#/$defs/sourceDocumentRef"
+        },
+        "parser": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "engine",
+            "engine_version",
+            "configuration_hash",
+            "fallbacks"
+          ],
+          "properties": {
+            "engine": {
+              "type": "string"
+            },
+            "engine_version": {
+              "type": "string"
+            },
+            "configuration_hash": {
+              "$ref": "artifact-envelope.schema.json#/$defs/hash"
+            },
+            "fallbacks": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "parse_status": {
+          "type": "string",
+          "enum": [
+            "succeeded",
+            "partial",
+            "failed"
+          ]
+        },
+        "addressing_profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "page_numbers",
+            "block_ids",
+            "table_ids",
+            "section_ids"
+          ],
+          "properties": {
+            "page_numbers": {
+              "type": "string",
+              "enum": [
+                "stable",
+                "unstable",
+                "absent"
+              ]
+            },
+            "block_ids": {
+              "type": "string",
+              "enum": [
+                "stable",
+                "absent"
+              ]
+            },
+            "table_ids": {
+              "type": "string",
+              "enum": [
+                "stable",
+                "absent"
+              ]
+            },
+            "section_ids": {
+              "type": "string",
+              "enum": [
+                "stable",
+                "absent"
+              ]
+            }
+          }
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/page"
+          }
+        },
+        "blocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/block"
+          }
+        },
+        "tables": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/table"
+          }
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/section"
+          }
+        },
+        "quality_report": {
+          "$ref": "#/$defs/qualityReport"
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "page_id",
+        "page_number",
+        "status",
+        "text_hash",
+        "quality"
+      ],
+      "properties": {
+        "page_id": {
+          "type": "string"
+        },
+        "page_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "readable",
+            "empty",
+            "low_confidence",
+            "failed"
+          ]
+        },
+        "text_hash": {
+          "$ref": "artifact-envelope.schema.json#/$defs/hash"
+        },
+        "quality": {
+          "$ref": "#/$defs/quality"
+        }
+      }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "block_id",
+        "block_type",
+        "reading_order",
+        "text",
+        "text_hash",
+        "quality"
+      ],
+      "properties": {
+        "block_id": {
+          "type": "string"
+        },
+        "page_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "block_type": {
+          "type": "string"
+        },
+        "reading_order": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "text": {
+          "type": "string"
+        },
+        "text_hash": {
+          "$ref": "artifact-envelope.schema.json#/$defs/hash"
+        },
+        "quality": {
+          "$ref": "#/$defs/quality"
+        }
+      }
+    },
+    "table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "table_id",
+        "reading_order",
+        "columns",
+        "rows",
+        "quality"
+      ],
+      "properties": {
+        "table_id": {
+          "type": "string"
+        },
+        "page_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reading_order": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "quality": {
+          "$ref": "#/$defs/quality"
+        }
+      }
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section_id",
+        "title",
+        "level",
+        "reading_order",
+        "block_ids"
+      ],
+      "properties": {
+        "section_id": {
+          "type": "string"
+        },
+        "parent_section_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "level": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reading_order": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "block_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "qualityReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "overall",
+        "warnings",
+        "gaps"
+      ],
+      "properties": {
+        "overall": {
+          "$ref": "#/$defs/quality"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "sourceSetArtifact": {
+      "type": "object",
+      "required": [
+        "artifact_type",
+        "payload"
+      ],
+      "properties": {
+        "artifact_type": {
+          "const": "source_set"
+        },
+        "payload": {
+          "$ref": "#/$defs/sourceSetPayload"
+        }
+      }
+    },
+    "sourceSetPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_set_id",
+        "selection_status",
+        "entries"
+      ],
+      "properties": {
+        "source_set_id": {
+          "type": "string",
+          "pattern": "^srcset_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+        },
+        "selection_status": {
+          "type": "string",
+          "enum": [
+            "proposed",
+            "approved",
+            "partial",
+            "blocked"
+          ]
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sourceSetEntry"
+          },
+          "minItems": 1
+        },
+        "selection_notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "sourceSetEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_document_ref",
+        "intended_role",
+        "analysis_disposition",
+        "parse_disposition",
+        "precedence"
+      ],
+      "properties": {
+        "source_document_ref": {
+          "$ref": "#/$defs/sourceDocumentRef"
+        },
+        "intended_role": {
+          "type": "string",
+          "enum": [
+            "primary_tender",
+            "amendment",
+            "attachment",
+            "clarification",
+            "other"
+          ]
+        },
+        "analysis_disposition": {
+          "type": "string",
+          "enum": [
+            "included",
+            "ignored_by_user",
+            "excluded_by_policy",
+            "blocked_parse",
+            "unavailable"
+          ]
+        },
+        "parse_disposition": {
+          "type": "string",
+          "enum": [
+            "usable",
+            "usable_with_warning",
+            "blocked",
+            "not_requested"
+          ]
+        },
+        "parse_result_ref": {
+          "$ref": "#/$defs/parseResultRef"
+        },
+        "exception_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^clar_"
+          }
+        },
+        "precedence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "rank",
+            "rule"
+          ],
+          "properties": {
+            "rank": {
+              "type": "integer"
+            },
+            "rule": {
+              "type": "string",
+              "enum": [
+                "user_order",
+                "amendment_overrides_primary",
+                "clarification_overrides",
+                "user_decision"
+              ]
+            },
+            "decision_ref": {
+              "$ref": "#/$defs/userDecisionRef"
+            }
+          }
+        },
+        "rationale": {
+          "type": "string"
+        }
+      }
+    },
+    "documentMapArtifact": {
+      "type": "object",
+      "required": [
+        "artifact_type",
+        "payload"
+      ],
+      "properties": {
+        "artifact_type": {
+          "const": "document_map"
+        },
+        "payload": {
+          "$ref": "#/$defs/documentMapPayload"
+        }
+      }
+    },
+    "documentMapPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parse_result_refs",
+        "document_entries",
+        "segment_candidates",
+        "index_warnings"
+      ],
+      "properties": {
+        "parse_result_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/parseResultRef"
+          },
+          "minItems": 1
+        },
+        "document_entries": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "segment_candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "candidate_id",
+              "label",
+              "basis",
+              "locations",
+              "status"
+            ],
+            "properties": {
+              "candidate_id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "basis": {
+                "type": "string",
+                "enum": [
+                  "heading",
+                  "table",
+                  "directory",
+                  "pattern"
+                ]
+              },
+              "locations": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/parseLocationRef"
+                },
+                "minItems": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "proposed",
+                  "confirmed",
+                  "conflicting"
+                ]
+              }
+            }
+          }
+        },
+        "index_warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "parseLocationRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parse_result_ref",
+        "block_ids"
+      ],
+      "properties": {
+        "parse_result_ref": {
+          "$ref": "#/$defs/parseResultRef"
+        },
+        "page_range": {
+          "$ref": "artifact-envelope.schema.json#/$defs/pageRange"
+        },
+        "block_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "table_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "evidenceBundleArtifact": {
+      "type": "object",
+      "required": [
+        "artifact_type",
+        "payload"
+      ],
+      "properties": {
+        "artifact_type": {
+          "const": "evidence_bundle"
+        },
+        "payload": {
+          "$ref": "#/$defs/evidenceBundlePayload"
+        }
+      }
+    },
+    "evidenceBundlePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundle_id",
+        "bundle_mode",
+        "purpose",
+        "scope",
+        "items",
+        "coverage",
+        "selection_method",
+        "bundle_hash"
+      ],
+      "properties": {
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^evb_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+        },
+        "bundle_mode": {
+          "type": "string",
+          "enum": [
+            "source_only",
+            "mixed",
+            "user_only"
+          ]
+        },
+        "purpose": {
+          "type": "string",
+          "enum": [
+            "tender_structure",
+            "qualification",
+            "submission",
+            "disqualification",
+            "evaluation",
+            "business_technical",
+            "clarification",
+            "ad_hoc_query"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/bundleScope"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidenceItem"
+          },
+          "minItems": 1
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverageReport"
+        },
+        "selection_method": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "methods",
+            "version",
+            "parameters"
+          ],
+          "properties": {
+            "methods": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "deterministic_filter",
+                  "full_document_scan",
+                  "heading_scan",
+                  "table_scan",
+                  "keyword_retrieval",
+                  "semantic_retrieval",
+                  "adjacency_expansion",
+                  "user_selected"
+                ]
+              },
+              "minItems": 1
+            },
+            "version": {
+              "type": "string"
+            },
+            "parameters": {
+              "type": "object"
+            }
+          }
+        },
+        "bundle_hash": {
+          "$ref": "artifact-envelope.schema.json#/$defs/hash"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "bundle_mode": {
+                "const": "source_only"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scope": {
+                "properties": {
+                  "source_document_refs": {
+                    "minItems": 1
+                  },
+                  "parse_result_refs": {
+                    "minItems": 1
+                  }
+                }
+              },
+              "items": {
+                "items": {
+                  "$ref": "#/$defs/sourceExcerpt"
+                }
+              },
+              "coverage": {
+                "properties": {
+                  "profile": {
+                    "not": {
+                      "const": "user_provided_only"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "bundle_mode": {
+                "const": "user_only"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scope": {
+                "properties": {
+                  "source_document_refs": {
+                    "maxItems": 0
+                  },
+                  "parse_result_refs": {
+                    "maxItems": 0
+                  },
+                  "user_supplement_refs": {
+                    "minItems": 1
+                  }
+                }
+              },
+              "items": {
+                "items": {
+                  "$ref": "#/$defs/userEvidence"
+                }
+              },
+              "coverage": {
+                "properties": {
+                  "profile": {
+                    "const": "user_provided_only"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "bundleScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_set_ref",
+        "source_document_refs",
+        "parse_result_refs",
+        "user_supplement_refs"
+      ],
+      "properties": {
+        "source_set_ref": {
+          "$ref": "#/$defs/sourceSetRef"
+        },
+        "source_document_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sourceDocumentRef"
+          }
+        },
+        "parse_result_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/parseResultRef"
+          }
+        },
+        "user_supplement_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/userSupplementRef"
+          }
+        }
+      }
+    },
+    "evidenceItem": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sourceExcerpt"
+        },
+        {
+          "$ref": "#/$defs/userEvidence"
+        }
+      ]
+    },
+    "sourceExcerpt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "kind",
+        "content",
+        "content_hash",
+        "source_kind",
+        "inclusion_reason",
+        "quality",
+        "location"
+      ],
+      "properties": {
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^ev_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+        },
+        "kind": {
+          "const": "source_excerpt"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content_hash": {
+          "$ref": "artifact-envelope.schema.json#/$defs/hash"
+        },
+        "source_kind": {
+          "const": "source_document"
+        },
+        "inclusion_reason": {
+          "type": "string"
+        },
+        "quality": {
+          "enum": [
+            "acceptable",
+            "review_recommended",
+            "unreliable",
+            "unavailable"
+          ]
+        },
+        "location": {
+          "$ref": "#/$defs/evidenceLocation"
+        }
+      }
+    },
+    "userEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "kind",
+        "content",
+        "content_hash",
+        "source_kind",
+        "inclusion_reason",
+        "quality",
+        "user_supplement_ref"
+      ],
+      "properties": {
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^ev_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+        },
+        "kind": {
+          "const": "user_supplement"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content_hash": {
+          "$ref": "artifact-envelope.schema.json#/$defs/hash"
+        },
+        "source_kind": {
+          "const": "user_supplement"
+        },
+        "inclusion_reason": {
+          "type": "string"
+        },
+        "quality": {
+          "const": "user_provided"
+        },
+        "user_supplement_ref": {
+          "$ref": "#/$defs/userSupplementRef"
+        }
+      }
+    },
+    "evidenceLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "location_kind",
+        "source_document_ref",
+        "parse_result_ref",
+        "excerpt",
+        "excerpt_hash",
+        "quality"
+      ],
+      "properties": {
+        "location_kind": {
+          "type": "string",
+          "enum": [
+            "page",
+            "block",
+            "section",
+            "table",
+            "logical"
+          ]
+        },
+        "source_document_ref": {
+          "$ref": "#/$defs/sourceDocumentRef"
+        },
+        "parse_result_ref": {
+          "$ref": "#/$defs/parseResultRef"
+        },
+        "page_range": {
+          "$ref": "artifact-envelope.schema.json#/$defs/pageRange"
+        },
+        "block_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "section_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "table_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "char_range": {
+          "$ref": "artifact-envelope.schema.json#/$defs/charRange"
+        },
+        "excerpt": {
+          "type": "string"
+        },
+        "excerpt_hash": {
+          "$ref": "artifact-envelope.schema.json#/$defs/hash"
+        },
+        "quality": {
+          "$ref": "#/$defs/quality"
+        }
+      }
+    },
+    "coverageReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assessment_state",
+        "profile",
+        "methods",
+        "scanned_locations",
+        "excluded_locations",
+        "quality_gaps",
+        "limitations",
+        "not_found_claims"
+      ],
+      "properties": {
+        "assessment_state": {
+          "type": "string",
+          "enum": [
+            "not_checked",
+            "partial",
+            "completed",
+            "blocked"
+          ]
+        },
+        "profile": {
+          "type": "string",
+          "enum": [
+            "candidate_retrieval",
+            "targeted_scan",
+            "documented_completed_scope",
+            "full_scan_with_backcheck",
+            "user_provided_only"
+          ]
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "scanned_locations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/coverageLocation"
+          }
+        },
+        "excluded_locations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/coverageGap"
+          }
+        },
+        "quality_gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/coverageGap"
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "not_found_claims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "target",
+              "checked_scope",
+              "statement"
+            ],
+            "properties": {
+              "target": {
+                "type": "string"
+              },
+              "checked_scope": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/coverageLocation"
+                },
+                "minItems": 1
+              },
+              "statement": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "coverageLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_document_ref",
+        "parse_result_ref",
+        "scope_kind"
+      ],
+      "properties": {
+        "source_document_ref": {
+          "$ref": "#/$defs/sourceDocumentRef"
+        },
+        "parse_result_ref": {
+          "$ref": "#/$defs/parseResultRef"
+        },
+        "scope_kind": {
+          "type": "string",
+          "enum": [
+            "document",
+            "page_range",
+            "section",
+            "blocks",
+            "tables"
+          ]
+        },
+        "page_range": {
+          "$ref": "artifact-envelope.schema.json#/$defs/pageRange"
+        },
+        "section_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "block_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "table_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "coverageGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason"
+      ],
+      "properties": {
+        "location": {
+          "$ref": "#/$defs/coverageLocation"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "quality": {
+          "$ref": "#/$defs/quality"
+        },
+        "exception_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "userSupplementArtifact": {
+      "type": "object",
+      "required": [
+        "artifact_type",
+        "payload"
+      ],
+      "properties": {
+        "artifact_type": {
+          "const": "user_supplement"
+        },
+        "payload": {
+          "$ref": "#/$defs/userSupplementPayload"
+        }
+      }
+    },
+    "userSupplementPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "supplement_id",
+        "content",
+        "content_format",
+        "asserted_kind",
+        "applies_to",
+        "user_assertion_status"
+      ],
+      "properties": {
+        "supplement_id": {
+          "type": "string",
+          "pattern": "^supp_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+        },
+        "content": {
+          "type": "string"
+        },
+        "content_format": {
+          "type": "string",
+          "enum": [
+            "plain_text",
+            "markdown",
+            "structured_form"
+          ]
+        },
+        "asserted_kind": {
+          "type": "string",
+          "enum": [
+            "correction",
+            "additional_context",
+            "interpretation_request",
+            "scope_instruction"
+          ]
+        },
+        "applies_to": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "purposes",
+            "artifact_refs",
+            "conversation_only"
+          ],
+          "properties": {
+            "purposes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "artifact_refs": {
+              "type": "array",
+              "items": {
+                "$ref": "artifact-envelope.schema.json#/$defs/artifactRef"
+              }
+            },
+            "conversation_only": {
+              "type": "boolean"
+            }
+          }
+        },
+        "user_assertion_status": {
+          "type": "string",
+          "enum": [
+            "unverified",
+            "confirmed_by_user",
+            "withdrawn"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "applies_to": {
+                "properties": {
+                  "conversation_only": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "applies_to": {
+                "properties": {
+                  "purposes": {
+                    "maxItems": 0
+                  },
+                  "artifact_refs": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "userEditArtifact": {
+      "type": "object",
+      "required": [
+        "artifact_type",
+        "payload"
+      ],
+      "properties": {
+        "artifact_type": {
+          "const": "user_edit"
+        },
+        "payload": {
+          "$ref": "#/$defs/userEditPayload"
+        }
+      }
+    },
+    "userEditPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "edit_id",
+        "base_artifact_ref",
+        "target",
+        "operation",
+        "before_value_hash",
+        "reason",
+        "effective_scope",
+        "recorded_at"
+      ],
+      "properties": {
+        "edit_id": {
+          "type": "string",
+          "pattern": "^edit_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+        },
+        "base_artifact_ref": {
+          "$ref": "artifact-envelope.schema.json#/$defs/artifactRef"
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path"
+          ],
+          "properties": {
+            "item_id": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^/"
+            }
+          }
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "replace",
+            "add",
+            "remove",
+            "set_status",
+            "set_applicability",
+            "set_constraint",
+            "link",
+            "unlink"
+          ]
+        },
+        "before_value_hash": {
+          "$ref": "artifact-envelope.schema.json#/$defs/hash"
+        },
+        "after_value": {},
+        "reason": {
+          "type": "string",
+          "enum": [
+            "user_correction",
+            "user_scope_choice",
+            "user_acceptance",
+            "user_rejection",
+            "transcription_fix"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "artifact-envelope.schema.json#/$defs/evidenceItemRef"
+          }
+        },
+        "supplement_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/userSupplementRef"
+          }
+        },
+        "effective_scope": {
+          "type": "string",
+          "enum": [
+            "artifact_revision",
+            "prospective_reanalysis",
+            "baseline_proposal"
+          ]
+        },
+        "recorded_at": {
+          "$ref": "artifact-envelope.schema.json#/$defs/utcTimestamp"
+        }
+      }
+    },
+    "userDecisionArtifact": {
+      "type": "object",
+      "required": [
+        "artifact_type",
+        "payload"
+      ],
+      "properties": {
+        "artifact_type": {
+          "const": "user_decision"
+        },
+        "payload": {
+          "$ref": "#/$defs/userDecisionPayload"
+        }
+      }
+    },
+    "userDecisionPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "decision_type",
+        "subject_refs",
+        "decision",
+        "effective_scope",
+        "recorded_at"
+      ],
+      "properties": {
+        "decision_id": {
+          "type": "string",
+          "pattern": "^dec_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+        },
+        "decision_type": {
+          "type": "string",
+          "enum": [
+            "resolve_conflict",
+            "accept_analysis_item",
+            "reject_analysis_item",
+            "scope_selection",
+            "adopt_response_file_plan",
+            "resolve_parse_exception",
+            "approve_change_set",
+            "reject_change_set"
+          ]
+        },
+        "subject_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "artifact-envelope.schema.json#/$defs/artifactRef"
+          },
+          "minItems": 1
+        },
+        "decision": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "effective_scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope_kind",
+            "artifact_refs"
+          ],
+          "properties": {
+            "scope_kind": {
+              "type": "string",
+              "enum": [
+                "conversation",
+                "project",
+                "artifact_revision",
+                "response_file"
+              ]
+            },
+            "artifact_refs": {
+              "type": "array",
+              "items": {
+                "$ref": "artifact-envelope.schema.json#/$defs/artifactRef"
+              }
+            }
+          }
+        },
+        "recorded_at": {
+          "$ref": "artifact-envelope.schema.json#/$defs/utcTimestamp"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "decision_type": {
+                "const": "resolve_conflict"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "required": [
+                  "disposition"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "decision_type": {
+                "enum": [
+                  "accept_analysis_item",
+                  "reject_analysis_item"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "required": [
+                  "item_ref"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "decision_type": {
+                "const": "scope_selection"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "required": [
+                  "source_set_ref"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "decision_type": {
+                "const": "adopt_response_file_plan"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "required": [
+                  "plan_ref"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "decision_type": {
+                "const": "resolve_parse_exception"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "required": [
+                  "resolution"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "decision_type": {
+                "enum": [
+                  "approve_change_set",
+                  "reject_change_set"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "required": [
+                  "change_set_ref"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

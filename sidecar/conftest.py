@@ -15,6 +15,15 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("SIDECAR_TOKEN", raising=False)
+    from app import agent as _agent_mod
+
+    # agent 模块的 saver/_agent 是进程级单例且绑定首个 DATA_DIR；删会话接口会触碰
+    # saver，跨测试必须复位，否则写到上一个测试的临时目录
+    if _agent_mod._saver_conn is not None:
+        _agent_mod._saver_conn.close()
+    _agent_mod._saver_conn = None
+    _agent_mod._saver = None
+    _agent_mod._agent = None
     from app.main import app
 
     with TestClient(app) as c:

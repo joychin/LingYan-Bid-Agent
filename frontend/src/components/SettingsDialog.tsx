@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Eye, EyeOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -19,6 +19,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
     enabled: open,
   })
   const { toast } = useToast()
+  const queryClient = useQueryClient()
   const [baseUrl, setBaseUrl] = useState('')
   const [model, setModel] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -49,6 +50,8 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
     setError(null)
     try {
       await putSettings(baseUrl, model)
+      // 模型胶囊（InputComposer）的 settings query staleTime 5min：不失效则标签不刷新
+      void queryClient.invalidateQueries({ queryKey: ['settings'] })
       toast('已保存，正在重启服务…', 'success')
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))

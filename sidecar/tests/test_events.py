@@ -69,7 +69,7 @@ def test_tool_result_with_error_field_on_task_failure():
     """ToolMessage status=error 时 tool_result 应携带 error 字段。"""
     msg = ToolMessage(
         content="FileNotFoundError: /tmp/nope",
-        name="convert_tender",
+        name="convert_doc",
         status="error",
         tool_call_id="call_1",
     )
@@ -77,7 +77,7 @@ def test_tool_result_with_error_field_on_task_failure():
     kinds = [(k, p) for k, p in iter_stream(stream)]
     assert kinds[0][0] == "tool_result"
     payload = kinds[0][1]
-    assert payload["tool"] == "convert_tender"
+    assert payload["tool"] == "convert_doc"
     assert payload["summary"].startswith("FileNotFoundError")
     assert payload["error"] is not None
     assert "FileNotFoundError" in payload["error"]
@@ -86,8 +86,8 @@ def test_tool_result_with_error_field_on_task_failure():
 def test_tool_result_without_error_field_on_success():
     """ToolMessage status 正常时 tool_result 不应携带 error（None）。"""
     msg = ToolMessage(
-        content="已生成 out/tender-full.md",
-        name="convert_tender",
+        content="已生成 out/a.md",
+        name="convert_doc",
         status="success",
         tool_call_id="call_2",
     )
@@ -97,13 +97,16 @@ def test_tool_result_without_error_field_on_success():
 
 
 def test_reasoning_yielded_when_chunk_has_reasoning_content():
-    """AIMessageChunk 携带 reasoning_content 时应发 reasoning 事件。"""
+    """AIMessageChunk 携带 reasoning_content 时应发 reasoning 事件（dict，agent_id 主图为 None）。"""
     chunk = AIMessageChunk(
         content="最终回答",
         additional_kwargs={"reasoning_content": "先读文档结构"},
     )
     kinds = list(iter_stream(_messages([chunk])))
-    assert kinds == [("reasoning", "先读文档结构"), ("token", "最终回答")]
+    assert kinds == [
+        ("reasoning", {"text": "先读文档结构", "agent_id": None}),
+        ("token", "最终回答"),
+    ]
 
 
 def test_reasoning_not_yielded_without_reasoning_content():
@@ -122,8 +125,8 @@ def test_reasoning_accumulates_across_chunks():
     ]
     kinds = list(iter_stream(_messages(chunks)))
     assert kinds == [
-        ("reasoning", "第一步"),
-        ("reasoning", "第二步"),
+        ("reasoning", {"text": "第一步", "agent_id": None}),
+        ("reasoning", {"text": "第二步", "agent_id": None}),
         ("token", "正文"),
     ]
 
@@ -137,4 +140,4 @@ def test_reasoning_content_list_of_blocks():
         },
     )
     kinds = list(iter_stream(_messages([chunk])))
-    assert kinds == [("reasoning", "推理片段")]
+    assert kinds == [("reasoning", {"text": "推理片段", "agent_id": None})]

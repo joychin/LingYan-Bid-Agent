@@ -13,10 +13,11 @@ export function useConversations() {
   })
 }
 
+/** 会话必须归属任务（P4）：创建时带 task_id。 */
 export function useCreateConversation() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: () => createConversation(),
+    mutationFn: (taskId: string) => createConversation(taskId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conversations'] })
     },
@@ -39,6 +40,7 @@ export function useDeleteConversation() {
     mutationFn: (id: string) => deleteConversation(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conversations'] })
+      queryClient.invalidateQueries({ queryKey: ['artifacts'] })
     },
   })
 }

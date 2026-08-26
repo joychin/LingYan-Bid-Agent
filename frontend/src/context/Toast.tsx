@@ -36,7 +36,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           <div
             key={t.id}
             className={cn(
-              'pointer-events-auto rounded-lg border bg-card px-3 py-2 text-sm shadow-md',
+              // pointer-events-none：toast 无交互，出现期间不可挡住右下角输入区的点击
+              'pointer-events-none rounded-lg border bg-card px-3 py-2 text-sm shadow-md',
               t.kind === 'error' && 'border-error/40 text-error',
               t.kind === 'success' && 'border-success/40 text-success',
               t.kind === 'info' && 'border-border text-foreground',

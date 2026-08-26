@@ -95,6 +95,8 @@
   place-items: center;
   font-size: 12px;
   color: var(--ink-2);
+  /* flex 子项防压缩：侧栏空间不足时圆形头像不被压扁 */
+  flex: none;
 }
 .avatar-sm {
   width: 24px;
@@ -116,6 +118,7 @@
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
+  position: relative;
   transition: width 0.2s ease, opacity 0.2s ease;
   overflow: hidden;
 }
@@ -185,29 +188,16 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  margin: 2px 0;
   min-height: 36px;
-  padding: 7px 10px 7px 12px;
+  padding: 7px 10px 7px 24px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease;
 }
-.chat-item::before {
-  content: "";
-  position: absolute;
-  inset: 7px auto 7px 0;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: transparent;
-  transition: background 0.12s ease;
-}
-.chat-item:hover {
-  background: var(--panel-2);
-}
+.chat-item:hover,
 .chat-item.active {
-  background: var(--accent-soft);
-}
-.chat-item.active::before {
-  background: var(--brand);
+  background: rgb(230 230 230);
 }
 .chat-item .t {
   min-width: 0;
@@ -222,7 +212,6 @@
 }
 .chat-item .m {
   flex: none;
-  max-width: 58px;
   font-size: 12px;
   line-height: 1.4;
   color: var(--ink-2);
@@ -364,9 +353,6 @@
 .nav-folder.collapsed .nav-sub {
   display: none;
 }
-.nav-folder.collapsed .folder-chev {
-  transform: rotate(-90deg);
-}
 
 .nav-item {
   padding: 7px 10px;
@@ -445,11 +431,6 @@
   background: var(--panel-2);
 }
 
-.nav-sub {
-  padding-left: 14px;
-  margin-left: 10px;
-  border-left: 1px solid var(--line);
-}
 .nav-folder {
   margin-top: 2px;
 }
@@ -460,7 +441,7 @@
   padding: 6px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--ink);
   transition: 0.12s;
@@ -468,21 +449,34 @@
 .folder-head:hover {
   background: var(--panel-2);
 }
-.folder-head .folder-chev {
-  width: 14px;
-  height: 14px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 2;
+/* 文件夹 toggle 图标：收起=闭合 Folder，展开=打开 FolderOpen，交叉淡入（侧栏专用） */
+.folder-head .folder-ico {
+  position: relative;
+  width: 16px;
+  height: 16px;
   flex: none;
 }
-.folder-head .folder {
-  width: 15px;
-  height: 15px;
+.folder-head .folder-ico .folder {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   stroke: currentColor;
   fill: none;
   stroke-width: 1.7;
-  flex: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.folder-head .ico-open {
+  opacity: 0;
+  transform: scale(0.85);
+}
+.nav-folder:not(.collapsed) .folder-head .ico-open {
+  opacity: 1;
+  transform: scale(1);
+}
+.nav-folder:not(.collapsed) .folder-head .ico-closed {
+  opacity: 0;
+  transform: scale(0.85);
 }
 
 .user-bar {
@@ -598,10 +592,10 @@
 .chat {
   max-width: 820px;
   margin: 0 auto;
-  padding: 24px 40px 32px;
+  padding: 16px 24px 24px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 16px;
 }
 .msg {
   display: flex;
@@ -634,7 +628,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 .msg-name {
   font-size: 14px;
@@ -1017,6 +1011,11 @@
   fill: none;
   stroke-width: 2;
 }
+.composer .left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .composer .right {
   display: flex;
   align-items: center;
@@ -1046,6 +1045,45 @@
 .model-select .chev {
   width: 14px;
   height: 14px;
+  stroke: var(--ink-3);
+  fill: none;
+  stroke-width: 2;
+}
+.task-select {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: 0.12s;
+}
+.task-select:hover {
+  background: var(--panel-2);
+}
+.task-select .task-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  stroke: var(--ink-2);
+  fill: none;
+  stroke-width: 2;
+}
+.task-select .label {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-select .chev {
+  width: 14px;
+  height: 14px;
+  flex: none;
   stroke: var(--ink-3);
   fill: none;
   stroke-width: 2;
@@ -1127,13 +1165,21 @@
 .product.collapsed .product-chev {
   transform: rotate(-90deg);
 }
+.product-head {
+  cursor: pointer;
+}
 .product-head:hover {
+  color: var(--ink-2);
+}
+.product-title {
+  font-size: 13px;
+  font-weight: 500;
   color: var(--ink-2);
 }
 .panel-actions {
   display: flex;
   gap: 4px;
-  margin-right: 4px;
+  margin-left: auto;
 }
 .panel-btn {
   border: 1px solid var(--line);
@@ -1168,14 +1214,27 @@
 .artifact {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 0;
+  gap: 6px;
+  padding: 4px 0;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: opacity 0.12s;
+  font-size: 13px;
+  color: var(--ink);
+  transition: background 0.12s;
 }
 .artifact:hover {
-  opacity: 0.7;
+  background: var(--panel-2);
 }
+/* 产物行小文件图标：参考图风格——文件图标带类型色（沿用品牌 teal），与灰色文件夹图标区分层级 */
+.artifact .file-ico {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  stroke: #0d9488;
+  stroke-width: 1.7;
+  fill: none;
+}
+/* md-ico 大徽章仅旧预览页 ProductPanel 复用，产物面板不再使用（保留定义防预览页坏） */
 .artifact .md-ico {
   width: 22px;
   height: 22px;
@@ -1193,6 +1252,159 @@
   font-weight: 500;
   color: var(--ink);
 }
+
+/* ---------- 产物面板文件树（WorkBuddy 风格：白底、纯图标、零状态色） ---------- */
+.file-tree {
+  /* 根容器仅作语义标记，样式由子节点承担 */
+}
+
+/* 文件夹分区：旋转 chev + Folder/FolderOpen 交叉淡入（沿用 .folder-head 套路） */
+.ft-folder {
+  margin-top: 4px;
+}
+.ft-folder-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 400;
+  font-family: inherit;
+  text-align: left;
+  color: var(--ink);
+  user-select: none;
+  transition: background 0.12s;
+}
+.ft-folder-head:hover {
+  background: var(--panel-2);
+}
+.ft-chev {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  stroke: var(--ink-3);
+  stroke-width: 2;
+  fill: none;
+  transition: transform 0.15s ease;
+}
+.ft-folder:not(.collapsed) .ft-chev {
+  transform: rotate(90deg);
+}
+.ft-folder-ico {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.ft-folder-ico svg {
+  position: absolute;
+  inset: 0;
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.7;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  color: var(--ink-2);
+}
+.ft-folder-ico .ico-open {
+  opacity: 0;
+  transform: scale(0.85);
+}
+.ft-folder:not(.collapsed) .ft-folder-ico .ico-open {
+  opacity: 1;
+  transform: scale(1);
+}
+.ft-folder:not(.collapsed) .ft-folder-ico .ico-closed {
+  opacity: 0;
+  transform: scale(0.85);
+}
+.ft-folder-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 文件行缩进：28 = 父 head 的 chev(14) + gap(8) + 文件图标与父文件夹图标同 x 所需的多余 6，让文件行文字与父 head 文字同 x */
+.ft-folder-body {
+  padding-left: 28px;
+}
+.ft-folder.collapsed .ft-folder-body {
+  display: none;
+}
+
+/* 文件行：白底、留白大、hover 浅灰；零徽标、零计数、零按钮 */
+.ft-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 5px 10px 5px 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13.5px;
+  color: var(--ink);
+  transition: background 0.12s;
+}
+.ft-row:hover {
+  background: var(--panel-2);
+}
+.ft-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ft-empty {
+  padding: 4px 6px 4px 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+/* 文件类型色块：参考图「M」「<>」色标，按 artifact.kind 派生 */
+.ft-ico {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: -0.3px;
+  color: #fff;
+  flex: none;
+}
+.ft-ico--md {
+  background: #0d9488; /* teal */
+}
+.ft-ico--code {
+  background: #7c3aed; /* 紫蓝 */
+}
+/* 兜底文件图标：灰色文档剪影（无契约命中时） */
+.ft-ico-glyph {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+}
+.ft-ico-svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.5;
+}
 .resizer {
   position: absolute;
   left: -3px;
@@ -1202,12 +1414,23 @@
   cursor: col-resize;
   z-index: 10;
 }
+/* 左栏变体：贴右缘内侧（.side overflow:hidden 会剪掉向外突出的部分） */
+.side .resizer {
+  left: auto;
+  right: 0;
+}
 .resizer:hover,
 .resizer.drag {
   background: var(--accent-soft);
 }
-.product.collapsed .resizer {
+.product.collapsed .resizer,
+.side.collapsed .resizer {
   pointer-events: none;
+}
+/* 拖拽期间禁用宽度过渡（保留收起/展开动画），否则宽度恒滞后鼠标 0.2s */
+.side.dragging,
+.product.dragging {
+  transition: none;
 }
 
 .side-toggle {
@@ -1280,6 +1503,7 @@
 .nav-section-title:focus-visible,
 .nav-item:focus-visible,
 .folder-head:focus-visible,
+.pf-head:focus-visible,
 .nav-more:focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: 2px;

@@ -101,7 +101,7 @@ security find-generic-password -s tender-agent   # 验证
 1. skills 路径两种写法（`skills/` vs 带 root 前缀）以启动日志实测为准（当前 `skills/` 可用）。
 2. DeepAgents beta：库内部格式变化只改 `sidecar/app/events.py` 一个文件；deepagents 锁 0.7.7。
 3. uvicorn 不要开 `--reload`（与 Tauri 进程树管理冲突）。
-4. `.doc/.pdf` 输入需 soffice（LibreOffice）；`.docx` 不需要。
+4. 解析支持 `.docx`（python-docx）与 `.pdf`（PyMuPDF 原生提取，无需 LibreOffice）；`.doc` 不支持（提示另存为 .docx）。
 5. **钥匙串**：`keyring` crate 在此 macOS 写入 Data Protection 钥匙串、`security` CLI 不可见，
    故改为 Rust 调 `security` CLI 子进程读写 login 钥匙串（满足 PRD M3 验收）。
 6. sse-starlette 对 dict 的 `data` 会输出 Python repr（单引号非 JSON）——sidecar 在

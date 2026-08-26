@@ -3,7 +3,10 @@
 DeepAgents 处于 beta，库内部格式变化只改这个文件，事件契约（agent.started / agent.token /
 tool.called / tool.result / agent.completed / agent.error / ping /
 todo.updated / artifact.created / run.state）不可变。
-agent.reasoning 是对契约的 additive 扩展（DeepSeek 推理模型有 reasoning_content 时才下发）。
+additive 扩展：agent.reasoning（推理模型）；tool_call_id / agent_id（子代理过程透传——
+agent.stream 开 subgraphs=True 后，子代理内部 tool 调用与 reasoning 以
+agent_id=所属 task 的 tool_call_id 归属下发；子代理正文 token 不透传，与 task 结果重复）；
+conversation.renamed（自动命名推送，无 seq）。
 """
 
 import json
@@ -21,9 +24,55 @@ EVENT_TODO_UPDATED = "todo.updated"
 EVENT_ARTIFACT_CREATED = "artifact.created"
 # 推理模型（DeepSeek reasoner）的 chain-of-thought 增量文本；非推理模型不产生该事件
 EVENT_REASONING = "agent.reasoning"
+# HITL：agent 调用 interrupt_on 登记的工具时暂停，等待用户裁决（approve/reject/respond/edit）
+# 后经 Command(resume={"decisions":[...]}) 续跑（契约 additive 扩展）
+EVENT_RUN_INTERRUPT = "run.interrupt"
+# 自动命名完成推送（契约 additive 扩展）：titler 生成标题并写入后发布。
+# 连接级事件不带 seq（同 ping/run.state，不属于任何 run 的事件流）
+EVENT_CONVERSATION_RENAMED = "conversation.renamed"
 # SSE 连接建立时由端点直接下发的对账事件（非 iter_stream 产出）：
 # 携带该会话最新 run 的真实状态，客户端据此恢复 running 或收敛
 EVENT_RUN_STATE = "run.state"
+
+
+def artifact_created_payload(row: dict, rid: str | None, cid: str, seq: int) -> dict:
+    """artifact.created 的 data 载荷（run 边界与转正端点共用，字段保持同构）。
+
+    P4 additive：scope（task=正式稿 / conversation=过程稿）、task_id、
+    promotion_proposed（AI 建议转正标记，前端据此高亮「建议转正」）。
+    """
+    task_id = row.get("task_id")
+    conversation_id = row.get("conversation_id")
+    scope = "task" if task_id else ("conversation" if conversation_id else "global")
+    return {
+        "run_id": rid,
+        "conversation_id": cid,
+        "artifact_id": row["artifact_id"],
+        "display_name": row["display_name"],
+        "kind": row["kind"],
+        "schema_id": row["schema_id"],
+        "schema_version": row["schema_version"],
+        "scope": scope,
+        "task_id": task_id,
+        "promotion_proposed": bool(row.get("promotion_proposed")),
+        "seq": seq,
+    }
+
+# ---- 子代理归属注册表 ----
+# task 工具执行时（agent._SubagentTagMiddleware.wrap_tool_call）登记：tools 任务的
+# checkpoint_ns（形如 "tools:<tid>"，恰为子代理事件 ns 元组的第 0 段）→ task 的 tool_call_id。
+# 注册发生在子代理启动之前、事件消费之前，因此并发子代理也能精确归属（无时序歧义）。
+# ns 与 tool_call_id 在 langgraph 层无稳定等式（tid 是执行哈希），只能靠插桩建立。
+_SUBAGENT_NS_TO_CALL: dict[str, str] = {}
+
+
+def register_subagent(ns: str, tool_call_id: str) -> None:
+    _SUBAGENT_NS_TO_CALL[ns] = tool_call_id
+
+
+def clear_subagent_registry() -> None:
+    """run 结束清空（防跨 run 累积；tid 虽唯一，干净回收更稳）。"""
+    _SUBAGENT_NS_TO_CALL.clear()
 
 
 def _chunk_text(msg: AIMessageChunk) -> str:
@@ -79,59 +128,117 @@ def _summary(content, limit: int = 400) -> str:
     return s[:limit] + ("…" if len(s) > limit else "")
 
 
-def iter_stream(stream: Iterator) -> Iterator[tuple[str, object]]:
-    """把 agent.stream(stream_mode=["messages","updates"]) 的产出映射为归一化事件。
+def _hitl_requests(interrupts) -> dict:
+    """把 langgraph Interrupt 元组归一化 {requests: [{tool, args, description, allowed}]}。
 
-    yield: ("token", text) | ("reasoning", text) | ("tool_called", {...})
-           | ("tool_result", {...}) | ("todo_updated", todos)
+    HumanInTheLoopMiddleware 每次 suspend 只发一个 interrupt（batch 模式下多个
+    tool call 合并进同一 HITLRequest）；多个 Interrupt 属并行分支，MVP 取第一个。
+    allowed 取 review_configs 的 allowed_decisions，前端据此分支渲染审批卡/问答卡。
+    """
+    first = interrupts[0] if isinstance(interrupts, (tuple, list)) else interrupts
+    value = getattr(first, "value", None) or {}
+    allowed_by_tool: dict[str, list[str]] = {}
+    for rc in value.get("review_configs", []):
+        if isinstance(rc, dict) and rc.get("action_name"):
+            allowed_by_tool[rc["action_name"]] = list(rc.get("allowed_decisions") or [])
+    requests = []
+    for ar in value.get("action_requests", []):
+        if not isinstance(ar, dict):
+            continue
+        name = ar.get("name") or "unknown"
+        requests.append(
+            {
+                "tool": name,
+                "args": _tool_args(ar.get("args")),
+                "description": ar.get("description") or "",
+                "allowed": allowed_by_tool.get(name) or ["approve", "reject"],
+            }
+        )
+    return {"requests": requests}
+
+
+def iter_stream(stream: Iterator) -> Iterator[tuple[str, object]]:
+    """把 agent.stream(stream_mode=["messages","updates"], subgraphs=True) 的产出映射为归一化事件。
+
+    subgraphs=True 时每项为 (ns, mode, payload) 三元组：主图 ns=()，子代理内部
+    ns=("tools:<tid>",)（孙代理长度 2，数据结构天然兼容）。兼容未开 subgraphs 的
+    (mode, payload) 二元组（此时没有子代理事件）。
+
+    yield: ("token", text) | ("reasoning", {"text", "agent_id"}) | ("tool_called", {...})
+           | ("tool_result", {...}) | ("todo_updated", todos) | ("interrupt", {"requests": [...]})
     """
     last_todos_key: str | None = None
     for item in stream:
-        mode = item[0] if isinstance(item, tuple) else item
-        chunk = item[1] if isinstance(item, tuple) else None
+        if isinstance(item, tuple) and len(item) == 3 and isinstance(item[0], tuple):
+            ns, mode, chunk = item
+        elif isinstance(item, tuple) and len(item) == 2:
+            ns, mode, chunk = (), item[0], item[1]
+        else:
+            continue
+        sub_ns = ns[0] if ns else None
+        # 子代理内部事件归属：ns 第 0 段查注册表得所属 task 的 tool_call_id
+        agent_id = _SUBAGENT_NS_TO_CALL.get(sub_ns) if sub_ns else None
+
         if mode == "messages":
             msg, _meta = chunk if isinstance(chunk, tuple) else (chunk, None)
             if isinstance(msg, AIMessageChunk):
                 reason = _chunk_reasoning(msg)
                 if reason:
-                    yield ("reasoning", reason)
-                text = _chunk_text(msg)
-                if text:
-                    yield ("token", text)
+                    yield ("reasoning", {"text": reason, "agent_id": agent_id})
+                if not sub_ns:
+                    # 子代理正文 token 不透传：与 task 的 tool.result（最终报告）重复
+                    text = _chunk_text(msg)
+                    if text:
+                        yield ("token", text)
         elif mode == "updates":
             if not isinstance(chunk, dict):
                 continue
+            # HITL 中断：langgraph 在 updates 模式以 {"__interrupt__": (Interrupt,...)} 下发
+            # （值是元组，不是节点 update；不专门处理会被静默丢弃）。value 即
+            # HumanInTheLoopMiddleware 的 HITLRequest；归一化为前端契约的 requests 形状。
+            pending = chunk.get("__interrupt__")
+            if pending:
+                yield ("interrupt", _hitl_requests(pending))
+                continue
             for _node, update in chunk.items():
-                # todos 由 TodoListMiddleware 的 write_todos 写入 state；
-                # 每次调用整体替换列表，去重后只在内容变化时发事件
                 if isinstance(update, dict):
+                    # todos 由 TodoListMiddleware 的 write_todos 写入主图 state；
+                    # 子代理 state 排除 todos 键，限定主图处理是双保险。
+                    # 每次调用整体替换列表，去重后只在内容变化时发事件
                     todos = update.get("todos")
-                    if todos is not None:
+                    if todos is not None and not sub_ns:
                         key = json.dumps(todos, sort_keys=True, ensure_ascii=False)
                         if key != last_todos_key:
                             last_todos_key = key
                             yield ("todo_updated", todos)
-                messages = update.get("messages", []) if isinstance(update, dict) else []
-                for m in messages:
-                    if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
-                        for tc in m.tool_calls:
+                    messages = update.get("messages", [])
+                    for m in messages:
+                        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+                            for tc in m.tool_calls:
+                                yield (
+                                    "tool_called",
+                                    {
+                                        "tool": tc.get("name", "unknown"),
+                                        "args": _tool_args(tc.get("args")),
+                                        "tool_call_id": tc.get("id"),
+                                        "agent_id": agent_id,
+                                    },
+                                )
+                        elif isinstance(m, ToolMessage):
+                            content = getattr(m, "content", "")
+                            status = getattr(m, "status", None)
+                            error = None
+                            if status == "error":
+                                # task 抛出异常时 ToolMessage.content 是错误文本；作为 tool_result 的
+                                # error 字段下发，让前端渲染「✗ 失败工具卡」并可展开查看详情
+                                error = _summary(content, limit=800)
                             yield (
-                                "tool_called",
-                                {"tool": tc.get("name", "unknown"), "args": _tool_args(tc.get("args"))},
+                                "tool_result",
+                                {
+                                    "tool": getattr(m, "name", None) or "unknown",
+                                    "summary": _summary(content),
+                                    "error": error,
+                                    "tool_call_id": getattr(m, "tool_call_id", None),
+                                    "agent_id": agent_id,
+                                },
                             )
-                    elif isinstance(m, ToolMessage):
-                        content = getattr(m, "content", "")
-                        status = getattr(m, "status", None)
-                        error = None
-                        if status == "error":
-                            # task 抛出异常时 ToolMessage.content 是错误文本；作为 tool_result 的
-                            # error 字段下发，让前端渲染「✗ 失败工具卡」并可展开查看详情
-                            error = _summary(content, limit=800)
-                        yield (
-                            "tool_result",
-                            {
-                                "tool": getattr(m, "name", None) or "unknown",
-                                "summary": _summary(content),
-                                "error": error,
-                            },
-                        )

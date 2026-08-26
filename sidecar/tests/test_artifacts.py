@@ -1,108 +1,157 @@
-"""产物：out/ 快照 diff、类型推断、db 与 /api/artifacts 端点。"""
+"""类型化 Artifact：/api/contracts、/api/artifacts 列表与内容端点。"""
 
-import pytest
+from app import artifact_store, db, publish
+from tests.util import create_task
 
-
-@pytest.fixture
-def art(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    from app import artifacts
-
-    return artifacts, tmp_path
+KEY = "tender.directory/tender-response-docs@1"
 
 
-def test_snapshot_and_diff_new_and_changed(art):
-    artifacts, tmp = art
-    out = tmp / "workspace" / "out"
-    out.mkdir(parents=True)
-    (out / "a.json").write_text("{}", encoding="utf-8")
-    (out / "b.html").write_text("<html></html>", encoding="utf-8")
-
-    snap = artifacts.snapshot_out()
-    assert set(snap) == {"a.json", "b.html"}
-
-    # 无变化 → 无产物
-    assert artifacts.diff_artifacts(snap) == []
-
-    # 新增
-    (out / "c.md").write_text("# hi", encoding="utf-8")
-    names = {f["name"] for f in artifacts.diff_artifacts(snap)}
-    assert names == {"c.md"}
-
-    # 大小变化命中，未变的不命中
-    (out / "b.html").write_text("<html>more</html>", encoding="utf-8")
-    names = {f["name"] for f in artifacts.diff_artifacts(snap)}
-    assert "b.html" in names
-    assert "a.json" not in names
+def _content(name="技术部分"):
+    return {
+        "response_documents": [
+            {"name": name, "scope": "", "directory": [{"目录名称": "目录", "level": 1, "children": []}]}
+        ]
+    }
 
 
-def test_detect_type(art):
-    artifacts, _ = art
-    assert artifacts.detect_type("tender-directory.html") == "html"
-    assert artifacts.detect_type("a.JSON") == "json"  # 大小写不敏感
-    assert artifacts.detect_type("notes.md") == "md"
-    assert artifacts.detect_type("tender.exe") == "other"
+def _task_conv():
+    """§16：发布需要任务上下文；client fixture 已隔离 DATA_DIR。"""
+    task = db.create_task("测试任务")
+    conv = db.create_conversation(task["id"])
+    return task, conv
 
 
-def test_artifacts_api_list_filters_and_content(client):
-    from app import db
-    from app.config import workspace_dir
+def _pub(content, conv=None, **kw):
+    """发布到会话过程稿；不传 conv 时新建任务+会话（覆盖语义需要同一 conv）。"""
+    if conv is None:
+        _, conv = _task_conv()
+    return publish.publish_artifact(KEY, content, conversation_id=conv["id"], **kw)
 
-    out = workspace_dir() / "out"
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "tender-directory.html").write_text("<h1>目录</h1>", encoding="utf-8")
 
-    # 一条磁盘存在的记录 + 一条磁盘已不存在的记录
-    db.create_artifact(
-        "a_1", "c_conv", "r_run", "tender-directory.html",
-        str(out / "tender-directory.html"), "html", 20,
+def test_contracts_endpoint(client):
+    r = client.get("/api/contracts")
+    assert r.status_code == 200
+    contracts = r.json()["contracts"]
+    keys = [c["key"] for c in contracts]
+    assert KEY in keys
+    dir_c = next(c for c in contracts if c["key"] == KEY)
+    assert dir_c["kind"] == "tender.directory"
+    assert dir_c["cardinality"] == "task-single"
+    assert dir_c["llm_write_mode"] == "suggest"
+    assert dir_c["editable"] is True
+    assert dir_c["default_display_name"] == "投标目录"
+
+
+def test_artifacts_list_and_content(client):
+    task, conv = _task_conv()
+    m = publish.publish_artifact(
+        KEY, _content(), conversation_id=conv["id"],
+        source={"skill": "demo-skill", "thread_id": conv["id"], "run_id": "r_1"},
     )
-    db.create_artifact("a_2", "c_conv", "r_run", "gone.html", str(out / "gone.html"), "html", 10)
+    aid = m["artifact_id"]
 
     r = client.get("/api/artifacts")
     assert r.status_code == 200
-    names = [a["name"] for a in r.json()["artifacts"]]
-    assert names == ["tender-directory.html"]  # gone.html 已从磁盘删除 → 过滤
+    arts = r.json()["artifacts"]
+    assert len(arts) == 1
+    a = arts[0]
+    assert a["artifact_id"] == aid
+    assert a["display_name"] == "投标目录"
+    assert a["kind"] == "tender.directory"
+    assert a["schema_id"] == "tender-response-docs"
+    assert a["schema_version"] == 1
+    assert a["editable"] is True
+    assert a["source"] == {"thread_id": conv["id"], "run_id": "r_1"}
+    assert a["scope"] == "conversation"
+    # §16：过程稿包路径在 <task>/threads/<conv>/ 下
+    assert a["path"].endswith(
+        f"{task['id']}/threads/{conv['id']}/{aid}/current/content.json"
+    )
 
-    r = client.get("/api/artifacts/a_1/content")
+    r = client.get(f"/api/artifacts/{aid}/content")
     assert r.status_code == 200
-    assert r.headers["content-type"].startswith("text/html")
-    assert r.text == "<h1>目录</h1>"
+    assert r.headers["content-type"].startswith("application/json")
+    assert r.json()["response_documents"][0]["name"] == "技术部分"
 
-    r = client.get("/api/artifacts/a_2/content")
-    assert r.status_code == 410  # 记录在但磁盘缺失
+    assert client.get("/api/artifacts/nope/content").status_code == 404
 
-    r = client.get("/api/artifacts/nope/content")
+
+def test_put_content_flow_no_lease(client):
+    """编辑保存无租约（文件夹语义）：正常保存、409 探测、force 用户裁决覆盖（留恢复点）、422。"""
+    m = _pub(_content())
+    aid = m["artifact_id"]
+
+    # 正常保存：无需任何租约
+    updated = _content()
+    updated["response_documents"][0]["name"] = "用户改后"
+    r = client.put(f"/api/artifacts/{aid}/content", json={"content": updated, "base_content_seq": 1})
+    assert r.status_code == 200
+    assert r.json()["content_seq"] == 2
+    assert "用户改后" in client.get(f"/api/artifacts/{aid}/content").text
+
+    # 再保存一次（seq 2 → 3）
+    r = client.put(f"/api/artifacts/{aid}/content", json={"content": updated, "base_content_seq": 2})
+    assert r.status_code == 200 and r.json()["content_seq"] == 3
+
+    # 基于旧 seq 保存 → 409 探测信号（客户端据此弹「拉取最新/保留我的」）
+    r = client.put(f"/api/artifacts/{aid}/content", json={"content": updated, "base_content_seq": 2})
+    assert r.status_code == 409
+
+    # force：用户裁决保留自己的版本，无条件覆盖，被顶掉的版本留恢复点
+    mine = _content()
+    mine["response_documents"][0]["name"] = "我的版本"
+    r = client.put(
+        f"/api/artifacts/{aid}/content",
+        json={"content": mine, "base_content_seq": 1, "force": True},
+    )
+    assert r.status_code == 200 and r.json()["content_seq"] == 4
+    assert "我的版本" in client.get(f"/api/artifacts/{aid}/content").text
+
+    # 列表带 content_seq 与 restore_available
+    a = client.get("/api/artifacts").json()["artifacts"][0]
+    assert a["content_seq"] == 4
+    assert a["restore_available"] is True
+
+    # schema 破坏始终拒绝（force 也不豁免）
+    r = client.put(
+        f"/api/artifacts/{aid}/content",
+        json={"content": {"foo": 1}, "base_content_seq": 4, "force": True},
+    )
+    assert r.status_code == 422
+
+
+def test_restore_roundtrip(client):
+    """恢复点安全网：发布覆盖留底 → 恢复上一版 → 恢复本身可再撤销。"""
+    _, conv = _task_conv()
+    _pub(_content("初版"), conv=conv, source={"skill": "t"})
+    m2 = _pub(_content("新版"), conv=conv, source={"skill": "t"})
+    aid = m2["artifact_id"]
+
+    r = client.post(f"/api/artifacts/{aid}/restore")
+    assert r.status_code == 200
+    assert "初版" in client.get(f"/api/artifacts/{aid}/content").text
+
+    # 再次恢复 → 回到「新版」（恢复前也留了底）
+    r = client.post(f"/api/artifacts/{aid}/restore")
+    assert r.status_code == 200
+    assert "新版" in client.get(f"/api/artifacts/{aid}/content").text
+
+
+def test_put_unknown_artifact(client):
+    r = client.put(
+        "/api/artifacts/art_0000000000ff/content", json={"content": {}, "base_content_seq": 1}
+    )
     assert r.status_code == 404
+    assert client.post("/api/artifacts/art_0000000000ff/restore").status_code == 404
 
 
-def test_artifacts_api_rejects_out_of_workspace_path(client, tmp_path):
-    """脏数据/历史记录的 path 指向工作区外：列表过滤 + content 拒读。"""
-    from app import db
+def test_artifacts_list_filters_missing_package(client):
+    """索引在、磁盘包被删：列表过滤、内容端点 410（与工具侧 containment 同标准）。"""
+    m = _pub(_content())
+    aid = m["artifact_id"]
 
-    secret = tmp_path / "secret.md"
-    secret.write_text("secret", encoding="utf-8")
-    db.create_artifact("a_evil", "c_conv", "r_run", "secret.md", str(secret), "md", 6)
+    import shutil
 
-    r = client.get("/api/artifacts")
-    assert r.status_code == 200
-    assert all(a["id"] != "a_evil" for a in r.json()["artifacts"])
-
-    assert client.get("/api/artifacts/a_evil/content").status_code == 410
-
-
-def test_artifacts_api_rejects_symlink_escape(client):
-    """out/ 内指向工作区外的 symlink：resolve 后越界，同样拒读。"""
-    from app import db
-    from app.config import workspace_dir
-
-    out = workspace_dir() / "out"
-    out.mkdir(parents=True, exist_ok=True)
-    secret = workspace_dir().parent / "secret.txt"
-    secret.write_text("secret", encoding="utf-8")
-    link = out / "link.md"
-    link.symlink_to(secret)
-    db.create_artifact("a_link", "c_conv", "r_run", "link.md", str(link), "md", 6)
-
-    assert client.get("/api/artifacts/a_link/content").status_code == 410
-    assert all(a["id"] != "a_link" for a in client.get("/api/artifacts").json()["artifacts"])
+    shutil.rmtree(artifact_store.artifact_dir(aid, m))
+    assert client.get("/api/artifacts").json()["artifacts"] == []
+    assert client.get(f"/api/artifacts/{aid}/content").status_code == 410
