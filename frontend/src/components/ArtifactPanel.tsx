@@ -3,23 +3,12 @@ import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen, Maximize2, Min
 import type { Artifact, Task } from '@/api/client'
 import { useArtifacts, useConversationArtifacts, useTaskArtifacts } from '@/hooks/useArtifacts'
 import { useConversations } from '@/hooks/useConversations'
+import { kindIcon } from '@/artifacts/registry'
 import { cn } from '@/lib/utils'
 
 const DEFAULT_W = 300
 const MIN_W = 240
 const MAX_W = 560
-
-/** 产物 kind → 文件树图标（语义型：按内容性质选色 + 字符）。
- *  新增 kind 加一行 + 在 workspace.css 加对应 .ft-ico--xxx 类即可。
- *  未来规划预留位（未实施）：tender.body=紫B / tender.analysis=橙A / tender.outline=黄O / tender.flow=蓝F。 */
-const KIND_ICON: Record<string, { cls: string; mark: string }> = {
-  'tender.directory': { cls: 'ft-ico--dir', mark: '≡' },
-  'doc.note': { cls: 'ft-ico--md', mark: 'M' },
-}
-
-function kindIcon(kind: string): { cls: string; mark: string } | null {
-  return KIND_ICON[kind] ?? null
-}
 
 /**
  * Workspace 右栏产物面板：WorkBuddy 风格文件树，无徽标/无计数/无动作按钮。
@@ -88,7 +77,6 @@ export function ArtifactPanel({
       </div>
     )
   }
-
   return (
     <>
       <aside
@@ -206,18 +194,4 @@ function FolderSection({
       </div>
     </section>
   )
-}
-
-/** 按 artifact.kind 派生图标色板（与扩展名解耦；新契约时由 kind 加分支）。
- *  返回 '' = 不命中色块，调用方改用 .ft-ico-glyph 渲染通用文档剪影。 */
-function kindIconClass(kind: string): string {
-  if (kind === 'tender.directory') return 'ft-ico--code'
-  if (kind === 'doc.note') return 'ft-ico--md'
-  return ''
-}
-
-function kindIconMark(kind: string): string {
-  if (kind === 'tender.directory') return '<>'
-  if (kind === 'doc.note') return 'M'
-  return ''
 }

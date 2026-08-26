@@ -1,15 +1,17 @@
-import { FileText, FolderOpen, ListTree, Upload } from 'lucide-react'
+import { FileText, FolderOpen, Upload } from 'lucide-react'
 import type { Artifact } from '@/api/client'
 import { isTauri, revealInFolder } from '@/api/client'
-import { contractLabel } from '@/artifacts/registry'
+import { contractLabel, kindIcon } from '@/artifacts/registry'
 import { formatRelativeTime, cn } from '@/lib/utils'
 import { usePromoteArtifact } from '@/hooks/useArtifacts'
 import { useToast } from '@/context/Toast'
 
-/** 聊天内产物卡：整卡可点击打开对应 Processor；过程稿带「转正」入口（AI 建议时高亮）。 */
+/** 聊天内产物卡：整卡可点击打开对应 Processor；过程稿带「转正」入口（AI 建议时高亮）。
+ *  图标与右侧产物面板共用 kindIcon 语义色板（registry.kindIcon）——色块+字符+22px 卡片变体。 */
 export function ArtifactCard({ artifact, onOpen }: { artifact: Artifact; onOpen: (id: string) => void }) {
   const { toast } = useToast()
   const promote = usePromoteArtifact()
+  const icon = kindIcon(artifact.kind)
 
   const handleReveal = async (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -20,8 +22,6 @@ export function ArtifactCard({ artifact, onOpen }: { artifact: Artifact; onOpen:
     }
   }
 
-  const isNote = artifact.kind === 'doc.note'
-
   return (
     <div
       className={cn(
@@ -30,10 +30,10 @@ export function ArtifactCard({ artifact, onOpen }: { artifact: Artifact; onOpen:
       )}
       onClick={() => onOpen(artifact.artifact_id)}
     >
-      {isNote ? (
-        <FileText className="h-5 w-5 shrink-0 text-primary" />
+      {icon ? (
+        <span className={cn('ft-ico ft-ico--card', icon.cls)}>{icon.mark}</span>
       ) : (
-        <ListTree className="h-5 w-5 shrink-0 text-primary" />
+        <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
       )}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">

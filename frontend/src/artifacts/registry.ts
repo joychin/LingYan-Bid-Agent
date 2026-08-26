@@ -53,6 +53,29 @@ export function contractLabel(kind: string): string {
   return map[kind] ?? kind
 }
 
+/** 产物 kind → 文件树/聊天卡图标（语义型色板：按内容性质选色 + 字符）。
+ *  新增 kind 时同步在 workspace.css 加对应 .ft-ico--xxx 类，并考虑加 .ft-ico--card 变体大小。
+ *  未来规划预留位（未实施）：
+ *    tender.body      → 紫 #7c3aed + 'B'   投标正文
+ *    tender.analysis  → 橙 #f59e0b + 'A'   七节要点
+ *    tender.outline   → 黄 #eab308 + 'O'   大纲初稿
+ *    tender.flow      → 蓝 #2563eb + 'F'   流程图 */
+export interface KindIcon {
+  /** 套在 .ft-ico 上的色板类（背景色由此提供） */
+  cls: string
+  /** 方块内字符 */
+  mark: string
+}
+
+const KIND_ICON: Record<string, KindIcon> = {
+  'tender.directory': { cls: 'ft-ico--dir', mark: '≡' },
+  'doc.note': { cls: 'ft-ico--md', mark: 'M' },
+}
+
+export function kindIcon(kind: string): KindIcon | null {
+  return KIND_ICON[kind] ?? null
+}
+
 /** 启动对账：sidecar 契约目录 vs 客户端 Processor 覆盖，缺失即告警（半接入状态防漏）。 */
 export async function reconcileContracts(): Promise<void> {
   try {

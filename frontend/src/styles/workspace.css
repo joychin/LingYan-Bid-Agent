@@ -1369,7 +1369,13 @@
   color: var(--ink-3);
 }
 
-/* 文件类型色块：参考图「M」「<>」色标，按 artifact.kind 派生 */
+/* 文件类型色块：按 artifact.kind 派生（语义型色板）。
+   已在面板 KIND_ICON 注册的 kind：tender.directory / doc.note。
+   未来预留位（未实施，加 kind 时同步这里 + KIND_ICON）：
+     tender.body      → 紫 #7c3aed + 'B'   投标正文
+     tender.analysis  → 橙 #f59e0b + 'A'   七节要点
+     tender.outline   → 黄 #eab308 + 'O'   大纲初稿
+     tender.flow      → 蓝 #2563eb + 'F'   流程图 */
 .ft-ico {
   display: inline-grid;
   place-items: center;
@@ -1384,10 +1390,17 @@
   flex: none;
 }
 .ft-ico--md {
-  background: #0d9488; /* teal */
+  background: #0d9488; /* teal · doc.note 笔记 */
 }
-.ft-ico--code {
-  background: #7c3aed; /* 紫蓝 */
+.ft-ico--dir {
+  background: #10b981; /* emerald · tender.directory 目录 */
+}
+/* 卡片变体：聊天内 ArtifactCard 用，比文件树 18px 略大，与卡片 padding 比例合适 */
+.ft-ico--card {
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+  border-radius: 5px;
 }
 /* 兜底文件图标：灰色文档剪影（无契约命中时） */
 .ft-ico-glyph {
