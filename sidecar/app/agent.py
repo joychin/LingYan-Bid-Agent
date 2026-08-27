@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from deepagents import create_deep_agent
 from deepagents.backends.filesystem import FilesystemBackend
 from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
+from langchain_core.exceptions import ModelConnectionError, ModelRateLimitError, ModelTimeoutError
 from langchain_core.messages import SystemMessage
 from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -42,6 +43,12 @@ INTERRUPT_ON: dict = {
     "ask_human": {"allowed_decisions": ["respond"]},
     "task": {"allowed_decisions": ["approve", "reject"]},
 }
+
+# LLM 流式调用的瞬时错误（连接断开/超时/限流）：可从 checkpoint 断点自动重试——
+# 失败节点的写入未提交 checkpoint，以 input=None 重拉 graph 只重跑该节点，代价 ≈ 一次
+# 模型调用（见 _run_agent_stream）。认证/参数类永久错误不走重试，直接失败。
+_LLM_RETRYABLE_ERRORS = (ModelConnectionError, ModelRateLimitError, ModelTimeoutError)
+_LLM_RETRY_BACKOFFS = (3.0, 10.0)  # 两次重试的等待秒数（等待期间尊重停止请求）
 
 # 显式注册的子代理（deepagents 还会自动补 general-purpose）。tools 不指定 → 继承主
 # agent 全部工具；interrupt_on={} 整体替换继承：子代理不直接向用户提问（问答统一由
@@ -378,6 +385,59 @@ def _find_pending(steps: list[dict], payload: dict) -> dict | None:
     return None
 
 
+def _llm_retry_step(attempt: int, err: str, backoff: float) -> dict:
+    """断流自动重试的 trace 伪步骤（复用步骤 dict 形状，随 run_traces 落库，
+    历史回放可见重试发生过；前端零改动，按普通步骤渲染）。"""
+    now = int(time.time() * 1000)
+    return {
+        "id": f"llm_retry@{now}",
+        "tool": "llm_retry",
+        "args": {"attempt": attempt, "error": err[:300], "backoff_s": backoff},
+        "status": "done",
+        "summary": f"LLM 流式连接中断，{backoff:.0f}s 后从断点自动重试（第 {attempt} 次）",
+        "error": None,
+        "tool_call_id": None,
+        "reasoning": "",
+        "text": "",
+        "children": [],
+        "startedAt": now,
+        "endedAt": now,
+    }
+
+
+def _retire_broken_steps(top_steps: list[dict], rid: str, cid: str, _publish) -> None:
+    """断流重试前把残留的 running 步骤收尾为终态——失败那轮的 tool 调用实际未执行
+    （流中断在工具节点之前），重试会以全新 tool_call_id 重新发起，旧步骤不收尾会
+    在 trace 历史里永远转圈。顶层步骤同步补发 tool.result（error）让前端实时卡片收敛；
+    子代理 children 只改状态不发事件（agent_id 不在步骤里、且父卡已收敛）。"""
+    now = int(time.time() * 1000)
+
+    def mark(step: dict) -> None:
+        if step["status"] == "running":
+            step["status"] = "error"
+            step["error"] = "LLM 流中断，已自动重试"
+            step["endedAt"] = now
+        for c in step["children"]:
+            mark(c)
+
+    for s in top_steps:
+        was_running = s["status"] == "running"
+        mark(s)
+        if was_running:
+            _publish(
+                events.EVENT_TOOL_RESULT,
+                {
+                    "run_id": rid,
+                    "conversation_id": cid,
+                    "tool": s["tool"],
+                    "summary": s["error"],
+                    "error": s["error"],
+                    "tool_call_id": s.get("tool_call_id"),
+                    "agent_id": None,
+                },
+            )
+
+
 def _run_agent_stream(
     agent, cid: str, rid: str, task_id: str | None, _publish, user_text: str | None, resume_decisions: list | None,
     cancel_event: threading.Event | None = None,
@@ -398,6 +458,13 @@ def _run_agent_stream(
     cancel_event 非空且被置位 = 用户请求停止：在每个流事件边界协作式退出
     （LLM 流式调用期间 token 事件持续到达，停止会在下一个事件处生效；
     长工具执行中则等待工具返回），退出走 error 路径（半截回复落库 + run 标 error）。
+
+    瞬时 LLM 错误（_LLM_RETRYABLE_ERRORS：连接断开/超时/限流）自动从 checkpoint 断点
+    重试（最多 _LLM_RETRY_BACKOFFS 次）：重试时 input=None，langgraph 恢复 pending
+    任务只重跑失败节点；失败那轮的半截正文清空（重试会完整重流出）；残留 running
+    步骤收尾为 error；每次重试在 trace 里留 llm_retry 伪步骤。重试额度用尽仍失败才
+    走 error 路径（文案注明已重试次数）。已知轻微显示局限：失败那轮已流出的 token
+    在前端当前旁白段可能重复出现一次（DB 最终回复与 trace 不受影响）。
     """
     # run 上下文随 context 拷贝进入本线程：工具据此记录产物来源与作用域，
     # _TaskContextMiddleware 据此注入任务上下文（同线程同一份 context）
@@ -406,12 +473,6 @@ def _run_agent_stream(
         stream_input: object = Command(resume={"decisions": resume_decisions})
     else:
         stream_input = {"messages": [("user", user_text or "")]}
-    stream = agent.stream(
-        stream_input,
-        config={"configurable": {"thread_id": cid}},
-        stream_mode=["messages", "updates"],
-        subgraphs=True,  # 子代理内部事件浮现父流；events.iter_stream 按 ns 归属
-    )
     # 正文按轮次分段：cur_text_parts 是当前未封口段；主 agent 的 tool_called 到达即
     # 封口为旁白（挂该步骤 text），run 结束时最后未封口段 = 最终回复。
     cur_text_parts: list[str] = []
@@ -423,98 +484,133 @@ def _run_agent_stream(
     top_steps: list[dict] = []
     last_todos: list = []
     interrupt: dict | None = None
+    n_retries = 0
     try:
-        for kind, payload in events.iter_stream(stream, rid):
-            if cancel_event is not None and cancel_event.is_set():
-                error = events.CANCELLED_MESSAGE
-                break
-            if kind == "reasoning":
-                # DeepSeek 推理模型的 chain-of-thought 增量；agent_id 非空时归属子代理
-                _publish(
-                    events.EVENT_REASONING,
-                    {
-                        "run_id": rid,
-                        "conversation_id": cid,
-                        "text": payload["text"],
-                        "agent_id": payload.get("agent_id"),
-                    },
+        attempt_input: object = stream_input
+        while True:
+            try:
+                stream = agent.stream(
+                    attempt_input,
+                    config={"configurable": {"thread_id": cid}},
+                    stream_mode=["messages", "updates"],
+                    subgraphs=True,  # 子代理内部事件浮现父流；events.iter_stream 按 ns 归属
                 )
-                if payload.get("agent_id"):
-                    task_step = _find_task_step(top_steps, payload["agent_id"])
-                    if task_step is not None:
-                        task_step["reasoning"] += payload["text"]
-                else:
-                    cur_reasoning.append(payload["text"])
-            elif kind == "token":
-                cur_text_parts.append(payload)  # type: ignore[arg-type]
-                _publish(
-                    events.EVENT_TOKEN,
-                    {"run_id": rid, "conversation_id": cid, "text": payload},
+                for kind, payload in events.iter_stream(stream, rid):
+                    if cancel_event is not None and cancel_event.is_set():
+                        error = events.CANCELLED_MESSAGE
+                        break
+                    if kind == "reasoning":
+                        # DeepSeek 推理模型的 chain-of-thought 增量；agent_id 非空时归属子代理
+                        _publish(
+                            events.EVENT_REASONING,
+                            {
+                                "run_id": rid,
+                                "conversation_id": cid,
+                                "text": payload["text"],
+                                "agent_id": payload.get("agent_id"),
+                            },
+                        )
+                        if payload.get("agent_id"):
+                            task_step = _find_task_step(top_steps, payload["agent_id"])
+                            if task_step is not None:
+                                task_step["reasoning"] += payload["text"]
+                        else:
+                            cur_reasoning.append(payload["text"])
+                    elif kind == "token":
+                        cur_text_parts.append(payload)  # type: ignore[arg-type]
+                        _publish(
+                            events.EVENT_TOKEN,
+                            {"run_id": rid, "conversation_id": cid, "text": payload},
+                        )
+                    elif kind == "tool_called":
+                        _publish(
+                            events.EVENT_TOOL_CALLED,
+                            {
+                                "run_id": rid,
+                                "conversation_id": cid,
+                                "tool": payload["tool"],
+                                "args": payload["args"],
+                                "tool_call_id": payload.get("tool_call_id"),
+                                # agent_id 非空 = 子代理内部工具调用（归属对应 task）
+                                "agent_id": payload.get("agent_id"),
+                            },
+                        )
+                        step = _new_trace_step(payload)
+                        if not payload.get("agent_id"):
+                            # 主 agent 调用：把之前流出的正文封为旁白挂到本步骤（同轮连发的
+                            # 后续调用 text 为空串）；子代理调用不封段（其正文 token 不透传）
+                            step["text"] = "".join(cur_text_parts)
+                            cur_text_parts.clear()
+                        _attach_step(top_steps, step, payload.get("agent_id"))
+                    elif kind == "tool_result":
+                        _publish(
+                            events.EVENT_TOOL_RESULT,
+                            {
+                                "run_id": rid,
+                                "conversation_id": cid,
+                                "tool": payload["tool"],
+                                "summary": payload["summary"],
+                                # 失败工具必须透传 error（前端据 data.error 渲染失败卡），成功时为 null
+                                "error": payload.get("error"),
+                                "tool_call_id": payload.get("tool_call_id"),
+                                "agent_id": payload.get("agent_id"),
+                            },
+                        )
+                        step = _find_pending(top_steps, payload)
+                        if step is not None:
+                            step["status"] = "error" if payload.get("error") else "done"
+                            step["summary"] = payload["summary"]
+                            step["error"] = payload.get("error")
+                            step["endedAt"] = int(time.time() * 1000)
+                    elif kind == "todo_updated":
+                        todos = payload  # type: ignore[arg-type]
+                        last_todos = todos  # type: ignore[assignment]
+                        done = sum(1 for t in todos if t.get("status") == "completed")
+                        _publish(
+                            events.EVENT_TODO_UPDATED,
+                            {
+                                "run_id": rid,
+                                "conversation_id": cid,
+                                "done": done,
+                                "total": len(todos),
+                                "items": [
+                                    {"content": t.get("content", ""), "status": t.get("status", "pending")}
+                                    for t in todos
+                                ],
+                            },
+                        )
+                    elif kind == "interrupt":
+                        # HITL 暂停：流到此为止，run_stream 落半截消息并转 waiting_input
+                        interrupt = payload
+                        break
+                break  # 流耗尽或 interrupt/cancel 中断内层循环 → 本段结束
+            except _LLM_RETRYABLE_ERRORS as e:
+                # 瞬时断流：重试以 input=None 从 checkpoint 恢复 pending 任务（成功节点
+                # 的写入已提交，只重跑失败的那个节点）
+                if cancel_event is not None and cancel_event.is_set():
+                    error = events.CANCELLED_MESSAGE
+                    break
+                if n_retries >= len(_LLM_RETRY_BACKOFFS):
+                    error = f"{e}（已自动重试 {n_retries} 次仍失败）"
+                    break
+                backoff = _LLM_RETRY_BACKOFFS[n_retries]
+                n_retries += 1
+                logger.warning(
+                    "agent 流瞬时错误，%.0fs 后从 checkpoint 断点重试（第 %d 次）：%s",
+                    backoff, n_retries, e,
                 )
-            elif kind == "tool_called":
-                _publish(
-                    events.EVENT_TOOL_CALLED,
-                    {
-                        "run_id": rid,
-                        "conversation_id": cid,
-                        "tool": payload["tool"],
-                        "args": payload["args"],
-                        "tool_call_id": payload.get("tool_call_id"),
-                        # agent_id 非空 = 子代理内部工具调用（归属对应 task）
-                        "agent_id": payload.get("agent_id"),
-                    },
-                )
-                step = _new_trace_step(payload)
-                if not payload.get("agent_id"):
-                    # 主 agent 调用：把之前流出的正文封为旁白挂到本步骤（同轮连发的
-                    # 后续调用 text 为空串）；子代理调用不封段（其正文 token 不透传）
-                    step["text"] = "".join(cur_text_parts)
-                    cur_text_parts.clear()
-                _attach_step(top_steps, step, payload.get("agent_id"))
-            elif kind == "tool_result":
-                _publish(
-                    events.EVENT_TOOL_RESULT,
-                    {
-                        "run_id": rid,
-                        "conversation_id": cid,
-                        "tool": payload["tool"],
-                        "summary": payload["summary"],
-                        # 失败工具必须透传 error（前端据 data.error 渲染失败卡），成功时为 null
-                        "error": payload.get("error"),
-                        "tool_call_id": payload.get("tool_call_id"),
-                        "agent_id": payload.get("agent_id"),
-                    },
-                )
-                step = _find_pending(top_steps, payload)
-                if step is not None:
-                    step["status"] = "error" if payload.get("error") else "done"
-                    step["summary"] = payload["summary"]
-                    step["error"] = payload.get("error")
-                    step["endedAt"] = int(time.time() * 1000)
-            elif kind == "todo_updated":
-                todos = payload  # type: ignore[arg-type]
-                last_todos = todos  # type: ignore[assignment]
-                done = sum(1 for t in todos if t.get("status") == "completed")
-                _publish(
-                    events.EVENT_TODO_UPDATED,
-                    {
-                        "run_id": rid,
-                        "conversation_id": cid,
-                        "done": done,
-                        "total": len(todos),
-                        "items": [
-                            {"content": t.get("content", ""), "status": t.get("status", "pending")}
-                            for t in todos
-                        ],
-                    },
-                )
-            elif kind == "interrupt":
-                # HITL 暂停：流到此为止，run_stream 落半截消息并转 waiting_input
-                interrupt = payload
-                break
-    except Exception as e:  # 网络/API 错误等
+                # 失败那轮的半截正文清空（重试会完整重流出，保留会拼进最终回复）；
+                # reasoning 不清（跨轮累积，只可能尾部多一小段重复，展示层瑕疵无害）
+                cur_text_parts.clear()
+                _retire_broken_steps(top_steps, rid, cid, _publish)
+                top_steps.append(_llm_retry_step(n_retries, str(e), backoff))
+                if cancel_event is not None and cancel_event.wait(timeout=backoff):
+                    error = events.CANCELLED_MESSAGE
+                    break
+                attempt_input = None
+    except Exception as e:  # 永久错误（认证/参数）与其他意外错误：不重试
         logger.exception("agent stream failed")
-        error = str(e)
+        error = error or str(e)
     finally:
         runctx.clear_run()
         events.clear_subagent_registry(rid)

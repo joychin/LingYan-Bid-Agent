@@ -1,11 +1,17 @@
 """_run_agent_stream：iter_stream 归一化事件 -> SSE 发布载荷的映射。
 
 重点守护 tool.result 的 error 字段透传（历史上曾在重发布时被丢弃，导致前端把
-失败工具渲染成成功）。
+失败工具渲染成成功）；瞬时 LLM 错误的 checkpoint 断点自动重试（重试输入=None、
+半截正文清空、残留步骤收尾、trace 留证、额度用尽文案、backoff 尊重停止）。
 """
 
+import threading
+
+import pytest
+from langchain_core.exceptions import ModelConnectionError
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
+from app import agent as agent_mod
 from app.agent import _run_agent_stream
 
 
@@ -14,9 +20,31 @@ class _StubAgent:
 
     def __init__(self, items):
         self._items = items
+        self.inputs = []
+        self.calls = 0
 
-    def stream(self, *_args, **_kwargs):
+    def stream(self, *args, **_kwargs):
+        self.inputs.append(args[0] if args else None)
+        self.calls += 1
         return iter(self._items)
+
+
+class _FlakyAgent:
+    """前 fail_times 次抛瞬时异常，之后返回 items；记录每次输入供断言重试语义。"""
+
+    def __init__(self, fail_times: int, error: Exception, items):
+        self.fail_times = fail_times
+        self.error = error
+        self.items = items
+        self.inputs = []
+        self.calls = 0
+
+    def stream(self, *args, **_kwargs):
+        self.inputs.append(args[0] if args else None)
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise self.error
+        return iter(self.items)
 
 
 def test_tool_result_error_passthrough():
@@ -175,3 +203,152 @@ def test_subagent_specs():
     for ref in ("generate.md", "annotation.md", "revise-gapfill.md", "revise-scoring.md", "revise-walkthrough.md"):
         assert ref in writer["system_prompt"]
     assert "禁止调用 ask_human" in writer["system_prompt"]
+
+
+# ---- 瞬时 LLM 错误自动重试（2026-08-27 全量测试 T07 API 流断的修复）----
+
+
+def _ok_items() -> list:
+    """一段最小成功流：token + 最终回复。"""
+    return [("messages", AIMessageChunk(content="完整回复"))]
+
+
+def test_transient_error_retries_from_checkpoint(monkeypatch):
+    """ModelConnectionError → 以 input=None 从 checkpoint 断点重拉一次成功：
+    run 正常完成、失败那轮的半截正文不进最终回复、trace 留 llm_retry 伪步骤。"""
+    monkeypatch.setattr(agent_mod, "_LLM_RETRY_BACKOFFS", (0.01, 0.01))
+    stub = _FlakyAgent(1, ModelConnectionError("peer closed connection"), _ok_items())
+    published: list[tuple[str, dict]] = []
+    text, error, trace, interrupt = _run_agent_stream(
+        stub, "c1", "r1", None, lambda e, d: published.append((e, d)), "hi", None
+    )
+    assert error is None
+    assert interrupt is None
+    assert text == "完整回复"
+    assert stub.calls == 2
+    # 重试语义：首段传消息 dict，重试段传 None（langgraph 从 checkpoint 恢复 pending 任务）
+    assert stub.inputs[0] == {"messages": [("user", "hi")]}
+    assert stub.inputs[1] is None
+    retries = [s for s in trace["tools"] if s["tool"] == "llm_retry"]
+    assert len(retries) == 1
+    assert retries[0]["status"] == "done"
+    assert retries[0]["args"]["attempt"] == 1
+    # 失败那轮已发出的 token 事件不做撤回（已知显示局限），但成功段的 token 照常发布
+    tokens = "".join(d["text"] for e, d in published if e == "agent.token")
+    assert tokens == "完整回复"
+
+
+def test_transient_error_clears_partial_text(monkeypatch):
+    """失败那轮流出的半截正文必须清空——重试会完整重流出，保留会拼进最终回复。"""
+    monkeypatch.setattr(agent_mod, "_LLM_RETRY_BACKOFFS", (0.01, 0.01))
+
+    def _fail_gen():
+        yield ("messages", AIMessageChunk(content="半截"))
+        raise ModelConnectionError("incomplete chunked read")
+
+    stub = _FlakyAgent(0, ModelConnectionError("x"), _ok_items())
+
+    def stream(*args, **kwargs):
+        stub.inputs.append(args[0] if args else None)
+        stub.calls += 1
+        if stub.calls == 1:
+            return _fail_gen()  # 先流出半截 token，再断流
+        return iter(stub.items)
+
+    stub.stream = stream
+    text, error, trace, _interrupt = _run_agent_stream(
+        stub, "c1", "r1", None, lambda e, d: None, "hi", None
+    )
+    assert error is None
+    assert text == "完整回复"  # 「半截」被清空，未混入最终回复
+
+
+def test_broken_steps_retired_and_republished_on_retry(monkeypatch):
+    """断流时残留的 running 步骤（该轮工具实际未执行）收尾为 error 并补发
+    tool.result（error）让前端实时卡片收敛；重试轮的新调用以新 tool_call_id 落新步骤。"""
+    monkeypatch.setattr(agent_mod, "_LLM_RETRY_BACKOFFS", (0.01, 0.01))
+    ghost_call = ("updates", {"model": {"messages": [AIMessage(content="", tool_calls=[{"name": "read", "args": {}, "id": "old1"}])]}})
+
+    def _fail_gen():
+        yield ghost_call
+        raise ModelConnectionError("peer closed")
+
+    ok = [
+        ("updates", {"model": {"messages": [AIMessage(content="", tool_calls=[{"name": "read", "args": {}, "id": "new1"}])]}}),
+        ("updates", {"tools": {"messages": [ToolMessage(content="ok", name="read", status="success", tool_call_id="new1")]}}),
+        ("messages", AIMessageChunk(content="done")),
+    ]
+    stub = _FlakyAgent(0, ModelConnectionError("x"), ok)
+    calls = 0
+
+    def stream(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _fail_gen()
+        return iter(ok)
+
+    stub.stream = stream
+    published: list[tuple[str, dict]] = []
+    text, error, trace, _interrupt = _run_agent_stream(
+        stub, "c1", "r1", None, lambda e, d: published.append((e, d)), "hi", None
+    )
+    assert error is None
+    assert text == "done"
+    tools = {s.get("tool_call_id"): s for s in trace["tools"] if s.get("tool") == "read"}
+    assert tools["old1"]["status"] == "error"
+    assert "LLM 流中断" in tools["old1"]["error"]
+    assert tools["new1"]["status"] == "done"
+    ghost_results = [d for e, d in published if e == "tool.result" and d.get("tool_call_id") == "old1"]
+    assert len(ghost_results) == 1
+    assert ghost_results[0]["error"]
+
+
+def test_permanent_error_no_retry():
+    """非瞬时错误（认证/参数类）不重试：一次失败即 error，trace 无 llm_retry。"""
+    stub = _FlakyAgent(5, RuntimeError("401 Authentication Fails: invalid api key"), _ok_items())
+    _text, error, trace, _interrupt = _run_agent_stream(
+        stub, "c1", "r1", None, lambda e, d: None, "hi", None
+    )
+    assert stub.calls == 1
+    assert "401" in error
+    assert not [s for s in trace["tools"] if s["tool"] == "llm_retry"]
+
+
+def test_retry_exhausted_reports_count(monkeypatch):
+    """重试额度（2 次）用尽仍失败：error 文案注明已重试次数，trace 留两条 llm_retry。"""
+    monkeypatch.setattr(agent_mod, "_LLM_RETRY_BACKOFFS", (0.01, 0.01))
+    stub = _FlakyAgent(99, ModelConnectionError("peer closed connection"), _ok_items())
+    _text, error, trace, _interrupt = _run_agent_stream(
+        stub, "c1", "r1", None, lambda e, d: None, "hi", None
+    )
+    assert stub.calls == 3
+    assert "已自动重试 2 次" in error
+    retries = [s for s in trace["tools"] if s["tool"] == "llm_retry"]
+    assert len(retries) == 2
+
+
+def test_cancel_during_backoff_wins(monkeypatch):
+    """backoff 等待期间用户停止：立即走取消路径（不再发起重试）。"""
+    monkeypatch.setattr(agent_mod, "_LLM_RETRY_BACKOFFS", (0.5, 0.5))
+    stub = _FlakyAgent(1, ModelConnectionError("peer closed"), _ok_items())
+    cancel = threading.Event()
+    threading.Timer(0.1, cancel.set).start()
+    _text, error, _trace, _interrupt = _run_agent_stream(
+        stub, "c1", "r1", None, lambda e, d: None, "hi", None, cancel_event=cancel
+    )
+    assert error == agent_mod.events.CANCELLED_MESSAGE
+    assert stub.calls == 1  # 取消发生在等待期，未发起第二次调用
+
+
+def test_cancel_before_failure_no_retry(monkeypatch):
+    """断流时已请求停止：不进重试，直接取消收尾。"""
+    monkeypatch.setattr(agent_mod, "_LLM_RETRY_BACKOFFS", (0.01, 0.01))
+    stub = _FlakyAgent(1, ModelConnectionError("peer closed"), _ok_items())
+    cancel = threading.Event()
+    cancel.set()
+    _text, error, _trace, _interrupt = _run_agent_stream(
+        stub, "c1", "r1", None, lambda e, d: None, "hi", None, cancel_event=cancel
+    )
+    assert error == agent_mod.events.CANCELLED_MESSAGE
+    assert stub.calls == 1

@@ -46,6 +46,9 @@ def _make_docx(path, with_table=True):
         t.rows[0].cells[1].text = "内容"
         t.rows[1].cells[0].text = "包1"
         t.rows[1].cells[1].text = "软件开发服务"
+    # 第三个一级章：完整招标文件的多部分形态（docx-native 顶层 <3 会触发稀疏节选警示）
+    doc.add_heading("第三章 评标办法", level=1)
+    doc.add_paragraph("本项目采用综合评分法。")
     doc.save(str(path))
 
 
@@ -91,6 +94,48 @@ def test_requires_task_context(ws):
         pass  # 夹具 teardown 会再 clear 一次，无需恢复
     assert r.startswith("[解析失败]")
     assert "任务上下文" in r
+
+
+def _make_docx_headings(path, n_top: int, subs_per_top: int = 2):
+    """n_top 个一级标题 + 每个下设 subs_per_top 个二级标题（照抄真实稀疏档形态：
+    戚墅堰所=2 个一级/37 个总标题的节选卷，顶层判据而非总标题判据）。"""
+    doc = Document()
+    filler = "本项目为测试采购项目，现邀请合格投标人参加投标，详见本章各项条款约定。" * 3
+    for i in range(n_top):
+        doc.add_heading(f"第{i + 1}部分 标题{i + 1}", level=1)
+        doc.add_paragraph(filler)
+        for j in range(subs_per_top):
+            doc.add_heading(f"{i + 1}.{j + 1} 小节", level=2)
+            doc.add_paragraph(filler)
+    doc.save(str(path))
+
+
+def test_docx_native_sparse_toplevel_warning(ws):
+    """docx-native 但顶层章节 <3（二级标题丰富也没用）：警示疑似节选/结构不完整
+    （2026-08-27 全量测试 T05/T06 真实文件——完整招标文件几乎必有多部分，
+    实测语料完整标书顶层全部 ≥4；确认门据此提醒用户补传其他卷册）。"""
+    f = ws / "稀疏顶层.docx"
+    _make_docx_headings(f, n_top=2, subs_per_top=3)  # 总标题 8 个，顶层仍 2
+    r = parse_document.invoke({"path": "稀疏顶层.docx"})
+    assert r.startswith("[解析成功]")
+    meta = json.loads((_out_parse(ws) / "稀疏顶层.docx" / "稀疏顶层.docx.meta.json").read_text())
+    assert meta["conversion"] == "docx-native"
+    assert meta["headings"] == 8  # 总标题不触发判据——顶层才触发
+    assert any("顶层章节仅 2 个" in w and "结构可能不完整" in w for w in meta["warnings"])
+    # 警示拼进返回文案（解析概况确认门复述的来源）
+    assert "⚠️" in r and "结构可能不完整" in r
+
+
+@pytest.mark.parametrize("n_top", [3, 5])
+def test_docx_native_normal_toplevel_no_warning(ws, n_top):
+    """正常顶层章数（≥3）不触发稀疏警示（3 为最小完整形态，保阈值不误伤）。"""
+    f = ws / f"正常顶层{n_top}.docx"
+    _make_docx_headings(f, n_top=n_top)
+    r = parse_document.invoke({"path": f"正常顶层{n_top}.docx"})
+    meta = json.loads((_out_parse(ws) / f"正常顶层{n_top}.docx" / f"正常顶层{n_top}.docx.meta.json").read_text())
+    assert meta["conversion"] == "docx-native"
+    assert meta["warnings"] == []
+    assert "⚠️" not in r
 
 
 def test_bare_name_resolves_from_task_files(ws):

@@ -153,6 +153,14 @@ def parse_document(path: str) -> str:
             warnings.append("未识别到任何标题层级，大纲导航不可用（改用 grep 关键词定位）")
         if info["conversion"] in ("docx-numbered", "pdf-fontsize"):
             warnings.append("结构来自启发式识别（无样式/无书签），层级可能不完整或有误")
+        elif info["conversion"] == "docx-native" and len(top_titles) < 3:
+            # 完整招标文件几乎必有多部分（公告/须知/评标/格式等）；顶层仅 1-2 个 =
+            # 疑似节选卷册或正文章节未标记样式（实测语料：两份顶层 1-2 的均为节选，
+            # 完整标书顶层全部 ≥4）。如实警示，确认门据此提醒用户补传其他卷册。
+            warnings.append(
+                f"顶层章节仅 {len(top_titles)} 个，疑似节选卷册或结构未完整标记，"
+                "结构可能不完整（精读时建议结合 grep 关键词定位）"
+            )
 
         out_dir.mkdir(parents=True, exist_ok=True)
         md_path.write_text(md_text, encoding="utf-8")
