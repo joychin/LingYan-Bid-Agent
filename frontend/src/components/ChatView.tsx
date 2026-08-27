@@ -214,7 +214,9 @@ export function ChatView({
       if (!convId) {
         if (!pickedTaskId) {
           toast('请先选择所属任务', 'error')
-          return
+          // reject：InputComposer 的契约是 onSend 失败即保留输入（不清空、不 acknowledge），
+          // 正常 resolve 会把用户已打的文字清掉
+          throw new Error('请先选择所属任务')
         }
         // 建会话失败：toast 已提示；向上抛让 InputComposer 保留输入（不清空、不 acknowledge）
         try {
@@ -291,61 +293,65 @@ export function ChatView({
 
   return (
     <UploadDropzone>
-      <div className="relative flex h-full w-full flex-col">
-        <div ref={scrollRef} onScroll={handleScroll} className="chat-scroll">
-          <div className="chat">
-            {isLoading && <MessageSkeletons />}
-            {empty && (
-              <WelcomeScreen
-                hasTask={!!convId || !!pickedTaskId}
-                onPickFile={openFilePicker}
-                onPrompt={fillPrompt}
-              />
-            )}
-            <MessageList messages={messages} convArtifacts={convArtifacts} onOpenArtifact={onOpenArtifact} />
-            {running && (
-              <RunMessage running={running} startedAt={startedAt} tools={tools} todos={todos} done={done} total={total} text={streamText} reasoningText={reasoningText} />
-            )}
-            {interrupt && !running && (
-              wizardMode ? (
-                <InterruptCard
-                  requests={interrupt.requests}
-                  wizard={{
-                    stepIndex,
-                    stepDrafts,
-                    onToggleStep: toggleStepOption,
-                    onTextChange: setStepText,
-                    onApprovalChoice: setStepApproval,
-                    onReasonChange: setStepReason,
-                    onNav: wizardNav,
-                  }}
+      {/* min-h-0：本层与 UploadDropzone 层都是 .main（flex column，上邻 44px chat-head）里的
+          h-full flex item，缺 min-h-0 时依赖默认 shrink 被压缩，异常场景会把 composer
+          连同底栏推出视口下缘被 overflow:hidden 裁掉（表现为发送钮/文件 chip 点不到） */}
+      <div className="relative flex h-full min-h-0 w-full flex-col">
+        <div className="relative min-h-0 flex-1">
+          <div ref={scrollRef} onScroll={handleScroll} className="chat-scroll h-full">
+            <div className="chat">
+              {isLoading && <MessageSkeletons />}
+              {empty && (
+                <WelcomeScreen
+                  hasTask={!!convId || !!pickedTaskId}
+                  onPickFile={openFilePicker}
+                  onPrompt={fillPrompt}
                 />
-              ) : (
-                <InterruptCard requests={interrupt.requests} onDecide={(d) => void decide(d)} />
-              )
-            )}
-            {error && (
-              <ErrorCard
-                message={error}
-                cancelled={errorCode === 'cancelled'}
-                retryText={lastSent}
-                onRetry={() => void doSend(lastSent).catch(() => {})}
-              />
-            )}
+              )}
+              <MessageList messages={messages} convArtifacts={convArtifacts} onOpenArtifact={onOpenArtifact} />
+              {running && (
+                <RunMessage running={running} startedAt={startedAt} tools={tools} todos={todos} done={done} total={total} text={streamText} reasoningText={reasoningText} />
+              )}
+              {interrupt && !running && (
+                wizardMode ? (
+                  <InterruptCard
+                    requests={interrupt.requests}
+                    wizard={{
+                      stepIndex,
+                      stepDrafts,
+                      onToggleStep: toggleStepOption,
+                      onTextChange: setStepText,
+                      onApprovalChoice: setStepApproval,
+                      onReasonChange: setStepReason,
+                      onNav: wizardNav,
+                    }}
+                  />
+                ) : (
+                  <InterruptCard requests={interrupt.requests} onDecide={(d) => void decide(d)} />
+                )
+              )}
+              {error && (
+                <ErrorCard
+                  message={error}
+                  cancelled={errorCode === 'cancelled'}
+                  retryText={lastSent}
+                  onRetry={() => void doSend(lastSent).catch(() => {})}
+                />
+              )}
+            </div>
           </div>
-        </div>
-        {showJump && (
-          <div className="flex shrink-0 justify-center pb-2">
+          {/* 回到底部：浮在滚动区底部（不占布局流——在流内会把 composer 整体下压 38px） */}
+          {showJump && (
             <button
               type="button"
               onClick={jumpToBottom}
-              className="flex items-center gap-1 rounded-full border bg-card px-3 py-1.5 text-xs text-muted-foreground shadow-md hover:text-foreground"
+              className="absolute bottom-2 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-full border bg-card px-3 py-1.5 text-xs text-muted-foreground shadow-md hover:text-foreground"
             >
               <ArrowDown className="h-3.5 w-3.5" />
               回到底部
             </button>
-          </div>
-        )}
+          )}
+        </div>
         <InputComposer
           running={running}
           waiting={!!interrupt}

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, RunEvent, State};
 use tauri_plugin_opener::OpenerExt;
 
-use sidecar::{LlmSettings, SidecarInfo, SidecarManager};
+use sidecar::{ModelSettings, SidecarInfo, SidecarManager};
 
 /// 返回 sidecar 地址（port + token）。sidecar 拉起前会短暂等待，保证前端总能拿到真值。
 ///
@@ -28,49 +28,66 @@ fn get_sidecar_info(state: State<'_, Arc<SidecarManager>>) -> Result<SidecarInfo
 }
 
 #[tauri::command]
-fn get_llm_settings(state: State<'_, Arc<SidecarManager>>) -> LlmSettings {
-    state.settings.lock().unwrap().clone()
+fn get_model_settings(state: State<'_, Arc<SidecarManager>>) -> ModelSettings {
+    sidecar::read_settings_file().unwrap_or_else(|| state.settings.lock().unwrap().clone())
 }
 
-/// 保存 api_key 到钥匙串（service=tender-agent, account=llm-api-key），
-/// 更新 base_url/model 并重启 sidecar 使其生效。api_key 永不返回、永不进 HTTP。
+/// 按角色保存模型设置（role = "llm" | "vlm"）：
+/// api_key 存钥匙串对应 account（llm-api-key / vlm-api-key），
+/// base_url/model 持久化 settings.json 并重启 sidecar 使 env 注入生效。
+/// api_key 永不返回、永不进 HTTP。llm 空值不覆盖现值；vlm 传空 base_url = 清除配置。
 #[tauri::command]
-fn set_llm_settings(
+fn set_model_settings(
     state: State<'_, Arc<SidecarManager>>,
+    role: String,
     base_url: Option<String>,
     model: Option<String>,
     api_key: Option<String>,
 ) -> Result<(), String> {
-    if let Some(key) = api_key {
-        if !key.is_empty() {
-            sidecar::keychain_set(&key).map_err(|e| format!("保存钥匙串失败: {e}"))?;
+    let account = match role.as_str() {
+        "llm" => sidecar::KEYRING_ACCOUNT_LLM,
+        "vlm" => sidecar::KEYRING_ACCOUNT_VLM,
+        _ => return Err(format!("未知角色: {role}")),
+    };
+    if let Some(key) = api_key.as_deref().filter(|k| !k.is_empty()) {
+        sidecar::keychain_set(account, key).map_err(|e| format!("保存钥匙串失败: {e}"))?;
+    }
+    // 以 settings.json 为基底合并（防 mgr 内存旧值覆盖 HTTP PUT 已写入的变更）
+    let mut s = sidecar::read_settings_file().unwrap_or_else(|| state.settings.lock().unwrap().clone());
+    let target = if role == "llm" { &mut s.llm } else { &mut s.vlm };
+    if role == "llm" {
+        if let Some(b) = base_url.as_deref().filter(|b| !b.trim().is_empty()) {
+            target.base_url = b.trim().to_string();
+        }
+        if let Some(m) = model.as_deref().filter(|m| !m.trim().is_empty()) {
+            target.model = m.trim().to_string();
+        }
+    } else {
+        // vlm：空串=显式清除（未配置），非空=覆盖
+        if let Some(b) = base_url.as_deref() {
+            target.base_url = b.trim().to_string();
+        }
+        if let Some(m) = model.as_deref() {
+            target.model = m.trim().to_string();
         }
     }
-    let (eff_base, eff_model) = {
-        let mut s = state.settings.lock().unwrap();
-        if let Some(b) = base_url {
-            if !b.trim().is_empty() {
-                s.base_url = b.trim().to_string();
-            }
-        }
-        if let Some(m) = model {
-            if !m.trim().is_empty() {
-                s.model = m.trim().to_string();
-            }
-        }
-        (s.base_url.clone(), s.model.clone())
-    };
+    *state.settings.lock().unwrap() = s.clone();
     // 持久化到 settings.json（与 sidecar HTTP PUT 共享单一真值），避免重启后回滚
-    sidecar::write_settings_file(&eff_base, &eff_model).map_err(|e| format!("保存设置失败: {e}"))?;
-    // 触发 supervisor 重启 sidecar（新 env 生效）
+    sidecar::write_settings_file(&s).map_err(|e| format!("保存设置失败: {e}"))?;
+    // 触发 supervisor 重启 sidecar（新 env 生效；vlm key 经钥匙串注入也需重启）
     state.restart_requested.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 
-/// 只返回布尔：钥匙串里是否已有 key（永不返回 key 本体）。
+/// 只返回布尔：钥匙串对应角色是否已有 key（永不返回 key 本体）。
 #[tauri::command]
-fn get_api_key_has_value() -> bool {
-    sidecar::keychain_has_value()
+fn get_api_key_has_value(role: String) -> Result<bool, String> {
+    let account = match role.as_str() {
+        "llm" => sidecar::KEYRING_ACCOUNT_LLM,
+        "vlm" => sidecar::KEYRING_ACCOUNT_VLM,
+        _ => return Err(format!("未知角色: {role}")),
+    };
+    Ok(sidecar::keychain_has_value(account))
 }
 
 /// 在系统文件管理器中定位工作区里的产物文件。
@@ -98,6 +115,17 @@ pub fn run() {
     let mgr = Arc::new(SidecarManager::default());
 
     let app = tauri::Builder::default()
+        // single-instance 必须第一个注册。agent.db 是单文件 SQLite + SqliteSaver 常驻连接，
+        // GUI 双开会撞 checkpoint——单实例守卫是用户不可见的最简防线，不做任何互斥协调。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
+        // 记住窗口大小/位置（退出自动持久化到系统 app 配置目录），纯 plumbing 无 IPC
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .manage(mgr.clone())
         .setup(move |app| {
@@ -106,8 +134,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_sidecar_info,
-            get_llm_settings,
-            set_llm_settings,
+            get_model_settings,
+            set_model_settings,
             get_api_key_has_value,
             reveal_in_folder
         ])

@@ -70,12 +70,16 @@ export async function rawFetch(path: string, init?: RequestInit): Promise<Respon
   return res
 }
 
-export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(
+  path: string,
+  init?: RequestInit,
+  opts?: { timeoutMs?: number },
+): Promise<T> {
   const res = await rawFetch(path, {
     ...init,
     // 挂死防护：sidecar 忙/代理异常时请求永不 settle，会让 mutation 永久 pending
     // （如「+」新建会话的 isPending 卡死）。上传（XHR）与 SSE 走各自的通道，不受影响
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(opts?.timeoutMs ?? 15_000),
     headers: {
       'Content-Type': 'application/json',
       ...(init?.headers as Record<string, string> | undefined),
@@ -138,10 +142,19 @@ export type HitlDecision =
   | { type: 'respond'; message: string }
   | { type: 'edit'; edited_action: { name: string; args: Record<string, unknown> } }
 
-export interface Settings {
+export interface RoleSettings {
   base_url: string
   model: string
+  key_configured: boolean
 }
+
+/** 双角色模型设置（llm=对话模型；vlm=视觉模型，可选，用于知识库图片/扫描件识别） */
+export interface Settings {
+  llm: RoleSettings
+  vlm: RoleSettings
+}
+
+export type ModelRole = 'llm' | 'vlm'
 
 export function listTasks(): Promise<{ tasks: Task[] }> {
   return request('/tasks')
@@ -166,7 +179,8 @@ export function patchTask(
 }
 
 export function deleteTask(id: string): Promise<{ ok: boolean }> {
-  return request(`/tasks/${id}`, { method: 'DELETE' })
+  // 归档要搬走整个任务目录（rmtree threads + mv），大任务可能明显超过常规接口的 15s
+  return request(`/tasks/${id}`, { method: 'DELETE' }, { timeoutMs: 60_000 })
 }
 
 export function listConversations(): Promise<{ conversations: Conversation[] }> {
@@ -221,8 +235,18 @@ export function getSettings(): Promise<Settings> {
   return request('/settings')
 }
 
-export function putSettings(base_url: string, model: string): Promise<{ ok: boolean }> {
-  return request('/settings', { method: 'PUT', body: JSON.stringify({ base_url, model }) })
+/** 按角色 PUT；vlm.base_url 传空串 = 清除视觉模型配置。 */
+export function putSettings(
+  role: ModelRole,
+  base_url: string,
+  model: string,
+): Promise<{ ok: boolean }> {
+  return request('/settings', { method: 'PUT', body: JSON.stringify({ [role]: { base_url, model } }) })
+}
+
+/** 设置对话框「测试」按钮：向对应角色端点发最小请求，验证 endpoint+key+model。 */
+export function testModelConnection(role: ModelRole): Promise<{ ok: boolean; role: string }> {
+  return request(`/settings/test?role=${role}`)
 }
 
 export interface FileItem {
@@ -354,4 +378,158 @@ export async function checkHealth(): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+// ===== 知识库（跨任务共享的公司资料层） =====
+
+export interface KbFieldType {
+  code: string
+  name: string
+  fields: string[]
+}
+
+export interface KbFieldSource {
+  value: string
+  source?: string
+}
+
+export interface KbMetadata {
+  doc_type: string
+  confidence?: number
+  fields?: Record<string, KbFieldSource>
+  extra?: Record<string, KbFieldSource>
+  summary?: string
+}
+
+export type KbParseStatus = 'pending' | 'parsing' | 'ready' | 'failed'
+export type KbExtractStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+export type KbReviewStatus = 'pending_review' | 'confirmed'
+
+export interface KbItem {
+  id: string
+  file_name: string
+  file_hash: string
+  title: string
+  ext: string
+  doc_type: string | null
+  doc_type_name: string
+  parse_status: KbParseStatus
+  extract_status: KbExtractStatus
+  review_status: KbReviewStatus
+  suggested_metadata: KbMetadata | null
+  business_metadata: KbMetadata | null
+  error: string | null
+  created_at: string
+  updated_at: string
+  md_ready: boolean
+}
+
+/** 解析概况（GET /kb/items/{id}/content 附带；档位标签真值在 sidecar）。 */
+export interface KbParseMeta {
+  conversion: string
+  conversion_label: string
+  chars: number | null
+  headings: number | null
+  tables: number | null
+  warnings: string[]
+  pages?: number
+  scanned_pages?: number[]
+  top_sections: string[]
+}
+
+export function listKbTypes(): Promise<{ types: KbFieldType[]; field_labels: Record<string, string> }> {
+  return request('/kb/types')
+}
+
+export function getKbBadge(): Promise<{ pending: number }> {
+  return request('/kb/badge')
+}
+
+export function listKbItems(params?: {
+  review_status?: string
+  doc_type?: string
+  q?: string
+}): Promise<{ items: KbItem[] }> {
+  const search = new URLSearchParams()
+  if (params?.review_status) search.set('review_status', params.review_status)
+  if (params?.doc_type) search.set('doc_type', params.doc_type)
+  if (params?.q) search.set('q', params.q)
+  const qs = search.toString()
+  return request(`/kb/items${qs ? `?${qs}` : ''}`)
+}
+
+export function getKbItem(id: string): Promise<KbItem> {
+  return request(`/kb/items/${id}`)
+}
+
+export function getKbItemContent(
+  id: string,
+): Promise<{ id: string; content: string; meta: KbParseMeta | null }> {
+  return request(`/kb/items/${id}/content`)
+}
+
+/** 确认元数据：fields 为 {字段code: 值}，保存即确认（review_status→confirmed）。 */
+export function confirmKbMetadata(
+  id: string,
+  body: { doc_type: string; fields: Record<string, string>; extra?: Record<string, string> },
+): Promise<KbItem> {
+  return request(`/kb/items/${id}/metadata`, { method: 'PUT', body: JSON.stringify(body) })
+}
+
+export function retriggerKbItem(id: string): Promise<{ ok: boolean }> {
+  return request(`/kb/items/${id}/retrigger`, { method: 'POST' })
+}
+
+export function deleteKbItem(id: string): Promise<{ ok: boolean }> {
+  return request(`/kb/items/${id}`, { method: 'DELETE' })
+}
+
+/** 上传到知识库（XHR 带进度；无 task_id，与任务文件上传独立）。返回 Promise<progress> */
+export function uploadKbFile(
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<{ id: string; file_name: string; size: number; parse_status: string }> {
+  return new Promise((resolve, reject) => {
+    void getSidecarInfo().then(({ baseURL, token }) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${baseURL}/api/kb/files`)
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText))
+          } catch {
+            reject(new Error('响应解析失败'))
+          }
+        } else {
+          let detail = `上传失败（${xhr.status}）`
+          try {
+            const j = JSON.parse(xhr.responseText)
+            if (j?.detail) detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail)
+          } catch {
+            /* 保底文案 */
+          }
+          reject(new Error(detail))
+        }
+      }
+      xhr.onerror = () => reject(new Error('网络错误'))
+      const fd = new FormData()
+      fd.append('file', file)
+      xhr.send(fd)
+    })
+  })
+}
+
+/** 原件二进制（图片条目预览）：带鉴权 fetch blob → objectURL（用完 revoke）。 */
+export async function fetchKbItemRaw(id: string): Promise<string> {
+  const { baseURL, token } = await getSidecarInfo()
+  const resp = await fetch(`${baseURL}/api/kb/items/${id}/raw`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  })
+  if (!resp.ok) throw new Error(`原件获取失败（${resp.status}）`)
+  const blob = await resp.blob()
+  return URL.createObjectURL(blob)
 }

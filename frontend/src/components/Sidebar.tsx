@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
+  BookOpen,
   Folder,
   FolderOpen,
   MoreHorizontal,
@@ -22,6 +23,7 @@ import { useDeleteTask, useRenameTask, useTasks } from '@/hooks/useTasks'
 import { useSidecarHealth } from '@/context/SidecarHealth'
 import { useFileUpload } from '@/context/FileUpload'
 import { useToast } from '@/context/Toast'
+import { useKbBadge } from '@/hooks/useKnowledge'
 import { cn, formatRelativeTime } from '@/lib/utils'
 import type { Conversation, Task } from '@/api/client'
 import { ChatItem } from '@/components/workspace/ChatItem'
@@ -34,8 +36,11 @@ export interface SidebarProps {
   onSelect: (id: string | null) => void
   /** 「新建任务」：进入新建会话草稿页（所属任务在输入框胶囊里选/建） */
   onNewSession: () => void
+  /** 打开知识库视图（全局资料层） */
+  onOpenKnowledge: () => void
+  /** 主区形态：决定知识库入口的 active 态 */
+  activeView?: 'chat' | 'kb'
   onOpenSettings: () => void
-  onOpenArtifacts: () => void
   collapsed: boolean
   onCollapse: () => void
 }
@@ -55,13 +60,20 @@ const STATUS_LABEL: Record<string, string> = {
   failed: '失败',
 }
 
+/** AbortSignal 超时的原始 message 是 "signal timed out"，对用户不可读 */
+function errMsg(e: unknown): string {
+  const m = e instanceof Error ? e.message : String(e)
+  return m === 'signal timed out' ? '请求超时，请重试' : m
+}
+
 /** Workspace 侧栏：快捷导航 + 「任务」分区（任务文件夹 → 会话两级）+ 用户栏。 */
 export function Sidebar({
   selectedId,
   onSelect,
   onNewSession,
+  onOpenKnowledge,
+  activeView = 'chat',
   onOpenSettings,
-  onOpenArtifacts,
   collapsed,
   onCollapse,
 }: SidebarProps) {
@@ -75,6 +87,7 @@ export function Sidebar({
   const { status: sidecarStatus } = useSidecarHealth()
   const { setTaskScope } = useFileUpload()
   const { toast } = useToast()
+  const kbBadge = useKbBadge()
   const [menuFor, setMenuFor] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -83,6 +96,8 @@ export function Sidebar({
   const [taskRenameValue, setTaskRenameValue] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<Conversation | null>(null)
   const [confirmDeleteTask, setConfirmDeleteTask] = useState<Task | null>(null)
+  // 确认弹窗内联错误：删除失败时弹窗保持打开、红字展示原因，可重试（不再静默关闭）
+  const [confirmError, setConfirmError] = useState<string | null>(null)
   // 拖拽调宽（照 ArtifactPanel 的 resizer 模式；宽度 = 鼠标 x − app 左缘）
   const [width, setWidth] = useState(SIDE_DEFAULT_W)
   const [dragging, setDragging] = useState(false)
@@ -108,7 +123,7 @@ export function Sidebar({
       const conv = await createConv.mutateAsync(taskId)
       onSelect(conv.id)
     } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), 'error')
+      toast(errMsg(e), 'error')
     }
   }
 
@@ -117,7 +132,7 @@ export function Sidebar({
     try {
       if (title) await renameConv.mutateAsync({ id, title })
     } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), 'error')
+      toast(errMsg(e), 'error')
     }
     setRenamingId(null)
     setMenuFor(null)
@@ -128,7 +143,7 @@ export function Sidebar({
     try {
       if (title && title !== task.title) await renameTask.mutateAsync({ id: task.id, title })
     } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), 'error')
+      toast(errMsg(e), 'error')
     }
     setRenamingTask(null)
     setTaskMenuFor(null)
@@ -143,11 +158,12 @@ export function Sidebar({
     try {
       await deleteConv.mutateAsync(deletingId)
     } catch (e) {
-      setConfirmDelete(null)
-      toast(e instanceof Error ? e.message : String(e), 'error')
+      // 弹窗保持打开：内联红字展示失败原因，按钮恢复可点可重试
+      setConfirmError(errMsg(e))
       return
     }
     setConfirmDelete(null)
+    setConfirmError(null)
     if (willReset) {
       if (neighbors.length > 0) onSelect(neighbors[0].id)
       else onSelect(null)
@@ -162,11 +178,12 @@ export function Sidebar({
     try {
       await deleteTaskM.mutateAsync(tid)
     } catch (e) {
-      setConfirmDeleteTask(null)
-      toast(e instanceof Error ? e.message : String(e), 'error')
+      // 弹窗保持打开：内联红字展示失败原因，按钮恢复可点可重试
+      setConfirmError(errMsg(e))
       return
     }
     setConfirmDeleteTask(null)
+    setConfirmError(null)
     // 同步清掉上传归属任务：会话切换/列表刷新到位前重挂载的输入区不再拿着
     // 已删任务的 taskScope 去拉 files（否则吃到一次 404）
     setTaskScope(null)
@@ -217,8 +234,19 @@ export function Sidebar({
       <div className="side-scroll">
         <div className="quick-list">
           <NavRow icon={<Plus />} label="新建任务" onClick={onNewSession} />
-          <NavRow icon={<Package />} label="投标工作台" onClick={onOpenArtifacts} />
-          <NavRow icon={<Settings />} label="知识库" onClick={onOpenSettings} />
+          {/* 占位入口：页面未落地前不给任何真实副作用（曾误绑设置弹窗/展开产物面板） */}
+          <NavRow
+            icon={<Package />}
+            label="投标工作台"
+            onClick={() => toast('投标工作台即将上线', 'info')}
+          />
+          <NavRow
+            icon={<BookOpen />}
+            label="知识库"
+            active={activeView === 'kb'}
+            badge={(kbBadge.data?.pending ?? 0) > 0}
+            onClick={onOpenKnowledge}
+          />
         </div>
 
         {/* count=任务（文件夹）数：子项是任务文件夹树，不是会话数 */}
@@ -244,7 +272,11 @@ export function Sidebar({
               onConfirmRename={() => void handleTaskRename(g.task)}
               onCancelRename={() => setRenamingTask(null)}
               onMenuToggle={() => setTaskMenuFor(taskMenuFor === g.task.id ? null : g.task.id)}
-              onDelete={() => setConfirmDeleteTask(g.task)}
+              onDelete={() => {
+                setTaskMenuFor(null)
+                setConfirmError(null)
+                setConfirmDeleteTask(g.task)
+              }}
               onNewConversation={() => void handleNewConv(g.task.id)}
             >
               {g.conversations.map((c) => (
@@ -268,7 +300,11 @@ export function Sidebar({
                   }}
                   onConfirmRename={() => void handleRename(c.id)}
                   onCancelRename={() => setRenamingId(null)}
-                  onDelete={() => setConfirmDelete(c)}
+                  onDelete={() => {
+                    setMenuFor(null)
+                    setConfirmError(null)
+                    setConfirmDelete(c)
+                  }}
                 />
               ))}
             </TaskFolder>
@@ -293,14 +329,29 @@ export function Sidebar({
 
       {confirmDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setConfirmDelete(null)} aria-hidden />
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => {
+              setConfirmDelete(null)
+              setConfirmError(null)
+            }}
+            aria-hidden
+          />
           <div className="relative z-10 w-full max-w-sm rounded-xl border bg-card p-6 shadow-md">
             <h2 className="text-base font-semibold">删除会话</h2>
             <p className="mt-2 text-sm text-muted-foreground">
               删除「{confirmDelete.title}」？其消息与本会话过程稿将一并删除，任务正式稿保留。
             </p>
+            {confirmError && <p className="mt-2 text-sm text-error">删除失败：{confirmError}</p>}
             <div className="mt-4 flex justify-end gap-2">
-              <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(null)}>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setConfirmDelete(null)
+                  setConfirmError(null)
+                }}
+              >
                 取消
               </Button>
               <Button variant="destructive" size="sm" onClick={() => void handleDelete()} disabled={deleteConv.isPending}>
@@ -313,15 +364,30 @@ export function Sidebar({
 
       {confirmDeleteTask && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setConfirmDeleteTask(null)} aria-hidden />
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => {
+              setConfirmDeleteTask(null)
+              setConfirmError(null)
+            }}
+            aria-hidden
+          />
           <div className="relative z-10 w-full max-w-sm rounded-xl border bg-card p-6 shadow-md">
             <h2 className="text-base font-semibold">删除任务</h2>
             <p className="mt-2 text-sm text-muted-foreground">
               删除任务「{confirmDeleteTask.title}」？其下全部会话、消息与会话过程稿将被删除，
               正式稿移入归档目录（可手工找回）。此操作不可撤销。
             </p>
+            {confirmError && <p className="mt-2 text-sm text-error">删除失败：{confirmError}</p>}
             <div className="mt-4 flex justify-end gap-2">
-              <Button variant="ghost" size="sm" onClick={() => setConfirmDeleteTask(null)}>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setConfirmDeleteTask(null)
+                  setConfirmError(null)
+                }}
+              >
                 取消
               </Button>
               <Button

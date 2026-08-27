@@ -61,6 +61,28 @@ CREATE TABLE IF NOT EXISTS run_traces(
   duration_ms INTEGER,
   reasoning TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL);
+-- 知识库条目（一个上传文件一条；suggested=LLM 抽取建议、business=确认后真值，
+-- 两列之隔即审核边界——确认动作把 suggested 拷入 business，LLM 永不覆盖 business）
+CREATE TABLE IF NOT EXISTS kb_items(
+  id TEXT PRIMARY KEY,
+  file_name TEXT NOT NULL,
+  file_hash TEXT NOT NULL,
+  title TEXT NOT NULL,
+  ext TEXT NOT NULL,
+  doc_type TEXT,
+  parse_status TEXT NOT NULL DEFAULT 'pending',
+  extract_status TEXT NOT NULL DEFAULT 'pending',
+  review_status TEXT NOT NULL DEFAULT 'pending_review',
+  suggested_metadata TEXT,
+  business_metadata TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL);
+-- 知识库检索切段（FTS5）：按 outline 节点切段一段一行，body 存 jieba 预分词文本
+-- （写入/查询两侧同源分词，unicode61 切英文数字 token；索引可从 kb_items+磁盘 md 重建）
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_segments USING fts5(
+  body, item_id UNINDEXED, section_path UNINDEXED,
+  line_start UNINDEXED, line_end UNINDEXED, page_start UNINDEXED);
 """
 
 # 索引与建表分两步：旧库先建表→探测补列→再建索引（索引引用新列，顺序不能反）
@@ -70,6 +92,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_conv ON runs(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_run_traces_message ON run_traces(message_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_index_scope
   ON artifact_index(task_id, conversation_id, kind, schema_id, schema_version);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_items_hash ON kb_items(file_hash);
+CREATE INDEX IF NOT EXISTS idx_kb_items_review ON kb_items(review_status);
 """
 
 
@@ -724,3 +748,176 @@ def rebuild_artifact_index(manifests: list[dict], content_path_of) -> int:
     finally:
         conn.close()
     return len(rows)
+
+
+# ---------- 知识库（kb_items + kb_segments FTS5） ----------
+
+_KB_ITEM_COLS = (
+    "id, file_name, file_hash, title, ext, doc_type, "
+    "parse_status, extract_status, review_status, "
+    "suggested_metadata, business_metadata, error, created_at, updated_at"
+)
+
+
+def kb_insert_item(file_name: str, file_hash: str, title: str, ext: str) -> dict:
+    kid = f"kb_{uuid.uuid4().hex[:12]}"
+    now = _now()
+    conn = _conn()
+    try:
+        conn.execute(
+            "INSERT INTO kb_items(id, file_name, file_hash, title, ext, created_at, updated_at)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (kid, file_name, file_hash, title, ext, now, now),
+        )
+    finally:
+        conn.close()
+    return kb_get_item(kid) or {}
+
+
+def kb_get_item(kid: str) -> dict | None:
+    conn = _conn()
+    try:
+        row = conn.execute(
+            f"SELECT {_KB_ITEM_COLS} FROM kb_items WHERE id=?", (kid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def kb_get_item_by_hash(file_hash: str) -> dict | None:
+    conn = _conn()
+    try:
+        row = conn.execute(
+            f"SELECT {_KB_ITEM_COLS} FROM kb_items WHERE file_hash=?", (file_hash,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def kb_list_items(
+    review_status: str | None = None,
+    doc_type: str | None = None,
+    q: str | None = None,
+) -> list[dict]:
+    """知识库条目列表：待确认置顶、其余按创建时间倒序；q 对 file_name/title ILIKE。"""
+    sql = f"SELECT {_KB_ITEM_COLS} FROM kb_items"
+    where, args = [], []
+    if review_status:
+        where.append("review_status=?")
+        args.append(review_status)
+    if doc_type:
+        where.append("doc_type=?")
+        args.append(doc_type)
+    if q:
+        where.append("(file_name LIKE ? OR title LIKE ?)")
+        args.extend([f"%{q}%", f"%{q}%"])
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY CASE review_status WHEN 'pending_review' THEN 0 ELSE 1 END, created_at DESC"
+    conn = _conn()
+    try:
+        rows = conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def kb_update_item(kid: str, **fields) -> None:
+    """更新 kb_items 指定列（仅白名单列）+ updated_at。"""
+    allowed = {
+        "title", "doc_type", "parse_status", "extract_status", "review_status",
+        "suggested_metadata", "business_metadata", "error",
+    }
+    keys = [
+        k for k in fields
+        if k in allowed and (fields[k] is not None or k == "error")  # error 允许置空清除
+    ]
+    if not keys:
+        return
+    sets = ", ".join(f"{k}=?" for k in keys)
+    args = [fields[k] for k in keys] + [_now(), kid]
+    conn = _conn()
+    try:
+        conn.execute(f"UPDATE kb_items SET {sets}, updated_at=? WHERE id=?", args)
+    finally:
+        conn.close()
+
+
+def kb_delete_item(kid: str) -> None:
+    conn = _conn()
+    try:
+        conn.execute("DELETE FROM kb_items WHERE id=?", (kid,))
+        conn.execute("DELETE FROM kb_segments WHERE item_id=?", (kid,))
+    finally:
+        conn.close()
+
+
+def kb_count_pending() -> int:
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM kb_items WHERE review_status='pending_review'"
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row["n"]) if row else 0
+
+
+def kb_replace_segments(item_id: str, segments: list[dict]) -> None:
+    """重建某条目的全部检索段（先 DELETE 后 INSERT，幂等）。"""
+    conn = _conn()
+    try:
+        conn.execute("DELETE FROM kb_segments WHERE item_id=?", (item_id,))
+        conn.executemany(
+            "INSERT INTO kb_segments(body, item_id, section_path, line_start, line_end, page_start)"
+            " VALUES(?,?,?,?,?,?)",
+            [
+                (
+                    s["body"], item_id, s.get("section_path"),
+                    s.get("line_start"), s.get("line_end"), s.get("page_start"),
+                )
+                for s in segments
+            ],
+        )
+    finally:
+        conn.close()
+
+
+def kb_search_segments(match_expr: str, limit: int = 8) -> list[dict]:
+    """FTS5 检索（bm25 排序），返回原始文本（body 是分词后文本，调用方展示用原文摘要）。"""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT item_id, section_path, line_start, line_end, page_start, body,"
+            " bm25(kb_segments) AS rank"
+            " FROM kb_segments WHERE kb_segments MATCH ?"
+            " ORDER BY rank LIMIT ?",
+            (match_expr, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def recover_stale_kb() -> int:
+    """启动对账：sidecar 被杀时残留的 parsing/running 条目置 failed（可手动重触发）。"""
+    conn = _conn()
+    try:
+        cur = conn.execute(
+            "UPDATE kb_items SET parse_status='failed',"
+            " error=COALESCE(error, 'sidecar 中断，请重新触发'), updated_at=?"
+            " WHERE parse_status IN ('pending','parsing')",
+            (_now(),),
+        )
+        n1 = cur.rowcount
+        cur = conn.execute(
+            "UPDATE kb_items SET extract_status='failed', updated_at=?"
+            " WHERE extract_status='running'",
+            (_now(),),
+        )
+        n2 = cur.rowcount
+    finally:
+        conn.close()
+    return n1 + n2

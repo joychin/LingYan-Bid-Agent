@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen, Maximize2, Min
 import type { Artifact, Task } from '@/api/client'
 import { useArtifacts, useConversationArtifacts, useTaskArtifacts } from '@/hooks/useArtifacts'
 import { useConversations } from '@/hooks/useConversations'
+import { useTasks } from '@/hooks/useTasks'
 import { kindIcon } from '@/artifacts/registry'
 import { cn } from '@/lib/utils'
 
@@ -32,6 +33,7 @@ export function ArtifactPanel({
   const { data: taskArtifacts = [], isLoading: loadingTask } = useTaskArtifacts(currentTask?.id ?? null)
   const { data: convArtifacts = [], isLoading: loadingConv } = useConversationArtifacts(currentConvId)
   const { data: conversations = [] } = useConversations()
+  const { data: tasks = [] } = useTasks()
   const convTitle = conversations.find((c) => c.id === currentConvId)?.title
   // 无任务上下文时退化为平铺（有会话则只看该会话，否则全量历史视图）
   const fallbackArtifacts = currentConvId ? convArtifacts : allArtifacts
@@ -62,7 +64,7 @@ export function ArtifactPanel({
     }
   }
 
-  const renderRow = (a: Artifact) => {
+  const renderRow = (a: Artifact, subLabel?: string) => {
     const icon = kindIcon(a.kind)
     return (
       <div key={a.artifact_id} className="ft-row" onClick={() => onOpen(a.artifact_id)}>
@@ -74,6 +76,7 @@ export function ArtifactPanel({
           </span>
         )}
         <span className="ft-name truncate">{a.display_name}</span>
+        {subLabel && <span className="ft-row-sub">{subLabel}</span>}
       </div>
     )
   }
@@ -150,7 +153,13 @@ export function ArtifactPanel({
               {!fallbackLoading && fallbackArtifacts.length === 0 && (
                 <p className="ft-empty">{currentConvId ? '本会话还没有过程稿' : '还没有产物'}</p>
               )}
-              {fallbackArtifacts.map(renderRow)}
+              {/* 无任务上下文的平铺视图按 artifact.task_id 标注归属任务，防跨任务同名产物混淆 */}
+              {fallbackArtifacts.map((a) =>
+                renderRow(
+                  a,
+                  a.task_id ? (tasks.find((t) => t.id === a.task_id)?.title ?? '未归属') : '未归属',
+                ),
+              )}
             </>
           )}
         </div>

@@ -76,6 +76,24 @@ export function kindIcon(kind: string): KindIcon | null {
   return KIND_ICON[kind] ?? null
 }
 
+/** 知识库文件扩展名 → 图标（按文件格式选色；复用 .ft-ico 色板族，workspace.css 同步维护）。 */
+const EXT_ICON: Record<string, KindIcon> = {
+  '.pdf': { cls: 'ft-ico--pdf', mark: 'P' },
+  '.docx': { cls: 'ft-ico--docx', mark: 'W' },
+  '.txt': { cls: 'ft-ico--md', mark: 'T' },
+  '.md': { cls: 'ft-ico--md', mark: 'M' },
+  '.jpg': { cls: 'ft-ico--img', mark: 'I' },
+  '.jpeg': { cls: 'ft-ico--img', mark: 'I' },
+  '.png': { cls: 'ft-ico--img', mark: 'I' },
+  '.webp': { cls: 'ft-ico--img', mark: 'I' },
+  '.bmp': { cls: 'ft-ico--img', mark: 'I' },
+}
+
+export function fileExtIcon(fileName: string): KindIcon {
+  const ext = fileName.slice(fileName.lastIndexOf('.')).toLowerCase()
+  return EXT_ICON[ext] ?? { cls: 'ft-ico--md', mark: '?' }
+}
+
 /** 启动对账：sidecar 契约目录 vs 客户端 Processor 覆盖，缺失即告警（半接入状态防漏）。 */
 export async function reconcileContracts(): Promise<void> {
   try {

@@ -340,7 +340,7 @@ export function InputComposer({
             {leftSlot}
           </div>
           <div className="right">
-            <ModelSelect label={settings?.model ?? 'deepseek-v4-flash'} onClick={onOpenSettings} />
+            <ModelSelect label={settings?.llm.model ?? 'deepseek-v4-flash'} onClick={onOpenSettings} />
             {runningBlock ? (
               <button
                 type="button"

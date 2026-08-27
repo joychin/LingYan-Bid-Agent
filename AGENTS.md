@@ -18,7 +18,8 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
 三条铁律：
 
 1. Rust 不含任何业务逻辑。
-2. API Key 永不出现于 HTTP 载荷与前端 JS 内存；key 由 Rust 从钥匙串读取，spawn 时注入 env。
+2. API Key 永不出现于 HTTP 载荷与前端 JS 内存；key 由 Rust 从钥匙串读取（llm/vlm 两
+   account：`llm-api-key`/`vlm-api-key`），spawn 时注入 env。
 3. 前端只消费 PRD §5.5 事件契约（agent.started / agent.token / tool.called / tool.result /
    agent.completed / agent.error / todo.updated / artifact.created / run.state / ping），
    不依赖 DeepAgents 内部格式。run.state 是 SSE 连接建立时由端点下发的对账事件
@@ -169,8 +170,8 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
 
 - 用 deepagents 原生 `interrupt_on`（`agent.INTERRUPT_ON`，当前两项：`ask_human`
   `allowed_decisions=["respond"]` 问答型；`task` approve/reject——子代理派发审批门禁，
-  AI 新闻调研等技能执行前用户确认）。给其他工具加门禁改这里。子代理 spec 的
-  `interrupt_on` 是**整体替换继承**——news-researcher 传 `{}` 即排除（子代理不直接问用户）。
+  tender-outline 多册并发派发前用户确认）。给其他工具加门禁改这里。子代理 spec 的
+  `interrupt_on` 是**整体替换继承**——tender-outline-writer 传 `{}` 即排除（子代理不直接问用户）。
 - **暂停语义**：langgraph 在 updates 模式以 `{"__interrupt__": (Interrupt,...)}` 下发
   （值是元组，不专门处理会被 `events.iter_stream` 静默丢弃且 run 以空回复 completed）；
   捕获后 run_stream 落半截回复（带「等待你的输入…」标记，沿用任务中断先例）+ trace →
@@ -193,8 +194,46 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   「已选：X；Y\n补充…」一条 respond 回答，send 自动路由）；否则审批卡（批准/拒绝+可选
   理由；edit UI 不做）。run.state/GET runs/latest 在 waiting_input 时附 requests 快照
   恢复卡片（点选状态不持久，重连后重选）。
-- **ai-news-research 技能**是 HITL 全链路测试载体：ask_human 多选确认调研范围
-  （含补充侧重）→ task 审批卡 → 按已选厂商派发 1-3 个子代理 → 汇总。
+  （原 HITL 全链路测试载体 ai-news-research 技能及其 news-researcher 子代理已于
+  2026-08-27 删除；HITL 机制由 ask_human/task 门禁本身及 tender 流水线持续使用。）
+
+## 知识库（公司资料库，2026-08-27 已实施）
+
+跨任务共享的公司资料层（资质证书/合同案例/人员证书/公司介绍等），写标书时检索引用。
+单库、无向量：FTS5 全文检索，`kb_items` + `kb_segments`（FTS5 虚表）两张表，索引可从
+kb_items+磁盘 md 重建（启动 `rebuild_kb_index`）；同 hash 上传 API 层拦截（uq_kb_items_hash）。
+
+- **磁盘布局**：`workspace/knowledge/{files,parse}/`——与 skills/archive 同级的**全局目录**
+  （`artifact_store._GLOBAL_DIR_NAMES` 先例，任务目录枚举跳过它、agent 文件工具天然可读）。
+  原件在 files/（投标引用用原件）；解析产物 parse/<stem>/（.md/.outline.json/.meta.json，
+  与任务场景 parse_document 同三件套格式）。
+- **sidecar 模块**：`app/knowledge/types.py`（类型注册表**封闭**，10 类：营业执照/资质证书/
+  人员证书/合同案例/验收报告/财务审计/公司介绍/技术方案/荣誉知产/其他；每类字段模板+
+  文件名提示规则；类型清单不进表结构（doc_type 存 code、字段全收 JSON 列），加类型零迁移）；
+  `segmenter.py`（outline 节点→检索段）；`fts.py`（**jieba 写入/查询两侧同源分词 + 中文
+  bigram 补充**——unicode61 把连续 CJK 当单 token 会整句 miss，bigram 保两字词子串命中）；
+  `ingest.py`（入库管线：上传后 fire-and-forget `asyncio.create_task`+to_thread（titler 先例），
+  状态 parsing→ready（切段完成即可检索）→extracting→ready；启动 `db.recover_stale_kb`
+  对账残留态）；`app/api/knowledge.py`（上传/条目列表详情/PUT metadata 确认/GET kb/badge
+  红点计数/kb/types 类型注册表）；`app/tools/search_knowledge.py`（LLM 检索工具：命中带
+  章节路径+行号区间+摘录+read_file 精读指引；doc_type 过滤后无命中回退未过滤结果
+  （误召回>漏召回）；失败返回「[检索失败]」文案不抛异常打崩 run）。
+- **审核边界=提示不是门禁**：kb_items 双列 suggested_metadata（LLM 抽取建议）/
+  business_metadata（人工确认）；pending_review 条目照常可检索；PUT metadata 确认即
+  confirmed+重建检索段（人工填的字段也要可检索）。
+- **视觉路由**：图片整体走 VL 转写；PDF 按逐页文本量分类（meta.scanned_pages），扫描页
+  渲染成图 VL 转写后拼回页锚点；转写后统一走文本抽取管线（VL 只是图→文本替代 OCR）。
+  VLM 未配置一律降级链：收原件+登记资产+人工填表，**不阻塞上传**。
+- **解析注册表**：`app/parse/`（扩展名→**确定性**转换器，docx/pdf/txt/md→md；知识库入库
+  与 parse_document 工具共用同一套核心转换器，工具层只加场景限制）。注册表不收图片/
+  扫描页转换器（`parse/image.py` 提供但不注册）——外部模型调用不得静默触发，属入库编排层。
+- **VLM 客户端**：`app/vlm.py`，OpenAI 兼容 chat.completions+image_url，配置经
+  VLM_API_KEY/VLM_BASE_URL/VLM_MODEL（三者任一缺失=未配置），provider 无关。
+- **上下文注入**：agent 任务上下文注入附 `_kb_summary_line`（类型清单+待确认数一行，
+  引导模型先 search_knowledge 再写）。
+- **frontend**：`components/KnowledgeView.tsx`（左栏类型分组折叠列表+右区内容/信息两 tab，
+  信息 tab=元数据确认表单）+ `hooks/useKnowledge.ts`（react-query；parsing/extracting
+  分阶段轮询）+ NavRow 红点（badge 60s 轮询）。
 
 ## 命令
 
@@ -212,8 +251,9 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
 - 浏览器模式（`npm run dev:browser`，前端经 proxy 访问的）8765 sidecar 用的是
   `sidecar/.env` 里的 `LLM_API_KEY`——它可能是占位/无效 key（会报 401 invalid key），真实 key
   只在 Tauri 模式由 Rust 从钥匙串注入。浏览器模式要跑真实对话，需在 `.env` 里配有效 key。
-- sidecar 有 pytest（`uv run pytest`，覆盖 db 恢复 / 设置校验 / 工具路径 containment /
-  契约校验 / 发布管线 / 编辑保存与恢复点 / **§5.5 事件契约 schema**（`test_contract.py`，
+- sidecar 有 pytest（`uv run pytest`，覆盖 db 恢复 / 设置校验（含双角色）/ 工具路径 containment /
+  契约校验 / 发布管线 / 编辑保存与恢复点 / 知识库（入库/检索/元数据/解析注册表，
+  `test_knowledge_*.py`）/ **§5.5 事件契约 schema**（`test_contract.py`，
   字段清单须与前端 `api/sse.ts` 的 AgentEventData 人工同步））；frontend/Rust 暂无测试 runner。
 - e2e 冒烟：`cd sidecar && uv run pytest -m e2e`——spawn 真实 sidecar 子进程（独立端口 +
   隔离 DATA_DIR）跑一轮真实 LLM 对话，断言 run 完成、SSE seq 单调无重复、tool_call_id
@@ -246,13 +286,18 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
     连带清 checkpoint；run 中断时已流出的半截回复落库（带「（任务中断）」标记）。
     messages 查询排序用 `created_at, rowid` 决胜（created_at 秒级精度，同秒消息按
     随机 uuid 排序会乱序）。
-  - base_url/model 单一真值在 `data/settings.json`（优先级 env > settings.json > 默认值）；
-    HTTP PUT /settings 与 Tauri IPC `set_llm_settings` 都写它，Tauri 每次 spawn 前读它注入 env。
+  - 模型设置双角色嵌套（2026-08-27）：`data/settings.json` 结构 `{llm:{...},vlm:{...}}`
+    （旧扁平 LLM_* 键兼容迁移），优先级 env > settings.json > 默认值；
+    `app/api/settings.py` GET/PUT 双角色读写+连通性测试，**key 永不接受 HTTP 修改**
+    （GET 只回 key_configured 布尔）；PUT 后 llm 变更即时重建 agent、vlm 是无状态客户端
+    改 env 即生效；Tauri 侧对应 IPC `set_model_settings`（按 role 写 settings.json+钥匙串）。
   - skills 从 `app/skills/` 启动时同步到 `data/workspace/skills/`（FilesystemBackend root）。
 - **src-tauri**（Rust stable ≥1.85）：
   - `src/sidecar.rs`：选空闲端口 → 随机 token → spawn（`process_group(0)`）→ healthz(nonce 校验,1s×30) →
-    指数退避重启（上限 3 次）→ 退出杀进程树并 wait 回收。base_url/model 单一真值在
-    `data/settings.json`（HTTP PUT 与 IPC 都写它，spawn 前读取覆盖默认值）；
+    指数退避重启（上限 3 次）→ 退出杀进程树并 wait 回收。模型设置单一真值在
+    `data/settings.json`（`{llm, vlm}` 双角色嵌套，HTTP PUT 与 IPC `set_model_settings`
+    都写它，spawn 前读取注入 env）；key 存钥匙串**两 account**：`llm-api-key`/`vlm-api-key`
+    （vlm 传空 base_url=显式清除配置，llm 空值不覆盖现值；改完触发 supervisor 重启 sidecar）；
     `stopping` 标志保证应用退出后 supervisor 不再拉起孤儿进程。
   - 生产分发限制：目前用 `Command` 直接 spawn `.venv/bin/python -m uvicorn` + 自定义 supervisor
     （随机端口/token 注入/healthz 探活/退避重启），dev 期没问题，甚至比官方 `sidecar()` 更强
@@ -263,6 +308,9 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
     参考 https://github.com/dieharders/example-tauri-python-server-sidecar
   - 钥匙串用 macOS `security` CLI 子进程（`keyring` crate 在此 macOS 写 Data Protection 钥匙串，
     `security` CLI 不可见，无法满足 PRD M3 验收）。
+  - 已装插件仅两枚官方 plumbing：`tauri-plugin-single-instance`（须第一个注册——GUI 双开会撞
+    agent.db 单库 checkpoint，二次启动聚焦已有窗口，不做互斥协调）+ `tauri-plugin-window-state`
+    （记住窗口大小/位置）；均纯 Rust 侧、零 IPC 权限、前端零依赖。
 - **frontend**：sidecar 地址解析在 `src/api/client.ts` 的 `getSidecarInfo()`——
   Tauri 环境走 `__TAURI_INTERNALS__.invoke('get_sidecar_info')`；浏览器开发模式默认返回
   相对路径（`/api/...`），由 `vite.config.ts` 的 `server.proxy` 同源转发到 8765——CORS

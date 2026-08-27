@@ -17,7 +17,7 @@ export function UploadDropzone({ children }: { children: ReactNode }) {
 
   return (
     <div
-      className="relative flex h-full w-full flex-col"
+      className="relative flex h-full min-h-0 w-full flex-col"
       onDragOver={(e) => {
         e.preventDefault()
         setOver(true)

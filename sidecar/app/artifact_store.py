@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 _AID_RE = re.compile(r"^art_[0-9a-f]{12}$")
 
 # workspace 根下的全局目录（不属于任何任务，索引扫描跳过）
-_GLOBAL_DIR_NAMES = {"skills", "archive"}
+_GLOBAL_DIR_NAMES = {"skills", "archive", "knowledge"}
 
 
 def task_dir(task_id: str) -> Path:

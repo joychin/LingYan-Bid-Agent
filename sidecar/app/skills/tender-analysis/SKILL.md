@@ -31,6 +31,7 @@ supplements=补充文件按其 role 并入证据；excluded 不引用）。逐�
 2. main + supplements 每个文件在 `out/parse/<文件名>/` 下三件产物齐备（md/outline/meta）；
 3. **新鲜度**：某文件 meta.json 的 `generated_at` 晚于既有产物头部生成时间 → 该文件在
    分析后被更新过 → 提示用户重跑（全量或相应节），由用户裁决，不自行混跑。
+   （两侧都是 ISO 8601 秒级 UTC 字符串、格式一致，直接按字符串比较即可。）
 
 解析失败的补充文件在解析环节已声明降级，其内容不可引用。
 
@@ -82,8 +83,10 @@ outline 定位不到目标内容时，用 grep 工具按关键词兜底（如「
 - 路径：`out/analysis/{structure, requirements-qualification, requirements-submission,
   requirements-business, requirements-format, disqualification, evaluation, clarifications}.md`
 - 每个产物文件**第一行**是头部元信息（HTML 注释），补充文件带细分角色：
-  `<!-- tender-analysis | 节=disqualification | 主文件=招标文件.docx | 补充=补遗1.docx(补遗);技术需求附录.docx(附录) | 生成=<UTC时间> -->`
-  （无补充文件时省略「补充=」段；这是来源集合与角色的权威记录，下游按它核对新鲜度）
+  `<!-- tender-analysis | 节=disqualification | 主文件=招标文件.docx | 补充=补遗1.docx(补遗);技术需求附录.docx(附录) | 生成=2026-08-27T09:30:00+00:00 -->`
+  （「生成=」取任务上下文里的当前 UTC 时间，**ISO 8601 秒级、与 meta.json 的
+  generated_at 同格式**——下游凭它核对新鲜度，格式不一致会破坏可比性；
+  无补充文件时省略「补充=」段；这是来源集合与角色的权威记录）
 - **编号即行序**：requirements-format 的必须章节/模板表、requirements-business 的需求表、
   evaluation 的评分表是 `assemble_tender` 构建来源登记表（MAND/TPL/REQ/SCORE）的机器输入，
   编号由**行序**决定（两位零填充，如 REQ-01）。**清单定稿后不要插行/删行/换序**，

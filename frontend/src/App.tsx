@@ -3,6 +3,7 @@ import { ChevronRight } from 'lucide-react'
 import { Sidebar } from '@/components/Sidebar'
 import { ChatView } from '@/components/ChatView'
 import { ChatHeader } from '@/components/ChatHeader'
+import { KnowledgeView } from '@/components/KnowledgeView'
 import { SettingsDialog } from '@/components/SettingsDialog'
 import { ArtifactPanel } from '@/components/ArtifactPanel'
 import { ArtifactOpenHost } from '@/components/ArtifactOpenHost'
@@ -21,6 +22,8 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   // 「新建会话」草稿页：主区展示欢迎页+输入框（convId=null），所属任务在输入框胶囊里选/建
   const [drafting, setDrafting] = useState(false)
+  // 主区形态：chat=对话工作台 / kb=知识库（全局资料层，与任务无关）
+  const [activeView, setActiveView] = useState<'chat' | 'kb'>('chat')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [previewId, setPreviewId] = useState<string | null>(null)
   const [pendingSend, setPendingSend] = useState<string | null>(null)
@@ -47,7 +50,8 @@ export default function App() {
     setPendingSend(text)
   }
 
-  // 草稿页展示的会话 id（null=欢迎页）；selectedId 保留，草稿中选中别的会话即退出
+  // 草稿页展示的会话 id（null=欢迎页）；进入草稿页时清空选中（高亮与任务胶囊保持一致），
+  // 退出草稿 = 点任一会话（onSelect 会置回 drafting=false）
   const viewConvId = drafting ? null : selectedId
   const viewConv = viewConvId ? (conversations.find((c) => c.id === viewConvId) ?? null) : null
   const currentTask = viewConv ? taskOfConversation(tasks, conversations, viewConvId) : null
@@ -58,15 +62,21 @@ export default function App() {
         selectedId={selectedId}
         onSelect={(id) => {
           setDrafting(false)
+          setActiveView('chat')
           setSelectedId(id)
           setPendingSend(null)
         }}
         onNewSession={() => {
           setDrafting(true)
+          setActiveView('chat')
+          // 清掉旧会话高亮：草稿页里侧栏选中态与输入框任务胶囊指向一致，
+          // 不再出现「侧栏亮着 A 任务的会话、胶囊却是 B 任务」的错位
+          setSelectedId(null)
           setPendingSend(null)
         }}
+        onOpenKnowledge={() => setActiveView('kb')}
+        activeView={activeView}
         onOpenSettings={() => setSettingsOpen(true)}
-        onOpenArtifacts={() => setArtifactsCollapsed(false)}
         collapsed={sidebarCollapsed}
         onCollapse={() => {
           setSidebarCollapsed((v) => {
@@ -88,28 +98,37 @@ export default function App() {
           <ChevronRight />
         </button>
         <SidecarBanner />
-        <ChatHeader task={currentTask} conversation={viewConv} />
-        <ChatView
-          key={viewConvId ?? 'root'}
-          convId={viewConvId}
-          onOpenArtifact={setPreviewId}
-          initialSend={pendingSend}
-          onRequestCreate={handleRequestCreate}
-          onOpenSettings={() => setSettingsOpen(true)}
-        />
+        {activeView === 'kb' ? (
+          <KnowledgeView />
+        ) : (
+          <>
+            <ChatHeader task={currentTask} conversation={viewConv} />
+            <ChatView
+              key={viewConvId ?? 'root'}
+              convId={viewConvId}
+              onOpenArtifact={setPreviewId}
+              initialSend={pendingSend}
+              onRequestCreate={handleRequestCreate}
+              onOpenSettings={() => setSettingsOpen(true)}
+            />
+          </>
+        )}
       </main>
-      <ArtifactPanel
-        currentConvId={viewConvId}
-        currentTask={currentTask}
-        collapsed={artifactsCollapsed}
-        onOpen={setPreviewId}
-        onCollapse={() => {
-          setArtifactsCollapsed((v) => {
-            localStorage.setItem(LS_ARTIFACTS, v ? '0' : '1')
-            return !v
-          })
-        }}
-      />
+      {/* 产物面板是对话工作台的一部分：知识库视图下不渲染（grid auto 列自动收 0，卸载即停内部轮询） */}
+      {activeView !== 'kb' && (
+        <ArtifactPanel
+          currentConvId={viewConvId}
+          currentTask={currentTask}
+          collapsed={artifactsCollapsed}
+          onOpen={setPreviewId}
+          onCollapse={() => {
+            setArtifactsCollapsed((v) => {
+              localStorage.setItem(LS_ARTIFACTS, v ? '0' : '1')
+              return !v
+            })
+          }}
+        />
+      )}
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <ArtifactOpenHost artifactId={previewId} onClose={() => setPreviewId(null)} />
     </div>

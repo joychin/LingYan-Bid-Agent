@@ -357,8 +357,9 @@ export function useRun(convId: string | null) {
           // 用户回答已由 sidecar 落为 user message，拉取真值
           queryClient.invalidateQueries({ queryKey: ['messages', convId] })
         } catch (e) {
-          // 409 = 已在续跑（连点/竞态窗口），静默即可
-          if ((e as Error & { status?: number }).status === 409) return
+          // 409 = 已在续跑（连点/竞态窗口）：不置错误卡（run 确实在跑），但向上抛——
+          // InputComposer 据此保留输入，静默 resolve 会把用户刚打的回答清掉
+          if ((e as Error & { status?: number }).status === 409) throw e
           setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e), errorCode: null }))
           throw e
         }

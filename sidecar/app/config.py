@@ -1,7 +1,9 @@
 """读取环境变量。数据目录默认 <sidecar>/data，可通过 DATA_DIR 覆盖。
 
 base_url/model 优先级：环境变量 > data/settings.json > 内置默认值。
-settings.json 是 Tauri 与 sidecar 共享的单一配置真值（Tauri 侧 lib.rs 也读写它）。
+settings.json 是 Tauri 与 sidecar 共享的单一配置真值（Tauri 侧 lib.rs 也读写它），
+结构为双角色嵌套 {llm:{base_url,model}, vlm:{...}}；llm 读侧兼容旧扁平 {base_url,model}。
+vlm 无内置默认：base_url 为空即未配置（知识库图片/扫描件走降级链）。
 """
 
 import json
@@ -27,6 +29,11 @@ def workspace_dir() -> Path:
     return data_dir() / "workspace"
 
 
+def knowledge_dir() -> Path:
+    """知识库目录（workspace 下与 skills/archive 同级的全局目录，不属于任何任务）。"""
+    return workspace_dir() / "knowledge"
+
+
 def skills_source_dir() -> Path:
     return SIDECAR_ROOT / "app" / "skills"
 
@@ -45,6 +52,17 @@ def _file_overrides() -> dict:
         return {}
 
 
+def _file_role(role: str) -> dict:
+    """读 settings.json 某角色块。llm 兼容旧扁平格式（顶层 base_url/model 视作 llm 块）。"""
+    data = _file_overrides()
+    block = data.get(role)
+    if isinstance(block, dict):
+        return block
+    if role == "llm" and ("base_url" in data or "model" in data):
+        return data
+    return {}
+
+
 def llm_api_key() -> str | None:
     return os.environ.get("LLM_API_KEY")
 
@@ -53,14 +71,26 @@ def llm_base_url() -> str:
     v = os.environ.get("LLM_BASE_URL")
     if v:
         return v
-    return str(_file_overrides().get("base_url") or "https://api.deepseek.com/v1")
+    return str(_file_role("llm").get("base_url") or "https://api.deepseek.com/v1")
 
 
 def llm_model() -> str:
     v = os.environ.get("LLM_MODEL")
     if v:
         return v
-    return str(_file_overrides().get("model") or "deepseek-v4-flash")
+    return str(_file_role("llm").get("model") or "deepseek-v4-flash")
+
+
+def vlm_api_key() -> str | None:
+    return os.environ.get("VLM_API_KEY")
+
+
+def vlm_base_url() -> str:
+    return os.environ.get("VLM_BASE_URL") or str(_file_role("vlm").get("base_url") or "")
+
+
+def vlm_model() -> str:
+    return os.environ.get("VLM_MODEL") or str(_file_role("vlm").get("model") or "")
 
 
 def sidecar_token() -> str | None:

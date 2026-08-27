@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 
 from . import config as cfg
 from . import db
-from .api import artifacts, conversations, files, runs, settings as settings_api, sse, tasks
+from .api import artifacts, conversations, files, knowledge, runs, settings as settings_api, sse, tasks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("sidecar")
@@ -67,6 +67,13 @@ async def lifespan(_app: FastAPI):
     recovered = db.recover_stale_runs()
     if recovered:
         logger.warning("启动时标记 %d 条崩溃残留的 running run 为 error", recovered)
+    # 知识库：残留解析/抽取状态对账 + 检索段重建（磁盘 md 权威，对齐 artifact 索引语义）
+    stale_kb = db.recover_stale_kb()
+    if stale_kb:
+        logger.warning("启动时标记 %d 条崩溃残留的知识库条目为 failed", stale_kb)
+    from .knowledge.ingest import rebuild_kb_index
+
+    rebuild_kb_index()
     # checkpoint 是记忆真值，messages 表是恢复源：agent.db 丢失/损坏的会话在此重建记忆
     from .agent import recover_agent_memory
 
@@ -121,6 +128,7 @@ app.include_router(settings_api.router, prefix="/api")
 app.include_router(sse.router, prefix="/api")
 app.include_router(files.router, prefix="/api")
 app.include_router(artifacts.router, prefix="/api")
+app.include_router(knowledge.router, prefix="/api")
 
 
 def main() -> None:

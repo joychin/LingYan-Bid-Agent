@@ -25,6 +25,14 @@ FMT_MD = """<!-- tender-analysis | 节=format | 来源=招标文件.docx | sha25
 | 序号 | 模板名称 | 归属(bidPart) | 对应必须章节 | 原文出处线索 |
 |---|---|---|---|---|
 | 1 | 投标函格式 | commercial | 投标函 | 附件3 |
+
+## 待澄清登记
+| 编号 | 类型 | 问题 | 影响范围 | 建议动作 |
+|---|---|---|---|---|
+| CLAR-01 | 歧义 | 装订顺序不明 | 目录 | 向招标代理确认 |
+
+## coverage 声明
+已检查：附件2、附件3；未检查：无
 """
 
 BIZ_MD = """<!-- tender-analysis | 节=business | 来源=招标文件.docx | sha256=ab | 生成=t -->
@@ -33,6 +41,14 @@ BIZ_MD = """<!-- tender-analysis | 节=business | 来源=招标文件.docx | sha
 |---|---|
 | 系统须支持 500 并发用户 | 第三章 技术要求 2.1 |
 | 提供三年免费运维服务 | 第五章 服务要求 |
+
+## 待澄清登记
+| 编号 | 类型 | 问题 | 影响范围 | 建议动作 |
+|---|---|---|---|---|
+| CLAR-02 | 冲突 | 质保期两处不一致 | 商务 | 向招标代理确认 |
+
+## coverage 声明
+已检查：第三章、第五章；未检查：无
 """
 
 EVAL_MD = """<!-- tender-analysis | 节=evaluation | 来源=招标文件.docx | sha256=ab | 生成=t -->
@@ -41,6 +57,17 @@ EVAL_MD = """<!-- tender-analysis | 节=evaluation | 来源=招标文件.docx | 
 |---|---|---|---|
 | 技术方案 | 30 | 完整性、可行性 | 评标办法 附表 |
 | 商务报价 | 30 | 价格分公式 | 评标办法 3.2 |
+
+## 评标办法概述
+综合评分法，价格分占 30 分。
+
+## 待澄清登记
+| 编号 | 类型 | 问题 | 影响范围 | 建议动作 |
+|---|---|---|---|---|
+| CLAR-03 | 缺失 | 附表跨页断裂 | 评分 | 核对原件 |
+
+## coverage 声明
+已检查：评标办法章；未检查：无
 """
 
 OUTLINE_MD = """## 项目信息
@@ -161,3 +188,27 @@ def test_empty_tree_warning(env):
     r = assemble_tender.invoke({})
     assert r.startswith("[组装发布成功]")
     assert "未解析出任何响应文件目录" in r
+
+
+def test_tree_violation_and_orphan_annotation_warned(env):
+    """树格式红线违反（编号行被静默跳过）与孤儿标注：警告但不拦停发布。"""
+    md = (
+        OUTLINE_MD.replace(
+            "- 运维服务方案\n",
+            "1. 实施方案\n- 运维服务方案\n",
+        )
+        .replace(
+            "- 运维服务方案 :: REQ-02\n",
+            "- 运维服务方案 :: REQ-02\n- 售后承诺函 :: REQ-01\n",
+        )
+    )
+    (env["out"] / "outline" / "tender-response-docs.md").write_text(md, encoding="utf-8")
+    r = assemble_tender.invoke({})
+    assert r.startswith("[组装发布成功]"), r
+    assert "不符合 `- ` 列表格式的行" in r and "1. 实施方案" in r
+    assert "未挂到任何目录节点" in r and "售后承诺函" in r
+
+    js = json.loads(
+        (env["out"] / "outline" / "tender-response-docs.json").read_text(encoding="utf-8")
+    )
+    assert "丢节点" in js["warning"] and "售后承诺函" in js["warning"]

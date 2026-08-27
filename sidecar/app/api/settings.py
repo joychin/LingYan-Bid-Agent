@@ -1,14 +1,18 @@
-"""Settings 端点（PRD §5.4）：GET 只返回 base_url/model，PUT 即时重建 agent。
+"""Settings 端点（PRD §5.4）：双角色（llm/vlm）嵌套读写 + 连通性测试。
 
-LLM_API_KEY 不接受 HTTP 修改——只能经环境变量（即 Tauri 侧改钥匙串后重启 sidecar）。
-base_url/model 持久化到 data/settings.json（与 Tauri 共享的单一配置真值）。
+LLM_API_KEY / VLM_API_KEY 不接受 HTTP 修改——只能经环境变量
+（即 Tauri 侧改钥匙串后重启 sidecar）。base_url/model 持久化到
+data/settings.json（与 Tauri 共享的单一配置真值，结构 {llm:{...},vlm:{...}}）。
+PUT 后：llm 变更即时重建 agent；vlm 是无状态客户端，改 env 即生效无需重建。
 """
 
+import asyncio
 import json
 import os
+from typing import Literal
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from .. import config as cfg
@@ -16,10 +20,17 @@ from ..agent import rebuild_agent
 
 router = APIRouter()
 
+Role = Literal["llm", "vlm"]
 
-class SettingsBody(BaseModel):
+
+class RoleBody(BaseModel):
     base_url: str | None = None
     model: str | None = None
+
+
+class SettingsBody(BaseModel):
+    llm: RoleBody | None = None
+    vlm: RoleBody | None = None
 
 
 def _validate_base_url(v: str) -> str:
@@ -38,15 +49,45 @@ def _validate_base_url(v: str) -> str:
 
 @router.get("/settings")
 async def get_settings():
-    return {"base_url": cfg.llm_base_url(), "model": cfg.llm_model()}
+    return {
+        "llm": {
+            "base_url": cfg.llm_base_url(),
+            "model": cfg.llm_model(),
+            "key_configured": bool(cfg.llm_api_key()),
+        },
+        "vlm": {
+            "base_url": cfg.vlm_base_url(),
+            "model": cfg.vlm_model(),
+            "key_configured": bool(cfg.vlm_api_key()),
+        },
+    }
 
 
-def _persist(base_url: str | None, model: str | None) -> None:
+def _persist(llm: RoleBody | None, vlm: RoleBody | None) -> None:
+    """读现有 settings.json → 应用变更 → 写回（保留未知键；llm 写入即从旧扁平格式迁移）。"""
     data = cfg._file_overrides()
-    if base_url is not None:
-        data["base_url"] = base_url
-    if model is not None:
-        data["model"] = model
+    if llm is not None:
+        block = data.get("llm") if isinstance(data.get("llm"), dict) else {}
+        if llm.base_url is not None:
+            block["base_url"] = llm.base_url
+        if llm.model is not None:
+            block["model"] = llm.model
+        data["llm"] = block
+        # 迁移：清掉旧扁平顶层键，避免两处真值
+        data.pop("base_url", None)
+        data.pop("model", None)
+    if vlm is not None:
+        base = (vlm.base_url or "").strip()
+        if base:
+            block = data.get("vlm") if isinstance(data.get("vlm"), dict) else {}
+            if vlm.base_url is not None:
+                block["base_url"] = vlm.base_url
+            if vlm.model is not None:
+                block["model"] = vlm.model
+            data["vlm"] = block
+        else:
+            # vlm base_url 传空 = 清除视觉模型配置（知识库图片/扫描件走降级链）
+            data.pop("vlm", None)
     cfg.settings_path().parent.mkdir(parents=True, exist_ok=True)
     with open(cfg.settings_path(), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -54,13 +95,68 @@ def _persist(base_url: str | None, model: str | None) -> None:
 
 @router.put("/settings")
 async def put_settings(body: SettingsBody):
-    base_url = _validate_base_url(body.base_url) if body.base_url is not None else None
-    if base_url:
-        os.environ["LLM_BASE_URL"] = base_url
-    if body.model:
-        os.environ["LLM_MODEL"] = body.model
-    _persist(base_url, body.model)
-    # 无 key 时不重建 agent（build_agent 需要 key）；首次调用时惰性构建即可
-    if cfg.llm_api_key():
+    if body.llm is None and body.vlm is None:
+        raise HTTPException(status_code=422, detail="至少提供 llm 或 vlm 之一")
+
+    llm_changed = False
+    if body.llm is not None:
+        base_url = _validate_base_url(body.llm.base_url) if body.llm.base_url else None
+        if base_url:
+            os.environ["LLM_BASE_URL"] = base_url
+        if body.llm.model:
+            os.environ["LLM_MODEL"] = body.llm.model
+        llm_changed = bool(base_url or body.llm.model)
+
+    if body.vlm is not None:
+        if body.vlm.base_url:
+            base_url = _validate_base_url(body.vlm.base_url)
+            os.environ["VLM_BASE_URL"] = base_url
+        else:
+            os.environ.pop("VLM_BASE_URL", None)
+        if body.vlm.model:
+            os.environ["VLM_MODEL"] = body.vlm.model
+        else:
+            os.environ.pop("VLM_MODEL", None)
+
+    _persist(body.llm, body.vlm)
+    # 无 key 时不重建 agent（build_agent 需要 key）；首次调用时惰性构建即可。
+    # vlm 无状态（每次调用现读 env），无需重建。
+    if llm_changed and cfg.llm_api_key():
         await rebuild_agent()
     return {"ok": True}
+
+
+def _test_role_sync(role: str) -> str:
+    """同步最小连通性测试：向对应角色端点发一条 ping chat（验证 endpoint+key+model 三件套）。"""
+    from openai import OpenAI
+
+    if role == "llm":
+        base_url, model, api_key = cfg.llm_base_url(), cfg.llm_model(), cfg.llm_api_key()
+        if not api_key:
+            raise HTTPException(status_code=400, detail="LLM API Key 未配置（Tauri 设置里保存）")
+        content = "ping"
+    else:
+        base_url, model, api_key = cfg.vlm_base_url(), cfg.vlm_model(), cfg.vlm_api_key()
+        if not (base_url and api_key):
+            raise HTTPException(status_code=400, detail="VLM 未配置（base_url / API Key 缺失）")
+        # VL 模型对纯文本输入普遍兼容（qwen-vl / glm-4v 均支持 text-only chat）
+        content = "ping"
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=15.0, max_retries=0)
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=1,
+        )
+    except Exception as e:  # noqa: BLE001 - 测试端点要把原始错误透给用户
+        raise HTTPException(status_code=502, detail=f"连通失败：{e}") from e
+    if not resp.choices:
+        raise HTTPException(status_code=502, detail="连通失败：响应无 choices")
+    return "ok"
+
+
+@router.get("/settings/test")
+async def test_settings(role: str = Query(pattern="^(llm|vlm)$")):
+    """轻量连通性测试（设置对话框「测试」按钮）：最小 chat 请求，返回 ok 或错误详情。"""
+    result = await asyncio.to_thread(_test_role_sync, role)
+    return {"ok": result == "ok", "role": role}

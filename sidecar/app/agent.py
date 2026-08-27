@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 # HITL：这些工具的调用先 interrupt 暂停、等用户裁决后 resume。ask_human 只允许
 # respond（回答代替执行）；task = 子代理派发审批（并发子代理是重操作，派发前用户
-# 确认——AI 新闻调研等技能的执行门禁，不需要时删除该行）。
+# 确认——tender-outline 多册并发等场景的门禁，不需要时删除该行）。
 INTERRUPT_ON: dict = {
     "ask_human": {"allowed_decisions": ["respond"]},
     "task": {"allowed_decisions": ["approve", "reject"]},
@@ -47,24 +47,6 @@ INTERRUPT_ON: dict = {
 # agent 全部工具；interrupt_on={} 整体替换继承：子代理不直接向用户提问（问答统一由
 # 主 agent 发起，需裁决项由子代理记 ⚠待澄清带回）。
 SUBAGENTS: list[dict] = [
-    {
-        # 调研子代理：UI 卡片显示 subagent_type 标签、专属提示词含降级规则
-        # （ai-news-research 技能的执行单元）。
-        "name": "news-researcher",
-        "description": (
-            "联网调研指定 AI 厂商最新新闻，输出结构化中文摘要"
-            "（ai-news-research 技能的执行单元）"
-        ),
-        "system_prompt": (
-            "你是新闻调研子代理。用 fetch_url 抓取任务描述里给出的新闻源页面（仅 https），"
-            "从页面内容提炼 3-5 条最新动态，每条包含：日期、标题、一句话摘要、来源 URL。"
-            "页面内容不足时可以再抓页面里指向的子页面（最多补抓 2 个）。"
-            "抓取失败或内容不可用时，基于你已有的知识输出近期动态，"
-            "并明确注明「未能联网核实，基于模型知识」。"
-            "只调研任务描述指定的公司，输出中文，直接给出清单，不要寒暄。"
-        ),
-        "interrupt_on": {},
-    },
     {
         # 投标目录编写子代理：单册 R2 初稿 + 三道清理的执行单元（tender-outline 多册并发）。
         # 注意：任务目录前缀经 _TaskContextMiddleware 只注入主 agent，不会出现在子代理的
@@ -77,7 +59,8 @@ SUBAGENTS: list[dict] = [
         "system_prompt": (
             "你是投标目录编写子代理，只负责一个响应文件的目录初稿与清理。"
             "任务描述会给出：任务目录前缀（读写路径都必须带该前缀）、响应文件名、scope、"
-            "fragment 输出路径、out/analysis 各输入文件的完整路径。\n"
+            "fragment 输出路径、out/analysis 各输入文件的完整路径、来源文件名清单"
+            "（主文件+补充文件名——回原文核实时据此构造 out/parse/<文件名>/ 路径）。\n"
             "开工前先依次 read_file：skills/tender-outline/references/generate.md、"
             "annotation.md、revise-gapfill.md、revise-scoring.md、revise-walkthrough.md，"
             "严格按其规则执行：R2 补全三段（## 目录 / ## 来源标注 / ## 目录说明）"
@@ -165,6 +148,9 @@ def _task_context_block(task_id: str, conversation_id: str) -> str:
     note = (task.get("progress_note") or "").strip()
     if note:
         lines.append(f"### 任务进度便签\n{note}")
+    kb_line = _kb_summary_line()
+    if kb_line:
+        lines.append(kb_line)
     formal = _artifact_listing(db.list_artifact_index(task_id=task_id))
     if formal:
         lines.append("### 任务正式稿（用户确认过的权威成果）\n" + "\n".join(formal))
@@ -172,6 +158,30 @@ def _task_context_block(task_id: str, conversation_id: str) -> str:
     if drafts:
         lines.append("### 本会话过程稿（草稿层）\n" + "\n".join(drafts))
     return "\n".join(lines)
+
+
+def _kb_summary_line() -> str:
+    """知识库摘要一行（跨任务共享的公司资料层；条目数 + 类型分布 + 待确认数）。
+
+    无条目时返回空——知识库不存在时不占用上下文。
+    """
+    from .knowledge.types import TYPES
+
+    items = db.kb_list_items()
+    if not items:
+        return ""
+    counts: dict[str, int] = {}
+    for it in items:
+        code = it.get("doc_type") or "other"
+        counts[code] = counts.get(code, 0) + 1
+    parts = [f"{TYPES[c].name} {n} 份" for c, n in sorted(counts.items()) if c in TYPES]
+    pending = sum(1 for it in items if it["review_status"] == "pending_review")
+    tail = f"，其中 {pending} 份信息待用户确认" if pending else ""
+    return (
+        f"### 公司知识库（共享资料层）\n共 {len(items)} 份资料：{'、'.join(parts) or '未分类'}{tail}。"
+        "写标书需要公司资质、案例、证书等内容时，先用 search_knowledge 检索，"
+        "再按返回的行号区间用 read_file 精读原文。"
+    )
 
 
 class _TaskContextMiddleware(AgentMiddleware):
@@ -230,8 +240,7 @@ def build_agent():
             "读 outline 按行号取区段，禁止整读全文）；"
             "要点齐后生成投标目录用 tender-outline 技能（R1 确认点→初稿→三道清理→"
             "assemble_tender 组装发布并提醒转正；多响应文件时并发派发"
-            " tender-outline-writer 子代理每册一个，主线程只派发与汇总）；"
-            "调研 AI 厂商新闻用 ai-news-research 技能（并发派 3 个 news-researcher 子代理后汇总）。"
+            " tender-outline-writer 子代理每册一个，主线程只派发与汇总）。"
             "用户上传的文件在当前任务工作目录的 files/ 下（任务目录前缀见任务上下文，"
             "如 <任务目录>/files/招标文件.docx）。"
             "引用结构化成果（如投标目录）时用 read_artifact 按契约读取当前内容（正式稿优先），"

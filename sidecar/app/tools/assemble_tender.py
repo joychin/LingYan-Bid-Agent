@@ -11,6 +11,8 @@ parse_toc.py（build 路径）；输入位置改为技能产物布局（out/anal
 - out/analysis/evaluation.md：`| 评分项 | 分值 | 评分要点 | 出处 |` 表（SCORE registry）
 - out/outline/tender-response-docs.md：`# 响应文件：X` + scope + `## 目录` /
   `## 来源标注` / `## 目录说明`（可选顶部 `## 项目信息`）
+各 analysis 文件在登记表之后的可选段（待澄清登记/coverage 声明/评标办法概述）
+不参与行序编号；目录段中不符合列表格式的行会被静默跳过（探测警告见返回文案）。
 """
 
 from __future__ import annotations
@@ -30,6 +32,13 @@ CONTRACT_KEY = "tender.directory/tender-response-docs@1"
 
 ID_RE = re.compile(r"^(MAND|REQ|SCORE|TPL)-\d+$")
 
+_TREE_LINE_RE = re.compile(r"^(\s*)[-*]\s+(.*)$")
+
+# 登记表之后的可选段（允许表格/散文，不参与「行序=编号」的机器输入）；
+# 各节 SKILL/references 的待澄清登记按 clarifications.md 是五列表格，不截掉会
+# 被全文件扫描的 registry 构建器当成 REQ/SCORE/TPL 行收进登记表。
+_OPTIONAL_SECTION_RE = re.compile(r"^##\s*(待澄清登记|coverage\s*声明|评标办法概述)\s*$")
+
 DIR_NOTE_RE = re.compile(
     r"^(?P<title>.+?)\s*::\s*交付形态=(?P<mode>[^|]+?)\s*"
     r"\|\s*归位理由=(?P<reason>[^|]*?)\s*"
@@ -46,6 +55,18 @@ def _norm_id(i: str) -> str:
 # ---------------------------------------------------------------------------
 # registry 构建（回收自 parse_toc.py）
 # ---------------------------------------------------------------------------
+def _cut_optional_sections(md: str) -> str:
+    """截掉登记表之后的可选段（待澄清登记/coverage 声明/评标办法概述）。
+
+    这些段允许表格与散文，混进 registry 行序会产生幻影编号。
+    """
+    lines = md.splitlines()
+    for i, line in enumerate(lines):
+        if _OPTIONAL_SECTION_RE.match(line.strip()):
+            return "\n".join(lines[:i])
+    return md
+
+
 def _split_format_sections(md: str) -> dict[str, str]:
     sections = {"structure": "", "mandatory": "", "templates": ""}
     cur = None
@@ -62,7 +83,7 @@ def _split_format_sections(md: str) -> dict[str, str]:
 
 
 def _build_mand_tpl_registry(fmt_md: str) -> tuple[dict, dict]:
-    sec = _split_format_sections(fmt_md)
+    sec = _split_format_sections(_cut_optional_sections(fmt_md))
     mand, nm = {}, 0
     for line in sec["mandatory"].splitlines():
         s = line.strip()
@@ -89,7 +110,7 @@ def _build_mand_tpl_registry(fmt_md: str) -> tuple[dict, dict]:
 
 def _build_req_registry(biz_md: str) -> dict:
     reg, n = {}, 0
-    for line in biz_md.splitlines():
+    for line in _cut_optional_sections(biz_md).splitlines():
         s = line.strip()
         if not s or s.startswith("#") or s.startswith("<!--") or "|" not in s:
             continue
@@ -105,7 +126,7 @@ def _build_req_registry(biz_md: str) -> dict:
 
 def _build_score_registry(eval_md: str) -> dict:
     reg, n = {}, 0
-    for line in eval_md.splitlines():
+    for line in _cut_optional_sections(eval_md).splitlines():
         s = line.strip()
         if not s or "|" not in s or s.startswith("#") or s.startswith("<!--"):
             continue
@@ -177,13 +198,16 @@ def _parse_dir_notes(md: str) -> dict[str, dict]:
 
 
 def _md_to_tree(md: str) -> list[dict]:
-    """无编号缩进列表 → 嵌套树；level 按树深度重赋（不依赖缩进宽度）。"""
+    """无编号缩进列表 → 嵌套树；level 按树深度重赋（不依赖缩进宽度）。
+
+    不匹配列表格式的行会被**静默跳过**（丢节点）——探测交给 _tree_skipped_lines。
+    """
     root: list[dict] = []
     stack: list[tuple[int, list[dict]]] = [(-1, root)]
     for line in md.splitlines():
         if not line.strip():
             continue
-        m = re.match(r"^(\s*)[-*]\s+(.*)$", line.rstrip())
+        m = _TREE_LINE_RE.match(line.rstrip())
         if not m:
             continue
         indent = len(m.group(1).replace("\t", "  "))
@@ -204,6 +228,19 @@ def _assign_levels(nodes: list[dict], base: int) -> list[dict]:
     return nodes
 
 
+def _tree_skipped_lines(dir_md: str) -> list[str]:
+    """## 目录 段中非空但不符合 `- ` 列表格式的行（编号前缀/代码块围栏等）。
+
+    这些行会被 _md_to_tree 静默跳过——即树格式红线违反的实际表现是丢节点，
+    这里把它显式探测出来供组装警告。
+    """
+    return [
+        s.strip()
+        for s in (line.rstrip() for line in dir_md.splitlines())
+        if s.strip() and not _TREE_LINE_RE.match(s)
+    ]
+
+
 def _source_type(rid: str) -> str:
     if rid.startswith("MAND"):
         return "招标文件规定"
@@ -216,27 +253,37 @@ def _source_type(rid: str) -> str:
     return "其他"
 
 
-def _match_ids(title: str, lineage_map: dict[str, list[str]]) -> list[str]:
+def _match_lineage(title: str, lineage_map: dict[str, list[str]]) -> tuple[list[str], str | None]:
+    """返回（来源 ID 列表, 命中的标注标题）——标题用于孤儿标注探测。"""
     if title in lineage_map:
-        return lineage_map[title]
+        return lineage_map[title], title
     for k, v in lineage_map.items():
         if k and (k in title or title in k):
-            return v
-    return []
+            return v, k
+    return [], None
 
 
-def _attach_lineage(tree: list[dict], lineage_map: dict[str, list[str]], dir_notes: dict[str, dict] | None = None) -> None:
+def _attach_lineage(
+    tree: list[dict],
+    lineage_map: dict[str, list[str]],
+    dir_notes: dict[str, dict] | None = None,
+    consumed: set[str] | None = None,
+) -> None:
     for node in tree:
-        ids = _match_ids(node["目录名称"], lineage_map)
+        ids, key = _match_lineage(node["目录名称"], lineage_map)
+        if key is not None and consumed is not None:
+            consumed.add(key)
         node["来源"] = sorted({_source_type(i) for i in ids}) if ids else []
         node["来源位置"] = ids if ids else []
         if dir_notes:
             note = dir_notes.get(node["目录名称"]) or {}
+            if note and consumed is not None:
+                consumed.add(node["目录名称"])
             node["交付形态"] = note.get("delivery_mode", "")
             node["归位理由"] = note.get("placement_reason", "")
             node["理由来源"] = note.get("reason_source_ids", [])
             node["节点概述"] = note.get("brief_summary", "")
-        _attach_lineage(node["children"], lineage_map, dir_notes)
+        _attach_lineage(node["children"], lineage_map, dir_notes, consumed)
 
 
 def _extract_section(body: str, name: str) -> str:
@@ -261,8 +308,12 @@ def _before_section(body: str, name: str) -> str:
     return "\n".join(out)
 
 
-def _parse_response_docs(md: str) -> list[dict]:
-    """每个顶层 `# 响应文件：XXX` 为一个响应文件，内含 ## 目录/## 来源标注/## 目录说明。"""
+def _parse_response_docs(md: str, warnings: list[str] | None = None) -> list[dict]:
+    """每个顶层 `# 响应文件：XXX` 为一个响应文件，内含 ## 目录/## 来源标注/## 目录说明。
+
+    warnings 传入列表时，收集两类探测结果（不拦停发布）：
+    树格式违反被跳过的行、没挂到任何目录节点的孤儿标注。
+    """
     segments: list[dict] = []
     cur: dict | None = None
     for line in md.splitlines():
@@ -283,7 +334,22 @@ def _parse_response_docs(md: str) -> list[dict]:
         lineage = _parse_trailer(body)
         notes = _parse_dir_notes(body)
         tree = _md_to_tree(dir_sec) if dir_sec.strip() else []
-        _attach_lineage(tree, lineage, notes)
+        consumed: set[str] = set()
+        _attach_lineage(tree, lineage, notes, consumed)
+        if warnings is not None:
+            skipped = _tree_skipped_lines(dir_sec)
+            if skipped:
+                warnings.append(
+                    f"响应文件「{name}」目录树中有不符合 `- ` 列表格式的行（已被跳过=丢节点）："
+                    + "；".join(skipped) + "；建议修复后重新组装"
+                )
+            orphan = [k for k in {*lineage, *notes} if k not in consumed]
+            if orphan:
+                warnings.append(
+                    f"响应文件「{name}」的来源标注/目录说明未挂到任何目录节点"
+                    f"（标题与目录树对不上，或对应树行被跳过）：" + "；".join(orphan)
+                    + "；建议修复后重新组装"
+                )
         scope = _before_section(body, "目录").strip()
         for prefix in ("scope：", "scope:", "Scope："):
             if scope.startswith(prefix):
@@ -365,7 +431,8 @@ def assemble_tender() -> str:
         for d in (mand_reg, tpl_reg, req_reg, score_reg):
             registry.update(d)
 
-        docs = _parse_response_docs(outline_md)
+        outline_warnings: list[str] = []
+        docs = _parse_response_docs(outline_md, outline_warnings)
         meta = _parse_meta(outline_md)
 
         referenced: set[str] = set()
@@ -375,14 +442,17 @@ def assemble_tender() -> str:
         unused_ids = sorted(k for k in registry if k not in referenced)
         dangling_ids = sorted(i for i in referenced if i not in registry)
 
+        warnings: list[str] = list(outline_warnings)
+        if not docs or all(not d["directory"] for d in docs):
+            warnings.append("未解析出任何响应文件目录，请检查 out/outline/tender-response-docs.md 格式")
         content: dict = {
             "response_documents": docs,
             "registry": registry,
             "meta": meta,
             "lineage_check": {"unused_ids": unused_ids, "dangling_ids": dangling_ids},
         }
-        if not docs or all(not d["directory"] for d in docs):
-            content["warning"] = "未解析出任何响应文件目录，请检查 out/outline/tender-response-docs.md 格式"
+        if warnings:
+            content["warning"] = "\n".join(warnings)
 
         total = sum(1 for d in docs for _ in _iter_nodes(d["directory"]))
         json_path = out_root / "outline" / "tender-response-docs.json"
@@ -406,11 +476,14 @@ def assemble_tender() -> str:
             f"[组装发布成功] 投标目录（{manifest['artifact_id']}）："
             f"响应文件 {len(docs)} 个 / 目录节点 {total} 个 / "
             f"来源登记 MAND={len(mand_reg)} TPL={len(tpl_reg)} REQ={len(req_reg)} SCORE={len(score_reg)}",
-            f"JSON 副本：{out_root.relative_to(workspace_dir())}/outline/tender-response-docs.json",
-            "已标记「建议转正」——请提醒用户在界面确认转正，目录才会进入任务正式稿。",
         ]
-        if content.get("warning"):
-            parts.insert(1, f"⚠️ {content['warning']}")
+        parts.extend(f"⚠️ {w}" for w in warnings)
+        parts.extend(
+            [
+                f"JSON 副本：{out_root.relative_to(workspace_dir())}/outline/tender-response-docs.json",
+                "已标记「建议转正」——请提醒用户在界面确认转正，目录才会进入任务正式稿。",
+            ]
+        )
         if dangling_ids:
             parts.append(
                 f"⚠️ 悬空来源ID（被引用但登记表不存在，多为清单行序漂移或编号拼写错误）：{dangling_ids}；"
