@@ -8,6 +8,12 @@ import { ToastProvider } from './context/Toast'
 import { SidecarHealthProvider } from './context/SidecarHealth'
 import { FileUploadProvider } from './context/FileUpload'
 
+// macOS Tauri 才有红绿灯悬浮（Overlay 标题栏）：挂类驱动让位 CSS；
+// 浏览器模式与 Windows 不挂，布局零变化
+if ('__TAURI_INTERNALS__' in window && /Mac/i.test(navigator.userAgent)) {
+  document.documentElement.classList.add('mac-tauri')
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

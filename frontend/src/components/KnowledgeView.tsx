@@ -241,8 +241,8 @@ export function KnowledgeView() {
           if (e.dataTransfer.files?.length) void doUpload(e.dataTransfer.files)
         }}
       >
-        <div className="kb-side-head">
-          <span className="kb-title">知识库</span>
+        <div className="kb-side-head" data-tauri-drag-region>
+          <span className="kb-title" data-tauri-drag-region>知识库</span>
           <button type="button" className="kb-add" title="上传资料" onClick={() => fileInputRef.current?.click()}>
             <Plus className="h-4 w-4" />
           </button>

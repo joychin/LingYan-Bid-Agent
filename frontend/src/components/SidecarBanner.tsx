@@ -18,7 +18,7 @@ export function SidecarBanner() {
 
   if (status === 'reconnecting') {
     return (
-      <div className="flex items-center gap-2 border-b bg-warning/10 px-4 py-1.5 text-xs text-warning">
+      <div className="sidecar-banner flex items-center gap-2 border-b bg-warning/10 px-4 py-1.5 text-xs text-warning">
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-warning" />
         连接中断，正在重连…
       </div>
@@ -26,7 +26,7 @@ export function SidecarBanner() {
   }
   if (status === 'failed') {
     return (
-      <div className="flex items-center gap-2 border-b bg-error/10 px-4 py-1.5 text-xs text-error">
+      <div className="sidecar-banner flex items-center gap-2 border-b bg-error/10 px-4 py-1.5 text-xs text-error">
         <span className="h-1.5 w-1.5 rounded-full bg-error" />
         服务启动失败
         <button type="button" className="hover:underline" onClick={retry}>
@@ -37,7 +37,7 @@ export function SidecarBanner() {
   }
   if (restored) {
     return (
-      <div className="flex items-center gap-2 border-b bg-success/10 px-4 py-1.5 text-xs text-success">
+      <div className="sidecar-banner flex items-center gap-2 border-b bg-success/10 px-4 py-1.5 text-xs text-success">
         <span className="h-1.5 w-1.5 rounded-full bg-success" />
         已恢复连接
       </div>

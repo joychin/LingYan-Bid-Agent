@@ -218,8 +218,7 @@ export function Sidebar({
           window.addEventListener('mouseup', onUp)
         }}
       />
-      <div className="side-head">
-        <span>工作区</span>
+      <div className="side-head" data-tauri-drag-region>
         <button
           type="button"
           title="收起侧栏"

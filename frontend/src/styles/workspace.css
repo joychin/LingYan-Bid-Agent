@@ -130,12 +130,9 @@
 .side-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   min-height: 64px;
   padding: 12px 14px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ink-2);
 }
 .side-head button {
   border: none;
@@ -610,7 +607,7 @@
   white-space: nowrap;
 }
 .chat-head-task {
-  color: var(--ink-2);
+  color: var(--ink);
   font-size: 13px;
 }
 .chat-head-sep {
@@ -620,7 +617,6 @@
 .chat-head-title {
   color: var(--ink);
   font-size: 13px;
-  font-weight: 600;
 }
 .chat-scroll {
   flex: 1;
@@ -1515,6 +1511,33 @@
 }
 .side.collapsed ~ .main .side-toggle {
   display: grid;
+}
+
+/* ---------- macOS 红绿灯悬浮让位（Overlay 标题栏，仅 mac-tauri 生效） ----------
+ * 实测（Swift 探针复现 tao inset 几何）：按钮顶边 = y-9、高 14、水平间距 23，
+ * 即 y=34 时灯簇占 x 13–73、y 25–39（中心 32 = side-head 标签中心），内容让到 78px */
+:root.mac-tauri .side-head {
+  padding-left: 78px;
+}
+/* 侧栏收起后主区顶到窗口左缘：标题内容压到红绿灯中心线（32px）——
+ * chat-head 行高 44、内容原居中在 22，padding-top 20 + flex 居中 → 中心 ≈32；
+ * 展开按钮回贴左缘但下移避开红绿灯（灯占 y 25–39、原生标题栏容器到 y 48） */
+:root.mac-tauri .side.collapsed ~ .main .side-toggle {
+  top: 56px;
+}
+:root.mac-tauri .side.collapsed ~ .main .chat-head {
+  padding: 20px 16px 0 78px;
+}
+:root.mac-tauri .side.collapsed ~ .main .kb-side-head {
+  padding: 21px 16px 6px 78px;
+}
+:root.mac-tauri .side.collapsed ~ .main .sidecar-banner {
+  padding-left: 78px;
+}
+/* 产物面板全屏态（position:fixed 占满窗口）：头部让出红绿灯区并压到灯中心线 32px
+ * —— 停靠右侧的正常态不套用（头部在窗口右上，与灯无关） */
+:root.mac-tauri .product.expanded .product-head {
+  padding: 20px 16px 8px 78px;
 }
 .side-toggle svg {
   width: 14px;
