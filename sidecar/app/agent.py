@@ -26,6 +26,8 @@ from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
+import httpx
+
 from . import artifact_store
 from . import config as cfg
 from . import db
@@ -49,6 +51,25 @@ INTERRUPT_ON: dict = {
 # 模型调用（见 _run_agent_stream）。认证/参数类永久错误不走重试，直接失败。
 _LLM_RETRYABLE_ERRORS = (ModelConnectionError, ModelRateLimitError, ModelTimeoutError)
 _LLM_RETRY_BACKOFFS = (3.0, 10.0)  # 两次重试的等待秒数（等待期间尊重停止请求）
+# SSE 流迭代期断连（"peer closed connection ... incomplete chunked read"）以裸
+# httpx.RemoteProtocolError 逸出：openai SDK 只在建连阶段包装 httpx 异常，流路径不包；
+# langchain_openai 也只在 openai.APIError 路径包装成 ModelConnectionError。类型匹配
+# 之外再按消息关键词兜底，覆盖库版本更替下同类瞬断换了包装的情况。
+_LLM_TRANSIENT_MARKERS = (
+    "peer closed connection",
+    "incomplete chunked read",
+    "connection reset by peer",
+)
+
+
+def _is_llm_transient(exc: BaseException) -> bool:
+    """异常是否为可断点重试的瞬时 LLM/网络错误（否则按永久错误直接失败）。"""
+    if isinstance(exc, _LLM_RETRYABLE_ERRORS):
+        return True
+    if isinstance(exc, httpx.RemoteProtocolError):
+        return True
+    msg = str(exc).lower()
+    return any(m in msg for m in _LLM_TRANSIENT_MARKERS)
 
 # 显式注册的子代理（deepagents 还会自动补 general-purpose）。tools 不指定 → 继承主
 # agent 全部工具；interrupt_on={} 整体替换继承：子代理不直接向用户提问（问答统一由
@@ -459,7 +480,8 @@ def _run_agent_stream(
     （LLM 流式调用期间 token 事件持续到达，停止会在下一个事件处生效；
     长工具执行中则等待工具返回），退出走 error 路径（半截回复落库 + run 标 error）。
 
-    瞬时 LLM 错误（_LLM_RETRYABLE_ERRORS：连接断开/超时/限流）自动从 checkpoint 断点
+    瞬时 LLM 错误（_is_llm_transient：langchain 包装的连接断开/超时/限流 + 流式断连的
+    裸 httpx.RemoteProtocolError 与消息关键词兜底）自动从 checkpoint 断点
     重试（最多 _LLM_RETRY_BACKOFFS 次）：重试时 input=None，langgraph 恢复 pending
     任务只重跑失败节点；失败那轮的半截正文清空（重试会完整重流出）；残留 running
     步骤收尾为 error；每次重试在 trace 里留 llm_retry 伪步骤。重试额度用尽仍失败才
@@ -584,7 +606,9 @@ def _run_agent_stream(
                         interrupt = payload
                         break
                 break  # 流耗尽或 interrupt/cancel 中断内层循环 → 本段结束
-            except _LLM_RETRYABLE_ERRORS as e:
+            except Exception as e:
+                if not _is_llm_transient(e):
+                    raise  # 永久错误（认证/参数等）：交外层统一落 error
                 # 瞬时断流：重试以 input=None 从 checkpoint 恢复 pending 任务（成功节点
                 # 的写入已提交，只重跑失败的那个节点）
                 if cancel_event is not None and cancel_event.is_set():

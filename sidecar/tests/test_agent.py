@@ -7,6 +7,7 @@
 
 import threading
 
+import httpx
 import pytest
 from langchain_core.exceptions import ModelConnectionError
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
@@ -313,6 +314,49 @@ def test_permanent_error_no_retry():
     assert stub.calls == 1
     assert "401" in error
     assert not [s for s in trace["tools"] if s["tool"] == "llm_retry"]
+
+
+# ---- 瞬时判定谓词（SSE 流迭代期断连的裸 httpx 异常不在 langchain 包装范围内）----
+
+
+def test_is_llm_transient_predicate():
+    """类型命中 / 裸 httpx 流断连 / 消息关键词兜底 / 永久错误四类判定。"""
+    from app.agent import _is_llm_transient
+
+    assert _is_llm_transient(ModelConnectionError("x"))
+    assert _is_llm_transient(
+        httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body (incomplete chunked read)"
+        )
+    )
+    # 库版本更替下同类瞬断换了包装：非 httpx 类型但消息可识别
+    assert _is_llm_transient(RuntimeError("Server disconnected without sending a message (peer closed connection)"))
+    assert _is_llm_transient(Exception("...incomplete chunked read..."))
+    assert _is_llm_transient(RuntimeError("Connection reset by peer"))
+    # 永久错误：认证/参数/业务异常不重试
+    assert not _is_llm_transient(RuntimeError("401 Authentication Fails"))
+    assert not _is_llm_transient(ValueError("路径越界"))
+    assert not _is_llm_transient(httpx.InvalidURL("bad url"))
+
+
+def test_bare_httpx_stream_disconnect_retries(monkeypatch):
+    """T07 实测形态：流迭代期裸 httpx.RemoteProtocolError（非 langchain 包装）
+    也走断点重试并成功完成。"""
+    monkeypatch.setattr(agent_mod, "_LLM_RETRY_BACKOFFS", (0.01, 0.01))
+    stub = _FlakyAgent(
+        1,
+        httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body (incomplete chunked read)"
+        ),
+        _ok_items(),
+    )
+    text, error, trace, _interrupt = _run_agent_stream(
+        stub, "c1", "r1", None, lambda e, d: None, "hi", None
+    )
+    assert error is None
+    assert text == "完整回复"
+    assert stub.calls == 2
+    assert len([s for s in trace["tools"] if s["tool"] == "llm_retry"]) == 1
 
 
 def test_retry_exhausted_reports_count(monkeypatch):
