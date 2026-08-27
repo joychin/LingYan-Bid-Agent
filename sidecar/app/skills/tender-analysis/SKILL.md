@@ -37,13 +37,14 @@ supplements=补充文件按其 role 并入证据；excluded 不引用）。逐�
 
 ### 第 1 步：导航定位（硬纪律）
 
-先读 `out/parse/<文件名>/<文件名>.outline.json`（标题树，每个节点带 `start_line`/`end_line`
-行号区间），按当前节的职责锁定相关章节；再用
-`read_file(file_path=…, offset=<start_line>, limit=<end_line - start_line + 1>)` 精确读取区段。
-补充文件用**它自己的 outline** 定位，与主文件同纪律。
+双通道定位，可任意起手、可交叉验证：**outline**（读 `out/parse/<文件名>/<文件名>.outline.json`，
+标题树每个节点带 `start_line`/`end_line` 行号区间，按当前节职责锁定章节）或 **grep**
+（按关键词全文检索，不依赖文档结构——结构识别弱的文件上往往更有效）。两通道殊途同归：
+最终都用 `read_file(file_path=…, offset=…, limit=…)` 精确读取区段取证——outline 取节点
+行号区间，grep 取命中行及其上下文。补充文件用**它自己的 outline**，与主文件同纪律。
 
 **禁止不带 offset/limit 地整读 `<名>.md`**（招标文件动辄数百页，整读会撑爆上下文）。
-outline 定位不到目标内容时，用 grep 工具按关键词兜底（如「否决其投标」「评分办法」「资格要求」）。
+grep 的使用纪律（合并词表、次数预算、停止规则）见 `references/shared-rules.md`。
 
 ### 第 2 步：逐节提取
 
