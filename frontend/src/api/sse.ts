@@ -54,8 +54,9 @@ export interface AgentEventData {
   summary?: string
   message_id?: string
   error?: string
-  // agent.reasoning（推理模型 chain-of-thought 增量，非推理模型无此事件）
-  reasoning?: string
+  // agent.error / run.state（契约 additive，2026-08-27）：错误分类标记。
+  // cancelled=用户主动停止（协作式取消），前端据此中性呈现而非红色错误卡
+  code?: string | null
   // tool.called / tool.result：工具调用 id 与子代理归属（agent_id 非空 = 子代理内部事件，
   // 值为所属 task 调用的 tool_call_id）
   tool_call_id?: string | null

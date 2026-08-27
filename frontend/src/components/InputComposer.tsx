@@ -34,7 +34,7 @@ export function InputComposer({
   disabled?: boolean
   /** 已请求停止、等待收尾（协作式取消的事件边界窗口）：停止钮转「正在停止…」 */
   stopping?: boolean
-  onSend: (text: string) => void
+  onSend: (text: string) => void | Promise<void>
   value: string | null
   onChange: (v: string | null) => void
   /** 底栏左侧附加控件（附件钮右侧），如新会话时的任务选择胶囊 */
@@ -50,6 +50,7 @@ export function InputComposer({
   const [filesOpen, setFilesOpen] = useState(false)
   const [suggestionsOpen, setSuggestionsOpen] = useState(false)
   const [activeSuggestion, setActiveSuggestion] = useState(0)
+  const [sending, setSending] = useState(false)
   const suggestionListId = 'prompt-suggestion-list'
   const { uploads, taskScope, openFilePicker, retryUpload, dismissUpload, acknowledgeUploads } = useFileUpload()
   const { data: files = [] } = useFiles(taskScope)
@@ -62,7 +63,9 @@ export function InputComposer({
     retry: false,
   })
 
-  const inFlight = uploads.filter((u) => u.status !== 'done')
+  // 上传中/失败 chip 只显示当前任务的（AGENTS 约定「文件 chips 只显示当前任务的文件」）：
+  // 错误 chip 不随任务切换泄漏到别的任务输入区（上传目标仍锁原任务，重试不受影响）
+  const inFlight = uploads.filter((u) => u.status !== 'done' && u.taskId === taskScope)
   // 本任务新上传、尚未随任何消息「告知」助手的文件：空文本发送时自动合成文件通知消息。
   // 已告知状态由 FileUpload context 持有（acknowledgeUploads 发送后移除上传项）：
   // 组件重挂载（切会话/进出草稿页）不复活、不跨任务串扰
@@ -113,8 +116,8 @@ export function InputComposer({
     return () => document.removeEventListener('pointerdown', onDoc)
   }, [filesOpen])
 
-  const handleSend = () => {
-    if (disabled) return
+  const handleSend = async () => {
+    if (disabled || sending) return
     if (running && !waiting) return
     const fileNames = freshFiles.map((f) => f.name)
     // 空文本兜底：有刚上传的文件 → 合成文件通知（驱动助手处理新文件）
@@ -122,11 +125,20 @@ export function InputComposer({
     if (!text.trim() && !canSendFiles) return
     const effective = text.trim() || (canSendFiles ? `我上传了文件：${fileNames.join('、')}，请查收处理` : '')
     if (!effective) return
-    acknowledgeUploads(freshFiles.map((f) => f.id))
+    setSending(true)
+    try {
+      // 发送成功才清空：失败（网络/409/超时）时输入与新上传 chip 原样保留，
+      // 错误已由 useRun 置错误卡（带重试），用户可改可重发
+      await onSend(effective)
+    } catch {
+      return
+    } finally {
+      setSending(false)
+    }
     // 发送后输入区收敛：新上传 chip 已随 acknowledge 移除，文件浮层收起
+    acknowledgeUploads(freshFiles.map((f) => f.id))
     setFilesOpen(false)
     onChange(null)
-    onSend(effective)
   }
 
   const handleDeleteFile = async (name: string) => {
@@ -139,7 +151,7 @@ export function InputComposer({
   }
 
   const runningBlock = running && !waiting
-  const sendDisabled = disabled || (!text.trim() && freshFiles.length === 0)
+  const sendDisabled = disabled || sending || (!text.trim() && freshFiles.length === 0)
 
   return (
     <div className="composer">

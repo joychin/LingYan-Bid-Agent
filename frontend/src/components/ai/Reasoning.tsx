@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react'
 import { ChevronDownIcon } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { mdRemarkPlugins } from '@/lib/markdown'
 import { cn } from '@/lib/utils'
 
 /**
@@ -119,7 +119,7 @@ export function ReasoningContent({
     >
       <div ref={innerRef} className={cn('text-muted-foreground', contentClassName)}>
         {markdown ? (
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{children as string}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={mdRemarkPlugins}>{children as string}</ReactMarkdown>
         ) : (
           children
         )}

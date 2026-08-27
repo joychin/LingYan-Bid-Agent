@@ -23,6 +23,24 @@ def test_recover_stale_runs(db_env):
     assert db.active_run_exists(cid) is False
 
 
+def test_retire_pause_marker(db_env):
+    """暂停消息在 run 终止后的标记改写：末尾精确匹配「（等待你的输入…）」→
+    「（任务中断）」；已改写/空 id/不匹配后缀的消息不动。"""
+    tid = db.create_task("t")["id"]
+    cid = db.create_conversation(tid, "会话")["id"]
+    rid = db.create_run(cid)["id"]
+    msg = db.append_assistant_message(cid, "骨架已落盘。\n\n（等待你的输入…）")
+    db.interrupt_run(rid, [], 3, pause_msg_id=msg["id"])
+    assert db.get_run(rid)["pause_msg_id"] == msg["id"]
+
+    assert db.retire_pause_marker(msg["id"]) is True
+    assert [m["content"] for m in db.list_messages(cid)] == ["骨架已落盘。\n\n（任务中断）"]
+
+    # 幂等：后缀已不存在时不重复处理
+    assert db.retire_pause_marker(msg["id"]) is False
+    assert db.retire_pause_marker(None) is False
+
+
 def test_recover_only_marks_running(db_env):
     tid = db.create_task("t")["id"]
     cid = db.create_conversation(tid, "会话")["id"]
@@ -58,6 +76,52 @@ def test_set_title_if_default(db_env):
     # 已写入后不再覆盖
     assert db.set_title_if_default(cid, "第二次") is False
     assert db.get_conversation(cid)["title"] == "自动标题"
+
+
+def test_run_trace_reasoning_roundtrip(db_env):
+    """run_traces.reasoning：主 agent 思考流落库/回读（历史「深度思考」数据源）。"""
+    tid = db.create_task("t")["id"]
+    cid = db.create_conversation(tid, "会话")["id"]
+    msg = db.append_assistant_message(cid, "回复正文")
+    db.save_run_trace("r1", cid, msg["id"], [], [], 1200, reasoning="先想一步再想一步")
+    traces = db.get_traces_for_messages([msg["id"]])
+    assert traces[msg["id"]]["reasoning"] == "先想一步再想一步"
+    # 未传 reasoning 的旧调用路径（默认值）落空串，回读不抛
+    db.save_run_trace("r2", cid, None, [], [])
+    assert db.get_traces_for_messages([msg["id"]])[msg["id"]]["reasoning"] == "先想一步再想一步"
+
+
+def test_run_traces_reasoning_column_migration(tmp_path, monkeypatch):
+    """老库（reasoning 列不存在）启动时 PRAGMA 探测补列，旧数据回读 reasoning=''。"""
+    import sqlite3
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    from app.config import app_db_path
+
+    db.init_db()
+    conn = sqlite3.connect(str(app_db_path()))
+    # 造一个「没有 reasoning 列」的旧库：删表重建旧结构
+    conn.execute("DROP TABLE run_traces")
+    conn.execute(
+        "CREATE TABLE run_traces(run_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,"
+        " message_id TEXT, tools TEXT NOT NULL, todos TEXT NOT NULL, duration_ms INTEGER,"
+        " created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO run_traces(run_id, conversation_id, message_id, tools, todos, duration_ms, created_at)"
+        " VALUES ('r_old','c_old',NULL,'[]','[]',100,'2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+    db.init_db()  # 启动迁移：补 reasoning 列
+    rows = db.get_traces_for_messages([])  # 不炸即过
+    assert rows == {}
+    conn = sqlite3.connect(str(app_db_path()))
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(run_traces)").fetchall()}
+    old = conn.execute("SELECT reasoning FROM run_traces WHERE run_id='r_old'").fetchone()
+    conn.close()
+    assert "reasoning" in cols
+    assert old == ("",)
 
 
 def test_set_title_if_default_respects_manual_rename(db_env):

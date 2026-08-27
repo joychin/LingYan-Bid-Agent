@@ -50,8 +50,11 @@ export function ArtifactOpenHost({ artifactId, onClose }: { artifactId: string |
           <span className="rounded-full bg-accent px-2 py-0.5 text-xs text-muted-foreground">
             {contractLabel(artifact.kind)}
           </span>
-          <span className="hidden text-xs text-muted-foreground md:inline">
-            {artifactKey(artifact)} · {formatRelativeTime(artifact.updated_at)}
+          <span
+            className="hidden text-xs text-muted-foreground md:inline"
+            title={artifactKey(artifact)}
+          >
+            {formatRelativeTime(artifact.updated_at)}
           </span>
           <div className="ml-auto flex items-center gap-1">
             {isTauri() && (

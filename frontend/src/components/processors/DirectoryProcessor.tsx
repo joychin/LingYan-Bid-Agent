@@ -296,7 +296,14 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
   }
 
   const exitEdit = async () => {
-    if (dirtyRef.current && !conflictRef.current) await doSave()
+    // 冲突未裁决：留在编辑态由横幅按钮收尾（此时退出=静默丢用户编辑）
+    if (conflictRef.current) {
+      toast('内容有冲突待裁决：请先在上方横幅选择「拉取最新」或「保留我的」', 'error')
+      return
+    }
+    // 保存失败（网络错误/409 刚弹裁决横幅）：同样留在编辑态——
+    // 网络错误有「保存失败·点击重试」入口，409 走上一分支，编辑不丢
+    if (dirtyRef.current && !(await doSave())) return
     stopEditing()
   }
 

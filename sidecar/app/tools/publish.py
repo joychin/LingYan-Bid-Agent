@@ -90,13 +90,19 @@ def publish_artifact(
         return f"[发布失败] {e}"
     if not path.is_file():
         return f"[发布失败] 草稿不存在：{draft_path}"
-    if path.stat().st_size > _DRAFT_MAX_BYTES:
+    try:
+        size = path.stat().st_size
+    except OSError as e:  # 磁盘异常不能逃逸：工具抛异常会打崩整个 run（仓内铁则）
+        return f"[发布失败] 草稿读取失败：{e}"
+    if size > _DRAFT_MAX_BYTES:
         return "[发布失败] 草稿超过 10MB 上限"
 
     try:
         content = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as e:
         return f"[发布失败] 草稿不是合法 JSON：{e}"
+    except OSError as e:
+        return f"[发布失败] 草稿读取失败：{e}"
 
     # 未注册契约收拢为通用笔记（类型系统封闭：LLM 不能发明新类型，笔记兜底不中断记忆）
     note_fallback = False
@@ -122,7 +128,9 @@ def publish_artifact(
             conversation_id=ctx.conversation_id if ctx else None,
             propose_promotion=propose_promotion,
         )
-    except (publish.PublishError, ValidationError) as e:
+    except Exception as e:
+        # PublishError/ValidationError 之外还有落盘 OSError 等：全捕返错误字符串
+        # （对齐 parse_document/assemble_tender 先例——工具异常会打崩整个 run）
         return f"[发布失败] {e}"
 
     suffix = "，已标记「建议转正」（等待用户在界面确认）" if propose_promotion else "，已保存为当前版本。"

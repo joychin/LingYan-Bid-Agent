@@ -5,16 +5,18 @@ import { Steps, StepsContent, StepsItem, StepsTrigger } from '@/components/ai/St
 import { SubagentCard } from '@/components/ai/SubagentCard'
 import { stepArgLabel, toolDisplayName } from '@/components/ai/toolDisplay'
 import { useAutoCollapse } from '@/hooks/useAutoCollapse'
+import { mdRemarkPlugins } from '@/lib/markdown'
 import { cn } from '@/lib/utils'
+import ReactMarkdown from 'react-markdown'
 
 /** 步骤前旁白行：该工具调用前模型输出的一句过程说明（tool.called 封段写入 step.text）。
- *  旧 trace 快照无此键，防御性跳过。 */
+ *  旧 trace 快照无此键，防御性跳过。按 markdown 渲染（旁白里的 **加粗** 不再裸露）。 */
 function NarrationLine({ text }: { text?: string }) {
   if (!text) return null
   return (
-    <p className="whitespace-pre-wrap py-0.5 text-[13px] leading-relaxed text-muted-foreground">
-      {text}
-    </p>
+    <div className="py-0.5 text-[13px] leading-relaxed text-muted-foreground">
+      <ReactMarkdown remarkPlugins={mdRemarkPlugins}>{text}</ReactMarkdown>
+    </div>
   )
 }
 

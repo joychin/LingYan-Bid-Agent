@@ -21,6 +21,8 @@ export interface RunState {
   done: number
   total: number
   error: string | null
+  /** 错误分类（agent.error/run.state additive code）：cancelled=用户主动停止，中性呈现 */
+  errorCode: string | null
   /** 最近一次发送的文本：发送失败重试用（此时用户消息可能未落库，不能从消息列表取） */
   lastSent: string
   /** HITL 暂停（run.interrupt / run.state 对账）：非空 = 有待用户裁决的动作，输入框切回答模式 */
@@ -39,14 +41,15 @@ const INITIAL_STATE: RunState = {
   done: 0,
   total: 0,
   error: null,
+  errorCode: null,
   lastSent: '',
   interrupt: null,
 }
 
 /** 收敛已结束的 run：只有处于 running 态时才动作，避免历史 run 的 run.state 反复打扰 */
-function convergeRun(s: RunState, error: string | null): RunState {
+function convergeRun(s: RunState, error: string | null, errorCode: string | null = null): RunState {
   if (!s.running) return s
-  return { ...INITIAL_STATE, lastSent: s.lastSent, error }
+  return { ...INITIAL_STATE, lastSent: s.lastSent, error, errorCode }
 }
 
 function newStep(id: string, data: { tool?: string; args?: Record<string, unknown>; tool_call_id?: string | null }): ToolStep {
@@ -227,7 +230,9 @@ export function useRun(convId: string | null) {
                 setState((s) => ({
                   ...s,
                   running: true,
-                  runId: s.runId ?? data.run_id,
+                  // 对账事件以 sidecar 权威 run_id 为准（本地旧值可能属于已结束的 run，
+                  // 保留会让停止钮 POST 到错误的 run）
+                  runId: data.run_id,
                   error: null,
                   startedAt: s.startedAt ?? Date.now(),
                 }))
@@ -248,7 +253,7 @@ export function useRun(convId: string | null) {
               }
             } else {
               const err = data.status === 'error' ? (data.error ?? '任务已中断') : null
-              setState((s) => convergeRun(s, err))
+              setState((s) => convergeRun(s, err, data.status === 'error' ? (data.code ?? null) : null))
               // 收敛时拉真值（run 已结束但客户端错过了 completed/error 事件）
               void queryClient.invalidateQueries({ queryKey: ['messages', convId] })
             }
@@ -302,6 +307,7 @@ export function useRun(convId: string | null) {
                     streamText: '',
                     reasoningText: '',
                     error: data.error ?? '未知错误',
+                    errorCode: data.code ?? null,
                     interrupt: null,
                   })),
                 )
@@ -353,7 +359,7 @@ export function useRun(convId: string | null) {
         } catch (e) {
           // 409 = 已在续跑（连点/竞态窗口），静默即可
           if ((e as Error & { status?: number }).status === 409) return
-          setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e) }))
+          setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e), errorCode: null }))
           throw e
         }
         return
@@ -366,25 +372,29 @@ export function useRun(convId: string | null) {
         queryClient.invalidateQueries({ queryKey: ['messages', convId] })
       } catch (e) {
         // 发送失败（如 409 同会话并发）：展示错误并抛出，让调用方恢复输入框
-        setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e) }))
+        setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e), errorCode: null }))
         throw e
       }
     },
     [convId, state.running, state.interrupt, queryClient],
   )
 
-  /** HITL 审批卡的按钮裁决：全部动作统一 approve / reject（每个动作一个 decision）。 */
+  /** HITL 审批卡的按钮裁决：全部动作统一 approve / reject（每个动作一个 decision）。
+   *  返回是否已续跑（409=已在续跑亦视为成功）：调用方据此决定是否清理随附状态
+   *  （如 wizard 提交成功后才 acknowledge 上传告知）。 */
   const decide = useCallback(
-    async (decisions: HitlDecision[]) => {
-      if (!state.interrupt || state.running) return
+    async (decisions: HitlDecision[]): Promise<boolean> => {
+      if (!state.interrupt || state.running) return false
       const runId = state.interrupt.runId
       try {
         await resumeRun(runId, decisions)
         setState((s) => ({ ...INITIAL_STATE, running: true, runId, startedAt: Date.now(), lastSent: s.lastSent }))
+        return true
       } catch (e) {
-        // 409 = 已在续跑（双击竞态窗口），静默即可
-        if ((e as Error & { status?: number }).status === 409) return
-        setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e) }))
+        // 409 = 已在续跑（双击竞态窗口），静默且视为成功
+        if ((e as Error & { status?: number }).status === 409) return true
+        setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e), errorCode: null }))
+        return false
       }
     },
     [state.interrupt, state.running],
@@ -398,8 +408,13 @@ export function useRun(convId: string | null) {
     setState((s) => ({ ...s, stopping: true }))
     try {
       await cancelRun(rid)
-    } catch {
+    } catch (e) {
       // 404/409 = run 已结束（竞态窗口）：随后的终态事件/对账会自行收敛，无需提示
+      const status = (e as Error & { status?: number }).status
+      if (status === 404 || status === 409) return
+      // 网络层失败（请求未达 sidecar）：复位 stopping 解除按钮锁死，允许重试；
+      // run 若仍在跑，随后的终态事件/对账照常收敛
+      setState((s) => ({ ...s, stopping: false }))
     }
   }, [state.runId, state.running, state.stopping])
 

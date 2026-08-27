@@ -118,6 +118,32 @@ def test_narration_only_first_call_in_batch():
     assert trace["tools"][1]["text"] == ""
 
 
+def test_main_reasoning_accumulated_into_trace():
+    """主 agent 思考流（DeepSeek reasoning_content）整段累积进 trace["reasoning"]：
+    跨工具轮不封段（与旁白 text 不同），run 结束随 run_traces 落库供历史「深度思考」渲染；
+    SSE agent.reasoning 事件照常逐块发布（流式契约不变）。"""
+    items = [
+        ("messages", AIMessageChunk(content="", additional_kwargs={"reasoning_content": "先看评分"})),
+        ("messages", AIMessageChunk(content="", additional_kwargs={"reasoning_content": "办法…"})),
+        ("updates", {"model": {"messages": [AIMessage(content="", tool_calls=[{"name": "read", "args": {}, "id": "t1"}])]}}),
+        ("messages", AIMessageChunk(content="", additional_kwargs={"reasoning_content": "第二轮思考"})),
+        ("messages", AIMessageChunk(content="最终回复")),
+    ]
+    published: list[tuple[str, dict]] = []
+    text, error, trace, interrupt = _run_agent_stream(
+        _StubAgent(items), "c1", "r1", None, lambda e, d: published.append((e, d)), "hi", None
+    )
+    assert error is None
+    assert interrupt is None
+    assert text == "最终回复"
+    # 跨轮整段拼接（reasoning 不按 tool.called 封段）
+    assert trace["reasoning"] == "先看评分办法…第二轮思考"
+    # SSE 逐块发布不受影响，主代理事件的 agent_id 恒为 None
+    reason_events = [d for e, d in published if e == "agent.reasoning"]
+    assert "".join(d["text"] for d in reason_events) == "先看评分办法…第二轮思考"
+    assert all(d["agent_id"] is None for d in reason_events)
+
+
 def test_task_context_block_injects_clock(tmp_path, monkeypatch):
     """任务上下文注入当前时间：模型不知道时间，写时间戳（analysis 产物头部等）会编造。"""
     monkeypatch.setenv("DATA_DIR", str(tmp_path))

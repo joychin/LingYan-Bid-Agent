@@ -111,6 +111,8 @@ export interface Message {
   todos?: TodoItem[]
   /** run 总耗时（ms，run_traces 回填） */
   durationMs?: number | null
+  /** 主 agent 思考流整段（run_traces 回填，推理模型才有；历史「深度思考」数据源） */
+  reasoning?: string
 }
 
 export interface SendMessageResult {

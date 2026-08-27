@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('running','completed','error','waiting_input')),
   error TEXT, created_at TEXT NOT NULL,
-  interrupt TEXT, last_seq INTEGER NOT NULL DEFAULT 0);
+  interrupt TEXT, last_seq INTEGER NOT NULL DEFAULT 0,
+  pause_msg_id TEXT);
 CREATE TABLE IF NOT EXISTS artifact_index(
   artifact_id TEXT PRIMARY KEY,
   task_id TEXT,
@@ -48,8 +49,9 @@ CREATE TABLE IF NOT EXISTS artifact_index(
   last_run_id TEXT, last_thread_id TEXT,
   promotion_proposed INTEGER NOT NULL DEFAULT 0,
   emitted INTEGER NOT NULL DEFAULT 0);
--- run 执行过程快照（工具步骤树 + todos）：run 结束落一份，message_id 关联 assistant
--- 消息（error 中断的 run 无 message_id），历史会话/刷新后执行过程仍可见
+-- run 执行过程快照（工具步骤树 + todos + 主 agent 思考流）：run 结束落一份，
+-- message_id 关联 assistant 消息（error 中断的 run 无 message_id），
+-- 历史会话/刷新后执行过程与「深度思考」仍可见
 CREATE TABLE IF NOT EXISTS run_traces(
   run_id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
@@ -57,6 +59,7 @@ CREATE TABLE IF NOT EXISTS run_traces(
   tools TEXT NOT NULL,
   todos TEXT NOT NULL,
   duration_ms INTEGER,
+  reasoning TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL);
 """
 
@@ -89,19 +92,29 @@ def _rebuild_runs_for_waiting_input(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if row is None or "waiting_input" in row["sql"]:
         return
-    conn.execute(
-        """CREATE TABLE runs_migrate(
-          id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
-          status TEXT NOT NULL CHECK(status IN ('running','completed','error','waiting_input')),
-          error TEXT, created_at TEXT NOT NULL,
-          interrupt TEXT, last_seq INTEGER NOT NULL DEFAULT 0)"""
-    )
-    conn.execute(
-        "INSERT INTO runs_migrate(id, conversation_id, status, error, created_at, interrupt, last_seq)"
-        " SELECT id, conversation_id, status, error, created_at, NULL, 0 FROM runs"
-    )
-    conn.execute("DROP TABLE runs")  # 索引随表删除，_SCHEMA_INDEXES 在迁移后重建
-    conn.execute("ALTER TABLE runs_migrate RENAME TO runs")
+    # 事务包裹 + 幂等前置（SQLite DDL 可事务化）：裸 autocommit 下四条 DDL 各自提交，
+    # 崩在中间会导致重启时 runs_migrate 已存在而 init_db 抛错（或 _SCHEMA 重建出空
+    # runs 表、旧行滞留孤儿表静默丢失）。任一步失败整体回滚，重启重跑即可。
+    conn.execute("BEGIN")
+    try:
+        conn.execute("DROP TABLE IF EXISTS runs_migrate")  # 上次迁移中途崩溃的残留
+        conn.execute(
+            """CREATE TABLE runs_migrate(
+              id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('running','completed','error','waiting_input')),
+              error TEXT, created_at TEXT NOT NULL,
+              interrupt TEXT, last_seq INTEGER NOT NULL DEFAULT 0)"""
+        )
+        conn.execute(
+            "INSERT INTO runs_migrate(id, conversation_id, status, error, created_at, interrupt, last_seq)"
+            " SELECT id, conversation_id, status, error, created_at, NULL, 0 FROM runs"
+        )
+        conn.execute("DROP TABLE runs")  # 索引随表删除，_SCHEMA_INDEXES 在迁移后重建
+        conn.execute("ALTER TABLE runs_migrate RENAME TO runs")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
 
 def init_db() -> None:
@@ -115,7 +128,9 @@ def init_db() -> None:
         for table, column, ddl in (
             ("runs", "interrupt", "ALTER TABLE runs ADD COLUMN interrupt TEXT"),
             ("runs", "last_seq", "ALTER TABLE runs ADD COLUMN last_seq INTEGER NOT NULL DEFAULT 0"),
+            ("runs", "pause_msg_id", "ALTER TABLE runs ADD COLUMN pause_msg_id TEXT"),
             ("run_traces", "duration_ms", "ALTER TABLE run_traces ADD COLUMN duration_ms INTEGER"),
+            ("run_traces", "reasoning", "ALTER TABLE run_traces ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''"),
             ("conversations", "task_id", "ALTER TABLE conversations ADD COLUMN task_id TEXT"),
             ("artifact_index", "conversation_id", "ALTER TABLE artifact_index ADD COLUMN conversation_id TEXT"),
             (
@@ -309,29 +324,44 @@ def delete_conversation(cid: str) -> None:
 
 
 def save_run_trace(
-    run_id: str, cid: str, message_id: str | None, tools: list, todos: list, duration_ms: int | None = None
+    run_id: str,
+    cid: str,
+    message_id: str | None,
+    tools: list,
+    todos: list,
+    duration_ms: int | None = None,
+    reasoning: str = "",
 ) -> None:
-    """run 结束时落执行过程快照（幂等：同 run 重写）。"""
+    """run 结束时落执行过程快照（幂等：同 run 重写）。reasoning = 主 agent 思考流整段。"""
     conn = _conn()
     try:
         conn.execute(
-            "INSERT OR REPLACE INTO run_traces(run_id, conversation_id, message_id, tools, todos, duration_ms, created_at)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (run_id, cid, message_id, json.dumps(tools, ensure_ascii=False), json.dumps(todos, ensure_ascii=False), duration_ms, _now()),
+            "INSERT OR REPLACE INTO run_traces(run_id, conversation_id, message_id, tools, todos, duration_ms, reasoning, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (
+                run_id,
+                cid,
+                message_id,
+                json.dumps(tools, ensure_ascii=False),
+                json.dumps(todos, ensure_ascii=False),
+                duration_ms,
+                reasoning,
+                _now(),
+            ),
         )
     finally:
         conn.close()
 
 
 def get_traces_for_messages(message_ids: list[str]) -> dict[str, dict]:
-    """按 assistant message_id 批量取 trace，解析好 tools/todos 返回 {message_id: row}。"""
+    """按 assistant message_id 批量取 trace，解析好 tools/todos/reasoning 返回 {message_id: row}。"""
     if not message_ids:
         return {}
     ph = ",".join("?" * len(message_ids))
     conn = _conn()
     try:
         rows = conn.execute(
-            f"SELECT message_id, tools, todos, duration_ms FROM run_traces WHERE message_id IN ({ph})",
+            f"SELECT message_id, tools, todos, duration_ms, reasoning FROM run_traces WHERE message_id IN ({ph})",
             message_ids,
         ).fetchall()
     finally:
@@ -343,6 +373,7 @@ def get_traces_for_messages(message_ids: list[str]) -> dict[str, dict]:
                 "tools": json.loads(r["tools"]),
                 "todos": json.loads(r["todos"]),
                 "durationMs": r["duration_ms"],
+                "reasoning": r["reasoning"] or "",
             }
         except ValueError:
             continue  # 防御：快照损坏不阻断消息列表
@@ -415,7 +446,7 @@ def get_run(rid: str) -> dict | None:
     conn = _conn()
     try:
         row = conn.execute(
-            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq"
+            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq, pause_msg_id"
             " FROM runs WHERE id=?",
             (rid,),
         ).fetchone()
@@ -424,14 +455,37 @@ def get_run(rid: str) -> dict | None:
     return dict(row) if row else None
 
 
-def interrupt_run(rid: str, requests: list, last_seq: int) -> None:
-    """HITL 暂停：置 waiting_input 并保存快照（前端恢复审批卡）与事件序号（续段续接）。"""
+def interrupt_run(rid: str, requests: list, last_seq: int, pause_msg_id: str | None = None) -> None:
+    """HITL 暂停：置 waiting_input 并保存快照（前端恢复审批卡）与事件序号（续段续接）。
+    pause_msg_id 记录暂停时落的半截消息——续跑段终止且无新产出时据此改写其
+    「等待你的输入…」标记（retire_pause_marker），避免对话停在已失效的等待态。"""
     conn = _conn()
     try:
         conn.execute(
-            "UPDATE runs SET status='waiting_input', interrupt=?, last_seq=? WHERE id=?",
-            (json.dumps(requests, ensure_ascii=False), last_seq, rid),
+            "UPDATE runs SET status='waiting_input', interrupt=?, last_seq=?, pause_msg_id=? WHERE id=?",
+            (json.dumps(requests, ensure_ascii=False), last_seq, pause_msg_id, rid),
         )
+    finally:
+        conn.close()
+
+
+def retire_pause_marker(msg_id: str | None) -> bool:
+    """把暂停落库消息结尾的「（等待你的输入…）」改写为「（任务中断）」。
+
+    场景：run 暂停后续跑、又在未产出任何新消息时终止（取消/出错）——此时该消息
+    是对话最后一句，却宣称在等输入，与已终止的 run 矛盾。只做末尾精确匹配，
+    不动历史中段的暂停消息（那些在时序上真实等待过）。"""
+    if not msg_id:
+        return False
+    suffix = "\n\n（等待你的输入…）"
+    conn = _conn()
+    try:
+        row = conn.execute("SELECT content FROM messages WHERE id=?", (msg_id,)).fetchone()
+        if row is None or not row["content"].endswith(suffix):
+            return False
+        content = row["content"][: -len(suffix)] + "\n\n（任务中断）"
+        conn.execute("UPDATE messages SET content=? WHERE id=?", (content, msg_id))
+        return True
     finally:
         conn.close()
 

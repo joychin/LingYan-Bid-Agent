@@ -64,6 +64,53 @@ def test_iter_stream_interrupt_not_dropped_as_update():
     assert "interrupt" in kinds and "tool_called" not in kinds
 
 
+def _template_interrupt(name: str, args: dict) -> Interrupt:
+    """langchain HITL 中间件的默认 description（英文模板 + 完整 args repr）。"""
+    return Interrupt(
+        value={
+            "action_requests": [
+                {
+                    "name": name,
+                    "args": args,
+                    "description": f"Tool execution requires approval\nTool: {name}\nArgs: {args!r}",
+                }
+            ],
+            "review_configs": [],
+        }
+    )
+
+
+def test_hitl_template_description_rewritten_for_task():
+    """task 派发审批卡的默认模板 description 重写为人话摘要（args 原样保留）。"""
+    out = events._hitl_requests(
+        (
+            _template_interrupt(
+                "task",
+                {
+                    "description": "为「商务标书」生成目录（R2 初稿 + 三道清理）。\n你是执行单元，请先阅读规则文件。",
+                    "subagent_type": "tender-outline-writer",
+                },
+            ),
+        )
+    )
+    [req] = out["requests"]
+    assert req["description"] == "派出子代理（tender-outline-writer）：为「商务标书」生成目录（R2 初稿 + 三道清理）。"
+    assert req["args"]["subagent_type"] == "tender-outline-writer"
+
+
+def test_hitl_template_description_rewritten_for_generic_tool():
+    out = events._hitl_requests((_template_interrupt("fetch_url", {"url": "https://x"}),))
+    [req] = out["requests"]
+    assert req["description"] == "执行工具 fetch_url，需要你的批准"
+
+
+def test_hitl_custom_description_passthrough():
+    """skill 自拟的中文 description（非模板前缀）原样透传，不受重写影响。"""
+    out = events._hitl_requests((_make_interrupt(),))
+    [req] = out["requests"]
+    assert req["description"] == "确认方案"
+
+
 # ---------- run_stream：中断边界 ----------
 
 

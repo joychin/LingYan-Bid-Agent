@@ -56,6 +56,14 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    （工具调用轮正文一句以内，完整汇报只在最终回复）。动因=行业实践：A2A/LangSmith/
    Anthropic Agent SDK/Responses items 一致「过程与结果分通道」，且无主流产品把
    逐轮旁白拼进一条正文消息。
+   **契约 additive 扩展（2026-08-27 停止态标记）**：`agent.error` 与 `run.state`
+   （error 分支）恒带 `code`（`cancelled`=用户主动停止，文案常量在
+   `events.CANCELLED_MESSAGE`），前端据此把主动停止渲染成中性灰「重新执行」卡、
+   不与真实错误共用红色。配套：run.interrupt 的 `requests[].description` 在 events
+   适配层把 langchain HITL 默认英文模板（含完整 args repr）重写为人话摘要（args
+   原样保留，前端「查看参数」仍可见全量）；暂停落库消息在续跑段终止且无新产出时
+   经 `db.retire_pause_marker` 把「（等待你的输入…）」改写为「（任务中断）」
+   （runs.pause_msg_id 记录暂停消息，PRAGMA 探测 ALTER 迁移）。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。

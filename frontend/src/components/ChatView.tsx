@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowDown } from 'lucide-react'
 import { UploadDropzone } from '@/components/UploadDropzone'
-import { ChatMessage, markdownComponents } from '@/components/ChatMessage'
+import { ChatMessage, DeepThinking, markdownComponents } from '@/components/ChatMessage'
 import { Loader } from '@/components/ai/Loader'
 import { Duration } from '@/components/ai/Duration'
 import { ThinkingBar } from '@/components/ai/ThinkingBar'
@@ -30,7 +30,7 @@ import { useToast } from '@/context/Toast'
 import { formatDay } from '@/lib/utils'
 import type { Artifact, Message } from '@/api/client'
 import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { mdRemarkPlugins } from '@/lib/markdown'
 
 export function ChatView({
   convId,
@@ -59,6 +59,7 @@ export function ChatView({
     done,
     total,
     error,
+    errorCode,
     lastSent,
     interrupt,
     send,
@@ -156,7 +157,7 @@ export function ChatView({
    * 把「我上传了文件：…」拼进当前 question 步的回答。
    */
   const wizardNav = useCallback(
-    (dir: -1 | 1) => {
+    async (dir: -1 | 1) => {
       if (!interrupt) return
       const reqs = interrupt.requests
       const drafts = [...stepDrafts]
@@ -195,8 +196,9 @@ export function ChatView({
             ? { type: 'reject' as const, ...(d.reason?.trim() ? { message: d.reason.trim() } : {}) }
             : { type: 'approve' as const }
         })
-        void decide(decisions)
-        if (fileNote) acknowledgeUploads(freshFiles.map((f) => f.id))
+        // 成功续跑才 acknowledge：失败（网络/非 409）时草稿与 chips 原样保留，可重新提交
+        const resumed = await decide(decisions)
+        if (fileNote && resumed) acknowledgeUploads(freshFiles.map((f) => f.id))
         return
       }
       setStepIndex(stepIndex + 1)
@@ -214,21 +216,18 @@ export function ChatView({
           toast('请先选择所属任务', 'error')
           return
         }
-        // 建会话失败时恢复被 InputComposer 清掉的输入，用户重试不必重打
+        // 建会话失败：toast 已提示；向上抛让 InputComposer 保留输入（不清空、不 acknowledge）
         try {
           await onRequestCreate(text, pickedTaskId)
         } catch (e) {
           toast(e instanceof Error ? e.message : String(e), 'error')
-          setPrompt(text)
+          throw e
         }
         return
       }
       if (running) return
-      try {
-        await send(text)
-      } catch {
-        /* 发送失败：由 useRun 展示错误，输入框内容由 InputComposer 保留 */
-      }
+      // 失败向上抛：useRun 已置错误卡，InputComposer 据此保留输入与新上传 chips
+      await send(text)
     },
     [convId, running, send, onRequestCreate, pickedTaskId, toast],
   )
@@ -241,7 +240,12 @@ export function ChatView({
       setPrompt(initialSend)
       if (convId && sentInitialRef.current !== initialSend) {
         sentInitialRef.current = initialSend
+        // 发送成功后清空输入框：草稿页首发的合成消息（如「我上传了文件：…」）
+        // 不再整场会话残留在 composer 里；失败则保留文本（InputComposer 亦不清空，
+        // 错误卡带重试），用户可改可重发
         void doSend(initialSend)
+          .then(() => setPrompt(null))
+          .catch(() => {})
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -291,7 +295,13 @@ export function ChatView({
         <div ref={scrollRef} onScroll={handleScroll} className="chat-scroll">
           <div className="chat">
             {isLoading && <MessageSkeletons />}
-            {empty && <WelcomeScreen onPickFile={openFilePicker} onPrompt={fillPrompt} />}
+            {empty && (
+              <WelcomeScreen
+                hasTask={!!convId || !!pickedTaskId}
+                onPickFile={openFilePicker}
+                onPrompt={fillPrompt}
+              />
+            )}
             <MessageList messages={messages} convArtifacts={convArtifacts} onOpenArtifact={onOpenArtifact} />
             {running && (
               <RunMessage running={running} startedAt={startedAt} tools={tools} todos={todos} done={done} total={total} text={streamText} reasoningText={reasoningText} />
@@ -315,7 +325,12 @@ export function ChatView({
               )
             )}
             {error && (
-              <ErrorCard message={error} retryText={lastSent} onRetry={() => void doSend(lastSent)} />
+              <ErrorCard
+                message={error}
+                cancelled={errorCode === 'cancelled'}
+                retryText={lastSent}
+                onRetry={() => void doSend(lastSent).catch(() => {})}
+              />
             )}
           </div>
         </div>
@@ -390,16 +405,9 @@ function RunMessage({
         </>
       }
     >
-      {reasoningText && (
-        <Reasoning isStreaming={running} className="mb-2">
-          <ReasoningTrigger className="text-sm text-foreground">深度思考</ReasoningTrigger>
-          <ReasoningContent contentClassName="mt-2 text-[13px] leading-relaxed" markdown>
-            {reasoningText}
-          </ReasoningContent>
-        </Reasoning>
-      )}
+      {reasoningText && <DeepThinking text={reasoningText} isStreaming={running} autoFollow />}
       {(tools.length > 0 || todos.length > 0) && (
-        <Reasoning isStreaming={running} className="mb-2">
+        <Reasoning isStreaming={running} className="mb-1.5">
           <ReasoningTrigger className="text-sm text-foreground">执行过程</ReasoningTrigger>
           <ReasoningContent contentClassName="mt-2">
             <RunTrace tools={tools} todos={todos} done={done} total={total} />
@@ -409,7 +417,7 @@ function RunMessage({
       <div className="bubble">
         {text ? (
           <>
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+            <ReactMarkdown remarkPlugins={mdRemarkPlugins} components={markdownComponents}>
               {text}
             </ReactMarkdown>
             <span className="caret-blink ml-0.5 inline-block h-[1.15em] w-0.5 translate-y-[0.2em] bg-primary" />
@@ -451,13 +459,31 @@ function MessageList({
   return <>{nodes}</>
 }
 
-function ErrorCard({ message, retryText, onRetry }: { message: string; retryText: string; onRetry: () => void }) {
+/** 错误卡。cancelled=true（用户主动停止，契约 additive code）：中性灰呈现 +
+ *  「重新执行」——自己停的不算出错，不与真实错误共用红色。 */
+function ErrorCard({
+  message,
+  cancelled = false,
+  retryText,
+  onRetry,
+}: {
+  message: string
+  cancelled?: boolean
+  retryText: string
+  onRetry: () => void
+}) {
   return (
-    <div className="rounded-lg border border-error/50 bg-error/5 px-3 py-2 text-sm text-error">
+    <div
+      className={
+        cancelled
+          ? 'rounded-lg border border-line bg-secondary px-3 py-2 text-sm text-muted-foreground'
+          : 'rounded-lg border border-error/50 bg-error/5 px-3 py-2 text-sm text-error'
+      }
+    >
       {message}
       {retryText.trim() && (
         <button type="button" className="ml-2 hover:underline" onClick={onRetry}>
-          重试
+          {cancelled ? '重新执行' : '重试'}
         </button>
       )}
     </div>

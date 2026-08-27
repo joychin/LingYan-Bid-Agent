@@ -74,7 +74,7 @@ async def get_messages(cid: str):
     if not db.get_conversation(cid):
         raise HTTPException(status_code=404, detail="会话不存在")
     messages = db.list_messages(cid)
-    # assistant 消息挂执行过程快照（run_traces），历史会话/刷新后执行过程仍可见
+    # assistant 消息挂执行过程快照（run_traces），历史会话/刷新后执行过程与深度思考仍可见
     traces = db.get_traces_for_messages([m["id"] for m in messages if m["role"] == "assistant"])
     for m in messages:
         t = traces.get(m["id"])
@@ -82,6 +82,7 @@ async def get_messages(cid: str):
             m["tools"] = t["tools"]
             m["todos"] = t["todos"]
             m["durationMs"] = t.get("durationMs")
+            m["reasoning"] = t.get("reasoning", "")
     return {"messages": messages}
 
 

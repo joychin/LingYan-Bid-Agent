@@ -20,6 +20,7 @@ import {
 } from '@/hooks/useConversations'
 import { useDeleteTask, useRenameTask, useTasks } from '@/hooks/useTasks'
 import { useSidecarHealth } from '@/context/SidecarHealth'
+import { useFileUpload } from '@/context/FileUpload'
 import { useToast } from '@/context/Toast'
 import { cn, formatRelativeTime } from '@/lib/utils'
 import type { Conversation, Task } from '@/api/client'
@@ -72,6 +73,7 @@ export function Sidebar({
   const renameTask = useRenameTask()
   const deleteTaskM = useDeleteTask()
   const { status: sidecarStatus } = useSidecarHealth()
+  const { setTaskScope } = useFileUpload()
   const { toast } = useToast()
   const [menuFor, setMenuFor] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -165,6 +167,9 @@ export function Sidebar({
       return
     }
     setConfirmDeleteTask(null)
+    // 同步清掉上传归属任务：会话切换/列表刷新到位前重挂载的输入区不再拿着
+    // 已删任务的 taskScope 去拉 files（否则吃到一次 404）
+    setTaskScope(null)
     if (willReset) {
       if (survivors.length > 0) onSelect(survivors[0].id)
       else onSelect(null)

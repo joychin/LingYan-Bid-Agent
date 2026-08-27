@@ -80,6 +80,10 @@ def read_artifact(contract: str, artifact_id: str = "") -> str:
         row = _row_by_id(artifact_id.strip(), c.kind)
         if row is None:
             return f"[读取失败] 「{artifact_id}」不是可读取的「{c.default_display_name}」成果"
+        # 归属校验：索引行恒带 task_id（两层皆然），与本 run 所属任务比对即可
+        # 覆盖两级作用域——防文档内容注入诱导模型读其他任务的成果进当前上下文
+        if row.get("task_id") != task_id:
+            return f"[读取失败] 「{artifact_id}」不在当前任务的可读范围内"
         where = "会话过程稿" if row.get("conversation_id") else "任务正式稿"
     elif c.cardinality != "task-single":
         # task-multi（如笔记）可能有多份：给出清单让模型用 artifact_id 选

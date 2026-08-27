@@ -37,6 +37,10 @@ async def _event_generator(cid: str):
                 "status": run["status"],
                 "error": run["error"],
             }
+            # 与 agent.error 同款 additive code：cancelled=用户主动停止（刷新/重连后
+            # 经对账事件恢复时同样中性呈现）
+            if run["status"] == "error" and run["error"] == events.CANCELLED_MESSAGE:
+                data["code"] = "cancelled"
             # HITL 对账：waiting_input 附审批/问答快照，客户端据此恢复 InterruptCard
             if run["status"] == "waiting_input":
                 try:

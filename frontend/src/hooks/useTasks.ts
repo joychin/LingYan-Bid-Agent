@@ -48,10 +48,12 @@ export function useDeleteTask() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => deleteTask(id),
-    onSuccess: () => {
+    onSuccess: (_data, id) => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       queryClient.invalidateQueries({ queryKey: ['conversations'] })
       queryClient.invalidateQueries({ queryKey: ['artifacts'] })
+      // 已删任务的文件列表缓存直接丢弃（而非 invalidate：任务没了，refetch 只会 404）
+      queryClient.removeQueries({ queryKey: ['files', id] })
     },
   })
 }

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { Sidebar } from '@/components/Sidebar'
 import { ChatView } from '@/components/ChatView'
+import { ChatHeader } from '@/components/ChatHeader'
 import { SettingsDialog } from '@/components/SettingsDialog'
 import { ArtifactPanel } from '@/components/ArtifactPanel'
 import { ArtifactOpenHost } from '@/components/ArtifactOpenHost'
@@ -48,7 +49,8 @@ export default function App() {
 
   // 草稿页展示的会话 id（null=欢迎页）；selectedId 保留，草稿中选中别的会话即退出
   const viewConvId = drafting ? null : selectedId
-  const currentTask = drafting ? null : taskOfConversation(tasks, conversations, selectedId)
+  const viewConv = viewConvId ? (conversations.find((c) => c.id === viewConvId) ?? null) : null
+  const currentTask = viewConv ? taskOfConversation(tasks, conversations, viewConvId) : null
 
   return (
     <div className="app">
@@ -86,6 +88,7 @@ export default function App() {
           <ChevronRight />
         </button>
         <SidecarBanner />
+        <ChatHeader task={currentTask} conversation={viewConv} />
         <ChatView
           key={viewConvId ?? 'root'}
           convId={viewConvId}

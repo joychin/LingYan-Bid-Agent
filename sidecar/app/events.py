@@ -34,6 +34,11 @@ EVENT_CONVERSATION_RENAMED = "conversation.renamed"
 # 携带该会话最新 run 的真实状态，客户端据此恢复 running 或收敛
 EVENT_RUN_STATE = "run.state"
 
+# 用户主动停止（协作式取消）时 run 的 error 文案。agent.error/run.state 据此带
+# code="cancelled"（契约 additive 扩展，2026-08-27）：前端对主动停止做中性呈现，
+# 不与真实错误共用红色错误卡。定义在 events.py 供 agent / api 共用。
+CANCELLED_MESSAGE = "任务已停止"
+
 
 def artifact_created_payload(row: dict, rid: str | None, cid: str, seq: int) -> dict:
     """artifact.created 的 data 载荷（run 边界与转正端点共用，字段保持同构）。
@@ -43,7 +48,9 @@ def artifact_created_payload(row: dict, rid: str | None, cid: str, seq: int) -> 
     """
     task_id = row.get("task_id")
     conversation_id = row.get("conversation_id")
-    scope = "task" if task_id else ("conversation" if conversation_id else "global")
+    # 过程稿索引行也恒带 task_id（publish 经会话反查），以 conversation_id 区分两层——
+    # 与 api/artifacts._to_api 同一口径
+    scope = "conversation" if conversation_id else "task"
     return {
         "run_id": rid,
         "conversation_id": cid,
@@ -63,16 +70,18 @@ def artifact_created_payload(row: dict, rid: str | None, cid: str, seq: int) -> 
 # checkpoint_ns（形如 "tools:<tid>"，恰为子代理事件 ns 元组的第 0 段）→ task 的 tool_call_id。
 # 注册发生在子代理启动之前、事件消费之前，因此并发子代理也能精确归属（无时序歧义）。
 # ns 与 tool_call_id 在 langgraph 层无稳定等式（tid 是执行哈希），只能靠插桩建立。
-_SUBAGENT_NS_TO_CALL: dict[str, str] = {}
+# 按 rid 分桶（同 CANCEL_EVENTS 键控姿势）：run 随便并发，一个 run 结束只回收自己的桶，
+# 不清掉正在并发执行的其他 run 的映射。
+_SUBAGENT_REGISTRY: dict[str, dict[str, str]] = {}
 
 
-def register_subagent(ns: str, tool_call_id: str) -> None:
-    _SUBAGENT_NS_TO_CALL[ns] = tool_call_id
+def register_subagent(rid: str, ns: str, tool_call_id: str) -> None:
+    _SUBAGENT_REGISTRY.setdefault(rid, {})[ns] = tool_call_id
 
 
-def clear_subagent_registry() -> None:
-    """run 结束清空（防跨 run 累积；tid 虽唯一，干净回收更稳）。"""
-    _SUBAGENT_NS_TO_CALL.clear()
+def clear_subagent_registry(rid: str) -> None:
+    """该 run 结束时回收自己的桶（tid 虽唯一，干净回收防累积；并发 run 互不影响）。"""
+    _SUBAGENT_REGISTRY.pop(rid, None)
 
 
 def _chunk_text(msg: AIMessageChunk) -> str:
@@ -128,6 +137,38 @@ def _summary(content, limit: int = 400) -> str:
     return s[:limit] + ("…" if len(s) > limit else "")
 
 
+_HITL_TEMPLATE_PREFIX = "Tool execution requires approval"
+
+
+def _friendly_description(name: str, args: dict) -> str:
+    """审批卡 description 人话化。
+
+    langchain HITL 中间件的默认 description 是英文模板 + 完整 args repr
+    （"Tool execution requires approval\\nTool: …\\nArgs: {…}"），整段铺在卡片里
+    普通用户无法据此判断在批什么；重写为一句话摘要，完整参数仍随 args 下发
+    （前端「查看参数」折叠可见，信息零丢失）。
+    """
+    if name == "task":
+        label = "派出子代理"
+        subagent_type = args.get("subagent_type")
+        if subagent_type:
+            label += f"（{subagent_type}）"
+        raw = args.get("description")
+        first = ""
+        if isinstance(raw, str) and raw.strip():
+            sentence = raw.strip().splitlines()[0]
+            for sep in ("。", "；", ";", "."):
+                idx = sentence.find(sep)
+                if idx != -1:
+                    sentence = sentence[: idx + 1]
+                    break
+            first = sentence.strip()
+            if len(first) > 80:
+                first = first[:80] + "…"
+        return f"{label}：{first}" if first else f"{label}，需要你的批准"
+    return f"执行工具 {name}，需要你的批准"
+
+
 def _hitl_requests(interrupts) -> dict:
     """把 langgraph Interrupt 元组归一化 {requests: [{tool, args, description, allowed}]}。
 
@@ -146,23 +187,27 @@ def _hitl_requests(interrupts) -> dict:
         if not isinstance(ar, dict):
             continue
         name = ar.get("name") or "unknown"
+        args = _tool_args(ar.get("args"))
+        desc = ar.get("description") or ""
+        if desc.startswith(_HITL_TEMPLATE_PREFIX):
+            desc = _friendly_description(name, args)
         requests.append(
             {
                 "tool": name,
-                "args": _tool_args(ar.get("args")),
-                "description": ar.get("description") or "",
+                "args": args,
+                "description": desc,
                 "allowed": allowed_by_tool.get(name) or ["approve", "reject"],
             }
         )
     return {"requests": requests}
 
 
-def iter_stream(stream: Iterator) -> Iterator[tuple[str, object]]:
+def iter_stream(stream: Iterator, rid: str | None = None) -> Iterator[tuple[str, object]]:
     """把 agent.stream(stream_mode=["messages","updates"], subgraphs=True) 的产出映射为归一化事件。
 
     subgraphs=True 时每项为 (ns, mode, payload) 三元组：主图 ns=()，子代理内部
     ns=("tools:<tid>",)（孙代理长度 2，数据结构天然兼容）。兼容未开 subgraphs 的
-    (mode, payload) 二元组（此时没有子代理事件）。
+    (mode, payload) 二元组（此时没有子代理事件）。rid 用于子代理归属注册表按 run 查桶。
 
     yield: ("token", text) | ("reasoning", {"text", "agent_id"}) | ("tool_called", {...})
            | ("tool_result", {...}) | ("todo_updated", todos) | ("interrupt", {"requests": [...]})
@@ -176,8 +221,8 @@ def iter_stream(stream: Iterator) -> Iterator[tuple[str, object]]:
         else:
             continue
         sub_ns = ns[0] if ns else None
-        # 子代理内部事件归属：ns 第 0 段查注册表得所属 task 的 tool_call_id
-        agent_id = _SUBAGENT_NS_TO_CALL.get(sub_ns) if sub_ns else None
+        # 子代理内部事件归属：ns 第 0 段查本 run 的注册桶得所属 task 的 tool_call_id
+        agent_id = _SUBAGENT_REGISTRY.get(rid or "", {}).get(sub_ns) if sub_ns else None
 
         if mode == "messages":
             msg, _meta = chunk if isinstance(chunk, tuple) else (chunk, None)

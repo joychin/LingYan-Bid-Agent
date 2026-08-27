@@ -3,7 +3,7 @@
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
-from app import db, events
+from app import db, events, runctx
 from app.agent import _SubagentTagMiddleware
 
 
@@ -28,8 +28,8 @@ def _ai_with_call(name, args, call_id):
     return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id}])
 
 
-def _run(items):
-    return list(events.iter_stream(iter(items)))
+def _run(items, rid=None):
+    return list(events.iter_stream(iter(items), rid))
 
 
 def test_two_tuple_compat_no_subgraphs():
@@ -46,29 +46,43 @@ def test_three_tuple_main_graph_events():
 
 
 def test_subagent_registry_attribution():
-    """注册 ns→tool_call_id 后：子代理 reasoning 透传带 agent_id、正文 token 被跳过。"""
-    events.register_subagent("tools:t1", "call_A1")
+    """注册 rid+ns→tool_call_id 后：子代理 reasoning 透传带 agent_id、正文 token 被跳过。"""
+    events.register_subagent("rid", "tools:t1", "call_A1")
     try:
         out = _run([
             (("tools:t1",), "messages", (_chunk(text="子代理正文", reasoning="先抓页面"), {})),
-        ])
+        ], rid="rid")
     finally:
-        events.clear_subagent_registry()
+        events.clear_subagent_registry("rid")
     kinds = [k for k, _ in out]
     assert "token" not in kinds  # 子代理正文不透传
     reasoning = [p for k, p in out if k == "reasoning"]
     assert reasoning == [{"text": "先抓页面", "agent_id": "call_A1"}]
 
 
+def test_registry_isolated_between_concurrent_runs():
+    """按 rid 分桶：一个 run 结束只回收自己的桶，并发 run 的映射不受影响。"""
+    events.register_subagent("rid_a", "tools:ta", "call_A")
+    events.register_subagent("rid_b", "tools:tb", "call_B")
+    events.clear_subagent_registry("rid_a")
+    assert events._SUBAGENT_REGISTRY == {"rid_b": {"tools:tb": "call_B"}}
+
+    # 查表也按 run 隔离：rid_b 的流不会命中 rid_a 已回收的映射
+    out = _run([(("tools:ta",), "messages", (_chunk(reasoning="思考"), {}))], rid="rid_b")
+    reasoning = [p for k, p in out if k == "reasoning"]
+    assert reasoning == [{"text": "思考", "agent_id": None}]
+    events.clear_subagent_registry("rid_b")
+
+
 def test_subagent_tool_events_carry_agent_id():
-    events.register_subagent("tools:t1", "call_A1")
+    events.register_subagent("rid", "tools:t1", "call_A1")
     try:
         out = _run([
             (("tools:t1",), "updates", _model_update([_ai_with_call("fetch_url", {"url": "https://x"}, "call_B1")])),
             (("tools:t1",), "updates", _tools_update([ToolMessage(content="页面内容", tool_call_id="call_B1", name="fetch_url")])),
-        ])
+        ], rid="rid")
     finally:
-        events.clear_subagent_registry()
+        events.clear_subagent_registry("rid")
     (called,) = [p for k, p in out if k == "tool_called"]
     (result,) = [p for k, p in out if k == "tool_result"]
     assert called["agent_id"] == "call_A1"
@@ -89,14 +103,14 @@ def test_main_graph_tool_called_carries_tool_call_id():
 
 def test_subagent_todos_filtered():
     """todos 只在主图 state；子代理 update 里的 todos 键被忽略（防御）。"""
-    events.register_subagent("tools:t1", "call_A1")
+    events.register_subagent("rid", "tools:t1", "call_A1")
     try:
         out = _run([
             (("tools:t1",), "updates", _model_update([], todos=[{"content": "x", "status": "pending"}])),
             ((), "updates", _model_update([], todos=[{"content": "y", "status": "pending"}])),
-        ])
+        ], rid="rid")
     finally:
-        events.clear_subagent_registry()
+        events.clear_subagent_registry("rid")
     (todos,) = [p for k, p in out if k == "todo_updated"]
     assert todos[0]["content"] == "y"
 
@@ -119,19 +133,21 @@ class _FakeRequest:
 
 
 def test_middleware_registers_task_only():
-    """_SubagentTagMiddleware：task 调用登记 ns→call_id，非 task 不登记。"""
-    events.clear_subagent_registry()
+    """_SubagentTagMiddleware：task 调用登记 rid+ns→call_id，非 task 不登记。"""
+    events.clear_subagent_registry("rid_mw")
+    runctx.set_run("cid", "rid_mw", None)
     mw = _SubagentTagMiddleware()
 
     def handler(request):
         return ToolMessage(content="ok", tool_call_id=request.tool_call["id"])
 
     mw.wrap_tool_call(_FakeRequest("fetch_url", "c1", "tools:other"), handler)
-    assert events._SUBAGENT_NS_TO_CALL == {}
+    assert events._SUBAGENT_REGISTRY.get("rid_mw") is None
 
     mw.wrap_tool_call(_FakeRequest("task", "call_A9", "tools:t9"), handler)
-    assert events._SUBAGENT_NS_TO_CALL == {"tools:t9": "call_A9"}
-    events.clear_subagent_registry()
+    assert events._SUBAGENT_REGISTRY.get("rid_mw") == {"tools:t9": "call_A9"}
+    runctx.clear_run()
+    events.clear_subagent_registry("rid_mw")
 
 
 @pytest.fixture

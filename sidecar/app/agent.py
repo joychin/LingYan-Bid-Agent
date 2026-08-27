@@ -128,7 +128,10 @@ class _SubagentTagMiddleware(AgentMiddleware):
         ns = (cfg.get("configurable") or {}).get("checkpoint_ns") or ""
         call_id = call.get("id") or ""
         if ns and call_id:
-            events.register_subagent(ns, call_id)
+            # rid 经 runctx 取（contextvars 已随 ToolNode 线程传播）：登记进本 run 的桶
+            ctx = runctx.current_run()
+            if ctx is not None:
+                events.register_subagent(ctx.run_id, ns, call_id)
         return handler(request)
 
 
@@ -235,7 +238,8 @@ def build_agent():
                 "不要猜文件路径；中途想保存的未登记内容以 doc.note 笔记保存。"
                 "完成阶段性工作后用 update_task_progress 更新任务进度便签（保持简短）。"
                 "输出纪律：调用工具的那一轮，正文只写一句以内的当前动作说明"
-                "（如「读取评分办法」），不展开计划、不罗列备选方案；"
+                "（如「读取评分办法」），面向用户说清要做什么，不复述工具用法、"
+                "输出格式等内部规则，也不展开计划、不罗列备选方案；"
                 "完整的进展与结论只在最终回复（不再调用工具的那一轮）给出。"
                 "缺少关键信息（如资质材料、报价策略）或遇到需要用户拍板的取舍时，"
                 "用 ask_human 向用户提问，不要自行猜测；可以明确推断的小事不要问。"
@@ -294,10 +298,17 @@ async def recover_agent_memory() -> int:
         if not history:
             continue
         cfg = {"configurable": {"thread_id": conv["id"]}}
-        msgs = (agent.get_state(cfg).values or {}).get("messages") or []
-        if msgs:
-            continue  # checkpoint 健在，不动
-        agent.update_state(cfg, {"messages": [(m["role"], m["content"]) for m in history]})
+        try:
+            msgs = (agent.get_state(cfg).values or {}).get("messages") or []
+            if msgs:
+                continue  # checkpoint 健在，不动
+            agent.update_state(cfg, {"messages": [(m["role"], m["content"]) for m in history]})
+        except sqlite3.DatabaseError:
+            # agent.db 文件损坏（本函数的兜底使命恰恰包含它）：不能让异常打崩 lifespan
+            # 导致 sidecar 起不来。记日志跳过——checkpoint 仍坏，首次对话会报错，
+            # 用户删掉 agent.db 重启后可由本函数用 messages 重建。
+            logger.exception("agent.db 读取失败（疑似损坏），记忆对账中止；删除 agent.db 后重启可重建")
+            return rebuilt
         rebuilt += 1
     if rebuilt:
         logger.warning("记忆对账：%d 个会话的 checkpoint 缺失，已用 messages 历史重建", rebuilt)
@@ -371,8 +382,9 @@ def _run_agent_stream(
     前端 useRun 用同一条封段规则，SSE 契约零改动）。
     interrupt 非空 = HITL 暂停（events 归一化的 {"requests": [...]}），本段流到此
     结束、run 转入 waiting_input，等用户裁决后由 run_stream 再开一段续流。
-    trace 是本次 run 的执行过程快照（顶层工具步骤树——task 步骤含子代理 children
-    与 reasoning——加最新 todos），run 结束时由 run_stream 落库 run_traces。
+    trace 是本次 run 的执行过程快照：顶层工具步骤树（task 步骤含子代理 children
+    与 reasoning）+ 最新 todos + 主 agent 思考流整段（reasoning 键，随 run_traces
+    落库供历史「深度思考」渲染），run 结束时由 run_stream 落库 run_traces。
 
     cancel_event 非空且被置位 = 用户请求停止：在每个流事件边界协作式退出
     （LLM 流式调用期间 token 事件持续到达，停止会在下一个事件处生效；
@@ -394,14 +406,18 @@ def _run_agent_stream(
     # 正文按轮次分段：cur_text_parts 是当前未封口段；主 agent 的 tool_called 到达即
     # 封口为旁白（挂该步骤 text），run 结束时最后未封口段 = 最终回复。
     cur_text_parts: list[str] = []
+    # 主 agent 思考流整段累积（DeepSeek reasoning_content）：不按步封段（跨多轮、
+    # 与工具步骤归属不清晰），run 结束随 trace 落 run_traces.reasoning——历史会话
+    # 的「深度思考」折叠区数据源。子代理 reasoning 另走 task_step["reasoning"]。
+    cur_reasoning: list[str] = []
     error = None
     top_steps: list[dict] = []
     last_todos: list = []
     interrupt: dict | None = None
     try:
-        for kind, payload in events.iter_stream(stream):
+        for kind, payload in events.iter_stream(stream, rid):
             if cancel_event is not None and cancel_event.is_set():
-                error = "任务已停止"
+                error = events.CANCELLED_MESSAGE
                 break
             if kind == "reasoning":
                 # DeepSeek 推理模型的 chain-of-thought 增量；agent_id 非空时归属子代理
@@ -418,6 +434,8 @@ def _run_agent_stream(
                     task_step = _find_task_step(top_steps, payload["agent_id"])
                     if task_step is not None:
                         task_step["reasoning"] += payload["text"]
+                else:
+                    cur_reasoning.append(payload["text"])
             elif kind == "token":
                 cur_text_parts.append(payload)  # type: ignore[arg-type]
                 _publish(
@@ -490,9 +508,14 @@ def _run_agent_stream(
         error = str(e)
     finally:
         runctx.clear_run()
-        events.clear_subagent_registry()
+        events.clear_subagent_registry(rid)
     # 最终回复 = 最后未封口段（未被 tool.called 跟随）；旁白已挂在 trace 步骤 text 上
-    return "".join(cur_text_parts), error, {"tools": top_steps, "todos": last_todos}, interrupt
+    return (
+        "".join(cur_text_parts),
+        error,
+        {"tools": top_steps, "todos": last_todos, "reasoning": "".join(cur_reasoning)},
+        interrupt,
+    )
 
 
 def _last_narration(tools: list[dict]) -> str:
@@ -610,9 +633,26 @@ async def run_stream(
                 # 中断 run 的半截回复落库：checkpoint 里模型"说过"这些话（或 dangling 修复后
                 # 仍残留半截上下文），messages 表同步记一份（带中断标记），UI 与模型记忆对齐
                 db.append_assistant_message(cid, snapshot_text.rstrip() + "\n\n（任务中断）")
+            else:
+                # 续跑段终止且无任何新产出：改写暂停消息的「等待你的输入…」标记，
+                # 否则对话最后一句永远宣称在等输入、与已终止的 run 矛盾
+                db.retire_pause_marker((db.get_run(rid) or {}).get("pause_msg_id"))
             # 中断 run 的执行过程也落 trace（message_id 空）便于复盘
-            db.save_run_trace(rid, cid, None, trace["tools"], trace["todos"], duration_ms)
-            await publish(cid, {"event": events.EVENT_ERROR, "data": {"run_id": rid, "conversation_id": cid, "error": error, "seq": next_seq()}})
+            db.save_run_trace(rid, cid, None, trace["tools"], trace["todos"], duration_ms, trace.get("reasoning", ""))
+            # code（契约 additive）：cancelled=用户主动停止，前端据此中性呈现（非红色错误卡）
+            await publish(
+                cid,
+                {
+                    "event": events.EVENT_ERROR,
+                    "data": {
+                        "run_id": rid,
+                        "conversation_id": cid,
+                        "error": error,
+                        "code": "cancelled" if error == events.CANCELLED_MESSAGE else None,
+                        "seq": next_seq(),
+                    },
+                },
+            )
             db.finish_run(rid, "error", error)
             return
 
@@ -624,7 +664,7 @@ async def run_stream(
             snapshot_text = text if text.strip() else _last_narration(trace["tools"])
             if snapshot_text.strip():
                 msg_id = db.append_assistant_message(cid, snapshot_text.rstrip() + "\n\n（等待你的输入…）")["id"]
-            db.save_run_trace(rid, cid, msg_id, _freeze_paused_steps(trace["tools"]), trace["todos"], duration_ms)
+            db.save_run_trace(rid, cid, msg_id, _freeze_paused_steps(trace["tools"]), trace["todos"], duration_ms, trace.get("reasoning", ""))
             seq = next_seq()
             await publish(
                 cid,
@@ -638,14 +678,14 @@ async def run_stream(
                     },
                 },
             )
-            db.interrupt_run(rid, interrupt["requests"], seq)
+            db.interrupt_run(rid, interrupt["requests"], seq, pause_msg_id=msg_id)
             return
 
         if not text.strip():
             text = "（空回复）"
         msg = db.append_assistant_message(cid, text)
         # 执行过程快照与 assistant 消息关联落库（历史会话/刷新后执行过程仍可见）
-        db.save_run_trace(rid, cid, msg["id"], trace["tools"], trace["todos"], duration_ms)
+        db.save_run_trace(rid, cid, msg["id"], trace["tools"], trace["todos"], duration_ms, trace.get("reasoning", ""))
         db.finish_run(rid, "completed")
         await publish(
             cid,

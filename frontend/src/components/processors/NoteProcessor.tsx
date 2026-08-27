@@ -5,7 +5,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { markdownComponents } from '@/components/ChatMessage'
 import { History, Loader2, Pencil, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { mdRemarkPlugins } from '@/lib/markdown'
 
 interface NoteData {
   title: string
@@ -232,7 +232,7 @@ export function NoteProcessor({ artifact, content }: ProcessorProps) {
         />
       ) : (
         <div className="note-md min-h-0 flex-1 overflow-auto rounded-lg border border-line bg-card p-4 text-sm leading-relaxed">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+          <ReactMarkdown remarkPlugins={mdRemarkPlugins} components={markdownComponents}>
             {body || '_（空笔记）_'}
           </ReactMarkdown>
         </div>

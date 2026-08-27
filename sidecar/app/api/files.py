@@ -3,7 +3,7 @@
 文件落在当前任务的 files/ 子目录（workspace/<task_id>/files/，§16 任务分组布局）——
 跨任务同名文件互不影响；task_id 必填（无任务上下文的前端禁止上传）。
 扩展名白名单 + 100MB 上限 + 任务内同名覆盖。
-解析支持 .docx/.pdf（parse_document）；.txt/.md 仅作参考文件上传，不参与解析。
+解析支持 .docx/.pdf/.txt/.md（parse_document；txt/md 透传为 markdown）。
 """
 
 import os

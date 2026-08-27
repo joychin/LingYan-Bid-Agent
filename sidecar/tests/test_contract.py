@@ -4,7 +4,9 @@
 （如已修的 agent.reasoning 文本键 text 被前端误读为 reasoning）从此在测试层挂掉。
 agent.completed / agent.error / artifact.created 的 payload 构造在 run_stream 层
 （含 seq 注入），由 e2e 冒烟（tests/test_smoke_e2e.py）覆盖；这里驱动
-_run_agent_stream 覆盖六类流事件。
+_run_agent_stream 覆盖六类流事件。注意 agent.error 自 2026-08-27 起 additive 带
+code（cancelled=用户主动停止，恒有键、非取消为 null），run.state 的 error 分支
+同款——同步时一并核对 sse.ts 的 AgentEventData。
 """
 
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
@@ -99,13 +101,15 @@ def test_artifact_created_payload_matches_contract():
         "kind": "tender.directory",
         "schema_id": "tender-response-docs",
         "schema_version": 1,
-        "task_id": None,
+        # §16 真实形状：过程稿索引行也恒带所属 task_id（publish 经会话反查），
+        # 以 conversation_id 区分两层（同 api/artifacts._to_api 口径）
+        "task_id": "t_1",
         "conversation_id": "c_1",
         "promotion_proposed": 1,
     }
     data = artifact_created_payload(row, "r_1", "c_1", 7)
     assert data["scope"] == "conversation"
-    assert data["task_id"] is None
+    assert data["task_id"] == "t_1"
     assert data["promotion_proposed"] is True
     assert data["seq"] == 7
     for field in ("run_id", "conversation_id", "artifact_id", "display_name", "kind", "schema_id", "schema_version"):
