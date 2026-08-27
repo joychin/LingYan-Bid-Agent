@@ -68,11 +68,19 @@ def test_confirm_metadata_flow(client):
     # badge 归零
     assert client.get("/api/kb/badge").json() == {"pending": 0}
 
-    # 人工字段可检索（元数据段）
-    from app.knowledge import fts
-    from app import db
+    # 人工字段可检索（元数据段）。段重建与后台入库管线并发（上传 fire-and-forget），
+    # 契约是最终一致：确认后若与管线收尾的补重建撞车，人工字段段可能迟几百毫秒
+    # 才落上（管线末尾有收敛探测），轮询至收敛。
+    import time
 
-    assert db.kb_search_segments(fts.build_match_expr("CN-001"), limit=3)
+    from app import db
+    from app.knowledge import fts
+
+    expr = fts.build_match_expr("CN-001")
+    deadline = time.time() + 5
+    while not db.kb_search_segments(expr, limit=3):
+        assert time.time() < deadline, "人工字段段 5s 内未收敛可检索"
+        time.sleep(0.05)
 
 
 def test_items_list_filters(client):

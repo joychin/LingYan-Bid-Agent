@@ -65,6 +65,7 @@ def run_ingest(kid: str) -> dict:
     if not src.is_file():
         db.kb_update_item(kid, parse_status="failed", error="原件缺失")
         return db.kb_get_item(kid) or {}
+    _was_confirmed = item["review_status"] == "confirmed"
 
     db.kb_update_item(kid, parse_status="parsing", extract_status="pending", error=None)
 
@@ -132,7 +133,15 @@ def run_ingest(kid: str) -> dict:
 
     # ---- ③ 元数据抽取（文本管线；失败不阻塞检索）----
     _extract(item, md_text)
-    return db.kb_get_item(kid) or {}
+    final = db.kb_get_item(kid) or {}
+    # 收敛探测（不加锁的最终一致）：确认若发生在管线上半场，②的段重建可能读到
+    # 确认前的旧条目、晚到覆盖掉人工字段段——结束时发现「进来时未确认、现在已
+    # 确认」就用最新状态补重建一次。残余窗口只剩本次重建自身的建段间隙，且
+    # 任何后续确认保存/重新识别/重启（启动全量重建）都会自愈。
+    if final.get("review_status") == "confirmed" and not _was_confirmed:
+        reindex_item(kid)
+        final = db.kb_get_item(kid) or {}
+    return final
 
 
 def _fill_scanned_pages(src: Path, result, warnings: list[str]) -> object:

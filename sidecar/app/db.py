@@ -848,8 +848,15 @@ def kb_update_item(kid: str, **fields) -> None:
 def kb_delete_item(kid: str) -> None:
     conn = _conn()
     try:
-        conn.execute("DELETE FROM kb_items WHERE id=?", (kid,))
-        conn.execute("DELETE FROM kb_segments WHERE item_id=?", (kid,))
+        # 单事务：两条 DELETE 之间不留「条目没了段还在」的可见窗口
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DELETE FROM kb_items WHERE id=?", (kid,))
+            conn.execute("DELETE FROM kb_segments WHERE item_id=?", (kid,))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     finally:
         conn.close()
 
@@ -866,21 +873,33 @@ def kb_count_pending() -> int:
 
 
 def kb_replace_segments(item_id: str, segments: list[dict]) -> None:
-    """重建某条目的全部检索段（先 DELETE 后 INSERT，幂等）。"""
+    """重建某条目的全部检索段（先 DELETE 后 INSERT，幂等）。
+
+    DELETE+INSERT 必须在同一事务：连接是 autocommit（isolation_level=None），
+    两条语句各自提交会留出「段已清空、新版未入」的可见窗口——确认表单后
+    立即检索的调用方恰好落进窗口就空手而归（test_confirm_metadata_flow
+    偶发失败的根因；与入库管线/确认路径的线程并发无关也要保证）。
+    """
     conn = _conn()
     try:
-        conn.execute("DELETE FROM kb_segments WHERE item_id=?", (item_id,))
-        conn.executemany(
-            "INSERT INTO kb_segments(body, item_id, section_path, line_start, line_end, page_start)"
-            " VALUES(?,?,?,?,?,?)",
-            [
-                (
-                    s["body"], item_id, s.get("section_path"),
-                    s.get("line_start"), s.get("line_end"), s.get("page_start"),
-                )
-                for s in segments
-            ],
-        )
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DELETE FROM kb_segments WHERE item_id=?", (item_id,))
+            conn.executemany(
+                "INSERT INTO kb_segments(body, item_id, section_path, line_start, line_end, page_start)"
+                " VALUES(?,?,?,?,?,?)",
+                [
+                    (
+                        s["body"], item_id, s.get("section_path"),
+                        s.get("line_start"), s.get("line_end"), s.get("page_start"),
+                    )
+                    for s in segments
+                ],
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     finally:
         conn.close()
 
