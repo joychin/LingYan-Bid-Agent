@@ -44,7 +44,7 @@ supplements=补充文件按其 role 并入证据；excluded 不引用）。逐�
 行号区间，grep 取命中行及其上下文。补充文件用**它自己的 outline**，与主文件同纪律。
 
 **禁止不带 offset/limit 地整读 `<名>.md`**（招标文件动辄数百页，整读会撑爆上下文）。
-grep 的使用纪律（合并词表、次数预算、停止规则）见 `references/shared-rules.md`。
+grep 的使用纪律（字面匹配逐词调用、批内并行、次数预算、停止规则）见 `references/shared-rules.md`。
 
 ### 第 2 步：逐节提取
 
