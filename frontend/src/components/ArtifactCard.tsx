@@ -47,7 +47,7 @@ export function ArtifactCard({ artifact, onOpen }: { artifact: Artifact; onOpen:
           )}
           {artifact.scope === 'task' && (
             <span className="shrink-0 rounded-full bg-accent-soft px-1.5 py-px text-[10px] font-medium text-muted-foreground">
-              正式稿
+              项目文件
             </span>
           )}
         </div>
@@ -69,7 +69,7 @@ export function ArtifactCard({ artifact, onOpen }: { artifact: Artifact; onOpen:
               ? 'bg-warning/15 text-warning hover:bg-warning/25'
               : 'text-muted-foreground hover:bg-accent hover:text-foreground',
           )}
-          title="复制到任务正式稿（原件保留，正式稿覆盖自动留恢复点）"
+          title="复制到任务项目文件（原件保留，覆盖自动留恢复点）"
         >
           <Upload className="h-3.5 w-3.5" />
           转正

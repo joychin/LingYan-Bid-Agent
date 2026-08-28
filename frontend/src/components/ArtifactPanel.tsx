@@ -12,7 +12,7 @@ const MIN_W = 240
 const MAX_W = 560
 
 /**
- * Workspace 右栏产物面板 v2：一棵朴素文件夹树——任务名为根，正式稿/过程稿/工作台
+ * Workspace 右栏产物面板 v2：一棵朴素文件夹树——任务名为根，项目文件/会话产物
  * 是它的一级子文件夹，往下纯嵌套（工作台 = 任务 out/ 的 md 过程产物）。
  * 行上不带任何小字后缀（修订/来源状态在查看器头部徽章条里看）。
  * 无任务上下文（草稿态）时 App 不渲染本面板。
@@ -154,20 +154,20 @@ export function ArtifactPanel({
         <div className="product-body file-tree">
           <TreeFolder title={currentTask?.title ?? '任务'}>
             <TreeFolder
-              title="正式稿"
+              title="项目文件"
               loading={loadingTask}
-              empty={taskArtifacts.length === 0 ? '暂无 · 转正自过程稿' : undefined}
+              empty={taskArtifacts.length === 0 ? '暂无 · 转正自会话产物' : undefined}
             >
               {taskArtifacts.map(artifactRow)}
             </TreeFolder>
             <TreeFolder
-              title={convTitle ? `过程稿 · ${convTitle}` : '过程稿'}
+              title={convTitle ? `会话产物 · ${convTitle}` : '会话产物'}
               loading={loadingConv}
-              empty={convArtifacts.length === 0 ? '暂无' : undefined}
+              empty={convArtifacts.length === 0 && workbench.length === 0 ? '暂无' : undefined}
             >
               {convArtifacts.map(artifactRow)}
+              <WorkbenchTree files={workbench} loading={loadingWorkbench} row={wbRow} />
             </TreeFolder>
-            <WorkbenchTree files={workbench} loading={loadingWorkbench} row={wbRow} />
           </TreeFolder>
         </div>
       </aside>
@@ -181,11 +181,13 @@ export function ArtifactPanel({
 /** 文件夹节点：头部 = 旋转箭头 + Folder/FolderOpen 交叉淡入，整行折叠；纯类名嵌套缩进。 */
 function TreeFolder({
   title,
+  titleHint,
   children,
   loading,
   empty,
 }: {
   title: string
+  titleHint?: string
   children?: React.ReactNode
   loading?: boolean
   empty?: string
@@ -193,7 +195,7 @@ function TreeFolder({
   const [open, setOpen] = useState(true)
   return (
     <section className={cn('ft-folder', !open && 'collapsed')}>
-      <button type="button" className="ft-folder-head" onClick={() => setOpen(!open)}>
+      <button type="button" className="ft-folder-head" title={titleHint} onClick={() => setOpen(!open)}>
         <ChevronRight className="ft-chev" />
         <span className="ft-folder-ico">
           <Folder className="ico-closed" />
@@ -210,7 +212,7 @@ function TreeFolder({
   )
 }
 
-/** 工作台子树：解析（按源文件分夹）/分析/目录 三个固定顺序的文件夹。 */
+/** 工作文件子树：任务共享的 out/ 过程产物（解析/分析/目录），随当前会话展示。 */
 function WorkbenchTree({
   files,
   loading,
@@ -234,13 +236,17 @@ function WorkbenchTree({
 
   if (loading) {
     return (
-      <TreeFolder title="工作台" loading>
+      <TreeFolder title="工作文件" loading>
         <></>
       </TreeFolder>
     )
   }
   return (
-    <TreeFolder title="工作台" empty={files.length === 0 ? '暂无 · 流水线产物' : undefined}>
+    <TreeFolder
+      title="工作文件"
+      titleHint="任务内所有会话共享同一份工作文件（解析→分析→目录的过程产物）"
+      empty={files.length === 0 ? '暂无 · 流水线产物' : undefined}
+    >
       {parseGroups.size > 0 && (
         <TreeFolder title="解析">
           {[...parseGroups.entries()].map(([src, list]) => (

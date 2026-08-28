@@ -44,7 +44,7 @@ export function usePromoteArtifact() {
     mutationFn: (id: string) => promoteArtifact(id),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['artifacts'] })
-      toast(`已转正「${data.artifact.display_name}」到任务正式稿`, 'success')
+      toast(`已转正「${data.artifact.display_name}」到项目文件`, 'success')
     },
     onError: (e) => {
       toast(e instanceof Error ? e.message : String(e), 'error')

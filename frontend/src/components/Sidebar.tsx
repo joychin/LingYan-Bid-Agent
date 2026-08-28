@@ -339,7 +339,7 @@ export function Sidebar({
           <div className="relative z-10 w-full max-w-sm rounded-xl border bg-card p-6 shadow-md">
             <h2 className="text-base font-semibold">删除会话</h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              删除「{confirmDelete.title}」？其消息与本会话过程稿将一并删除，任务正式稿保留。
+              删除「{confirmDelete.title}」？其消息与本会话产物将一并删除，项目文件保留。
             </p>
             {confirmError && <p className="mt-2 text-sm text-error">删除失败：{confirmError}</p>}
             <div className="mt-4 flex justify-end gap-2">
@@ -374,8 +374,8 @@ export function Sidebar({
           <div className="relative z-10 w-full max-w-sm rounded-xl border bg-card p-6 shadow-md">
             <h2 className="text-base font-semibold">删除任务</h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              删除任务「{confirmDeleteTask.title}」？其下全部会话、消息与会话过程稿将被删除，
-              正式稿移入归档目录（可手工找回）。此操作不可撤销。
+              删除任务「{confirmDeleteTask.title}」？其下全部会话、消息与会话产物将被删除，
+              项目文件移入归档目录（可手工找回）。此操作不可撤销。
             </p>
             {confirmError && <p className="mt-2 text-sm text-error">删除失败：{confirmError}</p>}
             <div className="mt-4 flex justify-end gap-2">

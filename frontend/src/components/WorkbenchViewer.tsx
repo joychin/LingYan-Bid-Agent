@@ -256,7 +256,7 @@ export function WorkbenchViewer({
     try {
       const res = await saveWorkbenchNote(conversationId, path)
       void queryClient.invalidateQueries({ queryKey: ['artifacts'] })
-      toast(`已存为笔记「${res.display_name}」到过程稿`, 'success')
+      toast(`已存为笔记「${res.display_name}」到会话产物`, 'success')
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), 'error')
     }
@@ -312,7 +312,7 @@ export function WorkbenchViewer({
             type="button"
             onClick={() => void handleNote()}
             disabled={!conversationId}
-            title={conversationId ? '把当前内容快照发布为过程稿笔记（不再随后续重跑变化）' : '需要会话上下文'}
+            title={conversationId ? '把当前内容快照发布为会话产物笔记（不再随后续重跑变化）' : '需要会话上下文'}
             className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
           >
             <NotebookPen className="h-3.5 w-3.5" />
