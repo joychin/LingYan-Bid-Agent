@@ -1,0 +1,13 @@
+{
+  "name": "子代理树：agent_id 归属 children + 子代理 reasoning 累积",
+  "events": [
+    { "event": "agent.started", "data": { "run_id": "r1", "conversation_id": "c1", "seq": 1 } },
+    { "event": "agent.token", "data": { "run_id": "r1", "conversation_id": "c1", "text": "派个帮手去查。", "seq": 2 } },
+    { "event": "tool.called", "data": { "run_id": "r1", "conversation_id": "c1", "tool": "task", "args": { "description": "查资料" }, "tool_call_id": "task_1", "agent_id": null, "seq": 3 } },
+    { "event": "tool.called", "data": { "run_id": "r1", "conversation_id": "c1", "tool": "fetch_url", "args": { "url": "https://y" }, "tool_call_id": "child_1", "agent_id": "task_1", "seq": 4 } },
+    { "event": "agent.reasoning", "data": { "run_id": "r1", "conversation_id": "c1", "text": "子思考", "agent_id": "task_1", "seq": 5 } },
+    { "event": "tool.result", "data": { "run_id": "r1", "conversation_id": "c1", "tool": "fetch_url", "summary": "子页内容", "error": null, "tool_call_id": "child_1", "agent_id": "task_1", "seq": 6 } },
+    { "event": "tool.result", "data": { "run_id": "r1", "conversation_id": "c1", "tool": "task", "summary": "子代理最终报告", "error": null, "tool_call_id": "task_1", "agent_id": null, "seq": 7 } },
+    { "event": "agent.completed", "data": { "run_id": "r1", "conversation_id": "c1", "message_id": "m2", "seq": 8 } }
+  ]
+}

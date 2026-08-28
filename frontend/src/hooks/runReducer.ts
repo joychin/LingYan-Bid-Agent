@@ -1,0 +1,385 @@
+/**
+ * useRun 的纯 reducer：SSE 事件流 → RunState 的全部决策收口于此（可回放、可单测）。
+ *
+ * 设计：
+ * - 记账字段（seq 去重 / terminalRuns / 步骤 id 计数）一并收进 state——整条事件管线
+ *   用固定时钟即可在 vitest 里重放（见 __fixtures__/）。
+ * - 副作用（react-query 失效、消息拉回后再收敛的时序）不在这里执行，而是以 Effect
+ *   描述符返回，由 useRun 统一执行——决策单点化，hook 保持薄执行层。
+ * - 「先 invalidate 拉回落库消息、再撤掉流式气泡」的既有时序用 settle-after-messages
+ *   表达：等价于原 invalidateQueries().then(setState)。
+ */
+
+import type { AgentEventData, InterruptRequest, TodoItem, ToolStep } from '@/api/sse'
+
+export interface RunState {
+  running: boolean
+  /** 已请求停止、等待事件边界收尾（agent.error 到达前）：停止钮转「正在停止…」防重复点 */
+  stopping: boolean
+  /** 当前 run id：停止按钮（POST /runs/{rid}/cancel）与 SSE 事件对账用 */
+  runId: string | null
+  /** run 开始时间（ms epoch）：驱动「执行中 · 12s」总计时 */
+  startedAt: number | null
+  streamText: string
+  reasoningText: string
+  tools: ToolStep[]
+  todos: TodoItem[]
+  done: number
+  total: number
+  error: string | null
+  /** 错误分类（agent.error/run.state additive code）：cancelled=用户主动停止，中性呈现 */
+  errorCode: string | null
+  /** 最近一次发送的文本：发送失败重试用（此时用户消息可能未落库，不能从消息列表取） */
+  lastSent: string
+  /** HITL 暂停（run.interrupt / run.state 对账）：非空 = 有待用户裁决的动作，输入框切回答模式 */
+  interrupt: { runId: string; requests: InterruptRequest[] } | null
+  // ---- 记账字段（非渲染用；收进 state 使事件管线可整体回放）----
+  /** seq 去重：当前 run 已接受的最高序列号（换 run 时按 runId 区分，seq=1 重新起算） */
+  lastSeq: { runId: string; seq: number } | null
+  /** 已通过 SSE 收到终态的 run：HTTP 对账拿到的过期 running 状态不再复活它 */
+  terminalRuns: Set<string>
+  /** 步骤 id 计数（与 now 组合生成稳定 id） */
+  stepCounter: number
+}
+
+export const INITIAL_STATE: RunState = {
+  running: false,
+  stopping: false,
+  runId: null,
+  startedAt: null,
+  streamText: '',
+  reasoningText: '',
+  tools: [],
+  todos: [],
+  done: 0,
+  total: 0,
+  error: null,
+  errorCode: null,
+  lastSent: '',
+  interrupt: null,
+  lastSeq: null,
+  terminalRuns: new Set(),
+  stepCounter: 0,
+}
+
+export type Effect =
+  /** 刷新 react-query 缓存（artifacts/conversations） */
+  | { kind: 'invalidate'; queryKey: unknown[] }
+  /** 拉回落库消息（invalidate ['messages', cid]，cid 由 hook 层补） */
+  | { kind: 'invalidate-messages' }
+  /** 拉回落库消息之后才 dispatch action（保「先对齐消息、再撤流式气泡」的时序） */
+  | { kind: 'settle-after-messages'; action: Action }
+
+export type Action =
+  | { type: 'sse'; event: string; data: AgentEventData; now: number }
+  /** run 开始（agent.started）与续跑乐观置 running（resume 202 与 agent.started 之间）共用 */
+  | { type: 'started'; runId: string; now: number }
+  | { type: 'settle-completed' }
+  | { type: 'settle-error'; error: string; code: string | null }
+  | { type: 'settle-interrupt'; runId: string; requests: InterruptRequest[] }
+  | { type: 'remember-sent'; text: string }
+  | { type: 'send-failed'; error: string }
+  | { type: 'stop-requested' }
+  | { type: 'stop-failed' }
+  /** SSE 断线后的 HTTP 对账收敛（getLatestRun 确认已结束才触发） */
+  | { type: 'reconcile-converge'; error: string | null }
+
+export interface ReducerResult {
+  state: RunState
+  effects: Effect[]
+}
+
+/** 收敛已结束的 run：只有处于 running 态时才动作，避免历史 run 的 run.state 反复打扰。
+ * 记账字段随 INITIAL_STATE 复位（terminalRuns 也清：与「换会话重挂」语义一致）。 */
+function convergeRun(s: RunState, error: string | null, errorCode: string | null = null): RunState {
+  if (!s.running) return s
+  return { ...INITIAL_STATE, lastSent: s.lastSent, error, errorCode }
+}
+
+function newStep(
+  id: string,
+  data: { tool?: string; args?: Record<string, unknown>; tool_call_id?: string | null },
+  now: number,
+): ToolStep {
+  return {
+    id,
+    tool: data.tool ?? 'unknown',
+    args: data.args ?? {},
+    status: 'running',
+    summary: '',
+    error: null,
+    toolCallId: data.tool_call_id ?? null,
+    reasoning: '',
+    text: '',
+    children: [],
+    startedAt: now,
+    endedAt: null,
+  }
+}
+
+/** 不可变地把新步骤挂进树：带 agent_id 挂对应 task 的 children，否则挂顶层。 */
+function attachStep(steps: ToolStep[], step: ToolStep, agentId?: string | null): ToolStep[] {
+  if (agentId) {
+    return steps.map((s) => {
+      if (s.tool === 'task' && s.toolCallId === agentId) return { ...s, children: [...s.children, step] }
+      if (s.children.length > 0) {
+        const children = attachStep(s.children, step, agentId)
+        if (children !== s.children) return { ...s, children }
+      }
+      return s
+    })
+  }
+  return [...steps, step]
+}
+
+/** 不可变回填：按 tool_call_id（缺省退化按工具名）找 running 步骤写终态。 */
+function fillStep(
+  steps: ToolStep[],
+  data: { tool?: string; tool_call_id?: string | null; summary?: string; error?: string },
+  now: number,
+): ToolStep[] {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const s = steps[i]
+    if (s.status === 'running') {
+      const tcid = data.tool_call_id ?? null
+      const match = tcid ? s.toolCallId === tcid : s.tool === data.tool
+      if (match) {
+        const isError = !!data.error
+        return [
+          ...steps.slice(0, i),
+          {
+            ...s,
+            status: isError ? 'error' : 'done',
+            summary: data.summary ?? '',
+            error: data.error,
+            endedAt: now,
+          },
+          ...steps.slice(i + 1),
+        ]
+      }
+    }
+    if (s.children.length > 0) {
+      const children = fillStep(s.children, data, now)
+      if (children !== s.children) {
+        return [...steps.slice(0, i), { ...s, children }, ...steps.slice(i + 1)]
+      }
+    }
+  }
+  return steps
+}
+
+/** 树里是否已有该 tool_call_id（双连接重影的最后防线：同调用只入树一次）。 */
+function hasStepByCallId(steps: ToolStep[], toolCallId: string): boolean {
+  return steps.some(
+    (s) => s.toolCallId === toolCallId || (s.children.length > 0 && hasStepByCallId(s.children, toolCallId)),
+  )
+}
+
+/** 把子代理 reasoning 增量累积到所属 task 步骤（不可变）。 */
+function appendReasoning(steps: ToolStep[], agentId: string, text: string): ToolStep[] {
+  return steps.map((s) => {
+    if (s.tool === 'task' && s.toolCallId === agentId) return { ...s, reasoning: s.reasoning + text }
+    if (s.children.length > 0) {
+      const children = appendReasoning(s.children, agentId, text)
+      if (children !== s.children) return { ...s, children }
+    }
+    return s
+  })
+}
+
+const result = (state: RunState, effects: Effect[] = []): ReducerResult => ({ state, effects })
+
+export function runReducer(s: RunState, action: Action): ReducerResult {
+  switch (action.type) {
+    case 'sse':
+      return reduceSse(s, action)
+    case 'started':
+      // 乐观置 running（resume 202 到 agent.started 之间）与 agent.started 事件同款转移：
+      // 正文字段复位，记账字段保留（terminalRuns 跨 run 生命周期，lastSeq 按 runId 区分）
+      return result({
+        ...INITIAL_STATE,
+        running: true,
+        runId: action.runId,
+        startedAt: action.now,
+        lastSent: s.lastSent,
+        lastSeq: s.lastSeq,
+        terminalRuns: s.terminalRuns,
+        stepCounter: s.stepCounter,
+      })
+    case 'settle-completed':
+      // 等落库消息拉回后再撤掉流式气泡：避免「清空->闪空->再出现」（时序由 settle-after-messages 保证）
+      return result({
+        ...s,
+        running: false,
+        stopping: false,
+        streamText: '',
+        reasoningText: '',
+        error: null,
+        interrupt: null,
+      })
+    case 'settle-error':
+      // sidecar 已把中断 run 的半截回复落库（带「（任务中断）」标记）：拉回消息让 UI 与
+      // 模型记忆对齐；清空流式气泡避免与落库消息双显
+      return result({
+        ...s,
+        running: false,
+        stopping: false,
+        streamText: '',
+        reasoningText: '',
+        error: action.error,
+        errorCode: action.code,
+        interrupt: null,
+      })
+    case 'settle-interrupt':
+      return result({
+        ...s,
+        running: false,
+        stopping: false,
+        streamText: '',
+        reasoningText: '',
+        interrupt: { runId: action.runId, requests: action.requests },
+      })
+    case 'remember-sent':
+      return result({ ...s, lastSent: action.text })
+    case 'send-failed':
+      return result({ ...s, error: action.error, errorCode: null })
+    case 'stop-requested':
+      return result({ ...s, stopping: true })
+    case 'stop-failed':
+      // 网络层失败（请求未达 sidecar）：复位 stopping 解除按钮锁死，允许重试
+      return result({ ...s, stopping: false })
+    case 'reconcile-converge':
+      return result(convergeRun(s, action.error))
+  }
+}
+
+function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): ReducerResult {
+  const { event, data, now } = action
+  // seq 去重（契约 additive 扩展）：双连接残留的重复投递直接丢弃（结构上终结重影）；
+  // 缺口告警不重放（MVP 断线策略仍是重拉 messages）。无 seq（旧 sidecar/连接级事件）照常接受。
+  if (typeof data.seq === 'number') {
+    const last = s.lastSeq
+    if (last && last.runId === data.run_id) {
+      if (data.seq <= last.seq) return { state: s, effects: [] }
+      if (data.seq > last.seq + 1) {
+        console.warn(`[sse] 事件缺口：期望 ${last.seq + 1}，收到 ${data.seq}（run ${data.run_id}）`)
+      }
+    }
+    s = { ...s, lastSeq: { runId: data.run_id, seq: data.seq } }
+  }
+
+  switch (event) {
+    case 'agent.started':
+      return runReducer(s, { type: 'started', runId: data.run_id, now })
+    case 'agent.token':
+      return result({ ...s, streamText: s.streamText + (data.text ?? '') })
+    case 'agent.reasoning':
+      // 推理模型的 chain-of-thought 增量；agent_id 非空时归属子代理（累积到 task 步骤）
+      if (data.agent_id) {
+        return result({ ...s, tools: appendReasoning(s.tools, data.agent_id, data.text ?? '') })
+      }
+      return result({ ...s, reasoningText: s.reasoningText + (data.text ?? '') })
+    case 'tool.called': {
+      // 幂等兜底：双连接窗口内同一调用可能投递两次（单飞订阅已基本防住）
+      const callId = data.tool_call_id ?? null
+      if (callId && hasStepByCallId(s.tools, callId)) return result(s)
+      const step = newStep(`${now}-${s.stepCounter}`, data, now)
+      s = { ...s, stepCounter: s.stepCounter + 1 }
+      if (!data.agent_id) {
+        // 主 agent 调用：把之前流出的正文封为旁白挂到本步骤（与 sidecar 同一条
+        // 封段规则，SSE 契约零改动）；正文气泡只剩最终回复（最后未封口段）。
+        // 子代理调用不封段（其正文 token 本就不透传，streamText 恒为空）
+        step.text = s.streamText
+        return result({ ...s, tools: attachStep(s.tools, step, data.agent_id), streamText: '' })
+      }
+      return result({ ...s, tools: attachStep(s.tools, step, data.agent_id) })
+    }
+    case 'tool.result':
+      return result({ ...s, tools: fillStep(s.tools, data, now) })
+    case 'todo.updated':
+      return result({
+        ...s,
+        todos: data.items ?? [],
+        done: data.done ?? 0,
+        total: data.total ?? 0,
+      })
+    case 'artifact.created':
+      // 产物已落库，刷新列表让 ArtifactCard 即时出现
+      return result(s, [{ kind: 'invalidate', queryKey: ['artifacts'] }])
+    case 'conversation.renamed':
+      // 自动命名已写库（无 seq 连接级事件），刷新会话列表让侧栏标题即时更新
+      return result(s, [{ kind: 'invalidate', queryKey: ['conversations'] }])
+    case 'run.state': {
+      // 连接建立时的对账（sidecar 不补发历史事件）：
+      // 在跑则恢复 running（重连/新挂载错过 agent.started），已结束则收敛
+      if (data.status === 'running') {
+        if (s.terminalRuns.has(data.run_id)) return result(s)
+        // 恢复 running 态：计时从恢复时刻重新起算（拿不到真实起点，近似）；
+        // 对账事件以 sidecar 权威 run_id 为准（本地旧值可能属于已结束的 run，
+        // 保留会让停止钮 POST 到错误的 run）
+        return result({
+          ...s,
+          running: true,
+          runId: data.run_id,
+          error: null,
+          startedAt: s.startedAt ?? now,
+        })
+      }
+      if (data.status === 'waiting_input') {
+        // HITL 对账：恢复审批/问答卡。半截回复已由 sidecar 落库，
+        // 拉回消息并清掉流式气泡，避免与落库消息双显
+        if (s.terminalRuns.has(data.run_id)) return result(s)
+        return result(
+          {
+            ...s,
+            running: false,
+            stopping: false,
+            streamText: '',
+            reasoningText: '',
+            interrupt: { runId: data.run_id, requests: data.requests ?? [] },
+          },
+          [{ kind: 'invalidate-messages' }],
+        )
+      }
+      const err = data.status === 'error' ? (data.error ?? '任务已中断') : null
+      return result(
+        convergeRun(s, err, data.status === 'error' ? (data.code ?? null) : null),
+        // 收敛时拉真值（run 已结束但客户端错过了 completed/error 事件）
+        [{ kind: 'invalidate-messages' }],
+      )
+    }
+    case 'run.interrupt':
+      // HITL 暂停（additive）：run 转 waiting_input。与 completed 同款时序——
+      // 先拉回落库的半截消息（带「等待你的输入…」标记与 trace）再清流式气泡
+      return result(s, [
+        {
+          kind: 'settle-after-messages',
+          action: {
+            type: 'settle-interrupt',
+            runId: data.run_id,
+            requests: data.requests ?? [],
+          },
+        },
+      ])
+    case 'agent.completed':
+      // 流式累积文本与落库内容一致，替换是无缝的（settle 在消息拉回后执行）
+      return result(markTerminal(s, data.run_id), [
+        { kind: 'settle-after-messages', action: { type: 'settle-completed' } },
+      ])
+    case 'agent.error':
+      return result(markTerminal(s, data.run_id), [
+        {
+          kind: 'settle-after-messages',
+          action: { type: 'settle-error', error: data.error ?? '未知错误', code: data.code ?? null },
+        },
+      ])
+    default:
+      return result(s)
+  }
+}
+
+function markTerminal(s: RunState, runId: string): RunState {
+  const terminalRuns = new Set(s.terminalRuns)
+  terminalRuns.add(runId)
+  return { ...s, terminalRuns }
+}

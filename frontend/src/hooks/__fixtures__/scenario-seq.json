@@ -1,0 +1,10 @@
+{
+  "name": "seq 去重与缺口：重复丢弃、缺口告警",
+  "events": [
+    { "event": "agent.started", "data": { "run_id": "r1", "conversation_id": "c1", "seq": 1 } },
+    { "event": "agent.token", "data": { "run_id": "r1", "conversation_id": "c1", "text": "A", "seq": 5 } },
+    { "event": "agent.token", "data": { "run_id": "r1", "conversation_id": "c1", "text": "A", "seq": 5 } },
+    { "event": "agent.token", "data": { "run_id": "r1", "conversation_id": "c1", "text": "B", "seq": 6 } },
+    { "event": "agent.token", "data": { "run_id": "r2", "conversation_id": "c1", "text": "新run不受旧seq限制", "seq": 2 } }
+  ]
+}

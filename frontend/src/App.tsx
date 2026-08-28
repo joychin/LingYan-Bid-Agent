@@ -8,6 +8,7 @@ import { SettingsDialog } from '@/components/SettingsDialog'
 import { ArtifactPanel } from '@/components/ArtifactPanel'
 import { ArtifactOpenHost } from '@/components/ArtifactOpenHost'
 import { SidecarBanner } from '@/components/SidecarBanner'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { reconcileContracts } from '@/artifacts/registry'
 import { useConversations, useCreateConversation } from '@/hooks/useConversations'
 import { useTasks, taskOfConversation } from '@/hooks/useTasks'
@@ -57,6 +58,7 @@ export default function App() {
   const currentTask = viewConv ? taskOfConversation(tasks, conversations, viewConvId) : null
 
   return (
+    <ErrorBoundary>
     <div className="app">
       <Sidebar
         selectedId={selectedId}
@@ -132,5 +134,6 @@ export default function App() {
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <ArtifactOpenHost artifactId={previewId} onClose={() => setPreviewId(null)} />
     </div>
+    </ErrorBoundary>
   )
 }

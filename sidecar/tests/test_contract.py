@@ -75,7 +75,9 @@ def test_stream_event_payloads_match_contract():
     def capture(e: str, d: dict) -> None:
         published.append((e, {**d, "seq": next(counter)}))
 
-    _run_agent_stream(_StubAgent(items), "cid", "rid", None, capture, "hi", None)
+    text, error, trace, interrupt = _run_agent_stream(
+        _StubAgent(items), "cid", "rid", None, capture, "hi", None
+    )
 
     seen = {e for e, _ in published}
     for expected in ("agent.reasoning", "agent.token", "tool.called", "tool.result", "todo.updated"):
@@ -84,6 +86,12 @@ def test_stream_event_payloads_match_contract():
         model = EVENT_PAYLOAD_MODELS.get(e)
         if model is not None:
             model.model_validate(data)  # 字段错位/缺必填在此抛 ValidationError
+
+    # 旁白封段（与 frontend runReducer.test.ts 同场景 parity）：tool.called 到达即把
+    # 之前流出的正文封为该 trace 步骤的 text 字段——两侧任何一边改语义，两边测试都要改
+    assert error is None and interrupt is None
+    assert trace["tools"][0]["text"] == "你好"
+    assert trace["tools"][0]["status"] == "done"
 
 
 def test_run_boundary_payload_builders_match_contract():

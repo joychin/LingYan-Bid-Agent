@@ -1,0 +1,14 @@
+{
+  "name": "正常 run：旁白封段 + 最终回复 + 产物失效",
+  "events": [
+    { "event": "agent.started", "data": { "run_id": "r1", "conversation_id": "c1", "seq": 1 } },
+    { "event": "agent.token", "data": { "run_id": "r1", "conversation_id": "c1", "text": "我先查一下资料。", "seq": 2 } },
+    { "event": "agent.reasoning", "data": { "run_id": "r1", "conversation_id": "c1", "text": "想想", "agent_id": null, "seq": 3 } },
+    { "event": "tool.called", "data": { "run_id": "r1", "conversation_id": "c1", "tool": "fetch_url", "args": { "url": "https://x" }, "tool_call_id": "call_1", "agent_id": null, "seq": 4 } },
+    { "event": "tool.result", "data": { "run_id": "r1", "conversation_id": "c1", "tool": "fetch_url", "summary": "页面内容", "error": null, "tool_call_id": "call_1", "agent_id": null, "seq": 5 } },
+    { "event": "agent.token", "data": { "run_id": "r1", "conversation_id": "c1", "text": "完成了：X。", "seq": 6 } },
+    { "event": "todo.updated", "data": { "run_id": "r1", "conversation_id": "c1", "done": 1, "total": 2, "items": [{ "content": "t1", "status": "completed" }, { "content": "t2", "status": "pending" }], "seq": 7 } },
+    { "event": "artifact.created", "data": { "run_id": "r1", "conversation_id": "c1", "artifact_id": "a1", "display_name": "投标目录", "kind": "tender.directory", "schema_id": "tender-response-docs", "schema_version": 1, "scope": "conversation", "task_id": "t1", "promotion_proposed": true, "seq": 8 } },
+    { "event": "agent.completed", "data": { "run_id": "r1", "conversation_id": "c1", "message_id": "m1", "seq": 9 } }
+  ]
+}

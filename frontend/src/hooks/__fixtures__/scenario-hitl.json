@@ -1,0 +1,11 @@
+{
+  "name": "HITL：中断恢复 + 续段 seq 续接去重",
+  "events": [
+    { "event": "agent.started", "data": { "run_id": "r1", "conversation_id": "c1", "seq": 1 } },
+    { "event": "agent.token", "data": { "run_id": "r1", "conversation_id": "c1", "text": "有个问题要问你", "seq": 2 } },
+    { "event": "run.interrupt", "data": { "run_id": "r1", "conversation_id": "c1", "requests": [{ "tool": "ask_human", "args": { "question": "选哪个方案？" }, "description": "方案确认", "allowed": ["respond"] }], "seq": 3 } },
+    { "event": "agent.started", "data": { "run_id": "r1", "conversation_id": "c1", "seq": 4 } },
+    { "event": "agent.token", "data": { "run_id": "r1", "conversation_id": "c1", "text": "续跑正文", "seq": 5 } },
+    { "event": "agent.completed", "data": { "run_id": "r1", "conversation_id": "c1", "message_id": "m3", "seq": 6 } }
+  ]
+}
