@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS runs(
   status TEXT NOT NULL CHECK(status IN ('running','completed','error','waiting_input')),
   error TEXT, created_at TEXT NOT NULL,
   interrupt TEXT, last_seq INTEGER NOT NULL DEFAULT 0,
-  pause_msg_id TEXT);
+  pause_msg_id TEXT,
+  thinking TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS artifact_index(
   artifact_id TEXT PRIMARY KEY,
   task_id TEXT,
@@ -412,17 +414,21 @@ def list_messages(cid: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def create_run(cid: str) -> dict:
+def create_run(cid: str, thinking: str = "low", model: str = "") -> dict:
+    """创建 run 行。thinking 是本 run 的思考档位（low/medium/high）、model 是选用的
+    模型 profile id（空=default），都随行存档——HITL 续跑（resume）时据此恢复，
+    无需客户端重传。"""
     rid = f"r_{uuid.uuid4().hex[:12]}"
+    now = _now()
     conn = _conn()
     try:
         conn.execute(
-            "INSERT INTO runs(id, conversation_id, status, error, created_at) VALUES (?,?,?,?,?)",
-            (rid, cid, "running", None, _now()),
+            "INSERT INTO runs(id, conversation_id, status, error, created_at, thinking, model) VALUES (?,?,?,?,?,?,?)",
+            (rid, cid, "running", None, now, thinking, model),
         )
     finally:
         conn.close()
-    return {"id": rid, "conversation_id": cid, "status": "running", "error": None, "created_at": _now()}
+    return {"id": rid, "conversation_id": cid, "status": "running", "error": None, "created_at": now, "thinking": thinking, "model": model}
 
 
 def finish_run(rid: str, status: str, error: str | None = None) -> None:
@@ -439,7 +445,7 @@ def get_run(rid: str) -> dict | None:
     conn = _conn()
     try:
         row = conn.execute(
-            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq, pause_msg_id"
+            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq, pause_msg_id, thinking, model"
             " FROM runs WHERE id=?",
             (rid,),
         ).fetchone()

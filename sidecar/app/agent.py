@@ -100,7 +100,7 @@ SUBAGENTS: list[dict] = [
     },
 ]
 
-_agent = None
+_agents: dict[str, object] = {}  # profile_id -> agent（跨供应商多模型：每 profile 一份）
 _agent_lock = asyncio.Lock()
 _saver_conn = None  # 持久 sqlite 连接（进程存活期只开一条、永不关闭）
 _saver = None
@@ -229,18 +229,56 @@ class _TaskContextMiddleware(AgentMiddleware):
         return handler(request)
 
 
-def build_agent():
-    """构造（或重建）DeepAgents 实例。settings 变更后调用 rebuild_agent()。"""
-    api_key = cfg.llm_api_key()
+# 思考档位 -> OpenAI 风格 reasoning_effort（标准 API 参数）。模型本身默认开思考，
+# 档位只是强度提示，网关/模型按自身能力解释（不依赖网关认真分档）。
+THINKING_PAYLOADS: dict[str, dict] = {
+    "low": {"reasoning_effort": "low"},
+    "medium": {"reasoning_effort": "medium"},
+    "high": {"reasoning_effort": "high"},
+}
+
+
+class _RunAwareChatDeepSeek(ChatDeepSeek):
+    """按当前 run 的思考档位注入 reasoning_effort 的模型壳。
+
+    档位经 runctx（contextvars）随 run 传播：主 agent 与子代理共用同一实例，
+    每次 API 请求构建 payload 时现读档位（并发 run 各在 to_thread 工作线程的
+    context 拷贝里互不串扰；实例共享且无状态，线程安全）。titler 是独立实例，
+    不经此类，保持模型默认行为。
+    """
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        extra = THINKING_PAYLOADS.get(runctx.current_thinking())
+        if extra:
+            payload.update(extra)
+        return payload
+
+
+def build_agent(profile: cfg.ModelProfile | None = None):
+    """按模型 profile 构造 DeepAgents 实例（profile=None 走 default profile）。
+
+    settings 变更后调用 rebuild_agent()（清缓存，按 profile 惰性重建）。
+    """
+    p = profile or cfg.get_profile(cfg.default_model_id())
+    if p is None:
+        # 模型列表为空（用户删光）：给出人话错误；agent 缓存不落空值，
+        # 下次带 profile 的调用还会重试（settings 改回即自愈）
+        raise RuntimeError("未配置任何模型（设置 → 模型 → 添加模型）")
+    api_key = cfg.model_key(p.id)
     if not api_key:
-        raise RuntimeError("LLM_API_KEY 未设置（sidecar 只能通过环境变量拿到 key）")
+        raise RuntimeError(
+            f"模型「{p.name}」未配置 API Key（sidecar 只能通过环境变量拿到 key；"
+            "Tauri 设置里保存后自动重启生效）"
+        )
 
     # ChatDeepSeek 会提取 DeepSeek 的 reasoning_content 到 additional_kwargs，
     # events._chunk_reasoning 据此发 agent.reasoning（非推理模型下与 ChatOpenAI 行为一致）。
-    model = ChatDeepSeek(
+    # 思考档位按 run 注入（reasoning_effort），见 _RunAwareChatDeepSeek。
+    model = _RunAwareChatDeepSeek(
         api_key=api_key,
-        base_url=cfg.llm_base_url(),
-        model=cfg.llm_model(),
+        base_url=p.base_url,
+        model=p.model,
         timeout=180,
     )
 
@@ -285,20 +323,25 @@ def build_agent():
     return agent
 
 
-async def get_agent():
-    global _agent
-    if _agent is None:
-        async with _agent_lock:
-            if _agent is None:
-                _agent = await asyncio.to_thread(build_agent)
-    return _agent
+async def get_agent(profile_id: str | None = None):
+    """取（惰性构建）指定 profile 的 agent；None 走 default profile。
+
+    in-flight run 各持 agent 引用互不影响；saver/checkpointer 全局共享线程安全；
+    子代理在 deepagents 侧继承同一 model 实例（spec 未指定 model 时）。
+    """
+    pid = profile_id or cfg.default_model_id()
+    async with _agent_lock:
+        agent = _agents.get(pid)
+        if agent is None:
+            agent = await asyncio.to_thread(build_agent, cfg.get_profile(pid))
+            _agents[pid] = agent
+        return agent
 
 
 async def rebuild_agent():
-    """PUT /api/settings 后重建 agent 实例（base_url/model 立即生效）。"""
-    global _agent
+    """模型列表/配置变更后清空 agent 缓存（按 profile 惰性重建，不再预构建）。"""
     async with _agent_lock:
-        _agent = await asyncio.to_thread(build_agent)
+        _agents.clear()
 
 
 def delete_thread_memory(cid: str) -> None:
@@ -457,7 +500,7 @@ def _retire_broken_steps(top_steps: list[dict], rid: str, cid: str, _publish) ->
 
 def _run_agent_stream(
     agent, cid: str, rid: str, task_id: str | None, _publish, user_text: str | None, resume_decisions: list | None,
-    cancel_event: threading.Event | None = None,
+    cancel_event: threading.Event | None = None, thinking: str = "low",
 ) -> tuple[str, str | None, dict, dict | None]:
     """worker 线程里跑完整流，逐块实时回调 _publish(event, data)。
 
@@ -485,8 +528,8 @@ def _run_agent_stream(
     在前端当前旁白段可能重复出现一次（DB 最终回复与 trace 不受影响）。
     """
     # run 上下文随 context 拷贝进入本线程：工具据此记录产物来源与作用域，
-    # _TaskContextMiddleware 据此注入任务上下文（同线程同一份 context）
-    runctx.set_run(cid, rid, task_id)
+    # _TaskContextMiddleware 据此注入任务上下文，模型壳据此注入思考档位（同线程同一份 context）
+    runctx.set_run(cid, rid, task_id, thinking)
     if resume_decisions is not None:
         stream_input: object = Command(resume={"decisions": resume_decisions})
     else:
@@ -698,11 +741,15 @@ async def run_stream(
     user_text: str | None = None,
     resume_decisions: list | None = None,
     start_seq: int = 0,
+    thinking: str = "low",
+    model: str | None = None,
 ) -> None:
     """后台任务：驱动一段 agent 流式执行并实时发布 §5.5 事件。
 
     首段传 user_text；HITL 续段传 resume_decisions（同一 run 从 interrupt 处续跑，
-    start_seq 接上一段的事件序号——前端按 run_id 去重，重置会吞掉续段事件）。
+    start_seq 接上一段的事件序号--前端按 run_id 去重，重置会吞掉续段事件）。
+    thinking 是本 run 的思考档位（low/medium/high，续跑沿用首段存档值）。
+    model 是本 run 选用的模型 profile id（None=default；续跑沿用首段存档值）。
     """
     # 用户请求停止（POST /runs/{rid}/cancel）：注册协作式取消事件，run 结束时摘除
     cancel_event = threading.Event()
@@ -722,7 +769,7 @@ async def run_stream(
             cid,
             {"event": events.EVENT_STARTED, "data": events.started_payload(rid, cid, next_seq())},
         )
-        agent = await get_agent()
+        agent = await get_agent(model)
         loop = asyncio.get_running_loop()
 
         # worker 线程里逐块发布：把协程调度回事件循环（queue.put_nowait 即时返回）
@@ -734,7 +781,7 @@ async def run_stream(
         t0 = time.monotonic()
         task_id = (db.get_conversation(cid) or {}).get("task_id")
         text, error, trace, interrupt = await asyncio.to_thread(
-            _run_agent_stream, agent, cid, rid, task_id, _publish, user_text, resume_decisions, cancel_event
+            _run_agent_stream, agent, cid, rid, task_id, _publish, user_text, resume_decisions, cancel_event, thinking
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
 

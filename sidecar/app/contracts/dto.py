@@ -59,19 +59,15 @@ class RunInfo(BaseModel):
     last_seq: int | None = None
 
 
-class RoleSettings(BaseModel):
+class ModelProfile(BaseModel):
+    """一个已配置的模型接入（多 profile：任意供应商任意个；key 只回布尔）。"""
+
+    id: str
+    name: str
     base_url: str
     model: str
-    key_configured: bool
-
-
-class LlmSettings(BaseModel):
-    """llm 角色比 vlm 多 image_support（对话模型自报的图片输入能力，能力状态条消费）。"""
-
-    base_url: str
-    model: str
-    key_configured: bool
     image_support: bool
+    key_configured: bool
 
 
 class OcrSettings(BaseModel):
@@ -86,8 +82,8 @@ class SettingsPaths(BaseModel):
 
 
 class Settings(BaseModel):
-    llm: LlmSettings
-    vlm: RoleSettings
+    models: list[ModelProfile]
+    default_model: str
     ocr: OcrSettings
     paths: SettingsPaths
 

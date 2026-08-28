@@ -1,10 +1,12 @@
-"""视觉模型（VLM）客户端：OpenAI-compatible chat.completions + image_url。
+"""视觉模型客户端：OpenAI-compatible chat.completions + image_url。
 
-- 配置经 config（VLM_API_KEY/VLM_BASE_URL/VLM_MODEL，Tauri spawn 注入或 .env），
-  三者任一缺失即未配置（vlm_available()=False），知识库图片/扫描件走降级链
-  （收原件+登记资产+人工填表，不阻塞上传）。
+2026-08-29 起不再独立配置——视觉能力来自模型 profile：resolve_vision() 取
+「default 若支持图片，否则第一个 image_support 的 profile」，其 API Key 走
+MODEL_KEYS（default 回退 LLM_API_KEY）。无可用视觉 profile 即未配置
+（vlm_available()=False），知识库图片/扫描件走降级链（收原件+登记资产+人工
+填表，不阻塞上传）。
 - 同步实现（agent worker 线程之外的后台任务用 asyncio.to_thread 包裹，titler 先例）。
-- provider 无关：qwen-vl（DashScope compatible-mode）/ glm-4v 等均走 OpenAI 兼容端点。
+- provider 无关：qwen-vl（DashScope compatible-mode）/ glm-4v / gpt-4o 等均走 OpenAI 兼容端点。
 """
 
 import base64
@@ -18,7 +20,7 @@ from . import config as cfg
 
 
 class VlmUnavailable(Exception):
-    """VLM 未配置。调用方捕获后走降级链，不当错误展示。"""
+    """无可用视觉模型 profile。调用方捕获后走降级链，不当错误展示。"""
 
 
 # 瞬时错误（连接/超时/5xx/429）在客户端内两连试（1s 间隔）；其余（鉴权/参数/配额）原样抛。
@@ -27,13 +29,15 @@ _TRANSIENT_ERRORS = (APIConnectionError, InternalServerError, RateLimitError)
 
 
 def vlm_available() -> bool:
-    return bool(cfg.vlm_base_url() and cfg.vlm_api_key() and cfg.vlm_model())
+    p = cfg.resolve_vision()
+    return bool(p and p.base_url and p.model and cfg.model_key(p.id))
 
 
 def _client():
+    p = cfg.resolve_vision()
     return OpenAI(
-        api_key=cfg.vlm_api_key(),
-        base_url=cfg.vlm_base_url(),
+        api_key=cfg.model_key(p.id),
+        base_url=p.base_url,
         timeout=120.0,
         max_retries=0,
     )
@@ -51,11 +55,12 @@ def vlm_read_image(image_path: Path, prompt: str) -> str:
     未配置时抛 VlmUnavailable；瞬时网络/API 错误在此两连试，仍失败原样抛由调用方降级。
     """
     if not vlm_available():
-        raise VlmUnavailable("VLM 未配置")
+        raise VlmUnavailable("未配置支持图片输入的模型")
+    p = cfg.resolve_vision()
     data = base64.b64encode(Path(image_path).read_bytes()).decode()
     mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
     resp = _client().chat.completions.create(
-        model=cfg.vlm_model(),
+        model=p.model,
         messages=[
             {
                 "role": "user",

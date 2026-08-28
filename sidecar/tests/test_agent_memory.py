@@ -20,7 +20,7 @@ def _reset_agent_module():
         agent_mod._saver_conn.close()
     agent_mod._saver_conn = None
     agent_mod._saver = None
-    agent_mod._agent = None
+    agent_mod._agents.clear()
 
 
 @pytest.fixture
@@ -142,7 +142,7 @@ def _drive_run_stream(agent_env, monkeypatch, stub):
     cid = db.create_conversation(None, "t")["id"]
     rid = db.create_run(cid)["id"]
 
-    async def _fake_get_agent():
+    async def _fake_get_agent(profile_id=None):
         return stub()
 
     monkeypatch.setattr(agent_env, "get_agent", _fake_get_agent)

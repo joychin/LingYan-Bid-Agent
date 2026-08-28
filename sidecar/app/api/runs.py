@@ -83,6 +83,9 @@ async def resume(rid: str, body: ResumeBody):
             rid,
             resume_decisions=decisions,
             start_seq=run["last_seq"],
+            # 续跑沿用首段档位/模型（旧库空串兜底 low / default），客户端无需重传
+            thinking=run.get("thinking") or "low",
+            model=run.get("model") or None,
         )
     )
     logger.info("run %s 已按用户裁决续跑（%s）", rid, ",".join(d["type"] for d in decisions))

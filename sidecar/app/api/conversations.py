@@ -7,11 +7,13 @@ P4：会话必须归属任务（POST 必填 task_id）；删会话级联删该�
 import asyncio
 import json
 import shutil
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from .. import agent, artifact_store, db, titler
+from .. import config as cfg
 from ..agent import delete_thread_memory, run_stream
 
 router = APIRouter()
@@ -28,6 +30,10 @@ class RenameConversationBody(BaseModel):
 
 class NewMessageBody(BaseModel):
     content: str
+    # 思考档位（标准 reasoning_effort 三档；模型默认开思考，无关闭项），缺省 low
+    thinking: Literal["low", "medium", "high"] | None = None
+    # 本条消息选用的模型 profile id（输入框胶囊选择器），缺省/未知值走 default
+    model: str | None = None
 
 
 @router.get("/conversations")
@@ -126,13 +132,16 @@ async def create_message(cid: str, body: NewMessageBody):
         raise HTTPException(status_code=422, detail="消息内容不能为空")
 
     msg = db.create_user_message(cid, content)
-    run = db.create_run(cid)
+    thinking = body.thinking or "low"
+    # 模型 profile：未知 id（配置已删）静默回落 default，不为此打断对话
+    model = body.model if body.model and cfg.get_profile(body.model) else ""
+    run = db.create_run(cid, thinking, model)
 
     # 自动命名（fire-and-forget）：默认标题时后台生成，条件收敛在 titler 内部
     asyncio.create_task(titler.maybe_generate_title(cid, content))
 
     async def _task():
-        await run_stream(cid, run["id"], content)
+        await run_stream(cid, run["id"], content, thinking=thinking, model=model or None)
 
     asyncio.create_task(_task())
     return {"message_id": msg["id"], "run_id": run["id"]}

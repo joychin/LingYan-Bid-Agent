@@ -17,6 +17,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("SIDECAR_TOKEN", raising=False)
     monkeypatch.delenv("BAIDU_OCR_API_KEY", raising=False)
     monkeypatch.delenv("BAIDU_OCR_SECRET_KEY", raising=False)
+    monkeypatch.delenv("MODEL_KEYS", raising=False)
     from app import baidu_ocr as _baidu
 
     _baidu._reset_token_cache()

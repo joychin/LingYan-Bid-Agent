@@ -11,7 +11,7 @@
 
 import sqlite3
 
-LATEST = 9
+LATEST = 11
 
 
 def _add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -58,6 +58,20 @@ MIGRATIONS: list[tuple[int, object]] = [
         lambda c: _add_column(
             c, "artifact_index", "promotion_proposed",
             "ALTER TABLE artifact_index ADD COLUMN promotion_proposed INTEGER NOT NULL DEFAULT 0",
+        ),
+    ),
+    (
+        10,
+        lambda c: _add_column(
+            c, "runs", "thinking",
+            "ALTER TABLE runs ADD COLUMN thinking TEXT NOT NULL DEFAULT ''",
+        ),
+    ),
+    (
+        11,
+        lambda c: _add_column(
+            c, "runs", "model",
+            "ALTER TABLE runs ADD COLUMN model TEXT NOT NULL DEFAULT ''",
         ),
     ),
 ]

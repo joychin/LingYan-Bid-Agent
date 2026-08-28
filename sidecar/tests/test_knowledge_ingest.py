@@ -93,7 +93,7 @@ def test_ingest_image_vlm_unavailable_degrades(tmp_path, monkeypatch):
     assert not md_path.is_file()
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["conversion"] == "vision-unavailable"
-    assert any("视觉模型与文档解析均未配置" in w for w in meta["warnings"])
+    assert any("没有可用的图片识别模型" in w for w in meta["warnings"])
     assert (store.kb_files_dir() / "营业执照.jpg").is_file()  # 原件保留
 
 

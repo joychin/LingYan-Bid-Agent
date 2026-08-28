@@ -127,7 +127,7 @@ class _StubAgent:
 def _drive_run_stream(monkeypatch, stub, cid, rid, **kwargs):
     """订阅 bus 队列跑一遍 run_stream，返回产出的事件 [(event, data)]。"""
 
-    async def fake_get_agent():
+    async def fake_get_agent(profile_id=None):
         return stub
 
     monkeypatch.setattr(agent_mod, "get_agent", fake_get_agent)
@@ -294,7 +294,7 @@ def test_resume_endpoint_flow(client, tmp_path, monkeypatch):
     cid, rid = _waiting_setup(tmp_path, monkeypatch)
     captured: dict = {}
 
-    async def fake_run_stream(cid_, rid_, user_text=None, resume_decisions=None, start_seq=0):
+    async def fake_run_stream(cid_, rid_, user_text=None, resume_decisions=None, start_seq=0, thinking="low", model=None):
         captured.update(cid=cid_, rid=rid_, resume_decisions=resume_decisions, start_seq=start_seq)
 
     monkeypatch.setattr(runs_api, "run_stream", fake_run_stream)

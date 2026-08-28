@@ -160,12 +160,12 @@ def _transcribe_image(src: Path, warnings: list[str]):
         try:
             return baidu_ocr.parse_via_baidu(src)
         except Exception as e:
-            warnings.append(f"云端文档解析失败（{e}），回退视觉模型识别")
+            warnings.append(f"云端文档解析失败（{e}），回退图片模型识别")
     try:
         return parse_image.transcribe(src)
     except VlmUnavailable:
         # 降级：收原件+登记，无文本可检索；确认表单人工填（元数据段在确认时建索引）
-        warnings.append("视觉模型与文档解析均未配置，图片未识别——可在设置中配置后重新识别，或直接在「信息」里手动填写")
+        warnings.append("没有可用的图片识别模型（文档解析也未配置），图片未识别——可在设置中配置后重新识别，或直接在「信息」里手动填写")
         return None
 
 
@@ -178,7 +178,7 @@ def _fill_scanned_pages(src: Path, result, warnings: list[str]) -> object:
             warnings.append("扫描版 PDF 已由云端文档解析（PaddleOCR-VL）整本识别，建议人工核对关键内容")
             return cloud
         except Exception as e:
-            warnings.append(f"云端文档解析失败（{e}），回退视觉模型逐页转写")
+            warnings.append(f"云端文档解析失败（{e}），回退图片模型逐页转写")
 
     tmp_dir = store.kb_parse_dir(src.name) / "_pages"
     try:
@@ -199,11 +199,11 @@ def _fill_scanned_pages(src: Path, result, warnings: list[str]) -> object:
         result.md = md
         result.info = {**result.info, "conversion": "pdf-mixed"}
         if converted:
-            warnings.append(f"{converted} 个扫描页已由视觉模型转写（识别结果建议人工核对）")
+            warnings.append(f"{converted} 个扫描页已由图片模型转写（识别结果建议人工核对）")
         return result
     except VlmUnavailable:
         warnings.append(
-            f"{len(scanned(result))} 个扫描页未识别（视觉模型未配置）——可在设置中配置视觉模型或文档解析后重新识别"
+            f"{len(scanned(result))} 个扫描页未识别（无可用图片识别模型）——可在设置中配置后重新识别"
         )
         return result
     finally:
