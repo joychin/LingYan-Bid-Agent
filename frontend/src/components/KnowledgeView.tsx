@@ -226,7 +226,7 @@ export function KnowledgeView() {
         type="file"
         multiple
         hidden
-        accept=".docx,.pdf,.txt,.md,.jpg,.jpeg,.png,.webp,.bmp"
+        accept=".docx,.pdf,.txt,.md,.doc,.jpg,.jpeg,.png,.webp,.bmp"
         onChange={(e) => {
           if (e.target.files?.length) void doUpload(e.target.files)
           e.target.value = ''

@@ -4,7 +4,7 @@ import { Sidebar } from '@/components/Sidebar'
 import { ChatView } from '@/components/ChatView'
 import { ChatHeader } from '@/components/ChatHeader'
 import { KnowledgeView } from '@/components/KnowledgeView'
-import { SettingsDialog } from '@/components/SettingsDialog'
+import { SettingsModal } from '@/components/SettingsModal'
 import { ArtifactPanel } from '@/components/ArtifactPanel'
 import { ArtifactOpenHost } from '@/components/ArtifactOpenHost'
 import { WorkbenchViewer } from '@/components/WorkbenchViewer'
@@ -136,7 +136,7 @@ export default function App() {
           }}
         />
       )}
-      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <ArtifactOpenHost artifactId={previewId} onClose={() => setPreviewId(null)} />
       {currentTask && (
         <WorkbenchViewer

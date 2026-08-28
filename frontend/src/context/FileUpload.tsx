@@ -197,7 +197,8 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
       }}
     >
       {children}
-      <input ref={inputRef} type="file" className="hidden" multiple accept=".docx,.pdf,.txt,.md" />
+      {/* 2026-08-28 放开类型白名单：不设 accept 过滤，类型是否可解析由后端解析层裁决报人话 */}
+      <input ref={inputRef} type="file" className="hidden" multiple />
     </FileUploadContext.Provider>
   )
 }

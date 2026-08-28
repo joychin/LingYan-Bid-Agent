@@ -80,6 +80,7 @@ export function kindIcon(kind: string): KindIcon | null {
 const EXT_ICON: Record<string, KindIcon> = {
   '.pdf': { cls: 'ft-ico--pdf', mark: 'P' },
   '.docx': { cls: 'ft-ico--docx', mark: 'W' },
+  '.doc': { cls: 'ft-ico--docx', mark: 'W' },
   '.txt': { cls: 'ft-ico--md', mark: 'T' },
   '.md': { cls: 'ft-ico--md', mark: 'M' },
   '.jpg': { cls: 'ft-ico--img', mark: 'I' },

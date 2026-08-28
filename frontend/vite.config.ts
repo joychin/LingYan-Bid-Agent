@@ -1,10 +1,19 @@
+import { createRequire } from 'node:module'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+// 根 tsconfig 是 NodeNext：JSON import 需要属性语法，vite 对此有兼容坑，改走 require
+const require = createRequire(import.meta.url)
+const pkg = require('./package.json') as { version: string }
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // __APP_VERSION__：package.json 版本号（src/env.d.ts 有声明；设置窗「通用」页展示）
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   resolve: {
     alias: {
       '@': new URL('./src', import.meta.url).pathname,
