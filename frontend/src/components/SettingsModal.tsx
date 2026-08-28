@@ -57,6 +57,9 @@ const emptyRole: RoleFormState = {
 }
 
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
+  // open gate 必须有：ModalShell 无 open 概念，丢了它设置窗会常驻渲染（关闭回调
+  // 全部生效但 UI 永不卸载）——旧 ui/dialog.tsx 的同款门控在双栏重构时弄丢过一次
+  if (!open) return null
   const [section, setSection] = useState<SectionId>('models')
   const { data: settings } = useQuery({
     queryKey: ['settings'],
