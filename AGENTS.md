@@ -65,6 +65,20 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    原样保留，前端「查看参数」仍可见全量）；暂停落库消息在续跑段终止且无新产出时
    经 `db.retire_pause_marker` 把「（等待你的输入…）」改写为「（任务中断）」
    （runs.pause_msg_id 记录暂停消息，PRAGMA 探测 ALTER 迁移）。
+   **契约 additive 扩展（2026-08-28 设置重构与文档解析）**：GET /settings 响应加
+   `llm.image_support`、顶层 `ocr.configured`（百度 AK/SK 两 env 齐）与
+   `paths.{data_dir,log_file}`；PUT 接受 `llm.image_support`（只存 settings.json、
+   **不触发 agent 重建**；Rust 侧 ModelSettings 必须透传该字段，否则保存 key 重写
+   settings.json 时会抹掉）。`GET /settings/test?role=ocr` = 用 AK/SK 换一次
+   access_token 探活（未配置 400、失败 502）。设置界面 SettingsDialog →
+   **SettingsModal** 双栏窗（ModalShell 加 cardClassName；左导航 模型/文档解析/通用
+   + section 注册数组，入口与默认落点不变），右区顶部**能力状态条**（未配 LLM key/
+   无视觉能力/未配文档解析，提示不是门禁），模型页加**厂商预设**（前端静态快捷填充
+   不当真值）与「支持图片输入」勾选；文档解析页= 百度云 AK/SK 两字段（仅 Tauri，
+   钥匙串 account `baidu-ocr-api-key`/`baidu-ocr-secret-key`，`set_baidu_ocr_keys`
+   command 保存后重启 sidecar，凭证不进 HTTP）；通用页= 数据目录/日志路径 +
+   「打开」（**reveal_in_folder 路径前缀从 workspace/ 扩到 data/**）+ 版本号
+   （vite define `__APP_VERSION__`）。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。
@@ -134,7 +148,16 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   实测证伪：政采 PDF 章标题字号常与正文相同、封面全是巨字，17 份语料 3/3 全灭）；
   **PDF 页眉页脚剔除**（跨页重复条带+纯页码）+ 每页 `<!-- p:N -->` 页码锚点；txt/md
   透传（gb18030 兜底）；meta 含 pages/top_level(前12)/tables；同 hash 幂等、扫描件兜底、
-  workspace containment、裸文件名回退任务 files/；.doc 明确拒绝提示另存为 .docx）+
+  workspace containment、裸文件名回退任务 files/）+
+  **云端文档解析（2026-08-28）**：`app/baidu_ocr.py`（百度云 PaddleOCR-VL，平移老系统
+  document_helpler 的 token manager + 异步任务协议：AK/SK 换 access_token（30 天缓存）
+  → base64 提交 → 5s 轮询 → 下载结果拼 md；凭证 BAIDU_OCR_API_KEY/SECRET_KEY 只认 env）。
+  路由纪律：**数字版 PDF 永远本地 PyMuPDF**（书签/目录链接结构识别只在本地有）；
+  扫描 PDF（文本层过薄）/.doc/图片在**已配置时**路由云端**整本**解析（文档级 API 无逐页
+  接口，conversion=`paddleocr-vl`，幂等检查在路由前防重复云端花费），未配置维持明确拒绝
+  并提示设置入口；出处署名同 pdf-plain（OCR 标题不可回原文验证）。知识库侧转写优先级
+  同步改为 baidu > VLM > 降级（KB 上传白名单加 .doc，无 baidu 时降级仅存档）。任务文件
+  上传**白名单放开**（files API 不再按扩展名拒绝，类型是否可解析由解析层报人话）+
   工具 `assemble_tender`（读 out/analysis 三张机器输入表构建 MAND/TPL/REQ/SCORE 登记表
   （**行序=编号，产物头部 HTML 注释行会被 registry 跳过**）+ out/outline 目录中间态
   →lineage_check→发布 `tender.directory` 过程稿+建议转正）。
