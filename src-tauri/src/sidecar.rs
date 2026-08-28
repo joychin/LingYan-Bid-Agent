@@ -37,22 +37,14 @@ pub struct SidecarInfo {
     pub token: String,
 }
 
-/// 单角色模型配置（llm 或 vlm）。vlm 未配置时为全空串。
-/// image_support 仅 llm 块有值：透传 settings.json 的该字段（Python 侧写入），
-/// 不透传会在保存 key 重写文件时把它抹掉。
-#[derive(Clone, Default, Serialize)]
-pub struct RoleSettings {
+/// 一个模型 profile（settings.json {models:[...]} 的条目；与 Python config.ModelProfile 同构）。
+#[derive(Clone, Serialize)]
+pub struct ModelProfile {
+    pub id: String,
+    pub name: String,
     pub base_url: String,
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_support: Option<bool>,
-}
-
-/// 双角色模型设置：llm 恒有值（spawn 必需），vlm 可空（未配置=知识库图片/扫描件走降级链）。
-#[derive(Clone, Serialize)]
-pub struct ModelSettings {
-    pub llm: RoleSettings,
-    pub vlm: RoleSettings,
+    pub image_support: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Debug, Default)]
@@ -67,7 +59,6 @@ pub enum SidecarState {
 #[derive(Default)]
 pub struct SidecarManager {
     pub info: Mutex<Option<SidecarInfo>>,
-    pub settings: Mutex<ModelSettings>,
     pub state: Mutex<SidecarState>,
     pub child: Mutex<Option<Child>>,
     pub restart_requested: AtomicBool,
@@ -75,17 +66,122 @@ pub struct SidecarManager {
     pub stopping: AtomicBool,
 }
 
-impl Default for ModelSettings {
-    fn default() -> Self {
-        Self {
-            llm: RoleSettings {
-                base_url: DEFAULT_BASE_URL.to_string(),
-                model: DEFAULT_MODEL.to_string(),
-                image_support: None,
-            },
-            vlm: RoleSettings::default(),
+fn builtin_default_profile() -> ModelProfile {
+    ModelProfile {
+        id: "default".to_string(),
+        name: "默认模型".to_string(),
+        base_url: DEFAULT_BASE_URL.to_string(),
+        model: DEFAULT_MODEL.to_string(),
+        image_support: false,
+    }
+}
+
+/// 读 settings.json 的模型列表（新形状 {models, default_model}；旧 {llm, vlm} 双角色
+/// 读侧迁移为 default/vision 两条 profile——与 Python config.model_profiles 同语义，
+/// 仅供 supervisor 组 MODEL_KEYS 用，不回写文件）。读不到/为空 → 内置 default 单条。
+pub fn read_model_profiles() -> Vec<ModelProfile> {
+    let raw = match std::fs::read_to_string(settings_file_path()) {
+        Ok(r) => r,
+        Err(_) => return vec![builtin_default_profile()],
+    };
+    let v: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return vec![builtin_default_profile()],
+    };
+    if let Some(list) = v.get("models").and_then(|m| m.as_array()) {
+        let out: Vec<ModelProfile> = list
+            .iter()
+            .filter_map(|item| {
+                let id = item.get("id")?.as_str()?.trim().to_string();
+                if id.is_empty() {
+                    return None;
+                }
+                Some(ModelProfile {
+                    id,
+                    name: item.get("name").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+                    base_url: item.get("base_url").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+                    model: item.get("model").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+                    image_support: item.get("image_support").and_then(|b| b.as_bool()).unwrap_or(false),
+                })
+            })
+            .collect();
+        if !out.is_empty() {
+            return out;
+        }
+        return vec![builtin_default_profile()];
+    }
+    // 旧双角色/扁平格式迁移（只读不写）
+    let mut out: Vec<ModelProfile> = Vec::new();
+    let llm = v.get("llm").filter(|b| b.is_object()).or_else(|| {
+        // 更旧扁平格式：顶层 base_url/model 视作 llm 块
+        if v.get("base_url").is_some() || v.get("model").is_some() {
+            Some(&v)
+        } else {
+            None
+        }
+    });
+    if let Some(b) = llm {
+        out.push(ModelProfile {
+            id: "default".to_string(),
+            name: "默认模型".to_string(),
+            base_url: b.get("base_url").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+            model: b.get("model").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+            image_support: b.get("image_support").and_then(|x| x.as_bool()).unwrap_or(false),
+        });
+    } else {
+        out.push(builtin_default_profile());
+    }
+    if let Some(b) = v.get("vlm").filter(|b| b.is_object()) {
+        let base = b.get("base_url").and_then(|s| s.as_str()).unwrap_or_default().trim().to_string();
+        if !base.is_empty() {
+            out.push(ModelProfile {
+                id: "vision".to_string(),
+                name: "视觉模型".to_string(),
+                base_url: base,
+                model: b.get("model").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+                image_support: true,
+            });
         }
     }
+    out
+}
+
+/// profile 的 API Key：model-key-<id> 钥匙串 account，旧 account（default→llm-api-key /
+/// vision→vlm-api-key）与 LLM_API_KEY env 兜底（老安装与开发期 .env 零迁移可用）。
+pub fn resolve_model_key(pid: &str) -> Option<String> {
+    let account = format!("model-key-{pid}");
+    if let Ok(k) = keychain_get(&account) {
+        if !k.is_empty() {
+            return Some(k);
+        }
+    }
+    let legacy = match pid {
+        "default" => Some(KEYRING_ACCOUNT_LLM),
+        "vision" => Some(KEYRING_ACCOUNT_VLM),
+        _ => None,
+    };
+    if let Some(acc) = legacy {
+        if let Ok(k) = keychain_get(acc) {
+            if !k.is_empty() {
+                return Some(k);
+            }
+        }
+    }
+    if pid == "default" {
+        return std::env::var("LLM_API_KEY").ok().filter(|k| !k.is_empty());
+    }
+    None
+}
+
+/// 组 MODEL_KEYS env（JSON {id: key}，只含解析到 key 的 profile；恒注入，空集为 "{}"）。
+fn build_model_keys_json(profiles: &[ModelProfile]) -> String {
+    let mut map = serde_json::Map::new();
+    for p in profiles {
+        if let Some(k) = resolve_model_key(&p.id) {
+            map.insert(p.id.clone(), serde_json::Value::String(k));
+        }
+    }
+    serde_json::Value::Object(map).to_string()
 }
 
 fn sidecar_dir() -> PathBuf {
@@ -130,57 +226,10 @@ fn pick_free_port() -> u16 {
     listener.local_addr().expect("local_addr").port()
 }
 
-/// 与 sidecar app/config.py 共享的配置真值文件（base_url/model 跨重启持久）。
+/// 与 sidecar app/config.py 共享的配置真值文件（模型 profile 列表跨重启持久）。
 /// 注意：Tauri 不设 DATA_DIR，故两侧都落在 <sidecar>/data/settings.json。
 fn settings_file_path() -> PathBuf {
     sidecar_dir().join("data/settings.json")
-}
-
-/// 读 settings.json（双角色嵌套 `{llm:{base_url,model}, vlm:{...}}`；
-/// 兼容旧扁平 `{base_url,model}` —— 顶层键视作 llm 块，首次写入时自然迁移为新格式）。
-/// llm 缺失/损坏返回 None（调用方回退默认）；vlm 缺失返回空（未配置）。
-pub fn read_settings_file() -> Option<ModelSettings> {
-    let raw = std::fs::read_to_string(settings_file_path()).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let llm = v
-        .get("llm")
-        .and_then(read_role)
-        .or_else(|| read_role(&v)) // 旧扁平格式回退
-        ?;
-    let vlm = v.get("vlm").and_then(read_role).unwrap_or_default();
-    Some(ModelSettings { llm, vlm })
-}
-
-fn read_role(v: &serde_json::Value) -> Option<RoleSettings> {
-    let base = v.get("base_url")?.as_str()?;
-    let model = v.get("model")?.as_str()?;
-    if base.trim().is_empty() || model.trim().is_empty() {
-        return None;
-    }
-    Some(RoleSettings {
-        base_url: base.trim().to_string(),
-        model: model.trim().to_string(),
-        image_support: v.get("image_support").and_then(|b| b.as_bool()),
-    })
-}
-
-/// 写 settings.json（set_model_settings 持久化，使 HTTP PUT 与 IPC 走同一真值）。
-/// vlm 未配置（base_url 为空）时不写 vlm 块，读侧语义一致。
-pub fn write_settings_file(s: &ModelSettings) -> Result<(), String> {
-    let path = settings_file_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let mut llm = serde_json::json!({ "base_url": s.llm.base_url, "model": s.llm.model });
-    if let Some(img) = s.llm.image_support {
-        llm["image_support"] = serde_json::json!(img);
-    }
-    let mut json = serde_json::json!({ "llm": llm });
-    if !s.vlm.base_url.is_empty() {
-        json["vlm"] = serde_json::json!({ "base_url": s.vlm.base_url, "model": s.vlm.model });
-    }
-    std::fs::write(&path, serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
 }
 
 /// 钥匙串读写走 macOS `security` CLI（写 login 钥匙串，`security find-generic-password -s tender-agent`
@@ -224,14 +273,11 @@ fn resolve_api_key(account: &str, env_var: &str) -> Option<String> {
     std::env::var(env_var).ok().filter(|k| !k.is_empty())
 }
 
-/// vlm 为 None（未配置）时不注入任何 VLM_* env，让 sidecar 回退 settings.json 的 vlm 块；
-/// 注入空串会覆盖 settings.json 的配置，故必须「无值不注入」。baidu（OCR AK/SK）同理。
+/// baidu（OCR AK/SK）无值不注入（注入空串会让 sidecar 误判已配置）；
+/// MODEL_KEYS 恒注入（空集为 "{}"，与未注入等价且不覆盖语义更简单）。
 fn spawn_sidecar(
-    api_key: Option<String>,
-    base_url: &str,
-    model: &str,
-    vlm: Option<(String, String, String)>, // (api_key, base_url, model)
-    baidu: Option<(String, String)>,       // (api_key, secret_key)
+    model_keys: &str,
+    baidu: Option<(String, String)>, // (api_key, secret_key)
     nonce: &str,
 ) -> std::io::Result<(Child, u16, String)> {
     let port = pick_free_port();
@@ -243,16 +289,11 @@ fn spawn_sidecar(
     cmd.args(["-m", "uvicorn", "app.main:app", "--port", &port.to_string()])
         .current_dir(&workdir)
         .env("SIDECAR_TOKEN", &token)
-        .env("LLM_API_KEY", api_key.unwrap_or_default())
-        .env("LLM_BASE_URL", base_url)
-        .env("LLM_MODEL", model)
+        .env("MODEL_KEYS", model_keys)
         .env("TENDER_HEALTHZ_NONCE", nonce)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some((vkey, vbase, vmodel)) = vlm {
-        cmd.env("VLM_API_KEY", vkey).env("VLM_BASE_URL", vbase).env("VLM_MODEL", vmodel);
-    }
     if let Some((ak, sk)) = baidu {
         cmd.env("BAIDU_OCR_API_KEY", ak).env("BAIDU_OCR_SECRET_KEY", sk);
     }
@@ -335,17 +376,9 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
             if mgr.stopping.load(Ordering::SeqCst) {
                 break;
             }
-            // 取当前 settings：优先 settings.json（跨重启持久），否则 mgr.settings 默认
-            let ms = read_settings_file().unwrap_or_else(|| mgr.settings.lock().unwrap().clone());
-            let vlm = if ms.vlm.base_url.is_empty() {
-                None
-            } else {
-                Some((
-                    resolve_api_key(KEYRING_ACCOUNT_VLM, "VLM_API_KEY").unwrap_or_default(),
-                    ms.vlm.base_url.clone(),
-                    ms.vlm.model.clone(),
-                ))
-            };
+            // 模型 profile 列表：settings.json（跨重启持久），读不到回内置 default 单条
+            let profiles = read_model_profiles();
+            let model_keys = build_model_keys_json(&profiles);
 
             let nonce = Uuid::new_v4().to_string();
             // 百度 OCR AK/SK：两把钥匙串 account 齐备才注入（单边有值视为未配置，与 sidecar 判定一致）
@@ -356,14 +389,7 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
                 (Some(ak), Some(sk)) => Some((ak, sk)),
                 _ => None,
             };
-            match spawn_sidecar(
-                resolve_api_key(KEYRING_ACCOUNT_LLM, "LLM_API_KEY"),
-                &ms.llm.base_url,
-                &ms.llm.model,
-                vlm,
-                baidu,
-                &nonce,
-            ) {
+            match spawn_sidecar(&model_keys, baidu, &nonce) {
                 Ok((child, port, token)) => {
                     log::info!("sidecar spawned: pid={} port={}", child.id(), port);
                     *mgr.info.lock().unwrap() = Some(SidecarInfo { port, token: token.clone() });
@@ -377,7 +403,10 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
                         *mgr.fail_count.lock().unwrap() = 0;
                         *mgr.state.lock().unwrap() = SidecarState::Running;
                         emit(&app, SidecarState::Running, "ok");
-                        log::info!("sidecar running on 127.0.0.1:{port} (base={} model={})", ms.llm.base_url, ms.llm.model);
+                        log::info!(
+                            "sidecar running on 127.0.0.1:{port} ({} 个模型 profile 已注入 key)",
+                            profiles.len()
+                        );
                     } else {
                         if mgr.stopping.load(Ordering::SeqCst) {
                             kill_and_reap(&mgr);

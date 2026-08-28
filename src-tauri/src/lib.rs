@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, RunEvent, State};
 use tauri_plugin_opener::OpenerExt;
 
-use sidecar::{ModelSettings, SidecarInfo, SidecarManager};
+use sidecar::{SidecarInfo, SidecarManager};
 
 /// 返回 sidecar 地址（port + token）。sidecar 拉起前会短暂等待，保证前端总能拿到真值。
 ///
@@ -27,54 +27,22 @@ fn get_sidecar_info(state: State<'_, Arc<SidecarManager>>) -> Result<SidecarInfo
     }
 }
 
+/// 保存某模型 profile 的 API Key 到钥匙串 account model-key-<id>，成功后重启 sidecar
+/// 使 MODEL_KEYS 注入生效。key 非空才写（留空 = 保持原值）、永不返回、永不进 HTTP；
+/// profile 的 base_url/model 等非机密字段经 HTTP PUT /settings/models 持久化。
 #[tauri::command]
-fn get_model_settings(state: State<'_, Arc<SidecarManager>>) -> ModelSettings {
-    sidecar::read_settings_file().unwrap_or_else(|| state.settings.lock().unwrap().clone())
-}
-
-/// 按角色保存模型设置（role = "llm" | "vlm"）：
-/// api_key 存钥匙串对应 account（llm-api-key / vlm-api-key），
-/// base_url/model 持久化 settings.json 并重启 sidecar 使 env 注入生效。
-/// api_key 永不返回、永不进 HTTP。llm 空值不覆盖现值；vlm 传空 base_url = 清除配置。
-#[tauri::command]
-fn set_model_settings(
-    state: State<'_, Arc<SidecarManager>>,
-    role: String,
-    base_url: Option<String>,
-    model: Option<String>,
-    api_key: Option<String>,
-) -> Result<(), String> {
-    let account = match role.as_str() {
-        "llm" => sidecar::KEYRING_ACCOUNT_LLM,
-        "vlm" => sidecar::KEYRING_ACCOUNT_VLM,
-        _ => return Err(format!("未知角色: {role}")),
-    };
-    if let Some(key) = api_key.as_deref().filter(|k| !k.is_empty()) {
-        sidecar::keychain_set(account, key).map_err(|e| format!("保存钥匙串失败: {e}"))?;
+fn set_model_key(state: State<'_, Arc<SidecarManager>>, model_id: String, api_key: String) -> Result<(), String> {
+    let pid = model_id.trim();
+    if pid.is_empty() {
+        return Err("缺少模型 id".into());
     }
-    // 以 settings.json 为基底合并（防 mgr 内存旧值覆盖 HTTP PUT 已写入的变更）
-    let mut s = sidecar::read_settings_file().unwrap_or_else(|| state.settings.lock().unwrap().clone());
-    let target = if role == "llm" { &mut s.llm } else { &mut s.vlm };
-    if role == "llm" {
-        if let Some(b) = base_url.as_deref().filter(|b| !b.trim().is_empty()) {
-            target.base_url = b.trim().to_string();
-        }
-        if let Some(m) = model.as_deref().filter(|m| !m.trim().is_empty()) {
-            target.model = m.trim().to_string();
-        }
-    } else {
-        // vlm：空串=显式清除（未配置），非空=覆盖
-        if let Some(b) = base_url.as_deref() {
-            target.base_url = b.trim().to_string();
-        }
-        if let Some(m) = model.as_deref() {
-            target.model = m.trim().to_string();
-        }
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err("请填写 API Key".into());
     }
-    *state.settings.lock().unwrap() = s.clone();
-    // 持久化到 settings.json（与 sidecar HTTP PUT 共享单一真值），避免重启后回滚
-    sidecar::write_settings_file(&s).map_err(|e| format!("保存设置失败: {e}"))?;
-    // 触发 supervisor 重启 sidecar（新 env 生效；vlm key 经钥匙串注入也需重启）
+    let account = format!("model-key-{pid}");
+    sidecar::keychain_set(&account, key).map_err(|e| format!("保存钥匙串失败: {e}"))?;
+    // 触发 supervisor 重启 sidecar（新 MODEL_KEYS 生效）
     state.restart_requested.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
@@ -101,9 +69,16 @@ fn set_baidu_ocr_keys(api_key: String, secret_key: String) -> Result<(), String>
 }
 
 /// 只返回布尔：钥匙串对应 account 是否已有值（永不返回本体）。
-/// role = "llm" | "vlm" | "baidu-ocr-api" | "baidu-ocr-secret"。
+/// role = "llm" | "vlm" | "baidu-ocr-api" | "baidu-ocr-secret" | "model:<profile_id>"
+/// （model: 前缀按 profile 查 model-key-<id>，旧 account 兜底语义同 resolve_model_key）。
 #[tauri::command]
 fn get_api_key_has_value(role: String) -> Result<bool, String> {
+    if let Some(pid) = role.strip_prefix("model:") {
+        if pid.trim().is_empty() {
+            return Err("缺少模型 id".into());
+        }
+        return Ok(sidecar::resolve_model_key(pid).is_some());
+    }
     let account = match role.as_str() {
         "llm" => sidecar::KEYRING_ACCOUNT_LLM,
         "vlm" => sidecar::KEYRING_ACCOUNT_VLM,
@@ -173,8 +148,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_sidecar_info,
-            get_model_settings,
-            set_model_settings,
+            set_model_key,
             set_baidu_ocr_keys,
             get_api_key_has_value,
             reveal_in_folder
