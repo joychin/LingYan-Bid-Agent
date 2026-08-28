@@ -92,16 +92,18 @@ def test_run_trace_reasoning_roundtrip(db_env):
 
 
 def test_run_traces_reasoning_column_migration(tmp_path, monkeypatch):
-    """老库（reasoning 列不存在）启动时 PRAGMA 探测补列，旧数据回读 reasoning=''。"""
+    """老库（reasoning 列不存在）经编号迁移补列，旧数据回读 reasoning=''。
+
+    user_version 语义注意：版本化后 init_db 以版本号为权威——已盖版本号的库手动降表
+    不会自动修复；旧库迁移只在 user_version==0（无版本号的存量库）时触发。"""
     import sqlite3
 
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     from app.config import app_db_path
 
-    db.init_db()
+    app_db_path().parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(app_db_path()))
-    # 造一个「没有 reasoning 列」的旧库：删表重建旧结构
-    conn.execute("DROP TABLE run_traces")
+    # 直接造「没有 reasoning 列」的旧库（user_version=0）
     conn.execute(
         "CREATE TABLE run_traces(run_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,"
         " message_id TEXT, tools TEXT NOT NULL, todos TEXT NOT NULL, duration_ms INTEGER,"

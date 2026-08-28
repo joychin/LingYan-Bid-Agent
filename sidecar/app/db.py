@@ -106,66 +106,35 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def _rebuild_runs_for_waiting_input(conn: sqlite3.Connection) -> None:
-    """runs 表 CHECK 增加 'waiting_input'（HITL 等待用户裁决）——SQLite 不能
-    ALTER CHECK，探测旧建表 SQL 后整表重建（CREATE new + copy + rename）。
-    旧行 status 原样带过，interrupt/last_seq 取列默认值。数据量小，秒级完成。
-    """
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='runs'"
-    ).fetchone()
-    if row is None or "waiting_input" in row["sql"]:
-        return
-    # 事务包裹 + 幂等前置（SQLite DDL 可事务化）：裸 autocommit 下四条 DDL 各自提交，
-    # 崩在中间会导致重启时 runs_migrate 已存在而 init_db 抛错（或 _SCHEMA 重建出空
-    # runs 表、旧行滞留孤儿表静默丢失）。任一步失败整体回滚，重启重跑即可。
-    conn.execute("BEGIN")
-    try:
-        conn.execute("DROP TABLE IF EXISTS runs_migrate")  # 上次迁移中途崩溃的残留
-        conn.execute(
-            """CREATE TABLE runs_migrate(
-              id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
-              status TEXT NOT NULL CHECK(status IN ('running','completed','error','waiting_input')),
-              error TEXT, created_at TEXT NOT NULL,
-              interrupt TEXT, last_seq INTEGER NOT NULL DEFAULT 0)"""
-        )
-        conn.execute(
-            "INSERT INTO runs_migrate(id, conversation_id, status, error, created_at, interrupt, last_seq)"
-            " SELECT id, conversation_id, status, error, created_at, NULL, 0 FROM runs"
-        )
-        conn.execute("DROP TABLE runs")  # 索引随表删除，_SCHEMA_INDEXES 在迁移后重建
-        conn.execute("ALTER TABLE runs_migrate RENAME TO runs")
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-
-
 def init_db() -> None:
+    """建库/升级：_SCHEMA 是新库权威全量，旧库经 db_migrations 编号迁移补齐。
+
+    user_version==0 且无表 = 全新库（_SCHEMA 直接建全，盖最新版本号）；
+    user_version==0 且有任一已知表 = 无版本号的存量旧库（跑全部迁移后盖版本号）；
+    user_version>0 = 已版本化，只跑增量迁移（版本号是权威，手动降表不再自动修复）。
+    索引最后建（可能引用迁移补的列）。
+    """
+    from . import db_migrations
+
+    _KNOWN_TABLES = (
+        "tasks", "conversations", "messages", "runs", "run_traces",
+        "artifact_index", "kb_items", "kb_segments",
+    )
+
     conn = _conn()
     try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        existing = {
+            r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        legacy = version == 0 and bool(existing & set(_KNOWN_TABLES))
         conn.executescript(_SCHEMA)
-        # runs 表整表迁移（CHECK 约束变化）必须先于列探测：新表自带全部新列
-        _rebuild_runs_for_waiting_input(conn)
-        # 仓内无迁移机制（IF NOT EXISTS 不改已有表）：后加的列用启动时探测补齐
-        # （新库由 _SCHEMA 直接建全，旧库走 ALTER）
-        for table, column, ddl in (
-            ("runs", "interrupt", "ALTER TABLE runs ADD COLUMN interrupt TEXT"),
-            ("runs", "last_seq", "ALTER TABLE runs ADD COLUMN last_seq INTEGER NOT NULL DEFAULT 0"),
-            ("runs", "pause_msg_id", "ALTER TABLE runs ADD COLUMN pause_msg_id TEXT"),
-            ("run_traces", "duration_ms", "ALTER TABLE run_traces ADD COLUMN duration_ms INTEGER"),
-            ("run_traces", "reasoning", "ALTER TABLE run_traces ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''"),
-            ("conversations", "task_id", "ALTER TABLE conversations ADD COLUMN task_id TEXT"),
-            ("artifact_index", "conversation_id", "ALTER TABLE artifact_index ADD COLUMN conversation_id TEXT"),
-            (
-                "artifact_index",
-                "promotion_proposed",
-                "ALTER TABLE artifact_index ADD COLUMN promotion_proposed INTEGER NOT NULL DEFAULT 0",
-            ),
-        ):
-            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-            if column not in cols:
-                conn.execute(ddl)
+        if legacy:
+            db_migrations.apply(conn, 0)
+        elif version > 0:
+            db_migrations.apply(conn, version)
+        else:
+            conn.execute(f"PRAGMA user_version = {db_migrations.LATEST}")
         conn.executescript(_SCHEMA_INDEXES)
     finally:
         conn.close()
