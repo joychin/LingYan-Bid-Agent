@@ -16,8 +16,10 @@ def create_conversation(client, title="新对话", task=None):
 
 def init_env(tmp_path, monkeypatch, data_subdir="data"):
     """DATA_DIR 隔离 + init_db + 建任务与首个会话（§16：发布/解析都需要任务上下文），
-    返回 (task, conv)。"""
+    返回 (task, conv)。云端文档解析凭证默认清空（需要时各测试自行 setenv）。"""
     monkeypatch.setenv("DATA_DIR", str(tmp_path / data_subdir))
+    monkeypatch.delenv("BAIDU_OCR_API_KEY", raising=False)
+    monkeypatch.delenv("BAIDU_OCR_SECRET_KEY", raising=False)
     from app import db
 
     db.init_db()

@@ -1,9 +1,9 @@
 ---
 name: document-parse
-description: 解析招标文件（文件→Markdown）时使用。用户上传 .docx/.pdf/.txt/.md 文件后要求
-  「解析招标文件 / 转换 / 开始解析 / 处理刚上传的文件」时触发。确认来源集合（主文件/补充/排除），
-  并行 parse_document 转换为带行号大纲的 Markdown，解析概况经用户确认后供
-  tender-analysis / tender-outline 消费。
+description: 解析招标文件（文件→Markdown）时使用。用户上传 .docx/.pdf/.txt/.md（以及
+  .doc/图片，需配置文档解析）文件后要求「解析招标文件 / 转换 / 开始解析 / 处理刚上传的
+  文件」时触发。确认来源集合（主文件/补充/排除），并行 parse_document 转换为带行号大纲的
+  Markdown，解析概况经用户确认后供 tender-analysis / tender-outline 消费。
 ---
 
 # 招标文件解析（document-parse）
@@ -22,7 +22,9 @@ Markdown + 行号大纲 + 元信息，以及来源确认单 `out/parse/sources.j
 
 ### 第 1 步：枚举候选
 
-`ls <任务目录>/files/`，列出候选文件（.docx/.pdf/.txt/.md 均可解析）。
+`ls <任务目录>/files/`，列出候选文件（.docx/.pdf/.txt/.md 均可解析；.doc 与图片
+类文件在配置了文档解析（百度云 PaddleOCR-VL）后也可解析——parse_document 返回
+`[解析失败]` 并提示配置时，如实告知用户可在设置中配置后重试，或换用 .docx/文本型 PDF）。
 没有文件 → 引导用户先上传。sources.json 已存在时此刻先读它（第 3 步详述重入
 依据）——excluded 名单里的文件不算候选。
 
@@ -93,7 +95,8 @@ schema 固定（UTF-8 JSON）：
   pdf-link-toc = 目录页内部超链接 / pdf-printed-toc = 印刷目录页解析（作者自报，
   接近可信）；docx-numbered / pdf-numbered
   = 中文编号识别（标题印在原文、可验证，层级可能不完整，如实告知）；pdf-plain =
-  未识别出结构（大纲不可用，警示下游用 grep 定位）；
+  未识别出结构（大纲不可用，警示下游用 grep 定位）；paddleocr-vl = 云端 OCR 识别
+  （扫描件/.doc/图片，标题非作者声明不可回原文验证，如实告知「建议核对」）；
 - 顶层章节清单（前 12 个，超出写「共 N 个」）；质量警示（确有警示才用 ⚠️ 前缀列出，
   无警示写「无」即可——⚠️ 配否定句会自相矛盾）；解析失败的补充文件（降级声明）；
 - 顶层章节明显像《投标文件》（投标函/技术方案类）而非《招标文件》（招标公告/投标人须知/

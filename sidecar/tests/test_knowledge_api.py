@@ -18,9 +18,11 @@ def test_upload_and_types(client):
     assert r.json()["field_labels"]["uscc"] == "统一社会信用代码"
 
 
-def test_upload_rejects_doc_and_oversize_name(client):
-    assert _upload(client, "a.doc", b"x").status_code == 400
+def test_upload_doc_accepted_and_hidden_rejected(client):
+    """白名单含 .doc（入库层无云端配置时降级仅存档）；隐藏文件仍拒。"""
+    assert _upload(client, "a.doc", b"x").status_code == 201
     assert _upload(client, ".hidden", b"x").status_code == 400
+    assert _upload(client, "a.exe", b"x").status_code == 400
 
 
 def test_upload_dedup_by_hash(client):

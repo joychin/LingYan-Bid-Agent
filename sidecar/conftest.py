@@ -15,6 +15,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("SIDECAR_TOKEN", raising=False)
+    monkeypatch.delenv("BAIDU_OCR_API_KEY", raising=False)
+    monkeypatch.delenv("BAIDU_OCR_SECRET_KEY", raising=False)
+    from app import baidu_ocr as _baidu
+
+    _baidu._reset_token_cache()
     from app import agent as _agent_mod
 
     # agent 模块的 saver/_agent 是进程级单例且绑定首个 DATA_DIR；删会话接口会触碰

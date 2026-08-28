@@ -120,3 +120,76 @@ def test_settings_test_llm_success(client, monkeypatch):
     r = client.get("/api/settings/test?role=llm")
     assert r.status_code == 200
     assert r.json() == {"ok": True, "role": "llm"}
+
+
+def test_image_support_persist_and_read(client):
+    # image_support 仅 llm 角色消费；不触发重建（无 key 时 PUT 恒 200 已有覆盖）
+    client.put(
+        "/api/settings",
+        json={"llm": {"base_url": "https://example.com/v1", "model": "m1", "image_support": True}},
+    )
+    data = client.get("/api/settings").json()
+    assert data["llm"]["image_support"] is True
+
+    # 回写 base_url 不带该字段时保留原值（_persist 合并不清键）
+    client.put("/api/settings", json={"llm": {"model": "m2"}})
+    assert client.get("/api/settings").json()["llm"]["image_support"] is True
+
+    # 可关回
+    client.put("/api/settings", json={"llm": {"image_support": False}})
+    assert client.get("/api/settings").json()["llm"]["image_support"] is False
+
+    # vlm 不消费该字段（持久化块不落 vlm.image_support）
+    from app import config as cfg
+
+    raw = json.loads(cfg.settings_path().read_text(encoding="utf-8"))
+    client.put("/api/settings", json={"vlm": {"base_url": "https://example.com/vl", "model": "vl-1"}})
+    raw = json.loads(cfg.settings_path().read_text(encoding="utf-8"))
+    assert "image_support" not in raw.get("vlm", {})
+
+
+def test_get_settings_ocr_and_paths(client, monkeypatch):
+    data = client.get("/api/settings").json()
+    assert data["ocr"]["configured"] is False
+    assert data["paths"]["data_dir"]
+    assert data["paths"]["log_file"].endswith("sidecar.log")
+
+    monkeypatch.setenv("BAIDU_OCR_API_KEY", "ak")
+    monkeypatch.setenv("BAIDU_OCR_SECRET_KEY", "sk")
+    assert client.get("/api/settings").json()["ocr"]["configured"] is True
+
+    # 只有 AK 不算配置齐
+    monkeypatch.delenv("BAIDU_OCR_SECRET_KEY", raising=False)
+    assert client.get("/api/settings").json()["ocr"]["configured"] is False
+
+
+def test_settings_test_ocr_unconfigured(client):
+    r = client.get("/api/settings/test?role=ocr")
+    assert r.status_code == 400
+    assert "文档解析" in r.json()["detail"]
+
+
+def test_settings_test_ocr_success(client, monkeypatch):
+    from app import baidu_ocr
+
+    monkeypatch.setenv("BAIDU_OCR_API_KEY", "ak")
+    monkeypatch.setenv("BAIDU_OCR_SECRET_KEY", "sk")
+    monkeypatch.setattr(baidu_ocr, "exchange_access_token", lambda force_refresh=False: "token-1")
+    r = client.get("/api/settings/test?role=ocr")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "role": "ocr"}
+
+
+def test_settings_test_ocr_failure(client, monkeypatch):
+    from app import baidu_ocr
+
+    monkeypatch.setenv("BAIDU_OCR_API_KEY", "ak")
+    monkeypatch.setenv("BAIDU_OCR_SECRET_KEY", "sk")
+
+    def boom(force_refresh=False):
+        raise baidu_ocr.BaiduOcrUnavailable("获取 access_token 失败：bad credentials")
+
+    monkeypatch.setattr(baidu_ocr, "exchange_access_token", boom)
+    r = client.get("/api/settings/test?role=ocr")
+    assert r.status_code == 502
+    assert "bad credentials" in r.json()["detail"]

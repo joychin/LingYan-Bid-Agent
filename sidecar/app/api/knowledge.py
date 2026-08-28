@@ -22,8 +22,8 @@ from ..parse.image import IMAGE_EXTS
 
 router = APIRouter()
 
-# 知识库白名单 = 解析注册表（docx/pdf/txt/md）+ 视觉转写（图片）
-KB_ALLOWED_EXTENSIONS = {".docx", ".pdf", ".txt", ".md"} | IMAGE_EXTS
+# 知识库白名单 = 解析注册表（docx/pdf/txt/md）+ 视觉/云端转写（图片 + .doc）
+KB_ALLOWED_EXTENSIONS = {".docx", ".pdf", ".txt", ".md", ".doc"} | IMAGE_EXTS
 MAX_SIZE_BYTES = 100 * 1024 * 1024
 _CHUNK = 1024 * 1024
 
@@ -38,8 +38,10 @@ CONVERSION_LABELS: dict[str, str] = {
     "pdf-plain": "未识别出结构",
     "pdf-fontsize": "启发式（字号判级，旧版）",  # 旧存量 meta 的兼容显示
     "pdf-mixed": "混合（扫描页已转写）",
+    "paddleocr-vl": "云端文档解析（PaddleOCR-VL）",
     "vision": "视觉转写",
     "vision-unavailable": "未识别（VLM 未配置）",
+    "parse-unavailable": "未识别（未配置文档解析）",
     "txt-passthrough": "纯文本",
     "md-passthrough": "纯文本",
 }
@@ -73,7 +75,7 @@ async def upload_file(file: UploadFile = File(...)):
     if ext not in KB_ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"不支持的文件类型：{ext or '(无扩展名)'}（允许 .docx/.pdf/.txt/.md 及图片 .jpg/.png；.doc 请用 Word 另存为 .docx）",
+            detail=f"不支持的文件类型：{ext or '(无扩展名)'}（允许 .docx/.pdf/.txt/.md/.doc 及图片 .jpg/.png）",
         )
 
     # 先落临时文件算 hash：同内容文件已入库则直接提示（不重复解析/占用条目）

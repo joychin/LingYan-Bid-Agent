@@ -3,9 +3,11 @@
 fire-and-forget（上传 API asyncio.create_task + to_thread，titler 先例）；
 启动对账由 db.recover_stale_kb 兜底（残留 parsing/running → failed，可重触发）。
 
-视觉路由：图片整体走 VL 转写；PDF 按逐页文本量分类（meta.scanned_pages），
-扫描页渲染成图走 VL 转写后拼回锚点。VLM 未配置一律降级（收原件+登记+人工填，
-不阻塞上传）；元数据抽取统一走文本管线（VL 只是图→文本，与 docx 同路）。
+视觉路由：图片与云端解析专属格式（.doc）按「云端文档解析（PaddleOCR-VL，已配置
+才触发）→ VLM（图片）→ 降级」取用；PDF 按逐页文本量分类（meta.scanned_pages），
+含扫描页时优先云端整本解析（文档级 API 无逐页接口），无云端配置则扫描页渲染成图
+走 VLM 逐页转写后拼回锚点。均未配置一律降级（收原件+登记+人工填，不阻塞上传）；
+元数据抽取统一走文本管线（视觉只是图→文本，与 docx 同路）。
 
 状态语义：parse ready 即可检索（切段已完成）；extract 失败不影响检索，
 仅 suggested_metadata 缺失（表单空着等人工填或重触发）。
@@ -20,8 +22,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .. import baidu_ocr, db
 from .. import config as cfg
-from .. import db
 from ..parse import convert as parse_convert
 from ..parse import count_nodes, outline_with_lines
 from ..parse import image as parse_image
@@ -37,6 +39,9 @@ logger = logging.getLogger(__name__)
 _MIN_EXTRACT_CHARS = 50
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
 _JSON_RE = re.compile(r"\{.*\}", re.S)
+
+# 本地注册表不收、云端文档解析专属的格式（.docx/pdf/txt/md 恒走本地）
+_CLOUD_ONLY_EXTS = {".doc"}
 
 
 def schedule_ingest(kid: str) -> None:
@@ -69,17 +74,22 @@ def run_ingest(kid: str) -> dict:
 
     db.kb_update_item(kid, parse_status="parsing", extract_status="pending", error=None)
 
-    # ---- ① 解析（文本管线 / VL 转写 / 混合拼接）----
+    # ---- ① 解析（文本管线 / 云端文档解析 / VL 转写 / 混合拼接）----
     ext = src.suffix.lower()
     warnings: list[str] = []
+    unavailable_conversion = "vision-unavailable"  # result=None 时的 meta.conversion
     try:
         if ext in parse_image.IMAGE_EXTS:
-            try:
-                result = parse_image.transcribe(src)
-            except VlmUnavailable:
-                # 降级：收原件+登记，无文本可检索；确认表单人工填（元数据段在确认时建索引）
+            result = _transcribe_image(src, warnings)
+        elif ext in _CLOUD_ONLY_EXTS:
+            if baidu_ocr.baidu_ocr_available():
+                result = baidu_ocr.parse_via_baidu(src)
+            else:
+                # 降级与视觉同款：收原件+登记，不阻塞上传；人工填或配好后重新识别
                 result = None
-                warnings.append("视觉模型未配置，图片未识别——可在设置中配置 VLM 后重新识别，或直接在「信息」里手动填写")
+                unavailable_conversion = "parse-unavailable"
+                warnings.append("文档解析未配置，该格式暂无法识别——可在设置中配置文档解析"
+                                "（百度云）后重新识别，或直接在「信息」里手动填写")
         else:
             result = parse_convert(src)
             scanned = result.info.get("scanned_pages") or []
@@ -91,7 +101,7 @@ def run_ingest(kid: str) -> dict:
 
     # ---- ② 产物落盘 + 切段建索引 ----
     if result is None:
-        md_text, info = "", {"conversion": "vision-unavailable", "tables": 0}
+        md_text, info = "", {"conversion": unavailable_conversion, "tables": 0}
         outline: list[dict] = []
     else:
         md_text, info = result.md, result.info
@@ -144,8 +154,32 @@ def run_ingest(kid: str) -> dict:
     return final
 
 
+def _transcribe_image(src: Path, warnings: list[str]):
+    """图片识别路由：云端文档解析（已配置优先，失败回退）→ VLM → None（降级）。"""
+    if baidu_ocr.baidu_ocr_available():
+        try:
+            return baidu_ocr.parse_via_baidu(src)
+        except Exception as e:
+            warnings.append(f"云端文档解析失败（{e}），回退视觉模型识别")
+    try:
+        return parse_image.transcribe(src)
+    except VlmUnavailable:
+        # 降级：收原件+登记，无文本可检索；确认表单人工填（元数据段在确认时建索引）
+        warnings.append("视觉模型与文档解析均未配置，图片未识别——可在设置中配置后重新识别，或直接在「信息」里手动填写")
+        return None
+
+
 def _fill_scanned_pages(src: Path, result, warnings: list[str]) -> object:
-    """扫描页渲染成图走 VL 转写，拼回页码锚点（混合 PDF = pdf-mixed）。"""
+    """扫描页处理：云端文档解析整本识别（文档级 API 无逐页接口，已配置优先）
+    → 视觉模型逐页转写拼回页码锚点（混合 PDF = pdf-mixed）→ 降级警示。"""
+    if baidu_ocr.baidu_ocr_available():
+        try:
+            cloud = baidu_ocr.parse_via_baidu(src)
+            warnings.append("扫描版 PDF 已由云端文档解析（PaddleOCR-VL）整本识别，建议人工核对关键内容")
+            return cloud
+        except Exception as e:
+            warnings.append(f"云端文档解析失败（{e}），回退视觉模型逐页转写")
+
     tmp_dir = store.kb_parse_dir(src.name) / "_pages"
     try:
         from .. import vlm
@@ -169,7 +203,7 @@ def _fill_scanned_pages(src: Path, result, warnings: list[str]) -> object:
         return result
     except VlmUnavailable:
         warnings.append(
-            f"{len(scanned(result))} 个扫描页未识别（视觉模型未配置）——可在设置中配置 VLM 后重新识别"
+            f"{len(scanned(result))} 个扫描页未识别（视觉模型未配置）——可在设置中配置视觉模型或文档解析后重新识别"
         )
         return result
     finally:

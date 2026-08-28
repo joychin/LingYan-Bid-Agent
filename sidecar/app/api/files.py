@@ -2,8 +2,8 @@
 
 文件落在当前任务的 files/ 子目录（workspace/<task_id>/files/，§16 任务分组布局）——
 跨任务同名文件互不影响；task_id 必填（无任务上下文的前端禁止上传）。
-扩展名白名单 + 100MB 上限 + 任务内同名覆盖。
-解析支持 .docx/.pdf/.txt/.md（parse_document；txt/md 透传为 markdown）。
+100MB 上限 + 任务内同名覆盖。上传不设扩展名白名单（2026-08-28 放开：类型是否可解析
+由 parse_document 工具层裁决并报人话，如 .doc/.图片需配置文档解析、.doc 提示另存）。
 """
 
 import os
@@ -17,7 +17,6 @@ from .. import artifact_store, db
 
 router = APIRouter()
 
-ALLOWED_EXTENSIONS = {".docx", ".pdf", ".txt", ".md"}
 MAX_SIZE_BYTES = 100 * 1024 * 1024
 _CHUNK = 1024 * 1024
 
@@ -42,12 +41,6 @@ async def upload_file(task_id: str, file: UploadFile = File(...)):
     name = _clean_name(raw)
     if name is None:
         raise HTTPException(status_code=400, detail="文件名非法")
-    ext = Path(name).suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的文件类型：{ext or '(无扩展名)'}（允许 .docx/.pdf/.txt/.md；.doc 请用 Word 另存为 .docx）",
-        )
 
     # 先写临时文件，成功后再 os.replace 原子覆盖：中途失败（413/断连/IO 错）不破坏磁盘上已存在的同名旧文件
     target_dir = artifact_store.task_files_dir(task_id)

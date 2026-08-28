@@ -1,9 +1,10 @@
 """Settings 端点（PRD §5.4）：双角色（llm/vlm）嵌套读写 + 连通性测试。
 
-LLM_API_KEY / VLM_API_KEY 不接受 HTTP 修改——只能经环境变量
-（即 Tauri 侧改钥匙串后重启 sidecar）。base_url/model 持久化到
-data/settings.json（与 Tauri 共享的单一配置真值，结构 {llm:{...},vlm:{...}}）。
-PUT 后：llm 变更即时重建 agent；vlm 是无状态客户端，改 env 即生效无需重建。
+LLM_API_KEY / VLM_API_KEY / BAIDU_OCR_API_KEY / BAIDU_OCR_SECRET_KEY 不接受 HTTP 修改
+——只能经环境变量（即 Tauri 侧改钥匙串后重启 sidecar）。base_url/model/image_support
+持久化到 data/settings.json（与 Tauri 共享的单一配置真值，结构 {llm:{...},vlm:{...}}）。
+PUT 后：llm base_url/model 变更即时重建 agent；image_support 与 vml 均无需重建
+（vlm/ocr 是无状态客户端，改 env 即生效）。
 """
 
 import asyncio
@@ -26,6 +27,7 @@ Role = Literal["llm", "vlm"]
 class RoleBody(BaseModel):
     base_url: str | None = None
     model: str | None = None
+    image_support: bool | None = None  # 仅 llm 角色消费；vlm 天然支持图片
 
 
 class SettingsBody(BaseModel):
@@ -54,11 +56,19 @@ async def get_settings():
             "base_url": cfg.llm_base_url(),
             "model": cfg.llm_model(),
             "key_configured": bool(cfg.llm_api_key()),
+            "image_support": cfg.llm_image_support(),
         },
         "vlm": {
             "base_url": cfg.vlm_base_url(),
             "model": cfg.vlm_model(),
             "key_configured": bool(cfg.vlm_api_key()),
+        },
+        "ocr": {
+            "configured": bool(cfg.baidu_ocr_api_key() and cfg.baidu_ocr_secret_key()),
+        },
+        "paths": {
+            "data_dir": str(cfg.data_dir()),
+            "log_file": str(cfg.data_dir() / "logs" / "sidecar.log"),
         },
     }
 
@@ -72,6 +82,8 @@ def _persist(llm: RoleBody | None, vlm: RoleBody | None) -> None:
             block["base_url"] = llm.base_url
         if llm.model is not None:
             block["model"] = llm.model
+        if llm.image_support is not None:
+            block["image_support"] = llm.image_support
         data["llm"] = block
         # 迁移：清掉旧扁平顶层键，避免两处真值
         data.pop("base_url", None)
@@ -127,8 +139,21 @@ async def put_settings(body: SettingsBody):
 
 
 def _test_role_sync(role: str) -> str:
-    """同步最小连通性测试：向对应角色端点发一条 ping chat（验证 endpoint+key+model 三件套）。"""
+    """同步最小连通性测试：llm/vlm 发一条 ping chat；ocr 用 AK/SK 换一次 access_token。"""
     from openai import OpenAI
+
+    if role == "ocr":
+        from ..baidu_ocr import BaiduOcrUnavailable, exchange_access_token
+
+        if not (cfg.baidu_ocr_api_key() and cfg.baidu_ocr_secret_key()):
+            raise HTTPException(status_code=400, detail="文档解析未配置（API Key / Secret Key 缺失）")
+        try:
+            exchange_access_token(force_refresh=True)
+        except BaiduOcrUnavailable as e:
+            raise HTTPException(status_code=502, detail=f"连通失败：{e}") from e
+        except Exception as e:  # noqa: BLE001 - 测试端点要把原始错误透给用户
+            raise HTTPException(status_code=502, detail=f"连通失败：{e}") from e
+        return "ok"
 
     if role == "llm":
         base_url, model, api_key = cfg.llm_base_url(), cfg.llm_model(), cfg.llm_api_key()
@@ -156,7 +181,7 @@ def _test_role_sync(role: str) -> str:
 
 
 @router.get("/settings/test")
-async def test_settings(role: str = Query(pattern="^(llm|vlm)$")):
+async def test_settings(role: str = Query(pattern="^(llm|vlm|ocr)$")):
     """轻量连通性测试（设置对话框「测试」按钮）：最小 chat 请求，返回 ok 或错误详情。"""
     result = await asyncio.to_thread(_test_role_sync, role)
     return {"ok": result == "ok", "role": role}

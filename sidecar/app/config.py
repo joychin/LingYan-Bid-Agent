@@ -2,8 +2,10 @@
 
 base_url/model 优先级：环境变量 > data/settings.json > 内置默认值。
 settings.json 是 Tauri 与 sidecar 共享的单一配置真值（Tauri 侧 lib.rs 也读写它），
-结构为双角色嵌套 {llm:{base_url,model}, vlm:{...}}；llm 读侧兼容旧扁平 {base_url,model}。
+结构为双角色嵌套 {llm:{base_url,model,image_support}, vlm:{...}}；llm 读侧兼容旧扁平 {base_url,model}。
 vlm 无内置默认：base_url 为空即未配置（知识库图片/扫描件走降级链）。
+百度云文档解析（PaddleOCR-VL）凭证 BAIDU_OCR_API_KEY/SECRET_KEY 只认环境变量
+（同 API Key 纪律：Tauri 钥匙串 → spawn 注入 env），不落 settings.json。
 """
 
 import json
@@ -79,6 +81,19 @@ def llm_model() -> str:
     if v:
         return v
     return str(_file_role("llm").get("model") or "deepseek-v4-flash")
+
+
+def llm_image_support() -> bool:
+    """对话模型是否声明支持图片输入（仅 settings.json llm 块，无 env 层）。"""
+    return bool(_file_role("llm").get("image_support"))
+
+
+def baidu_ocr_api_key() -> str | None:
+    return os.environ.get("BAIDU_OCR_API_KEY")
+
+
+def baidu_ocr_secret_key() -> str | None:
+    return os.environ.get("BAIDU_OCR_SECRET_KEY")
 
 
 def vlm_api_key() -> str | None:

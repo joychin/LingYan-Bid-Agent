@@ -2,7 +2,12 @@
 
 转换核心在 app/parse/（注册表，知识库入库管线共用）；本文件只保留工具层职责：
 任务上下文校验、workspace 路径 containment、hash 幂等、产物落盘（任务 out/parse/）、
-概况文案、以及任务场景限制（扫描件/图片明确拒绝——视觉识别是知识库管线能力）。
+概况文案、以及云端文档解析路由（见下）。
+
+云端文档解析（百度云 PaddleOCR-VL，已配置才触发）：扫描 PDF（文本层过薄）与 .doc /
+图片这类本地注册表不收的格式路由到 parse_via_baidu 整本解析（文档级 API 无逐页接口）；
+未配置时维持明确拒绝并提示配置入口。同 hash 幂等检查在路由之前，重复调用不重复
+产生云端花费。数字版 PDF 永远走本地 PyMuPDF（书签/目录链接结构识别只在本地有）。
 
 结构识别按可信度分档（meta.conversion 记录，下游引用出处时按档位决定是否署章节名）：
 - docx-native / pdf-toc：作者声明的结构（Word 标题样式 / PDF 书签树）——可信；
@@ -10,7 +15,8 @@
 - pdf-printed-toc：印刷目录页解析（文件自己印的目录）——作者自报，可靠性接近声明档；
 - docx-numbered / pdf-numbered：中文编号识别（标题文字印在原文行上，可回原文验证）
   ——层级可能不完整，产物带警示；
-- pdf-plain：未识别出结构（无书签/无印刷目录/无编号）——大纲不可用，警示 grep 兜底。
+- pdf-plain：未识别出结构（无书签/无印刷目录/无编号）——大纲不可用，警示 grep 兜底；
+- paddleocr-vl：云端 OCR 识别（标题非作者声明，署名纪律同 pdf-plain）。
 不使用字号判级（实测政采 PDF 章标题字号常与正文相同、封面全是巨字，信号不成立）。
 pdf 侧另有跨页重复的页眉页脚与纯页码剔除、每页页码锚点 <!-- p:N -->（出处可引页码）。
 txt/md 透传（md 保留 ATX 标题进 outline；txt 无结构走 grep 兜底警示）。
@@ -26,7 +32,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
-from .. import runctx
+from .. import baidu_ocr, runctx
 from ..artifact_store import task_files_dir, task_out_dir
 from ..config import workspace_dir
 from ..parse import convert as parse_convert
@@ -34,6 +40,7 @@ from ..parse import count_nodes, outline_with_lines, sha256_file
 from ..parse.image import IMAGE_EXTS
 
 _MIN_TEXT_CHARS = 100  # 低于此值视为转换失败（扫描件/损坏文件）
+_CLOUD_ONLY_EXTS = {".doc"}  # 本地注册表不收、云端文档解析专属的格式
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +95,8 @@ def _summary_lines(head: str, name: str, rel: Path, meta: dict, *, usage_hint: b
 
 @tool
 def parse_document(path: str) -> str:
-    """把文档（.docx/.pdf/.txt/.md）转换为 Markdown，并生成带行号区间的标题大纲与元信息。
+    """把文档（.docx/.pdf/.txt/.md，图片/.doc 需配置文档解析）转换为 Markdown，
+    并生成带行号区间的标题大纲与元信息。
 
     产物写入当前任务工作台的 out/parse/<文件名>/ 下三个文件（文件名=含扩展名的完整
     文件名——任务内同名即同文件，docx/pdf 同名不同扩展的产物互不覆盖）：
@@ -98,10 +106,12 @@ def parse_document(path: str) -> str:
 
     结构识别分档（meta.conversion）：docx-native/pdf-toc=作者声明的结构（Word 样式/
     PDF 书签），可信；pdf-link-toc=目录页内部超链接（Word 目录域生成的硬标记）；
-    pdf-printed-toc=印刷目录页解析（文件自己印的目录，可靠性接近作者声明）；docx-numbered/pdf-numbered=中文编号识别（标题文字印在原文行上，可
-    回原文验证，但层级可能不完整）；pdf-plain=未识别出结构（大纲不可用，下游改用
-    grep 定位）。不使用字号判级（实测政采 PDF 章标题字号常与正文相同、封面全是
-    巨字，字号信号在这类文档上不成立）。
+    pdf-printed-toc=印刷目录页解析（文件自己印的目录，可靠性接近作者声明）；
+    docx-numbered/pdf-numbered=中文编号识别（标题文字印在原文行上，可回原文验证，
+    但层级可能不完整）；pdf-plain=未识别出结构（大纲不可用，下游改用 grep 定位）；
+    paddleocr-vl=云端 OCR 识别（扫描件/.doc/图片，标题非作者声明，引用出处按
+    pdf-plain 纪律处理）。不使用字号判级（实测政采 PDF 章标题字号常与正文相同、
+    封面全是巨字，字号信号在这类文档上不成立）。
     同一文件内容未变（hash 一致）时重复调用会跳过重转（跳过同样返回全量概况，
     调用方无需读 meta.json 补数字）。下游分析技能精读时才用 outline.json 按行号
     定位区段；document-parse 阶段不需要读它。
@@ -114,11 +124,6 @@ def parse_document(path: str) -> str:
         src = _resolve_ws_path(path)
         if not src.is_file():
             return f"[解析失败] 文件不存在：{path}"
-        if src.suffix.lower() in IMAGE_EXTS:
-            return (
-                "[解析失败] 任务场景暂不支持图片解析；图片请上传到知识库"
-                "（知识库支持视觉模型识别），或改传 .docx / 文本型 PDF"
-            )
         digest = sha256_file(src)
         # 目录与产物文件名都用完整文件名（含扩展名）：同名不同扩展（docx/pdf 双格式）
         # 的解析产物各有各的目录，不互相覆盖
@@ -145,13 +150,34 @@ def parse_document(path: str) -> str:
                     )
                 )
 
-        result = parse_convert(src)
+        # 解析路由：图片/.doc 走云端文档解析（未配置则明确拒绝）；其余走本地注册表，
+        # PDF 文本层过薄（扫描件）时若有云端配置则整本替换解析（幂等检查已在前面，
+        # 重复调用不会重复产生云端花费）。经模块属性调用 baidu_ocr.parse_via_baidu，
+        # 便于测试 monkeypatch 且不触碰网络
+        ext = src.suffix.lower()
+        cloud_ready = baidu_ocr.baidu_ocr_available()
+        if ext in IMAGE_EXTS or ext in _CLOUD_ONLY_EXTS:
+            if not cloud_ready:
+                raise ValueError(
+                    f"暂不支持解析 {ext or '(无扩展名)'}：可在设置中配置文档解析"
+                    "（百度云 PaddleOCR-VL）后重试"
+                    + ("；图片也可上传到知识库（知识库支持视觉模型识别）" if ext in IMAGE_EXTS else "")
+                    + ("；.doc 也可用 Word 另存为 .docx 后上传" if ext in _CLOUD_ONLY_EXTS else "")
+                )
+            result = baidu_ocr.parse_via_baidu(src)
+        else:
+            result = parse_convert(src)
+            if ext == ".pdf" and len(result.md.strip()) < _MIN_TEXT_CHARS:
+                if not cloud_ready:
+                    raise ValueError(
+                        f"转换结果为空或极短（{len(result.md.strip())} 字符）。"
+                        "若输入为 PDF，疑似扫描件（图片型 PDF）：可在设置中配置文档解析"
+                        "（百度云）后重试，或提供 .docx / 文本型 PDF"
+                    )
+                result = baidu_ocr.parse_via_baidu(src)
         md_text, info = result.md, result.info
         if len(md_text.strip()) < _MIN_TEXT_CHARS:
-            raise ValueError(
-                f"转换结果为空或极短（{len(md_text.strip())} 字符）。"
-                "若输入为 PDF，疑似扫描件（图片型 PDF），当前不支持 OCR；请提供 .docx 或文本型 PDF"
-            )
+            raise ValueError(f"解析结果为空或极短（{len(md_text.strip())} 字符），无法继续")
         outline = outline_with_lines(md_text)
         n_headings = count_nodes(outline)
         top_titles = [n["标题"] for n in outline]
@@ -173,6 +199,8 @@ def parse_document(path: str) -> str:
                 f"顶层章节仅 {len(top_titles)} 个，疑似节选卷册或结构未完整标记，"
                 "结构可能不完整（精读时建议结合 grep 关键词定位）"
             )
+        # 云端解析等转换器自带的质量警示（OCR 识别建议核对等）
+        warnings.extend(info.get("warnings") or [])
 
         out_dir.mkdir(parents=True, exist_ok=True)
         md_path.write_text(md_text, encoding="utf-8")

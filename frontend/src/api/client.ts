@@ -194,10 +194,17 @@ export function listMessages(convId: string): Promise<{ messages: Message[] }> {
   return request(`/conversations/${convId}/messages`)
 }
 
-export function sendMessage(convId: string, content: string): Promise<SendMessageResult> {
+/** 思考档位（标准 reasoning_effort 三档；模型默认开思考，无关闭项） */
+export type ThinkingLevel = 'low' | 'medium' | 'high'
+
+export function sendMessage(
+  convId: string,
+  content: string,
+  thinking: ThinkingLevel = 'low',
+): Promise<SendMessageResult> {
   return request(`/conversations/${convId}/messages`, {
     method: 'POST',
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, thinking }),
   })
 }
 
@@ -223,17 +230,20 @@ export function getSettings(): Promise<Settings> {
   return request('/settings')
 }
 
-/** 按角色 PUT；vlm.base_url 传空串 = 清除视觉模型配置。 */
+/** 按角色 PUT；vlm.base_url 传空串 = 清除视觉模型配置。image_support 仅 llm 角色消费。 */
 export function putSettings(
   role: ModelRole,
   base_url: string,
   model: string,
+  imageSupport?: boolean,
 ): Promise<{ ok: boolean }> {
-  return request('/settings', { method: 'PUT', body: JSON.stringify({ [role]: { base_url, model } }) })
+  const block: Record<string, unknown> = { base_url, model }
+  if (role === 'llm' && imageSupport !== undefined) block.image_support = imageSupport
+  return request('/settings', { method: 'PUT', body: JSON.stringify({ [role]: block }) })
 }
 
-/** 设置对话框「测试」按钮：向对应角色端点发最小请求，验证 endpoint+key+model。 */
-export function testModelConnection(role: ModelRole): Promise<{ ok: boolean; role: string }> {
+/** 设置「测试」按钮：llm/vlm 发最小 chat；ocr 用 AK/SK 换一次 access_token 探活。 */
+export function testModelConnection(role: ModelRole | 'ocr'): Promise<{ ok: boolean; role: string }> {
   return request(`/settings/test?role=${role}`)
 }
 

@@ -93,16 +93,42 @@ def test_ingest_image_vlm_unavailable_degrades(tmp_path, monkeypatch):
     assert not md_path.is_file()
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["conversion"] == "vision-unavailable"
-    assert any("视觉模型未配置" in w for w in meta["warnings"])
+    assert any("视觉模型与文档解析均未配置" in w for w in meta["warnings"])
     assert (store.kb_files_dir() / "营业执照.jpg").is_file()  # 原件保留
 
 
-def test_ingest_unsupported_ext_fails(tmp_path, monkeypatch):
+def test_ingest_cloud_only_ext_degrades_when_unconfigured(tmp_path, monkeypatch):
+    """.doc 无云端文档解析：降级为仅存档（ready + 无 md + 提示配置），不 failed。"""
     _setup(tmp_path, monkeypatch)
     kid = _upload(tmp_path, "a.doc", b"xx")
     item = run_ingest(kid)
-    assert item["parse_status"] == "failed"
-    assert "不支持" in (item["error"] or "")
+    assert item["parse_status"] == "ready"
+    md_path, _, meta_path = store.kb_parse_paths("a.doc")
+    assert not md_path.is_file()
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta["conversion"] == "parse-unavailable"
+    assert any("文档解析未配置" in w for w in meta["warnings"])
+
+
+def test_ingest_cloud_only_ext_parses_when_configured(tmp_path, monkeypatch):
+    """.doc 配了云端文档解析：走 parse_via_baidu，产出 md 可检索。"""
+    _setup(tmp_path, monkeypatch)
+    from app import baidu_ocr
+
+    monkeypatch.setenv("BAIDU_OCR_API_KEY", "ak")
+    monkeypatch.setenv("BAIDU_OCR_SECRET_KEY", "sk")
+
+    fake = baidu_ocr.parse.ParseResult(
+        md="# 营业执照\n\n统一社会信用代码 91320XXX（云端解析结果）" * 3,
+        info={"conversion": "paddleocr-vl", "pages": 1, "tables": 0},
+    )
+    monkeypatch.setattr(baidu_ocr, "parse_via_baidu", lambda src: fake)
+    kid = _upload(tmp_path, "b.doc", b"xx")
+    item = run_ingest(kid)
+    assert item["parse_status"] == "ready"
+    from app.knowledge import fts
+
+    assert db.kb_search_segments(fts.build_match_expr("营业执照"), limit=3)
 
 
 def test_extract_failure_does_not_block_search(tmp_path, monkeypatch):

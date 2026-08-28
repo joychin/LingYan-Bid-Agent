@@ -75,12 +75,98 @@ def test_unsupported_ext(ws):
 
 
 def test_doc_rejected(ws):
-    """.doc 明确拒绝并提示另存为 .docx（仅支持 .docx/.pdf）。"""
+    """.doc 未配置云端文档解析时明确拒绝并提示（配置入口 / 另存为 .docx）。"""
     f = ws / "招标文件.doc"
     f.write_bytes(b"dummy")
     r = parse_document.invoke({"path": "招标文件.doc"})
     assert r.startswith("[解析失败]")
-    assert "另存为 .docx" in r
+    assert "文档解析" in r or "另存为 .docx" in r
+
+
+def test_doc_routes_to_cloud_when_configured(ws, monkeypatch):
+    """.doc 配了云端文档解析：整本走 parse_via_baidu，conversion=paddleocr-vl。"""
+    from app import baidu_ocr
+
+    monkeypatch.setenv("BAIDU_OCR_API_KEY", "ak")
+    monkeypatch.setenv("BAIDU_OCR_SECRET_KEY", "sk")
+    fake = baidu_ocr.parse.ParseResult(
+        md="## 第一章 招标公告\n\n" + "本项目为测试采购项目，内容来自云端文档解析。" * 10,
+        info={"conversion": "paddleocr-vl", "pages": 1, "tables": 0,
+              "top_level": ["第一章 招标公告"],
+              "warnings": ["内容经云端 OCR 识别，建议人工核对关键数字与条款"]},
+    )
+    calls = []
+    monkeypatch.setattr(baidu_ocr, "parse_via_baidu", lambda src: calls.append(src) or fake)
+    f = ws / "招标文件.doc"
+    f.write_bytes(b"dummy")
+    r = parse_document.invoke({"path": "招标文件.doc"})
+    assert r.startswith("[解析成功]"), r
+    assert calls and calls[0].name == "招标文件.doc"
+    out_dir = _out_parse(ws) / "招标文件.doc"
+    meta = json.loads((out_dir / "招标文件.doc.meta.json").read_text(encoding="utf-8"))
+    assert meta["conversion"] == "paddleocr-vl"
+    assert any("云端 OCR" in w for w in meta["warnings"])
+
+
+def test_image_routes_to_cloud_when_configured(ws, monkeypatch):
+    """图片：未配云端时拒绝（提示配置/知识库）；配了云端走 parse_via_baidu。"""
+    from app import baidu_ocr
+
+    f = ws / "现场照片.png"
+    f.write_bytes(b"\x89PNG fake")
+    r = parse_document.invoke({"path": "现场照片.png"})
+    assert r.startswith("[解析失败]")
+    assert "文档解析" in r
+
+    monkeypatch.setenv("BAIDU_OCR_API_KEY", "ak")
+    monkeypatch.setenv("BAIDU_OCR_SECRET_KEY", "sk")
+    fake = baidu_ocr.parse.ParseResult(
+        md="（图片转写内容）" + "营业执照信息如下，统一社会信用代码 9132。" * 10,
+        info={"conversion": "paddleocr-vl", "pages": 1, "tables": 0},
+    )
+    monkeypatch.setattr(baidu_ocr, "parse_via_baidu", lambda src: fake)
+    r = parse_document.invoke({"path": "现场照片.png"})
+    assert r.startswith("[解析成功]"), r
+    meta = json.loads((_out_parse(ws) / "现场照片.png" / "现场照片.png.meta.json").read_text(encoding="utf-8"))
+    assert meta["conversion"] == "paddleocr-vl"
+
+
+def test_scanned_pdf_routes_to_cloud_when_configured(ws, monkeypatch):
+    """扫描 PDF（文本层过薄）：未配云端报扫描件提示；配了云端整本替换解析。
+    幂等优先于路由——同 hash 二次调用不再触发云端。"""
+    from app import baidu_ocr
+
+    doc = pymupdf.open()
+    doc.new_page()  # 空内容页：文本层近 0 字符 → 扫描件判定
+    doc.save(str(ws / "扫描件.pdf"))
+    doc.close()
+
+    r = parse_document.invoke({"path": "扫描件.pdf"})
+    assert r.startswith("[解析失败]")
+    assert "扫描件" in r and "文档解析" in r
+
+    monkeypatch.setenv("BAIDU_OCR_API_KEY", "ak")
+    monkeypatch.setenv("BAIDU_OCR_SECRET_KEY", "sk")
+    calls = []
+    fake = baidu_ocr.parse.ParseResult(
+        md="## 第一章 项目概况\n\n" + "扫描件内容已由云端识别，本项目为测试采购项目。" * 10,
+        info={"conversion": "paddleocr-vl", "pages": 1, "tables": 0},
+    )
+
+    def fake_parse(src):
+        calls.append(src)
+        return fake
+
+    monkeypatch.setattr(baidu_ocr, "parse_via_baidu", fake_parse)
+    r = parse_document.invoke({"path": "扫描件.pdf"})
+    assert r.startswith("[解析成功]"), r
+    assert len(calls) == 1
+    meta = json.loads((_out_parse(ws) / "扫描件.pdf" / "扫描件.pdf.meta.json").read_text(encoding="utf-8"))
+    assert meta["conversion"] == "paddleocr-vl"
+    # 幂等：同 hash 再调不触发云端
+    r2 = parse_document.invoke({"path": "扫描件.pdf"})
+    assert r2.startswith("[解析跳过]")
+    assert len(calls) == 1
 
 
 def test_requires_task_context(ws):

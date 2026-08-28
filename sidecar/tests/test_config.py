@@ -31,3 +31,31 @@ def test_defaults_without_env(tmp_path, monkeypatch):
     monkeypatch.delenv("LLM_MODEL", raising=False)
     assert config.llm_base_url() == "https://api.deepseek.com/v1"
     assert config.llm_model() == "deepseek-v4-flash"
+
+
+def test_image_support_from_file_only(tmp_path, monkeypatch):
+    # image_support 只读 settings.json（无 env 层）；缺省 False
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    (tmp_path / "settings.json").write_text(
+        '{"llm": {"base_url": "https://x/v1", "model": "m", "image_support": true}}', encoding="utf-8"
+    )
+    assert config.llm_image_support() is True
+
+    (tmp_path / "settings.json").write_text(
+        '{"llm": {"base_url": "https://x/v1", "model": "m"}}', encoding="utf-8"
+    )
+    assert config.llm_image_support() is False
+
+
+def test_baidu_ocr_keys_env_only(tmp_path, monkeypatch):
+    # 凭证只认 env，settings.json 里的同名键不生效
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    (tmp_path / "settings.json").write_text(
+        '{"baidu_ocr": {"api_key": "from-file", "secret_key": "from-file"}}', encoding="utf-8"
+    )
+    assert config.baidu_ocr_api_key() is None
+    assert config.baidu_ocr_secret_key() is None
+    monkeypatch.setenv("BAIDU_OCR_API_KEY", "ak")
+    monkeypatch.setenv("BAIDU_OCR_SECRET_KEY", "sk")
+    assert config.baidu_ocr_api_key() == "ak"
+    assert config.baidu_ocr_secret_key() == "sk"

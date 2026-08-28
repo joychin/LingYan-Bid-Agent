@@ -61,27 +61,28 @@ def test_same_name_files_isolated_between_tasks(client):
     assert names_a == ["招标文件.docx"]
 
 
-def test_upload_rejects_bad_extension(client):
+def test_upload_accepts_any_extension(client):
+    """2026-08-28 放开白名单：上传不再按扩展名拒绝，类型是否可解析由 parse_document
+    工具层裁决（.doc/图片未配文档解析时在解析时报人话，不挡上传）。"""
     task = create_task(client)
     tid = task["task"]["id"]
     r = client.post(
         "/api/files",
         params={"task_id": tid},
-        files={"file": ("virus.exe", b"MZ", "application/octet-stream")},
+        files={"file": ("data.bin", b"MZ", "application/octet-stream")},
     )
-    assert r.status_code == 400
+    assert r.status_code == 201
 
 
-def test_upload_rejects_doc(client):
-    """.doc 移出白名单：上传即拒并提示另存为 .docx（仅支持 .docx/.pdf/.txt/.md）。"""
+def test_upload_accepts_doc(client):
+    """.doc 可上传：解析层有云端文档解析路径（parse_document 未配置时报配置提示）。"""
     task = create_task(client)
     r = client.post(
         "/api/files",
         params={"task_id": task["task"]["id"]},
         files={"file": ("招标文件.doc", b"dummy", "application/octet-stream")},
     )
-    assert r.status_code == 400
-    assert "另存为 .docx" in r.json()["detail"]
+    assert r.status_code == 201
 
 
 def test_upload_rejects_hidden_name(client):

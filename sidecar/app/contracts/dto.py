@@ -65,9 +65,31 @@ class RoleSettings(BaseModel):
     key_configured: bool
 
 
+class LlmSettings(BaseModel):
+    """llm 角色比 vlm 多 image_support（对话模型自报的图片输入能力，能力状态条消费）。"""
+
+    base_url: str
+    model: str
+    key_configured: bool
+    image_support: bool
+
+
+class OcrSettings(BaseModel):
+    """百度云文档解析（PaddleOCR-VL）——凭证只认 env，对外只回是否已配置。"""
+
+    configured: bool
+
+
+class SettingsPaths(BaseModel):
+    data_dir: str
+    log_file: str
+
+
 class Settings(BaseModel):
-    llm: RoleSettings
+    llm: LlmSettings
     vlm: RoleSettings
+    ocr: OcrSettings
+    paths: SettingsPaths
 
 
 class FileItem(BaseModel):
