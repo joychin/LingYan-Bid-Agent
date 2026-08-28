@@ -720,7 +720,7 @@ async def run_stream(
 
         await publish(
             cid,
-            {"event": events.EVENT_STARTED, "data": {"run_id": rid, "conversation_id": cid, "seq": next_seq()}},
+            {"event": events.EVENT_STARTED, "data": events.started_payload(rid, cid, next_seq())},
         )
         agent = await get_agent()
         loop = asyncio.get_running_loop()
@@ -769,13 +769,13 @@ async def run_stream(
                 cid,
                 {
                     "event": events.EVENT_ERROR,
-                    "data": {
-                        "run_id": rid,
-                        "conversation_id": cid,
-                        "error": error,
-                        "code": "cancelled" if error == events.CANCELLED_MESSAGE else None,
-                        "seq": next_seq(),
-                    },
+                    "data": events.error_payload(
+                        rid,
+                        cid,
+                        error,
+                        "cancelled" if error == events.CANCELLED_MESSAGE else None,
+                        next_seq(),
+                    ),
                 },
             )
             db.finish_run(rid, "error", error)
@@ -795,12 +795,7 @@ async def run_stream(
                 cid,
                 {
                     "event": events.EVENT_RUN_INTERRUPT,
-                    "data": {
-                        "run_id": rid,
-                        "conversation_id": cid,
-                        "requests": interrupt["requests"],
-                        "seq": seq,
-                    },
+                    "data": events.interrupt_payload(rid, cid, interrupt["requests"], seq),
                 },
             )
             db.interrupt_run(rid, interrupt["requests"], seq, pause_msg_id=msg_id)
@@ -814,11 +809,18 @@ async def run_stream(
         db.finish_run(rid, "completed")
         await publish(
             cid,
-            {"event": events.EVENT_COMPLETED, "data": {"run_id": rid, "conversation_id": cid, "message_id": msg["id"], "seq": next_seq()}},
+            {
+                "event": events.EVENT_COMPLETED,
+                "data": events.completed_payload(rid, cid, msg["id"], next_seq()),
+            },
         )
     except Exception as e:
         logger.exception("run_stream failed")
         db.finish_run(rid, "error", str(e))
-        await publish(cid, {"event": events.EVENT_ERROR, "data": {"run_id": rid, "conversation_id": cid, "error": str(e), "seq": next_seq()}})
+        # code 恒有键（契约 2026-08-27 additive）：此前此处漏发 code，靠前端 ?? null 兜住
+        await publish(
+            cid,
+            {"event": events.EVENT_ERROR, "data": events.error_payload(rid, cid, str(e), None, next_seq())},
+        )
     finally:
         CANCEL_EVENTS.pop(rid, None)

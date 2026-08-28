@@ -83,7 +83,7 @@ export function DeepThinking({
 
 /** 助手消息：左对齐通栏（不套气泡），白底透明，15px 行高 1.7。
  *  带思考流/trace 快照时先渲染「深度思考」「执行过程」折叠区（默认收起），正文在后。 */
-export function AssistantMessage({ content, tools, todos, durationMs, reasoning }: { content: string; tools?: Message['tools']; todos?: Message['todos']; durationMs?: Message['durationMs']; reasoning?: string }) {
+export function AssistantMessage({ content, tools, todos, durationMs, reasoning }: { content: string; tools?: Message['tools']; todos?: Message['todos']; durationMs?: Message['durationMs']; reasoning?: string | null }) {
   const done = tools?.filter((t) => t.status !== 'running').length ?? 0
   const durationText = durationMs ? ` · ${formatDuration(durationMs)}` : ''
   return (

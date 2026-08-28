@@ -5,13 +5,29 @@
 
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { getSidecarInfo } from './client'
+import type {
+  AgentCompleted,
+  AgentError,
+  AgentReasoning,
+  AgentStarted,
+  AgentToken,
+  ArtifactCreated,
+  ConversationRenamed,
+  InterruptRequestPayload,
+  RunInterrupt,
+  RunState as RunStatePayload,
+  TodoItemPayload,
+  TodoUpdated,
+  ToolCalled,
+  ToolResult,
+} from './events.gen'
 
-export type TodoStatus = 'pending' | 'in_progress' | 'completed'
+// ---- 契约类型单一事实源：sidecar app/contracts/events.py 的 pydantic 模型经
+// scripts/gen_ts_types.py 生成 events.gen.ts；本文件只做组合与客户端侧结构（ToolStep）。----
 
-export interface TodoItem {
-  content: string
-  status: TodoStatus
-}
+export type TodoStatus = TodoItemPayload['status']
+export type TodoItem = TodoItemPayload
+export type InterruptRequest = InterruptRequestPayload
 
 /** 工具步骤（运行中由 useRun 维护；run 结束后由 run_traces 快照还原，同构）。 */
 export interface ToolStep {
@@ -36,53 +52,27 @@ export interface ToolStep {
   endedAt?: number | null
 }
 
-/** HITL 待裁决动作（run.interrupt / run.state(waiting_input) 附带，契约 additive 扩展）。 */
-export interface InterruptRequest {
-  tool: string
-  args: Record<string, unknown>
-  description?: string
-  /** 允许的 decision（langchain HITL：approve/edit/reject/respond），驱动卡片分支渲染 */
-  allowed?: string[]
-}
-
-export interface AgentEventData {
+/**
+ * 全部 SSE 事件 payload 的扁平组合（消费侧按事件名取自己那几个字段）。
+ * 字段真值在 events.gen.ts（sidecar pydantic 生成）；ping 无 payload 不在此列。
+ */
+export interface AgentEventData
+  extends Partial<
+    AgentStarted &
+      AgentToken &
+      AgentReasoning &
+      ToolCalled &
+      ToolResult &
+      TodoUpdated &
+      ArtifactCreated &
+      AgentCompleted &
+      AgentError &
+      RunInterrupt &
+      RunStatePayload &
+      ConversationRenamed
+  > {
   run_id: string
   conversation_id: string
-  text?: string
-  tool?: string
-  args?: Record<string, unknown>
-  summary?: string
-  message_id?: string
-  error?: string
-  // agent.error / run.state（契约 additive，2026-08-27）：错误分类标记。
-  // cancelled=用户主动停止（协作式取消），前端据此中性呈现而非红色错误卡
-  code?: string | null
-  // tool.called / tool.result：工具调用 id 与子代理归属（agent_id 非空 = 子代理内部事件，
-  // 值为所属 task 调用的 tool_call_id）
-  tool_call_id?: string | null
-  agent_id?: string | null
-  // 事件序列号（sidecar per-run 单调递增）：客户端去重（双连接重影防线）与缺口检测
-  seq?: number
-  // run.state（连接建立时的对账事件）；waiting_input = HITL 暂停等待用户裁决（additive）
-  status?: 'running' | 'completed' | 'error' | 'waiting_input'
-  // run.interrupt / run.state(waiting_input)：待裁决动作清单（HITL additive）
-  requests?: InterruptRequest[]
-  // todo.updated
-  done?: number
-  total?: number
-  items?: TodoItem[]
-  // artifact.created（类型化：客户端据此 + Processor Registry 决定打开哪个处理程序）
-  artifact_id?: string
-  display_name?: string
-  kind?: string
-  schema_id?: string
-  schema_version?: number
-  // artifact.created（P4 additive）：作用域与转正建议标记（§16：无 global）
-  scope?: 'task' | 'conversation'
-  task_id?: string | null
-  promotion_proposed?: boolean
-  // conversation.renamed（additive）：自动命名完成推送；无 seq——连接级事件，同 run.state
-  title?: string
 }
 
 export interface SSEHandlers {

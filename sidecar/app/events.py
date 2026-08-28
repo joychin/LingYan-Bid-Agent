@@ -65,6 +65,28 @@ def artifact_created_payload(row: dict, rid: str | None, cid: str, seq: int) -> 
         "seq": seq,
     }
 
+# ---- run 边界事件 payload 构造 ----
+# 与 artifact_created_payload 同款先例：构造集中在本文件，契约形状的单一事实源在
+# app/contracts/events.py（pydantic 模型），test_contract.py 两者互证。
+
+
+def started_payload(rid: str, cid: str, seq: int) -> dict:
+    return {"run_id": rid, "conversation_id": cid, "seq": seq}
+
+
+def completed_payload(rid: str, cid: str, message_id: str, seq: int) -> dict:
+    return {"run_id": rid, "conversation_id": cid, "message_id": message_id, "seq": seq}
+
+
+def error_payload(rid: str, cid: str, error: str, code: str | None, seq: int) -> dict:
+    """agent.error：code 恒有键（cancelled=用户主动停止，非取消 None——2026-08-27 additive）。"""
+    return {"run_id": rid, "conversation_id": cid, "error": error, "code": code, "seq": seq}
+
+
+def interrupt_payload(rid: str, cid: str, requests: list, seq: int) -> dict:
+    return {"run_id": rid, "conversation_id": cid, "requests": requests, "seq": seq}
+
+
 # ---- 子代理归属注册表 ----
 # task 工具执行时（agent._SubagentTagMiddleware.wrap_tool_call）登记：tools 任务的
 # checkpoint_ns（形如 "tools:<tid>"，恰为子代理事件 ns 元组的第 0 段）→ task 的 tool_call_id。

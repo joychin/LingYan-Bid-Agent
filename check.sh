@@ -20,6 +20,14 @@ check_sidecar() {
   cd sidecar
   step uv run ruff check app tests
   step uv run pytest -q
+  # 契约类型漂移防线：重新生成前端 TS 类型，与入库版本 diff（改了 pydantic 契约模型
+  # 忘了跑 scripts/gen_ts_types.py 在此挂掉）
+  if uv run python scripts/gen_ts_types.py >/dev/null 2>&1; then
+    if ! git diff --exit-code -- ../frontend/src/api/events.gen.ts ../frontend/src/api/dto.gen.ts >/dev/null; then
+      echo "\n==> 契约 TS 类型与 pydantic 模型不同步（sidecar/scripts/gen_ts_types.py 后提交）"
+      fail=1
+    fi
+  fi
   cd ..
 }
 

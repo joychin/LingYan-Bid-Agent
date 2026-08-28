@@ -1,56 +1,47 @@
-"""§5.5 事件契约测试：每个流事件的 payload 必填字段与类型。
+"""§5.5 事件契约测试：真实发布的 payload 逐一过 contracts.events 的 pydantic 模型。
 
-字段清单须与 frontend/src/api/sse.ts 的 AgentEventData 人工同步——前后端字段错位
-（如已修的 agent.reasoning 文本键 text 被前端误读为 reasoning）从此在测试层挂掉。
-agent.completed / agent.error / artifact.created 的 payload 构造在 run_stream 层
-（含 seq 注入），由 e2e 冒烟（tests/test_smoke_e2e.py）覆盖；这里驱动
-_run_agent_stream 覆盖六类流事件。注意 agent.error 自 2026-08-27 起 additive 带
-code（cancelled=用户主动停止，恒有键、非取消为 null），run.state 的 error 分支
-同款——同步时一并核对 sse.ts 的 AgentEventData。
+契约单一事实源 = app/contracts/events.py（本文件校验真实数据 ↔ 模型；
+scripts/gen_ts_types.py 用同一批模型生成前端 events.gen.ts——前后端字段对齐从
+「注释纪律」变成「模型断言 + 生成」）。事件名常量真值在 app/events.py（适配层），
+注册表键集与常量集的对齐也在本文件断言（改一边不改另一边即红）。
+六类流事件由 _StubAgent 驱动 _run_agent_stream 产出；run 边界事件（completed/error/
+run.state）由 e2e 冒烟（tests/test_smoke_e2e.py）覆盖，payload 构造函数
+（events.*_payload）在此直接校验。
 """
+
+from pathlib import Path
 
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
+from app import events as events_module
 from app.agent import _run_agent_stream
+from app.contracts.events import EVENT_PAYLOAD_MODELS, ArtifactCreated
 
-# 每事件的必填字段 + 允许的类型（tuple = 多选）。可选字段不在此列。
-EVENT_SCHEMAS: dict[str, dict[str, tuple[type, ...]]] = {
-    "agent.reasoning": {
-        "run_id": (str,),
-        "conversation_id": (str,),
-        "text": (str,),
-        "agent_id": (str, type(None)),
-    },
-    "agent.token": {
-        "run_id": (str,),
-        "conversation_id": (str,),
-        "text": (str,),
-    },
-    "tool.called": {
-        "run_id": (str,),
-        "conversation_id": (str,),
-        "tool": (str,),
-        "args": (dict,),
-        "tool_call_id": (str, type(None)),
-        "agent_id": (str, type(None)),
-    },
-    "tool.result": {
-        "run_id": (str,),
-        "conversation_id": (str,),
-        "tool": (str,),
-        "summary": (str,),
-        "error": (str, type(None)),
-        "tool_call_id": (str, type(None)),
-        "agent_id": (str, type(None)),
-    },
-    "todo.updated": {
-        "run_id": (str,),
-        "conversation_id": (str,),
-        "done": (int,),
-        "total": (int,),
-        "items": (list,),
-    },
-}
+
+def test_generated_ts_files_cover_all_models():
+    """events.gen.ts / dto.gen.ts 覆盖全部契约模型（漏重新生成在此挂掉；
+    check.sh 的重生成 + git diff --exit-code 是完整防线）。"""
+    root = Path(__file__).resolve().parents[2]
+    events_gen = (root / "frontend/src/api/events.gen.ts").read_text(encoding="utf-8")
+    for model in EVENT_PAYLOAD_MODELS.values():
+        assert f"interface {model.__name__}" in events_gen, f"events.gen.ts 缺 {model.__name__}（重新生成）"
+
+    from app.contracts import dto as dto_module
+
+    dto_gen = (root / "frontend/src/api/dto.gen.ts").read_text(encoding="utf-8")
+    for name in ("Task", "Conversation", "Message", "RunInfo", "Artifact", "ArtifactContract", "KbItem", "KbParseMeta", "Settings"):
+        assert f"interface {name}" in dto_gen, f"dto.gen.ts 缺 {name}（重新生成）"
+        assert hasattr(dto_module, name)
+
+
+def test_event_registry_matches_events_module_constants():
+    """contracts 注册表 ↔ events.py 事件名常量键集一致（单一事实源与适配层对齐）。"""
+    constants = {
+        v for k, v in vars(events_module).items() if k.startswith("EVENT_") and isinstance(v, str)
+    }
+    assert set(EVENT_PAYLOAD_MODELS) == constants, (
+        "contracts/events.py 与 app/events.py 的事件清单不一致（改一边忘了另一边）"
+    )
 
 
 class _StubAgent:
@@ -62,7 +53,10 @@ class _StubAgent:
 
 
 def test_stream_event_payloads_match_contract():
-    """六类流事件的 payload 字段名/类型逐一符合契约（含 additive 扩展）。"""
+    """六类流事件的 payload 逐一通过契约模型（字段名/类型/必填，含 additive 扩展）。
+
+    _run_agent_stream 直发的 payload 不带 seq（由 run_stream 的 _publish 外层注入，
+    见 agent.py：payload = {**data, "seq": next_seq()}）——这里同样注入后校验。"""
     chunk = AIMessageChunk(content="你好", additional_kwargs={"reasoning_content": "想想"})
     calls = AIMessage(
         content="",
@@ -76,25 +70,39 @@ def test_stream_event_payloads_match_contract():
         ("updates", {"model": {"todos": [{"content": "t", "status": "pending"}], "messages": []}}),
     ]
     published: list[tuple[str, dict]] = []
-    _run_agent_stream(_StubAgent(items), "cid", "rid", None, lambda e, d: published.append((e, d)), "hi", None)
+    counter = iter(range(1, 100))
+
+    def capture(e: str, d: dict) -> None:
+        published.append((e, {**d, "seq": next(counter)}))
+
+    _run_agent_stream(_StubAgent(items), "cid", "rid", None, capture, "hi", None)
 
     seen = {e for e, _ in published}
-    for event, schema in EVENT_SCHEMAS.items():
-        assert event in seen, f"事件 {event} 未被产出（契约覆盖缺失）"
-        for e, data in published:
-            if e != event:
-                continue
-            for field, types in schema.items():
-                assert field in data, f"{event} 缺字段 {field}（前后端契约错位）"
-                assert isinstance(data[field], types), (
-                    f"{event}.{field} 类型 {type(data[field]).__name__} 不在 {types}"
-                )
+    for expected in ("agent.reasoning", "agent.token", "tool.called", "tool.result", "todo.updated"):
+        assert expected in seen, f"事件 {expected} 未被产出（契约覆盖缺失）"
+    for e, data in published:
+        model = EVENT_PAYLOAD_MODELS.get(e)
+        if model is not None:
+            model.model_validate(data)  # 字段错位/缺必填在此抛 ValidationError
+
+
+def test_run_boundary_payload_builders_match_contract():
+    """run 边界事件构造函数（agent.py/titler 调用）过契约模型；code 恒有键。"""
+    EVENT_PAYLOAD_MODELS["agent.started"].model_validate(
+        events_module.started_payload("r", "c", 1)
+    )
+    EVENT_PAYLOAD_MODELS["agent.completed"].model_validate(
+        events_module.completed_payload("r", "c", "m", 2)
+    )
+    err = events_module.error_payload("r", "c", "boom", None, 3)
+    EVENT_PAYLOAD_MODELS["agent.error"].model_validate(err)
+    assert "code" in err  # 契约要求恒有键（此前 run_stream 外层 except 漏发过）
+    evt = events_module.interrupt_payload("r", "c", [], 4)
+    EVENT_PAYLOAD_MODELS["run.interrupt"].model_validate(evt)
 
 
 def test_artifact_created_payload_matches_contract():
     """artifact.created 载荷（run 边界与转正端点共用 events.artifact_created_payload）。"""
-    from app.events import artifact_created_payload
-
     row = {
         "artifact_id": "art_000000000001",
         "display_name": "投标目录",
@@ -107,16 +115,14 @@ def test_artifact_created_payload_matches_contract():
         "conversation_id": "c_1",
         "promotion_proposed": 1,
     }
-    data = artifact_created_payload(row, "r_1", "c_1", 7)
+    data = events_module.artifact_created_payload(row, "r_1", "c_1", 7)
+    ArtifactCreated.model_validate(data)
     assert data["scope"] == "conversation"
     assert data["task_id"] == "t_1"
     assert data["promotion_proposed"] is True
-    assert data["seq"] == 7
-    for field in ("run_id", "conversation_id", "artifact_id", "display_name", "kind", "schema_id", "schema_version"):
-        assert field in data
 
     formal = {**row, "task_id": "t_1", "conversation_id": None, "promotion_proposed": 0}
-    data2 = artifact_created_payload(formal, "r_1", "c_1", 8)
+    data2 = events_module.artifact_created_payload(formal, "r_1", "c_1", 8)
+    ArtifactCreated.model_validate(data2)
     assert data2["scope"] == "task"
-    assert data2["task_id"] == "t_1"
     assert data2["promotion_proposed"] is False

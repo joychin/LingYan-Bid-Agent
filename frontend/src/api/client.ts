@@ -8,7 +8,47 @@
  *    `VITE_SIDECAR_URL` / `VITE_SIDECAR_TOKEN` 覆盖为绝对地址
  */
 
-import type { InterruptRequest, TodoItem, ToolStep } from './sse'
+import type { TodoItem, ToolStep } from './sse'
+import type {
+  Artifact,
+  ArtifactContract,
+  ArtifactSource,
+  Conversation,
+  FileItem,
+  KbFieldSource,
+  KbFieldType,
+  KbItem,
+  KbMetadata,
+  KbParseMeta,
+  Message as MessageDto,
+  RoleSettings,
+  RunInfo,
+  SendMessageResult,
+  Settings,
+  Task,
+  UploadResult,
+} from './dto.gen'
+
+// ---- REST DTO 类型单一事实源：sidecar app/contracts/dto.py 的 pydantic 模型经
+// scripts/gen_ts_types.py 生成 dto.gen.ts；这里 re-export 保持既有 import 路径不变。----
+export type {
+  Artifact,
+  ArtifactContract,
+  ArtifactSource,
+  Conversation,
+  FileItem,
+  KbFieldSource,
+  KbFieldType,
+  KbItem,
+  KbMetadata,
+  KbParseMeta,
+  RoleSettings,
+  RunInfo,
+  SendMessageResult,
+  Settings,
+  Task,
+  UploadResult,
+}
 
 export interface SidecarInfo {
   baseURL: string
@@ -88,51 +128,11 @@ export async function request<T>(
   return res.json() as Promise<T>
 }
 
-/** 任务（P4）：一次投标 = 项目文件夹，会话与正式稿产物的容器。 */
-export interface Task {
-  id: string
-  title: string
-  /** 进度便签（任务白板，markdown；LLM 与用户共同维护） */
-  progress_note: string
-  created_at: string
-}
-
-export interface Conversation {
-  id: string
-  task_id: string | null
-  title: string
-  created_at: string
-}
-
-export interface Message {
-  id: string
-  conversation_id: string
-  role: 'user' | 'assistant'
-  content: string
-  created_at: string
-  /** assistant 消息的执行过程快照（run_traces 落库回填；有 run 且成功落库时才有） */
+/** 消息行：基础字段来自 dto.gen；tools/todos 是 run_traces 快照（键序与 ToolStep 同构），
+ *  sidecar 侧松散声明，前端用客户端 ToolStep 类型标注。 */
+export interface Message extends Omit<MessageDto, 'tools' | 'todos'> {
   tools?: ToolStep[]
   todos?: TodoItem[]
-  /** run 总耗时（ms，run_traces 回填） */
-  durationMs?: number | null
-  /** 主 agent 思考流整段（run_traces 回填，推理模型才有；历史「深度思考」数据源） */
-  reasoning?: string
-}
-
-export interface SendMessageResult {
-  message_id: string
-  run_id: string
-}
-
-export interface RunInfo {
-  id: string
-  conversation_id: string
-  status: 'running' | 'completed' | 'error' | 'waiting_input'
-  error: string | null
-  created_at: string
-  /** status=waiting_input 时附带：待裁决动作清单（恢复审批/问答卡） */
-  requests?: InterruptRequest[]
-  last_seq?: number
 }
 
 /** HITL 裁决（与 sidecar/langchain 的 Decision 形状一致；edit 为 API 保留、UI 暂不提供）。 */
@@ -141,18 +141,6 @@ export type HitlDecision =
   | { type: 'reject'; message?: string }
   | { type: 'respond'; message: string }
   | { type: 'edit'; edited_action: { name: string; args: Record<string, unknown> } }
-
-export interface RoleSettings {
-  base_url: string
-  model: string
-  key_configured: boolean
-}
-
-/** 双角色模型设置（llm=对话模型；vlm=视觉模型，可选，用于知识库图片/扫描件识别） */
-export interface Settings {
-  llm: RoleSettings
-  vlm: RoleSettings
-}
 
 export type ModelRole = 'llm' | 'vlm'
 
@@ -249,57 +237,8 @@ export function testModelConnection(role: ModelRole): Promise<{ ok: boolean; rol
   return request(`/settings/test?role=${role}`)
 }
 
-export interface FileItem {
-  name: string
-  size: number
-  modified_at: string
-}
-
-export interface UploadResult {
-  name: string
-  size: number
-  overwritten: boolean
-}
-
-/** 类型化 Artifact（artifact-system-design.md）：kind/schema 决定用哪个 Processor 打开。 */
-export interface Artifact {
-  artifact_id: string
-  display_name: string
-  kind: string
-  schema_id: string
-  schema_version: number
-  cardinality: 'task-single' | 'task-multi'
-  editable: boolean
-  content_type: string
-  updated_at: string
-  source: { thread_id: string | null; run_id: string | null }
-  /** 内容版本号：外部更新探测基准 */
-  content_seq: number
-  /** 是否存在可恢复的历史版本（覆盖前自动留底的安全网） */
-  restore_available: boolean
-  /** 作用域（§16）：task=任务正式稿；conversation=会话过程稿 */
-  scope: 'task' | 'conversation'
-  task_id: string | null
-  conversation_id: string | null
-  /** AI 建议转正（过程稿标记，等用户确认） */
-  promotion_proposed: boolean
-  /** 工作区内绝对路径，供 reveal_in_folder 使用。 */
-  path: string
-}
-
 export function artifactKey(a: Pick<Artifact, 'kind' | 'schema_id' | 'schema_version'>): string {
   return `${a.kind}/${a.schema_id}@${a.schema_version}`
-}
-
-export interface ArtifactContract {
-  key: string
-  kind: string
-  schema_id: string
-  schema_version: number
-  cardinality: 'task-single' | 'task-multi'
-  llm_write_mode: 'suggest' | 'direct-on-request'
-  editable: boolean
-  default_display_name: string
 }
 
 export async function uploadFile(file: File, taskId: string): Promise<UploadResult> {
@@ -381,61 +320,6 @@ export async function checkHealth(): Promise<boolean> {
 }
 
 // ===== 知识库（跨任务共享的公司资料层） =====
-
-export interface KbFieldType {
-  code: string
-  name: string
-  fields: string[]
-}
-
-export interface KbFieldSource {
-  value: string
-  source?: string
-}
-
-export interface KbMetadata {
-  doc_type: string
-  confidence?: number
-  fields?: Record<string, KbFieldSource>
-  extra?: Record<string, KbFieldSource>
-  summary?: string
-}
-
-export type KbParseStatus = 'pending' | 'parsing' | 'ready' | 'failed'
-export type KbExtractStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
-export type KbReviewStatus = 'pending_review' | 'confirmed'
-
-export interface KbItem {
-  id: string
-  file_name: string
-  file_hash: string
-  title: string
-  ext: string
-  doc_type: string | null
-  doc_type_name: string
-  parse_status: KbParseStatus
-  extract_status: KbExtractStatus
-  review_status: KbReviewStatus
-  suggested_metadata: KbMetadata | null
-  business_metadata: KbMetadata | null
-  error: string | null
-  created_at: string
-  updated_at: string
-  md_ready: boolean
-}
-
-/** 解析概况（GET /kb/items/{id}/content 附带；档位标签真值在 sidecar）。 */
-export interface KbParseMeta {
-  conversion: string
-  conversion_label: string
-  chars: number | null
-  headings: number | null
-  tables: number | null
-  warnings: string[]
-  pages?: number
-  scanned_pages?: number[]
-  top_sections: string[]
-}
 
 export function listKbTypes(): Promise<{ types: KbFieldType[]; field_labels: Record<string, string> }> {
   return request('/kb/types')
