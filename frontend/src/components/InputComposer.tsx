@@ -7,9 +7,10 @@ import { useFileUpload } from '@/context/FileUpload'
 import { useToast } from '@/context/Toast'
 import { formatSize, cn } from '@/lib/utils'
 import { ModelSelect } from '@/components/workspace/ModelSelect'
+import { ThinkingSelect } from '@/components/ThinkingSelect'
 import { PromptSuggestionPopover } from '@/components/PromptSuggestionPopover'
 import { PROMPT_SUGGESTIONS, type PromptSuggestionItem } from '@/data/promptCatalog'
-import { getSettings } from '@/api/client'
+import { getSettings, type ThinkingLevel } from '@/api/client'
 
 /** Workspace 输入区：圆角 24 输入框（自适应高度）+ 附件钮 + 模型胶囊 + 圆形发送 + 文件/上传 chip 行 + 免责声明。 */
 export function InputComposer({
@@ -22,6 +23,10 @@ export function InputComposer({
   value,
   onChange,
   leftSlot,
+  thinking,
+  onThinkingChange,
+  model,
+  onModelChange,
   onOpenSettings,
   onStop,
 }: {
@@ -39,7 +44,13 @@ export function InputComposer({
   onChange: (v: string | null) => void
   /** 底栏左侧附加控件（附件钮右侧），如新会话时的任务选择胶囊 */
   leftSlot?: ReactNode
-  /** 打开设置（模型胶囊入口：切模型/配 Key） */
+  /** 思考档位（胶囊展示与切换；随消息发送由持有方 ChatView 接线） */
+  thinking: ThinkingLevel
+  onThinkingChange: (level: ThinkingLevel) => void
+  /** 模型 profile 选中（多模型选择器；未选/undefined 落到 default_model） */
+  model?: string
+  onModelChange: (id: string) => void
+  /** 打开设置（模型菜单「管理模型…」入口） */
   onOpenSettings?: () => void
   /** 停止当前 run（running 且非 HITL 等待时，发送钮变停止钮） */
   onStop?: () => void
@@ -343,7 +354,20 @@ export function InputComposer({
             {leftSlot}
           </div>
           <div className="right">
-            <ModelSelect label={settings?.llm.model ?? 'deepseek-v4-flash'} onClick={onOpenSettings} />
+            <ThinkingSelect value={thinking} onChange={onThinkingChange} />
+            <ModelSelect
+              options={
+                settings?.models.map((m) => ({
+                  id: m.id,
+                  name: m.name,
+                  model: m.model,
+                  imageSupport: m.image_support,
+                })) ?? []
+              }
+              value={model ?? settings?.default_model ?? ''}
+              onChange={onModelChange}
+              onManage={() => onOpenSettings?.()}
+            />
             {runningBlock ? (
               <button
                 type="button"

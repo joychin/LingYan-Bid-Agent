@@ -55,7 +55,12 @@ export function Composer({
             <Plus />
           </button>
           <div className="right">
-            <ModelSelect label={model} />
+            <ModelSelect
+              options={[{ id: 'demo', name: model, model: 'demo-model', imageSupport: false }]}
+              value="demo"
+              onChange={() => {}}
+              onManage={() => {}}
+            />
             <button
               type="button"
               className="send-btn"

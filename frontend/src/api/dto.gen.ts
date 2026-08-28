@@ -110,15 +110,6 @@ export interface KbParseMeta {
   top_sections: string[];
 }
 /**
- * llm 角色比 vlm 多 image_support（对话模型自报的图片输入能力，能力状态条消费）。
- */
-export interface LlmSettings {
-  base_url: string;
-  model: string;
-  key_configured: boolean;
-  image_support: boolean;
-}
-/**
  * GET /messages 的 assistant 消息；tools/todos 是 run_traces 快照（嵌套树，松散 dict，
  * 键序与前端 ToolStep 同构——前端用客户端类型标注，见 client.ts）。
  */
@@ -142,15 +133,21 @@ export interface TodoItemPayload {
   status: "pending" | "in_progress" | "completed";
 }
 /**
+ * 一个已配置的模型接入（多 profile：任意供应商任意个；key 只回布尔）。
+ */
+export interface ModelProfile {
+  id: string;
+  name: string;
+  base_url: string;
+  model: string;
+  image_support: boolean;
+  key_configured: boolean;
+}
+/**
  * 百度云文档解析（PaddleOCR-VL）——凭证只认 env，对外只回是否已配置。
  */
 export interface OcrSettings {
   configured: boolean;
-}
-export interface RoleSettings {
-  base_url: string;
-  model: string;
-  key_configured: boolean;
 }
 export interface RunInfo {
   id: string;
@@ -166,8 +163,8 @@ export interface SendMessageResult {
   run_id: string;
 }
 export interface Settings {
-  llm: LlmSettings;
-  vlm: RoleSettings;
+  models: ModelProfile[];
+  default_model: string;
   ocr: OcrSettings;
   paths: SettingsPaths;
 }

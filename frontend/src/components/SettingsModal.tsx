@@ -1,16 +1,16 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Eye, EyeOff, FileText, FolderOpen, Sparkles, X } from 'lucide-react'
+import { Check, Eye, EyeOff, FileText, FolderOpen, Image as ImageIcon, Pencil, Plus, Sparkles, Star, Trash2, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ModalShell } from '@/components/ui/ModalShell'
 import {
   getSettings,
   isTauri,
-  putSettings,
+  putModels,
   revealInFolder,
   testModelConnection,
-  type ModelRole,
+  type ModelBody,
 } from '@/api/client'
 import { useToast } from '@/context/Toast'
 
@@ -27,34 +27,60 @@ const SECTIONS: { id: SectionId; title: string; icon: typeof Sparkles }[] = [
   { id: 'general', title: '通用', icon: FolderOpen },
 ]
 
-/** 厂商预设：只是填表快捷方式不当真值，选中后任何字段都可改；会过时，少而精。 */
-const VENDOR_PRESETS = [
-  { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-v4-flash', imageSupport: false },
-  { name: 'Moonshot（Kimi）', baseUrl: 'https://api.moonshot.cn/v1', model: 'kimi-k2', imageSupport: false },
-  { name: '阿里云百炼', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-max', imageSupport: false },
-  { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o', imageSupport: true },
-  { name: '智谱', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4.6', imageSupport: false },
-  { name: '火山方舟', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-1.6', imageSupport: true },
+/** 厂商预设：只是填表快捷方式不当真值，选中后任何字段都可改；模型列表会过时，少而精。 */
+const VENDOR_PRESETS: { name: string; baseUrl: string; models: { name: string; imageSupport: boolean }[] }[] = [
+  {
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com/v1',
+    models: [
+      { name: 'deepseek-v4-flash', imageSupport: false },
+      { name: 'deepseek-chat', imageSupport: false },
+      { name: 'deepseek-reasoner', imageSupport: false },
+    ],
+  },
+  {
+    name: 'Moonshot（Kimi）',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    models: [
+      { name: 'kimi-k2', imageSupport: false },
+      { name: 'kimi-latest', imageSupport: false },
+    ],
+  },
+  {
+    name: '阿里云百炼',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    models: [
+      { name: 'qwen-max', imageSupport: false },
+      { name: 'qwen-plus', imageSupport: false },
+      { name: 'qwen-vl-max', imageSupport: true },
+    ],
+  },
+  {
+    name: 'OpenAI',
+    baseUrl: 'https://api.openai.com/v1',
+    models: [
+      { name: 'gpt-4o', imageSupport: true },
+      { name: 'gpt-4.1', imageSupport: true },
+    ],
+  },
+  {
+    name: '智谱',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    models: [
+      { name: 'glm-4.6', imageSupport: false },
+      { name: 'glm-4.5v', imageSupport: true },
+    ],
+  },
+  {
+    name: '火山方舟',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    models: [
+      { name: 'doubao-seed-1.6', imageSupport: true },
+      { name: 'doubao-1.5-pro', imageSupport: false },
+    ],
+  },
+  { name: '自定义', baseUrl: '', models: [] },
 ]
-
-/** 单角色表单状态：三字段 + key 已存标记 + 测试反馈 */
-interface RoleFormState {
-  baseUrl: string
-  model: string
-  key: string
-  keySaved: boolean
-  imageSupport: boolean
-  testing: boolean
-}
-
-const emptyRole: RoleFormState = {
-  baseUrl: '',
-  model: '',
-  key: '',
-  keySaved: false,
-  imageSupport: false,
-  testing: false,
-}
 
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
   // open gate 必须有：ModalShell 无 open 概念，丢了它设置窗会常驻渲染（关闭回调
@@ -70,11 +96,12 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   // 能力状态条：按配置现算，配置齐备时不显示（提示不是门禁）
   const notices: { level: 'error' | 'warn'; text: string }[] = []
   if (settings) {
-    if (!settings.llm.key_configured) {
-      notices.push({ level: 'error', text: '未配置对话模型 API Key，无法对话' })
+    const withKey = settings.models.filter((m) => m.key_configured)
+    if (withKey.length === 0) {
+      notices.push({ level: 'error', text: '没有已配 Key 的模型，无法对话——请添加模型并保存 API Key' })
     }
-    if (!settings.vlm.key_configured && !settings.llm.image_support) {
-      notices.push({ level: 'warn', text: '没有可用的视觉能力：知识库图片 / 扫描件将无法识别，仅存档原件' })
+    if (!settings.models.some((m) => m.image_support && m.key_configured)) {
+      notices.push({ level: 'warn', text: '没有可用的图片识别模型：知识库图片 / 扫描件将无法识别，仅存档原件' })
     }
     if (!settings.ocr.configured) {
       notices.push({ level: 'warn', text: '未配置文档解析：扫描版 PDF 与 .doc 无法解析（仅能存档）' })
@@ -133,7 +160,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
             </div>
           )}
 
-          {section === 'models' && <ModelsSection open={open} settings={settings} />}
+          {section === 'models' && <ModelsSection settings={settings} />}
           {section === 'parse' && <ParseSection />}
           {section === 'general' && <GeneralSection settings={settings} />}
         </div>
@@ -143,96 +170,273 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
 }
 
 // ---------------------------------------------------------------------------
-// 模型区：LLM / VLM 双角色表单（key 走钥匙串，永不进 HTTP）
+// 模型区：profile 列表制（多模型；key 走钥匙串 per-model account，永不进 HTTP）
 // ---------------------------------------------------------------------------
 
-function ModelsSection({
-  open,
-  settings,
-}: {
-  open: boolean
-  settings: Awaited<ReturnType<typeof getSettings>> | undefined
-}) {
+/** 列表/表单共用的本地形状（编辑中的草稿；保存时全量 PUT） */
+interface LocalModel {
+  id: string
+  name: string
+  baseUrl: string
+  model: string
+  imageSupport: boolean
+  keySaved: boolean
+}
+
+function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSettings>> | undefined }) {
   const { toast } = useToast()
   const queryClient = useQueryClient()
-  const [llm, setLlm] = useState<RoleFormState>(emptyRole)
-  const [vlm, setVlm] = useState<RoleFormState>(emptyRole)
+  const [models, setModels] = useState<LocalModel[]>([])
+  const [defaultModel, setDefaultModel] = useState('')
+  // null=列表态；'new'=新增；否则=编辑该 id
+  const [editing, setEditing] = useState<string | 'new' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (settings) {
-      setLlm((s) => ({
-        ...s,
-        baseUrl: settings.llm.base_url,
-        model: settings.llm.model,
-        imageSupport: settings.llm.image_support,
-      }))
-      setVlm((s) => ({ ...s, baseUrl: settings.vlm.base_url, model: settings.vlm.model }))
+      setModels(
+        settings.models.map((m) => ({
+          id: m.id,
+          name: m.name,
+          baseUrl: m.base_url,
+          model: m.model,
+          imageSupport: m.image_support,
+          keySaved: m.key_configured,
+        })),
+      )
+      setDefaultModel(settings.default_model)
     }
   }, [settings])
 
-  useEffect(() => {
-    if (open && isTauri()) {
-      // Key 仅在 Tauri 环境经 command 存钥匙串，永不进入 HTTP 载荷；
-      // 输入过程会瞬时存在于 JS state 与 IPC payload，保存后立即清空
-      void Promise.all(
-        (['llm', 'vlm'] as const).map(async (role) => {
-          try {
-            const has = await window.__TAURI_INTERNALS__?.invoke('get_api_key_has_value', { role })
-            if (role === 'llm') setLlm((s) => ({ ...s, keySaved: Boolean(has) }))
-            else setVlm((s) => ({ ...s, keySaved: Boolean(has) }))
-          } catch {
-            /* 查询失败按未配置显示 */
-          }
-        }),
-      )
-    }
-  }, [open])
-
-  const saveRole = async (role: ModelRole) => {
+  const persist = async (list: LocalModel[], dflt: string) => {
     setError(null)
-    const form = role === 'llm' ? llm : vlm
+    const body: ModelBody[] = list.map((m) => ({
+      id: m.id,
+      name: m.name || m.id,
+      base_url: m.baseUrl,
+      model: m.model,
+      image_support: m.imageSupport,
+    }))
     try {
-      await putSettings(role, form.baseUrl, form.model, role === 'llm' ? form.imageSupport : undefined)
-      // 模型胶囊（InputComposer）的 settings query staleTime 5min：不失效则标签不刷新
+      await putModels(body, dflt)
       void queryClient.invalidateQueries({ queryKey: ['settings'] })
-      toast(role === 'llm' ? '对话模型已保存' : '视觉模型已保存', 'success')
+      return true
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+      return false
     }
   }
 
-  const saveRoleKey = async (role: ModelRole) => {
-    setError(null)
-    const form = role === 'llm' ? llm : vlm
+  const saveFromForm = async (draft: LocalModel, isNew: boolean) => {
+    const list = isNew ? [...models, draft] : models.map((m) => (m.id === draft.id ? draft : m))
+    // 唯一一条时自动设为默认；默认模型被删时回落第一条
+    let dflt = defaultModel
+    if (!list.some((m) => m.id === dflt)) dflt = list[0]?.id ?? ''
+    if (list.length === 1) dflt = list[0].id
+    if (!(await persist(list, dflt))) return
+    setDefaultModel(dflt)
+    setEditing(null)
+    toast(isNew ? '模型已添加' : '模型已保存', 'success')
+  }
+
+  const removeModel = async (m: LocalModel) => {
+    if (!window.confirm(`删除模型「${m.name}」？（已保存的 API Key 会保留在钥匙串，重新添加同 id 可复用）`)) return
+    const list = models.filter((x) => x.id !== m.id)
+    let dflt = defaultModel
+    if (dflt === m.id) dflt = list[0]?.id ?? ''
+    if (!(await persist(list, dflt))) return
+    setDefaultModel(dflt)
+    toast('模型已删除', 'success')
+  }
+
+  const setAsDefault = async (m: LocalModel) => {
+    if (!(await persist(models, m.id))) return
+    setDefaultModel(m.id)
+    toast(`「${m.name}」已设为默认`, 'success')
+  }
+
+  if (editing !== null) {
+    const isNew = editing === 'new'
+    const current = isNew ? null : (models.find((m) => m.id === editing) ?? null)
+    return (
+      <ModelForm
+        key={editing}
+        initial={current}
+        isNew={isNew}
+        error={error}
+        onSave={saveFromForm}
+        onCancel={() => setEditing(null)}
+        onError={setError}
+      />
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-muted-foreground">
+          可配置任意多个模型（不同供应商各配各的）；勾选「支持图片输入」的模型会用于知识库图片
+          / 扫描件识别。带 ★ 的是默认模型（后台轻量任务与新会话使用）。
+        </p>
+        <Button size="sm" onClick={() => setEditing('new')}>
+          <Plus className="mr-1 h-3.5 w-3.5" />
+          添加模型
+        </Button>
+      </div>
+
+      {models.length === 0 && (
+        <p className="rounded-lg border border-dashed border-line p-6 text-center text-sm text-muted-foreground">
+          还没有配置模型——点击「添加模型」，选一家厂商预设后只需填写 API Key
+        </p>
+      )}
+
+      {models.map((m) => (
+        <div key={m.id} className="flex items-center gap-3 rounded-lg border border-line p-3">
+          <button
+            type="button"
+            onClick={() => void setAsDefault(m)}
+            title={defaultModel === m.id ? '默认模型' : '设为默认'}
+            className={`grid h-6 w-6 shrink-0 place-items-center rounded-md transition-colors ${
+              defaultModel === m.id
+                ? 'text-amber-500'
+                : 'text-muted-foreground/40 hover:bg-muted hover:text-muted-foreground'
+            }`}
+          >
+            <Star className={`h-4 w-4 ${defaultModel === m.id ? 'fill-current' : ''}`} />
+          </button>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <span className="truncate text-sm font-medium">{m.name}</span>
+              {m.imageSupport && (
+                <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-accent-soft px-1.5 py-px text-[10px] text-primary">
+                  <ImageIcon className="h-2.5 w-2.5" />
+                  图片
+                </span>
+              )}
+              <span
+                className={`ml-auto shrink-0 text-[10px] ${m.keySaved ? 'text-success' : 'text-error'}`}
+              >
+                {m.keySaved ? 'Key 已配置' : 'Key 未配置'}
+              </span>
+            </div>
+            <p className="truncate font-mono text-xs text-muted-foreground">
+              {m.model} · {m.baseUrl.replace(/^https?:\/\//, '')}
+            </p>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => setEditing(m.id)}>
+            <Pencil className="mr-1 h-3 w-3" />
+            编辑
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => void removeModel(m)}>
+            <Trash2 className="h-3 w-3" />
+          </Button>
+        </div>
+      ))}
+
+      {error && <p className="text-sm text-error">{error}</p>}
+    </div>
+  )
+}
+
+/** 新增/编辑表单：厂商预设下拉 → 只需填 Key；模型从预设列表选或自定义 */
+function ModelForm({
+  initial,
+  isNew,
+  error,
+  onSave,
+  onCancel,
+  onError,
+}: {
+  initial: LocalModel | null
+  isNew: boolean
+  error: string | null
+  onSave: (draft: LocalModel, isNew: boolean) => void
+  onCancel: () => void
+  onError: (e: string | null) => void
+}) {
+  const { toast } = useToast()
+  const [presetIdx, setPresetIdx] = useState(() => {
+    if (initial) {
+      const i = VENDOR_PRESETS.findIndex((p) => p.baseUrl && p.baseUrl === initial.baseUrl)
+      if (i >= 0) return i
+    }
+    return VENDOR_PRESETS.length - 1 // 自定义
+  })
+  const [name, setName] = useState(initial?.name ?? '')
+  const [baseUrl, setBaseUrl] = useState(initial?.baseUrl ?? '')
+  const [model, setModel] = useState(initial?.model ?? '')
+  const [customModel, setCustomModel] = useState(() => {
+    if (!initial) return false
+    const p = VENDOR_PRESETS.find((p) => p.baseUrl && p.baseUrl === initial.baseUrl)
+    return !p || !p.models.some((mm) => mm.name === initial.model)
+  })
+  const [imageSupport, setImageSupport] = useState(initial?.imageSupport ?? false)
+  const [key, setKey] = useState('')
+  const [keySaved, setKeySaved] = useState(initial?.keySaved ?? false)
+  const [showKey, setShowKey] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const tauri = isTauri()
+
+  const preset = VENDOR_PRESETS[presetIdx]
+
+  // 已保存过的 profile id 沿用（钥匙串 account 按id）；新模型生成 uuid
+  const [pid] = useState(initial?.id ?? `m_${crypto.randomUUID().slice(0, 8)}`)
+
+  useEffect(() => {
+    if (tauri && initial) {
+      void window.__TAURI_INTERNALS__?.invoke('get_api_key_has_value', { role: `model:${initial.id}` })
+        .then((has) => setKeySaved(Boolean(has)))
+        .catch(() => {})
+    }
+  }, [tauri, initial])
+
+  const applyPreset = (i: number) => {
+    setPresetIdx(i)
+    const p = VENDOR_PRESETS[i]
+    if (p.baseUrl) setBaseUrl(p.baseUrl)
+    if (!name && p.name !== '自定义') setName(p.name)
+    if (p.models.length > 0) {
+      setModel(p.models[0].name)
+      setImageSupport(p.models[0].imageSupport)
+      setCustomModel(false)
+    } else {
+      setCustomModel(true)
+    }
+  }
+
+  const pickPresetModel = (m: { name: string; imageSupport: boolean } | null) => {
+    if (m) {
+      setModel(m.name)
+      setImageSupport(m.imageSupport)
+    } else {
+      setCustomModel(true)
+      setModel('')
+    }
+  }
+
+  const saveKey = async () => {
+    onError(null)
     try {
-      await window.__TAURI_INTERNALS__?.invoke('set_model_settings', {
-        role,
-        baseUrl: form.baseUrl,
-        model: form.model,
-        apiKey: form.key,
-      })
-      if (role === 'llm') setLlm((s) => ({ ...s, key: '', keySaved: true }))
-      else setVlm((s) => ({ ...s, key: '', keySaved: true }))
+      await window.__TAURI_INTERNALS__?.invoke('set_model_key', { modelId: pid, apiKey: key })
+      setKey('')
+      setKeySaved(true)
       toast('API Key 已保存到钥匙串，正在重启服务…', 'success')
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      onError(e instanceof Error ? e.message : String(e))
     }
   }
 
-  const testRole = async (role: ModelRole) => {
-    setError(null)
-    const setTesting = (v: boolean) =>
-      role === 'llm' ? setLlm((s) => ({ ...s, testing: v })) : setVlm((s) => ({ ...s, testing: v }))
+  const test = async () => {
+    onError(null)
     setTesting(true)
     try {
-      // 先保存表单值再测试，避免「测的是旧配置」
-      const form = role === 'llm' ? llm : vlm
-      await putSettings(role, form.baseUrl, form.model, role === 'llm' ? form.imageSupport : undefined)
-      const r = await testModelConnection(role)
+      // 先保存表单值（进列表）再测试，避免「测的是旧配置」
+      const draft: LocalModel = { id: pid, name: name.trim() || pid, baseUrl: baseUrl.trim(), model: model.trim(), imageSupport, keySaved }
+      await onSave(draft, isNew)
+      const r = await testModelConnection({ model: pid })
       toast(r.ok ? '连接正常' : '连接失败', r.ok ? 'success' : 'error')
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      onError(e instanceof Error ? e.message : String(e))
     } finally {
       setTesting(false)
     }
@@ -240,31 +444,160 @@ function ModelsSection({
 
   return (
     <div className="space-y-4">
-      {/* 厂商预设：快捷填充 LLM 表单（字段选中后可改） */}
-      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-        <span className="shrink-0">预设：</span>
-        {VENDOR_PRESETS.map((p) => (
-          <button
-            key={p.name}
-            type="button"
-            onClick={() => setLlm((s) => ({ ...s, baseUrl: p.baseUrl, model: p.model, imageSupport: p.imageSupport }))}
-            className="rounded-full border px-2.5 py-0.5 transition-colors hover:bg-secondary"
-          >
-            {p.name}
-          </button>
-        ))}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+        >
+          ← 返回模型列表
+        </button>
+        <span className="text-sm font-medium">{isNew ? '添加模型' : `编辑：${initial?.name}`}</span>
       </div>
 
-      {renderRole('llm', '对话模型（LLM）', '对话与标书生成的文本模型', llm, setLlm, saveRole, saveRoleKey, testRole, {
-        baseUrl: 'https://api.deepseek.com/v1',
-        model: 'deepseek-v4-flash',
-        keyPlaceholder: '输入后保存到钥匙串并重启 sidecar',
-      })}
-      {renderRole('vlm', '视觉模型（VLM，可选）', '知识库图片 / 扫描件识别。不配置时仅保存原件，需手动填写信息', vlm, setVlm, saveRole, saveRoleKey, testRole, {
-        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        model: 'qwen-vl-max',
-        keyPlaceholder: '视觉模型 API Key（与对话模型可不同供应商）',
-      })}
+      <div className="space-y-3 rounded-lg border border-line p-3">
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">厂商预设</label>
+          <div className="flex flex-wrap gap-1.5">
+            {VENDOR_PRESETS.map((p, i) => (
+              <button
+                key={p.name}
+                type="button"
+                onClick={() => applyPreset(i)}
+                className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                  presetIdx === i ? 'border-primary bg-accent-soft text-primary' : 'hover:bg-secondary'
+                }`}
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            选预设后只需填 API Key；模型、地址都可再改。
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">名称</label>
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={preset.name === '自定义' ? '如：DeepSeek 主力' : preset.name} />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">Base URL</label>
+          <Input
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            placeholder={preset.baseUrl || 'https://api.example.com/v1'}
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">模型</label>
+          {preset.models.length > 0 && !customModel ? (
+            <div className="flex flex-wrap gap-1.5">
+              {preset.models.map((mm) => (
+                <button
+                  key={mm.name}
+                  type="button"
+                  onClick={() => pickPresetModel(mm)}
+                  className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                    model === mm.name ? 'border-primary bg-accent-soft text-primary' : 'hover:bg-secondary'
+                  }`}
+                >
+                  {mm.imageSupport && <ImageIcon className="h-3 w-3" />}
+                  {mm.name}
+                  {model === mm.name && <Check className="h-3 w-3" />}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => pickPresetModel(null)}
+                className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary"
+              >
+                自定义…
+              </button>
+            </div>
+          ) : (
+            <div className="flex gap-2">
+              <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="模型名，如 deepseek-v4-flash" />
+              {preset.models.length > 0 && (
+                <Button size="sm" variant="outline" onClick={() => setCustomModel(false)}>
+                  预设列表
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+
+        <label className="flex cursor-pointer items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            checked={imageSupport}
+            onChange={(e) => setImageSupport(e.target.checked)}
+            className="accent-[var(--brand)]"
+          />
+          <span className="font-medium">支持图片输入</span>
+          <span className="text-muted-foreground">
+            （勾选后该模型将用于知识库图片 / 扫描件识别；能否真的读图以模型实际能力为准）
+          </span>
+        </label>
+
+        {tauri ? (
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">
+              API Key {keySaved && <span className="text-success">（已保存到钥匙串）</span>}
+            </label>
+            <div className="relative">
+              <Input
+                type={showKey ? 'text' : 'password'}
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                placeholder={keySaved ? '已配置，输入新值可更换' : '输入后保存到钥匙串并重启 sidecar'}
+                className="pr-9"
+              />
+              <button
+                type="button"
+                onClick={() => setShowKey(!showKey)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                aria-label={showKey ? '隐藏 Key' : '显示 Key'}
+              >
+                {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            浏览器开发模式下 Key 经环境变量 MODEL_KEYS 配置（sidecar/.env，JSON 形如
+            {' {"<模型id>": "sk-…"}'}）。
+          </p>
+        )}
+
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            disabled={!baseUrl.trim() || !model.trim()}
+            onClick={() =>
+              onSave(
+                { id: pid, name: name.trim() || pid, baseUrl: baseUrl.trim(), model: model.trim(), imageSupport, keySaved },
+                isNew,
+              )
+            }
+          >
+            保存
+          </Button>
+          {tauri && (
+            <Button size="sm" variant="outline" disabled={!key} onClick={saveKey}>
+              保存 Key
+            </Button>
+          )}
+          <Button size="sm" variant="outline" disabled={testing} onClick={test}>
+            {testing ? '测试中…' : '测试'}
+          </Button>
+          <Button size="sm" variant="outline" onClick={onCancel}>
+            取消
+          </Button>
+        </div>
+      </div>
 
       {error && <p className="text-sm text-error">{error}</p>}
     </div>
@@ -320,7 +653,7 @@ function ParseSection() {
     setError(null)
     setTesting(true)
     try {
-      const r = await testModelConnection('ocr')
+      const r = await testModelConnection({ role: 'ocr' })
       toast(r.ok ? '连接正常' : '连接失败', r.ok ? 'success' : 'error')
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -465,92 +798,6 @@ function PathRow({
         )}
       </div>
       <p className="pl-[4.5rem] text-xs text-muted-foreground">{hint}</p>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// 双角色表单渲染（llm/vlm 共用；image_support 勾选仅 llm 显示）
-// ---------------------------------------------------------------------------
-
-interface RoleUiConfig {
-  baseUrl: string
-  model: string
-  keyPlaceholder: string
-}
-
-function renderRole(
-  role: ModelRole,
-  title: string,
-  hint: string,
-  form: RoleFormState,
-  setForm: Dispatch<SetStateAction<RoleFormState>>,
-  onSave: (role: ModelRole) => void,
-  onSaveKey: (role: ModelRole) => void,
-  onTest: (role: ModelRole) => void,
-  ui: RoleUiConfig,
-) {
-  return (
-    <div className="space-y-3 rounded-lg border border-line p-3">
-      <div>
-        <div className="text-sm font-medium">{title}</div>
-        <p className="text-xs text-muted-foreground">{hint}</p>
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Base URL</label>
-        <Input
-          value={form.baseUrl}
-          onChange={(e) => setForm((s) => ({ ...s, baseUrl: e.target.value }))}
-          placeholder={ui.baseUrl}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">模型</label>
-        <Input value={form.model} onChange={(e) => setForm((s) => ({ ...s, model: e.target.value }))} placeholder={ui.model} />
-      </div>
-
-      {role === 'llm' && (
-        <label className="flex cursor-pointer items-center gap-2 text-xs">
-          <input
-            type="checkbox"
-            checked={form.imageSupport}
-            onChange={(e) => setForm((s) => ({ ...s, imageSupport: e.target.checked }))}
-            className="accent-[var(--brand)]"
-          />
-          <span className="font-medium">支持图片输入</span>
-          <span className="text-muted-foreground">
-            （勾选后不再提醒配置视觉模型；对话中能否真的读图以模型实际能力为准）
-          </span>
-        </label>
-      )}
-
-      {isTauri() && (
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            API Key {form.keySaved && <span className="text-success">（已保存到钥匙串）</span>}
-          </label>
-          <Input
-            type="password"
-            value={form.key}
-            onChange={(e) => setForm((s) => ({ ...s, key: e.target.value }))}
-            placeholder={ui.keyPlaceholder}
-          />
-        </div>
-      )}
-
-      <div className="flex gap-2">
-        <Button size="sm" onClick={() => onSave(role)}>
-          保存
-        </Button>
-        {isTauri() && (
-          <Button size="sm" variant="outline" disabled={!form.key} onClick={() => onSaveKey(role)}>
-            保存 Key
-          </Button>
-        )}
-        <Button size="sm" variant="outline" disabled={form.testing} onClick={() => onTest(role)}>
-          {form.testing ? '测试中…' : '测试'}
-        </Button>
-      </div>
     </div>
   )
 }

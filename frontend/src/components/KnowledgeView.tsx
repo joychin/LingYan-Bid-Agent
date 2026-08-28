@@ -489,7 +489,7 @@ function ItemDetail({
             <div className="kb-main-empty">
               <p>无文本内容</p>
               <p className="text-xs text-muted-foreground">
-                {isImage ? '图片原件可在「信息」页确认识别结果，或配置视觉模型后点「重新识别」' : '可点「重新识别」重试'}
+                {isImage ? '图片原件可在「信息」页确认识别结果，或配置支持图片输入的模型后点「重新识别」' : '可点「重新识别」重试'}
               </p>
             </div>
           )}

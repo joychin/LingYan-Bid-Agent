@@ -21,7 +21,7 @@ import type {
   KbMetadata,
   KbParseMeta,
   Message as MessageDto,
-  RoleSettings,
+  ModelProfile,
   RunInfo,
   SendMessageResult,
   Settings,
@@ -42,7 +42,7 @@ export type {
   KbItem,
   KbMetadata,
   KbParseMeta,
-  RoleSettings,
+  ModelProfile,
   RunInfo,
   SendMessageResult,
   Settings,
@@ -142,8 +142,6 @@ export type HitlDecision =
   | { type: 'respond'; message: string }
   | { type: 'edit'; edited_action: { name: string; args: Record<string, unknown> } }
 
-export type ModelRole = 'llm' | 'vlm'
-
 export function listTasks(): Promise<{ tasks: Task[] }> {
   return request('/tasks')
 }
@@ -201,10 +199,13 @@ export function sendMessage(
   convId: string,
   content: string,
   thinking: ThinkingLevel = 'low',
+  model?: string,
 ): Promise<SendMessageResult> {
+  const body: Record<string, unknown> = { content, thinking }
+  if (model) body.model = model
   return request(`/conversations/${convId}/messages`, {
     method: 'POST',
-    body: JSON.stringify({ content, thinking }),
+    body: JSON.stringify(body),
   })
 }
 
@@ -230,21 +231,33 @@ export function getSettings(): Promise<Settings> {
   return request('/settings')
 }
 
-/** 按角色 PUT；vlm.base_url 传空串 = 清除视觉模型配置。image_support 仅 llm 角色消费。 */
-export function putSettings(
-  role: ModelRole,
-  base_url: string,
-  model: string,
-  imageSupport?: boolean,
-): Promise<{ ok: boolean }> {
-  const block: Record<string, unknown> = { base_url, model }
-  if (role === 'llm' && imageSupport !== undefined) block.image_support = imageSupport
-  return request('/settings', { method: 'PUT', body: JSON.stringify({ [role]: block }) })
+/** 模型 profile 请求体（id 前端生成 crypto.randomUUID，一旦生成不可变）。 */
+export interface ModelBody {
+  id: string
+  name?: string
+  base_url?: string
+  model?: string
+  image_support?: boolean
 }
 
-/** 设置「测试」按钮：llm/vlm 发最小 chat；ocr 用 AK/SK 换一次 access_token 探活。 */
-export function testModelConnection(role: ModelRole | 'ocr'): Promise<{ ok: boolean; role: string }> {
-  return request(`/settings/test?role=${role}`)
+/** 全量覆盖写模型列表 + 默认模型（settings.json 是唯一真值，前端是唯一写者）。 */
+export function putModels(
+  models: ModelBody[],
+  defaultModel: string,
+): Promise<{ ok: boolean }> {
+  return request('/settings/models', {
+    method: 'PUT',
+    body: JSON.stringify({ models, default_model: defaultModel }),
+  })
+}
+
+/** 设置「测试」按钮：model=<profile id> 发最小 chat；ocr 用 AK/SK 换一次 access_token 探活。 */
+export function testModelConnection(
+  target: { model: string } | { role: 'ocr' },
+): Promise<{ ok: boolean }> {
+  const qs =
+    'model' in target ? `model=${encodeURIComponent(target.model)}` : `role=${target.role}`
+  return request(`/settings/test?${qs}`)
 }
 
 export function artifactKey(a: Pick<Artifact, 'kind' | 'schema_id' | 'schema_version'>): string {

@@ -28,9 +28,29 @@ import { useCreateTask, useTasks } from '@/hooks/useTasks'
 import { useFileUpload } from '@/context/FileUpload'
 import { useToast } from '@/context/Toast'
 import { formatDay } from '@/lib/utils'
-import type { Artifact, Message } from '@/api/client'
+import type { Artifact, Message, ThinkingLevel } from '@/api/client'
 import ReactMarkdown from 'react-markdown'
 import { mdRemarkPlugins } from '@/lib/markdown'
+
+/** 思考档位的本地记忆（App.tsx 的 LS_* 先例：tender-agent.<名字>） */
+const LS_THINKING = 'tender-agent.thinking-level'
+/** 模型选中的本地记忆：按会话粘性 map（cid→profile id）+ 上次使用（新会话默认） */
+const LS_MODEL_BY_CONV = 'tender-agent.model-by-conv'
+const LS_MODEL_LAST = 'tender-agent.model-last'
+
+function loadThinking(): ThinkingLevel {
+  const v = localStorage.getItem(LS_THINKING)
+  return v === 'medium' || v === 'high' ? v : 'low'
+}
+
+function loadModelMap(): Record<string, string> {
+  try {
+    const v = JSON.parse(localStorage.getItem(LS_MODEL_BY_CONV) || '{}')
+    return typeof v === 'object' && v ? v : {}
+  } catch {
+    return {}
+  }
+}
 
 export function ChatView({
   convId,
@@ -84,6 +104,36 @@ export function ChatView({
   const [showJump, setShowJump] = useState(false)
   const [prompt, setPrompt] = useState<string | null>(initialSend)
   const [pickedTaskId, setPickedTaskId] = useState<string | null>(null)
+  // 思考档位（reasoning_effort）：随每条消息发送、localStorage 记忆上次选择（默认低）。
+  // ChatView 持有而非 InputComposer：无会话首发（initialSend effect）也要带上档位
+  const [thinking, setThinking] = useState<ThinkingLevel>(loadThinking)
+  const changeThinking = useCallback((level: ThinkingLevel) => {
+    setThinking(level)
+    localStorage.setItem(LS_THINKING, level)
+  }, [])
+  // 模型选中（多模型 profile）：按会话粘性——会话里选过就一直用，新会话/无记录时
+  // 用上次使用（无则 undefined=服务器 default）。ChatView 持有同 thinking 先例
+  const [model, setModel] = useState<string | undefined>(() => {
+    const last = localStorage.getItem(LS_MODEL_LAST)
+    return last ?? undefined
+  })
+  useEffect(() => {
+    // 切会话/进草稿时恢复该会话的粘性选择（无记录回落上次使用）
+    const map = loadModelMap()
+    setModel(map[convId ?? ''] ?? localStorage.getItem(LS_MODEL_LAST) ?? undefined)
+  }, [convId])
+  const changeModel = useCallback(
+    (id: string) => {
+      setModel(id)
+      localStorage.setItem(LS_MODEL_LAST, id)
+      if (convId) {
+        const map = loadModelMap()
+        map[convId] = id
+        localStorage.setItem(LS_MODEL_BY_CONV, JSON.stringify(map))
+      }
+    },
+    [convId],
+  )
   // HITL 逐项草稿（含问快照：单问=向导 N=1 特例，统一卡内作答）。按 runId 判定
   // 新中断才重置：SSE 重连对账（run.state waiting_input）会 new 一个同 runId 的
   // interrupt 对象，按对象引用重置会把用户已答内容清空
@@ -228,6 +278,7 @@ export function ChatView({
           throw new Error('请先选择所属任务')
         }
         // 建会话失败：toast 已提示；向上抛让 InputComposer 保留输入（不清空、不 acknowledge）
+        // 首发消息由建会话后的 initialSend effect 发出，届时带上当前思考档位
         try {
           await onRequestCreate(text, pickedTaskId)
         } catch (e) {
@@ -238,9 +289,9 @@ export function ChatView({
       }
       if (running) return
       // 失败向上抛：useRun 已置错误卡，InputComposer 据此保留输入与新上传 chips
-      await send(text)
+      await send(text, thinking, model)
     },
-    [convId, running, send, onRequestCreate, pickedTaskId, toast],
+    [convId, running, send, onRequestCreate, pickedTaskId, thinking, model, toast],
   )
 
   // 无会话时 App 转发首发消息。StrictMode 开发模式会把本 effect 跑两遍
@@ -302,7 +353,7 @@ export function ChatView({
 
   return (
     <UploadDropzone>
-      {/* min-h-0：本层与 UploadDropzone 层都是 .main（flex column，上邻 44px chat-head）里的
+      {/* min-h-0：本层与 UploadDropzone 层都是 .main（flex column，上邻 50px chat-head）里的
           h-full flex item，缺 min-h-0 时依赖默认 shrink 被压缩，异常场景会把 composer
           连同底栏推出视口下缘被 overflow:hidden 裁掉（表现为发送钮/文件 chip 点不到） */}
       <div className="relative flex h-full min-h-0 w-full flex-col">
@@ -370,6 +421,10 @@ export function ChatView({
           onSend={doSend}
           value={prompt}
           onChange={setPrompt}
+          thinking={thinking}
+          onThinkingChange={changeThinking}
+          model={model}
+          onModelChange={changeModel}
           onOpenSettings={onOpenSettings}
           onStop={() => void cancel()}
           leftSlot={
@@ -420,11 +475,11 @@ function RunMessage({
         </>
       }
     >
-      {reasoningText && <DeepThinking text={reasoningText} isStreaming={running} autoFollow />}
-      {(tools.length > 0 || todos.length > 0) && (
+      {(reasoningText || tools.length > 0 || todos.length > 0) && (
         <Reasoning isStreaming={running} className="mb-1.5">
-          <ReasoningTrigger className="text-sm text-foreground">执行过程</ReasoningTrigger>
-          <ReasoningContent contentClassName="mt-2">
+          <ReasoningTrigger className="text-sm text-muted-foreground">执行过程</ReasoningTrigger>
+          <ReasoningContent contentClassName="mt-2 space-y-2">
+            {reasoningText && <DeepThinking text={reasoningText} isStreaming={running} autoFollow />}
             <RunTrace tools={tools} todos={todos} done={done} total={total} />
           </ReasoningContent>
         </Reasoning>

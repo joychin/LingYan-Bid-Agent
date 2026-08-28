@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { getLatestRun, resumeRun, cancelRun, sendMessage, type HitlDecision } from '@/api/client'
+import { getLatestRun, resumeRun, cancelRun, sendMessage, type HitlDecision, type ThinkingLevel } from '@/api/client'
 import { subscribeSSE, type ToolStep } from '@/api/sse'
 import { useSidecarHealth } from '@/context/SidecarHealth'
 import { INITIAL_STATE, runReducer, type Action, type RunState } from './runReducer'
@@ -85,12 +85,13 @@ export function useRun(convId: string | null) {
   }, [convId, queryClient, reconnectSeq, dispatch])
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, thinking: ThinkingLevel = 'low', model?: string) => {
       if (!convId) return
       const content = text.trim()
       if (!content) return
       const cur = stateRef.current
-      // HITL 等待中：输入框的回答 = respond 决策（代替工具执行，回答合成为工具结果续跑）
+      // HITL 等待中：输入框的回答 = respond 决策（代替工具执行，回答合成为工具结果续跑）；
+      // 续跑沿用 run 存档的思考档位/模型，此处 thinking/model 不参与
       if (cur.interrupt) {
         const runId = cur.interrupt.runId
         dispatch({ type: 'remember-sent', text: content })
@@ -113,7 +114,7 @@ export function useRun(convId: string | null) {
       if (cur.running) return
       dispatch({ type: 'remember-sent', text: content })
       try {
-        await sendMessage(convId, content)
+        await sendMessage(convId, content, thinking, model)
         // user 消息已由 sidecar 落库，拉取真值
         queryClient.invalidateQueries({ queryKey: ['messages', convId] })
       } catch (e) {

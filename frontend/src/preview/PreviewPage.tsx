@@ -109,7 +109,15 @@ export function PreviewPage() {
             </div>
           </GalleryCell>
           <GalleryCell label="ModelSelect">
-            <ModelSelect label="Hy3" />
+            <ModelSelect
+              options={[
+                { id: 'a', name: 'DeepSeek 主力', model: 'deepseek-v4-flash', imageSupport: false },
+                { id: 'b', name: '通义视觉', model: 'qwen-vl-max', imageSupport: true },
+              ]}
+              value="a"
+              onChange={() => {}}
+              onManage={() => {}}
+            />
           </GalleryCell>
         </GallerySection>
 
