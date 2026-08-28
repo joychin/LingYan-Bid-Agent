@@ -343,6 +343,7 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
                 &nonce,
             ) {
                 Ok((child, port, token)) => {
+                    log::info!("sidecar spawned: pid={} port={}", child.id(), port);
                     *mgr.info.lock().unwrap() = Some(SidecarInfo { port, token: token.clone() });
                     *mgr.child.lock().unwrap() = Some(child);
                     *mgr.state.lock().unwrap() = SidecarState::Starting;
@@ -372,6 +373,7 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
 
                         if failed >= MAX_RESTARTS {
                             emit(&app, SidecarState::Failed, "已达重启上限，停止自动重启");
+                            log::error!("sidecar healthz 连续失败达上限（{failed} 次），停止自动重启，等待手动触发");
                             // 等待手动触发（set_model_settings 会置 restart_requested）
                             while !mgr.restart_requested.swap(false, Ordering::SeqCst) {
                                 if mgr.stopping.load(Ordering::SeqCst) {
@@ -384,6 +386,7 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
                         }
                         restart_waits += 1;
                         let wait = Duration::from_millis(1000 * 2u64.pow(restart_waits.min(3)));
+                        log::warn!("{wait:?} 后重试拉起 sidecar（第 {failed} 次失败）");
                         thread::sleep(wait);
                         continue;
                     }
@@ -414,19 +417,20 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
                     break; // 外层重新拉起
                 }
 
-                let exited = {
+                // Some(how)=已退出（how 为退出状态描述；wait 失败视为已退出但状态未知），None=仍在运行
+                let exited: Option<String> = {
                     let mut c = mgr.child.lock().unwrap();
                     match c.as_mut().map(|c| c.try_wait()) {
-                        Some(Ok(Some(_status))) => {
+                        Some(Ok(Some(status))) => {
                             *c = None;
-                            true
+                            Some(status.to_string())
                         }
-                        Some(Ok(None)) => false,
-                        _ => true,
+                        Some(Ok(None)) => None,
+                        _ => Some("wait 失败".into()),
                     }
                 };
 
-                if exited {
+                if let Some(how) = exited {
                     if mgr.stopping.load(Ordering::SeqCst) {
                         break 'outer;
                     }
@@ -437,10 +441,12 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
                     };
                     *mgr.state.lock().unwrap() = SidecarState::Failed;
                     emit(&app, SidecarState::Failed, "process exited unexpectedly");
-                    log::warn!("sidecar exited unexpectedly (attempt {failed})");
+                    // 退出状态是崩溃诊断的第一现场（信号退出在 unix 下由 code() 反映）
+                    log::warn!("sidecar exited unexpectedly: {how} (attempt {failed})");
 
                     if failed >= MAX_RESTARTS {
                         emit(&app, SidecarState::Failed, "已达重启上限，停止自动重启");
+                        log::error!("sidecar 连续意外退出达上限（{failed} 次），停止自动重启，等待手动触发");
                         while !mgr.restart_requested.swap(false, Ordering::SeqCst) {
                             if mgr.stopping.load(Ordering::SeqCst) {
                                 break 'outer;
@@ -452,6 +458,7 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
                     }
                     restart_waits += 1;
                     let wait = Duration::from_millis(1000 * 2u64.pow(restart_waits.min(3)));
+                    log::warn!("{wait:?} 后重试拉起 sidecar（第 {failed} 次失败）");
                     thread::sleep(wait);
                     break; // 外层重新拉起
                 }
@@ -464,6 +471,7 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
 
 /// 停止并清理 sidecar（应用退出时调用）。置 stopping 后杀进程树并回收，supervisor 随后退出。
 pub fn shutdown(mgr: &SidecarManager) {
+    log::info!("应用退出：停止 sidecar 进程树");
     mgr.stopping.store(true, Ordering::SeqCst);
     kill_and_reap(mgr);
     *mgr.state.lock().unwrap() = SidecarState::Failed;

@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -21,7 +22,31 @@ from . import config as cfg
 from . import db
 from .api import artifacts, conversations, files, knowledge, runs, settings as settings_api, sse, tasks
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+
+def _setup_logging() -> None:
+    """stderr 控制台 + 滚动文件双写。
+
+    Tauri 模式下 sidecar 的 stdio 被置 null（Python 侧日志原本完全丢失），文件落盘是
+    进程崩溃/异常退出时唯一的现场来源（data/logs/sidecar.log，5MB × 3 备份）。
+    幂等守卫：`python -m app.main` 下模块会以 __main__ 与 app.main 两个名字各执行一次
+    模块级代码（uvicorn 按 import string 再导入），无守卫会挂两个 file handler 双写。
+    """
+    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
+    root = logging.getLogger()
+    if any(isinstance(h, RotatingFileHandler) for h in root.handlers):
+        return
+    log_dir = cfg.data_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        log_dir / "sidecar.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    root.addHandler(handler)
+
+
+_setup_logging()
 logger = logging.getLogger("sidecar")
 
 VERSION = "0.1.0"
@@ -135,7 +160,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Tender Agent sidecar")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    uvicorn.run("app.main:app", host="127.0.0.1", port=args.port, log_level="info")
+    # log_config=None：uvicorn 不再自配 handler，其 error/access 日志传播到 root——
+    # 与 app 日志共用同一格式（此前两套格式并存），access log 也随双写落盘。
+    # （uvicorn CLI 直接拉起 app.main:app 时 CLI 会先自配 uvicorn logger，app 日志仍进文件。）
+    uvicorn.run("app.main:app", host="127.0.0.1", port=args.port, log_level="info", log_config=None)
 
 
 if __name__ == "__main__":
