@@ -79,6 +79,26 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    command 保存后重启 sidecar，凭证不进 HTTP）；通用页= 数据目录/日志路径 +
    「打开」（**reveal_in_folder 路径前缀从 workspace/ 扩到 data/**）+ 版本号
    （vite define `__APP_VERSION__`）。
+   **多模型 profile 与输入框选模型（2026-08-29，替代上段的 llm/vlm 双角色形状）**：
+   settings.json 换新形状 `{models:[{id,name,base_url,model,image_support}], default_model}`；
+   GET /settings = `{models(含 key_configured), default_model, ocr, paths}`；PUT
+   `/settings/models` 全量覆盖（前端唯一写者）；`/settings/test?model=<id>` 按模型
+   ping（role=ocr 保留）。**vlm 独立角色删除**——视觉能力= 任一 image_support 的
+   profile（`config.resolve_vision()`：default 优先，否则第一个；vlm.py 改读它，
+   VLM_* env 死）。Key：钥匙串 `model-key-<id>` per-profile account，Rust 组
+   `MODEL_KEYS` JSON（{id:key}）spawn 注入（`set_model_key` command 取代
+   set_model_settings；default/vision 两条 id 对旧 llm-api-key/vlm-api-key account
+   读侧兜底，旧 settings 双角色/扁平形状 Python+Rust 两侧读侧迁移）。**按消息选模型**：
+   POST /messages 加 `model`（未知 id 静默回落 default）；runs 加 `model` 列（迁移 11，
+   resume 沿用）；agent 从进程级单例改 **`dict[profile_id]` 缓存**（get_agent(pid)、
+   rebuild=清缓存、saver 共享、in-flight 持引用互不影响、子代理继承同实例）；
+   titler/KB 抽取恒走 default profile（`llm_*` 薄壳保留）。前端：设置模型区改
+   **列表制**（卡片+★默认+编辑/删除+添加表单：厂商预设胶囊→选模型→填 Key；预设带
+   每家模型清单与图片标记）；`ModelSelect` 重写为**下拉选择器**（列全部模型+Check+
+   「管理模型…」尾项，克隆 ThinkingSelect 模式）；选中按会话粘性（localStorage
+   `model-by-conv` map + `model-last`），随每条消息发送。
+   **关不掉 bug 教训**：ModalShell 无 open 概念，SettingsModal 必须 `if (!open) return null`
+   ——双栏重构时丢过一次（设置窗常驻、关闭回调全生效但 UI 永不卸载）。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。
