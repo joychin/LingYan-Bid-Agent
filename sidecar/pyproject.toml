@@ -19,6 +19,10 @@ dependencies = [
     "httpx",
     "trafilatura>=2.0",
     "jieba>=0.42.1",
+    # vlm.py / api/settings.py 直用 openai SDK（ChatCompletions + 连通性测试），
+    # 原先靠 langchain-openai 的传递依赖裸用，显式声明转正（版本=uv.lock 既有解析）
+    "openai==3.3.1",
+    "tenacity>=9",
 ]
 
 # 国内网络必须（pypi.org 直连会 TLS 超时）
@@ -29,7 +33,18 @@ default = true
 [dependency-groups]
 dev = [
     "pytest",
+    "ruff",
+    # pydantic 模型 → TS interface 生成（CLI 命令名 pydantic2ts；契约单一事实源用）
+    "pydantic-to-typescript",
 ]
+
+[tool.ruff]
+target-version = "py312"
+# 不启用 formatter（待工作区干净后再一次性全量格式化，避免大 diff 混入功能改动）
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.pytest.ini_options]
 addopts = "-m 'not e2e'"

@@ -49,17 +49,12 @@ pub struct ModelSettings {
     pub vlm: RoleSettings,
 }
 
-#[derive(Clone, Copy, PartialEq, Serialize, Debug)]
+#[derive(Clone, Copy, PartialEq, Serialize, Debug, Default)]
 pub enum SidecarState {
     Starting,
     Running,
+    #[default]
     Failed,
-}
-
-impl Default for SidecarState {
-    fn default() -> Self {
-        Self::Failed
-    }
 }
 
 /// 跨线程共享的 sidecar 状态（supervisor 线程 + commands + 退出钩子）。

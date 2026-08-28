@@ -8,7 +8,6 @@
 import threading
 
 import httpx
-import pytest
 from langchain_core.exceptions import ModelConnectionError
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 

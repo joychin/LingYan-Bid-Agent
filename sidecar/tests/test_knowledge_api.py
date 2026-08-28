@@ -44,7 +44,6 @@ def test_badge_counts_pending(client):
 
 
 def test_confirm_metadata_flow(client):
-    import json
 
     r = _upload(client, "cert.txt", b"# cert\n\nISO9001 content")
     kid = r.json()["id"]
@@ -84,7 +83,6 @@ def test_confirm_metadata_flow(client):
 
 
 def test_items_list_filters(client):
-    import json
 
     r1 = _upload(client, "a.txt", b"# a\n\nx")
     r2 = _upload(client, "b.txt", b"# b\n\ny")

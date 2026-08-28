@@ -6,8 +6,7 @@ from app import db
 from app.knowledge import fts, store
 from app.knowledge.ingest import reindex_item
 from app.knowledge.segmenter import segments_from
-from app.parse import count_nodes, outline_with_lines
-
+from app.parse import outline_with_lines
 from tests.util import init_env
 
 

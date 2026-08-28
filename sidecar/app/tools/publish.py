@@ -12,7 +12,6 @@ import json
 from pathlib import Path
 
 from langchain_core.tools import tool
-from pydantic import ValidationError
 
 from .. import artifact_store, contracts, publish, runctx
 from ..config import workspace_dir

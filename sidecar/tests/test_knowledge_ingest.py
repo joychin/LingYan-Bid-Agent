@@ -5,7 +5,6 @@ import json
 from app import db
 from app.knowledge import store
 from app.knowledge.ingest import run_ingest
-
 from tests.util import init_env
 
 

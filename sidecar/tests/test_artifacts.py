@@ -1,7 +1,6 @@
 """类型化 Artifact：/api/contracts、/api/artifacts 列表与内容端点。"""
 
 from app import artifact_store, db, publish
-from tests.util import create_task
 
 KEY = "tender.directory/tender-response-docs@1"
 

@@ -4,7 +4,6 @@
 （delete_thread_memory + DELETE 端点）、中断 run 半截回复落库。
 """
 
-from tests.util import create_conversation
 import asyncio
 
 import pytest

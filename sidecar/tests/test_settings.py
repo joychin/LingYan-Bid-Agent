@@ -114,7 +114,6 @@ def test_settings_test_llm_success(client, monkeypatch):
     class FakeClient:
         chat = type("Chat", (), {"completions": FakeCompletions()})()
 
-    import app.api.settings as settings_api
 
     monkeypatch.setenv("LLM_API_KEY", "test-key")
     monkeypatch.setattr("openai.OpenAI", lambda **kw: FakeClient(), raising=False)

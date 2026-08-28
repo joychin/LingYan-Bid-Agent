@@ -14,7 +14,6 @@ from pathlib import Path
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from .. import artifact_store, db
-from ..config import workspace_dir
 
 router = APIRouter()
 

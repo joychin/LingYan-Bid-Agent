@@ -34,8 +34,8 @@ class ContractDef:
         return f"{self.kind}/{self.schema_id}@{self.schema_version}"
 
 
-from .tender_directory import TENDER_DIRECTORY  # noqa: E402  （避免循环导入，置于类定义后）
 from .note import DOC_NOTE  # noqa: E402
+from .tender_directory import TENDER_DIRECTORY  # noqa: E402  （避免循环导入，置于类定义后）
 
 CONTRACTS: dict[str, ContractDef] = {
     TENDER_DIRECTORY.key: TENDER_DIRECTORY,

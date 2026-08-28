@@ -11,8 +11,7 @@ import shutil
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .. import artifact_store, db, titler
-from .. import agent
+from .. import agent, artifact_store, db, titler
 from ..agent import delete_thread_memory, run_stream
 
 router = APIRouter()

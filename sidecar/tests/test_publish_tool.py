@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app import artifact_store, db, publish, runctx
+from app import artifact_store, db, runctx
 from app.tools.publish import publish_artifact as publish_tool
 from tests.util import init_env
 

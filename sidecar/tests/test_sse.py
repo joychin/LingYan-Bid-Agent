@@ -1,8 +1,9 @@
 """SSE 端点：连接建立时下发的 run.state 对账事件。"""
 
-from tests.util import create_conversation
 import asyncio
 import json
+
+from tests.util import create_conversation
 
 
 def _first_frame(cid):
