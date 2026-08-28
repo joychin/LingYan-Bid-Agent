@@ -52,7 +52,8 @@ export function InputComposer({
   const [activeSuggestion, setActiveSuggestion] = useState(0)
   const [sending, setSending] = useState(false)
   const suggestionListId = 'prompt-suggestion-list'
-  const { uploads, taskScope, openFilePicker, retryUpload, dismissUpload, acknowledgeUploads } = useFileUpload()
+  const { uploads, taskScope, openFilePicker, retryUpload, dismissUpload, acknowledgeUploads, removeUploadsByName } =
+    useFileUpload()
   const { data: files = [] } = useFiles(taskScope)
   const deleteFile = useDeleteFile()
   const { toast } = useToast()
@@ -145,6 +146,8 @@ export function InputComposer({
     if (!taskScope) return
     try {
       await deleteFile.mutateAsync({ name, taskId: taskScope })
+      // 后端已删：同步清掉「新上传」chip，否则空文本发送的合成消息仍会带上它
+      removeUploadsByName(name, taskScope)
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), 'error')
     }

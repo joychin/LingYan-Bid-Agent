@@ -66,6 +66,13 @@ export function ChatView({
     decide,
     cancel,
   } = useRun(convId)
+  // 停止/出错卡的「重新执行」文本：优先内存态 lastSent（发送失败重试——消息可能未落库），
+  // 刷新后回退到消息列表里最后一条真实指令——终态 run 的用户消息必已落库；「已选：」
+  // 是 HITL respond 的落库消息、不是指令，跳过（重发会变成一条无上下文的普通消息）
+  const retryText =
+    lastSent ||
+    [...messages].reverse().find((m) => m.role === 'user' && !m.content.startsWith('已选：'))?.content ||
+    ''
   const { data: artifacts = [] } = useArtifacts()
   const { data: tasks = [] } = useTasks()
   const { data: conversations = [] } = useConversations()
@@ -113,6 +120,8 @@ export function ChatView({
     (opt: string) => {
       setStepDrafts((cur) => {
         const d = cur[stepIndex] ?? { picked: [], text: '' }
+        // 单选已选中再点 = no-op（toggle 反选会让提交钮莫名回禁用，实测用户会双击确认）
+        if (d.picked.includes(opt) && !curMultiple) return cur
         const picked = d.picked.includes(opt)
           ? d.picked.filter((o) => o !== opt)
           : curMultiple
@@ -334,8 +343,8 @@ export function ChatView({
                 <ErrorCard
                   message={error}
                   cancelled={errorCode === 'cancelled'}
-                  retryText={lastSent}
-                  onRetry={() => void doSend(lastSent).catch(() => {})}
+                  retryText={retryText}
+                  onRetry={() => void doSend(retryText).catch(() => {})}
                 />
               )}
             </div>

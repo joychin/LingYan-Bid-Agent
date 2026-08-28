@@ -39,6 +39,9 @@ interface FileUploadContextValue {
   /** 消息已随发送「告知」助手：移除对应上传项（freshFiles 依据其存在性，发送后 chip 即消失）。
    *  状态存 context 而非组件 ref——ChatView 按会话 key 重挂载不清零，切任务不串扰。 */
   acknowledgeUploads: (ids: string[]) => void
+  /** 文件浮层真删后端文件后，同步移除对应「新上传」chip——否则合成消息会引用已删文件，
+   *  模型看到 files/ 里没有它（实测会专门来问）。按 name+task 匹配（浮层只有文件名）。 */
+  removeUploadsByName: (name: string, taskId: string) => void
 }
 
 const FileUploadContext = createContext<FileUploadContextValue | null>(null)
@@ -157,6 +160,10 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
     setUploads((prev) => prev.filter((u) => !set.has(u.id)))
   }, [])
 
+  const removeUploadsByName = useCallback((name: string, taskId: string) => {
+    setUploads((prev) => prev.filter((u) => !(u.name === name && u.taskId === taskId)))
+  }, [])
+
   useEffect(() => {
     const input = inputRef.current
     if (!input) return
@@ -186,6 +193,7 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
         retryUpload,
         dismissUpload,
         acknowledgeUploads,
+        removeUploadsByName,
       }}
     >
       {children}

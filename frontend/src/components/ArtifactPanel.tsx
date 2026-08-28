@@ -153,11 +153,14 @@ export function ArtifactPanel({
               {!fallbackLoading && fallbackArtifacts.length === 0 && (
                 <p className="ft-empty">{currentConvId ? '本会话还没有过程稿' : '还没有产物'}</p>
               )}
-              {/* 无任务上下文的平铺视图按 artifact.task_id 标注归属任务，防跨任务同名产物混淆 */}
+              {/* 无任务上下文的平铺视图按 artifact.task_id 标注归属任务，防跨任务同名产物混淆；
+                  scope 后缀区分同任务的正式稿/过程稿两份（转正后同名成对出现） */}
               {fallbackArtifacts.map((a) =>
                 renderRow(
                   a,
-                  a.task_id ? (tasks.find((t) => t.id === a.task_id)?.title ?? '未归属') : '未归属',
+                  `${a.task_id ? (tasks.find((t) => t.id === a.task_id)?.title ?? '未归属') : '未归属'} · ${
+                    a.scope === 'task' ? '正式稿' : '过程稿'
+                  }`,
                 ),
               )}
             </>
