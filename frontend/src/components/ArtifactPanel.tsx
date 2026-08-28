@@ -1,9 +1,9 @@
 import { useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen, Maximize2, Minimize2 } from 'lucide-react'
-import type { Artifact, Task } from '@/api/client'
-import { useArtifacts, useConversationArtifacts, useTaskArtifacts } from '@/hooks/useArtifacts'
+import type { Artifact, Task, WorkbenchFile } from '@/api/client'
+import { useConversationArtifacts, useTaskArtifacts } from '@/hooks/useArtifacts'
 import { useConversations } from '@/hooks/useConversations'
-import { useTasks } from '@/hooks/useTasks'
+import { useWorkbench } from '@/hooks/useWorkbench'
 import { kindIcon } from '@/artifacts/registry'
 import { cn } from '@/lib/utils'
 
@@ -12,32 +12,45 @@ const MIN_W = 240
 const MAX_W = 560
 
 /**
- * Workspace 右栏产物面板：WorkBuddy 风格文件树，无徽标/无计数/无动作按钮。
- * 顶层两个根文件夹：正式稿（任务级）/ 过程稿（当前会话），各自独立展开。
- * 进度便签、转正入口、文件定位全部从面板剥离（ArtifactCard / ArtifactOpenHost 内已提供）。
+ * Workspace 右栏产物面板 v2：一棵朴素文件夹树——任务名为根，正式稿/过程稿/工作台
+ * 是它的一级子文件夹，往下纯嵌套（工作台 = 任务 out/ 的 md 过程产物）。
+ * 行上不带任何小字后缀（修订/来源状态在查看器头部徽章条里看）。
+ * 无任务上下文（草稿态）时 App 不渲染本面板。
  */
+
+/** 工作台文件的显示名：分析八件+目录主文件用业务名，其余（fragments/解析）用文件名。 */
+const WB_NAMES: Record<string, string> = {
+  'analysis/structure.md': '结构事实',
+  'analysis/requirements-qualification.md': '资格要求',
+  'analysis/requirements-submission.md': '递交要求',
+  'analysis/requirements-business.md': '商务技术要求',
+  'analysis/requirements-format.md': '格式要求',
+  'analysis/disqualification.md': '废标条款',
+  'analysis/evaluation.md': '评分标准',
+  'analysis/clarifications.md': '待澄清',
+  'outline/tender-response-docs.md': '投标目录（草稿）',
+}
+
 export function ArtifactPanel({
   currentConvId,
   currentTask,
   collapsed,
   onOpen,
+  onOpenWorkbench,
   onCollapse,
 }: {
   currentConvId: string | null
   currentTask: Task | null
   collapsed: boolean
   onOpen: (id: string) => void
+  onOpenWorkbench: (path: string) => void
   onCollapse: () => void
 }) {
-  const { data: allArtifacts = [], isLoading: loadingAll } = useArtifacts()
   const { data: taskArtifacts = [], isLoading: loadingTask } = useTaskArtifacts(currentTask?.id ?? null)
   const { data: convArtifacts = [], isLoading: loadingConv } = useConversationArtifacts(currentConvId)
   const { data: conversations = [] } = useConversations()
-  const { data: tasks = [] } = useTasks()
+  const { data: workbench = [], isLoading: loadingWorkbench } = useWorkbench(currentTask?.id ?? null)
   const convTitle = conversations.find((c) => c.id === currentConvId)?.title
-  // 无任务上下文时退化为平铺（有会话则只看该会话，否则全量历史视图）
-  const fallbackArtifacts = currentConvId ? convArtifacts : allArtifacts
-  const fallbackLoading = currentConvId ? loadingConv : loadingAll
   const [width, setWidth] = useState(DEFAULT_W)
   const [expanded, setExpanded] = useState(false)
   const [closing, setClosing] = useState(false)
@@ -64,7 +77,7 @@ export function ArtifactPanel({
     }
   }
 
-  const renderRow = (a: Artifact, subLabel?: string) => {
+  const artifactRow = (a: Artifact) => {
     const icon = kindIcon(a.kind)
     return (
       <div key={a.artifact_id} className="ft-row" onClick={() => onOpen(a.artifact_id)}>
@@ -76,10 +89,19 @@ export function ArtifactPanel({
           </span>
         )}
         <span className="ft-name truncate">{a.display_name}</span>
-        {subLabel && <span className="ft-row-sub">{subLabel}</span>}
       </div>
     )
   }
+
+  const wbRow = (f: WorkbenchFile) => (
+    <div key={f.path} className="ft-row" onClick={() => onOpenWorkbench(f.path)} title={f.path}>
+      <span className="ft-ico-glyph">
+        <FileText className="ft-ico-svg" />
+      </span>
+      <span className="ft-name truncate">{WB_NAMES[f.path] ?? f.path.split('/').pop()}</span>
+    </div>
+  )
+
   return (
     <>
       <aside
@@ -130,41 +152,23 @@ export function ArtifactPanel({
         </div>
 
         <div className="product-body file-tree">
-          {currentTask ? (
-            <>
-              <FolderSection
-                title="正式稿"
-                artifacts={taskArtifacts}
-                isLoading={loadingTask}
-                emptyText="暂无 · 转正自过程稿"
-                renderRow={renderRow}
-              />
-              <FolderSection
-                title={convTitle ? `过程稿 · ${convTitle}` : '过程稿'}
-                artifacts={convArtifacts}
-                isLoading={loadingConv}
-                emptyText="暂无"
-                renderRow={renderRow}
-              />
-            </>
-          ) : (
-            <>
-              {fallbackLoading && <p className="ft-empty">加载产物…</p>}
-              {!fallbackLoading && fallbackArtifacts.length === 0 && (
-                <p className="ft-empty">{currentConvId ? '本会话还没有过程稿' : '还没有产物'}</p>
-              )}
-              {/* 无任务上下文的平铺视图按 artifact.task_id 标注归属任务，防跨任务同名产物混淆；
-                  scope 后缀区分同任务的正式稿/过程稿两份（转正后同名成对出现） */}
-              {fallbackArtifacts.map((a) =>
-                renderRow(
-                  a,
-                  `${a.task_id ? (tasks.find((t) => t.id === a.task_id)?.title ?? '未归属') : '未归属'} · ${
-                    a.scope === 'task' ? '正式稿' : '过程稿'
-                  }`,
-                ),
-              )}
-            </>
-          )}
+          <TreeFolder title={currentTask?.title ?? '任务'}>
+            <TreeFolder
+              title="正式稿"
+              loading={loadingTask}
+              empty={taskArtifacts.length === 0 ? '暂无 · 转正自过程稿' : undefined}
+            >
+              {taskArtifacts.map(artifactRow)}
+            </TreeFolder>
+            <TreeFolder
+              title={convTitle ? `过程稿 · ${convTitle}` : '过程稿'}
+              loading={loadingConv}
+              empty={convArtifacts.length === 0 ? '暂无' : undefined}
+            >
+              {convArtifacts.map(artifactRow)}
+            </TreeFolder>
+            <WorkbenchTree files={workbench} loading={loadingWorkbench} row={wbRow} />
+          </TreeFolder>
         </div>
       </aside>
       <button type="button" className="product-toggle" title="展开产物面板" onClick={handleCollapseToggle}>
@@ -174,19 +178,17 @@ export function ArtifactPanel({
   )
 }
 
-/** 文件夹分区：头部 = 旋转箭头 + Folder/FolderOpen 交叉淡入，整行折叠；空态/加载各自独立。 */
-function FolderSection({
+/** 文件夹节点：头部 = 旋转箭头 + Folder/FolderOpen 交叉淡入，整行折叠；纯类名嵌套缩进。 */
+function TreeFolder({
   title,
-  artifacts,
-  isLoading,
-  emptyText,
-  renderRow,
+  children,
+  loading,
+  empty,
 }: {
   title: string
-  artifacts: Artifact[]
-  isLoading: boolean
-  emptyText: string
-  renderRow: (a: Artifact) => React.ReactNode
+  children?: React.ReactNode
+  loading?: boolean
+  empty?: string
 }) {
   const [open, setOpen] = useState(true)
   return (
@@ -197,13 +199,64 @@ function FolderSection({
           <Folder className="ico-closed" />
           <FolderOpen className="ico-open" />
         </span>
-        <span className="ft-folder-title">{title}</span>
+        <span className="ft-folder-title truncate">{title}</span>
       </button>
       <div className="ft-folder-body">
-        {isLoading && <p className="ft-empty">加载产物…</p>}
-        {!isLoading && artifacts.length === 0 && <p className="ft-empty">{emptyText}</p>}
-        {artifacts.map(renderRow)}
+        {loading && <p className="ft-empty">加载产物…</p>}
+        {!loading && empty !== undefined && <p className="ft-empty">{empty}</p>}
+        {children}
       </div>
     </section>
+  )
+}
+
+/** 工作台子树：解析（按源文件分夹）/分析/目录 三个固定顺序的文件夹。 */
+function WorkbenchTree({
+  files,
+  loading,
+  row,
+}: {
+  files: WorkbenchFile[]
+  loading: boolean
+  row: (f: WorkbenchFile) => React.ReactNode
+}) {
+  const parseFiles = files.filter((f) => f.path.startsWith('parse/'))
+  const analysisFiles = files.filter((f) => f.path.startsWith('analysis/'))
+  const outlineFiles = files.filter((f) => f.path.startsWith('outline/'))
+  // 解析按源文件（第二段）分夹；目录下 fragments 归子夹
+  const parseGroups = new Map<string, WorkbenchFile[]>()
+  for (const f of parseFiles) {
+    const src = f.path.split('/')[1] ?? ''
+    parseGroups.set(src, [...(parseGroups.get(src) ?? []), f])
+  }
+  const outlineRoots = outlineFiles.filter((f) => !f.path.startsWith('outline/fragments/'))
+  const fragments = outlineFiles.filter((f) => f.path.startsWith('outline/fragments/'))
+
+  if (loading) {
+    return (
+      <TreeFolder title="工作台" loading>
+        <></>
+      </TreeFolder>
+    )
+  }
+  return (
+    <TreeFolder title="工作台" empty={files.length === 0 ? '暂无 · 流水线产物' : undefined}>
+      {parseGroups.size > 0 && (
+        <TreeFolder title="解析">
+          {[...parseGroups.entries()].map(([src, list]) => (
+            <TreeFolder key={src} title={src}>
+              {list.map(row)}
+            </TreeFolder>
+          ))}
+        </TreeFolder>
+      )}
+      {analysisFiles.length > 0 && <TreeFolder title="分析">{analysisFiles.map(row)}</TreeFolder>}
+      {outlineFiles.length > 0 && (
+        <TreeFolder title="目录">
+          {outlineRoots.map(row)}
+          {fragments.length > 0 && <TreeFolder title="fragments">{fragments.map(row)}</TreeFolder>}
+        </TreeFolder>
+      )}
+    </TreeFolder>
   )
 }

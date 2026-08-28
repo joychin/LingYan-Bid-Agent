@@ -417,3 +417,68 @@ export async function fetchKbItemRaw(id: string): Promise<string> {
   const blob = await resp.blob()
   return URL.createObjectURL(blob)
 }
+
+// ---- 任务工作台（out/）：任务级共享的过程产物（parse/analysis/outline 的 md）----
+
+export interface WorkbenchFile {
+  path: string // 相对 out/ 的 posix 路径，如 "analysis/disqualification.md"
+  mtime: string
+  size: number
+  /** 首行头部注释含「修订=用户」：人工改过，模型重跑前会提示 */
+  revised: boolean
+  /** parse/ 只读（引用行号的证据基准） */
+  editable: boolean
+  has_backup: boolean
+}
+
+export interface WorkbenchContent {
+  content: string
+  hash: string
+  revised: boolean
+  editable: boolean
+  has_backup: boolean
+}
+
+/** 列出任务 out/ 全部 markdown（json/隐藏文件服务端已排除）。 */
+export function listWorkbench(taskId: string): Promise<{ files: WorkbenchFile[] }> {
+  return request(`/workbench?task_id=${encodeURIComponent(taskId)}`)
+}
+
+export function getWorkbenchContent(taskId: string, path: string): Promise<WorkbenchContent> {
+  const qs = new URLSearchParams({ task_id: taskId, path })
+  return request(`/workbench/content?${qs}`)
+}
+
+/** 编辑保存：非 force 时 409 = 文件已被外部更新（模型重跑）；force = 「保留我的版本」。 */
+export function putWorkbenchContent(
+  taskId: string,
+  path: string,
+  content: string,
+  baseHash: string,
+  force = false,
+): Promise<{ ok: boolean; hash: string }> {
+  return request(`/workbench/content`, {
+    method: 'PUT',
+    body: JSON.stringify({ task_id: taskId, path, content, base_hash: baseHash, force }),
+  })
+}
+
+/** 恢复上一版（与 .bak 互换，恢复本身可再撤销）。 */
+export function restoreWorkbench(taskId: string, path: string): Promise<WorkbenchContent> {
+  return request(`/workbench/restore`, {
+    method: 'POST',
+    body: JSON.stringify({ task_id: taskId, path }),
+  })
+}
+
+/** 存为笔记：工作台文件内容快照发布为 doc.note 过程稿（后续转正走既有按钮）。 */
+export function saveWorkbenchNote(
+  conversationId: string,
+  path: string,
+  title?: string,
+): Promise<{ artifact_id: string; display_name: string }> {
+  return request(`/workbench/note`, {
+    method: 'POST',
+    body: JSON.stringify({ conversation_id: conversationId, path, title }),
+  })
+}

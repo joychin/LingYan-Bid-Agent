@@ -7,6 +7,7 @@ import { KnowledgeView } from '@/components/KnowledgeView'
 import { SettingsDialog } from '@/components/SettingsDialog'
 import { ArtifactPanel } from '@/components/ArtifactPanel'
 import { ArtifactOpenHost } from '@/components/ArtifactOpenHost'
+import { WorkbenchViewer } from '@/components/WorkbenchViewer'
 import { SidecarBanner } from '@/components/SidecarBanner'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { reconcileContracts } from '@/artifacts/registry'
@@ -27,6 +28,8 @@ export default function App() {
   const [activeView, setActiveView] = useState<'chat' | 'kb'>('chat')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [previewId, setPreviewId] = useState<string | null>(null)
+  // 工作台文件（out/ 的 md 过程产物）查看器当前打开的相对路径
+  const [workbenchPath, setWorkbenchPath] = useState<string | null>(null)
   const [pendingSend, setPendingSend] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(LS_SIDEBAR) === '1')
   const [artifactsCollapsed, setArtifactsCollapsed] = useState(() => localStorage.getItem(LS_ARTIFACTS) === '1')
@@ -116,13 +119,15 @@ export default function App() {
           </>
         )}
       </main>
-      {/* 产物面板是对话工作台的一部分：知识库视图下不渲染（grid auto 列自动收 0，卸载即停内部轮询） */}
-      {activeView !== 'kb' && (
+      {/* 产物面板是对话工作台的一部分：知识库视图/无会话上下文（草稿态）不渲染
+          （grid auto 列自动收 0，卸载即停内部轮询） */}
+      {activeView !== 'kb' && currentTask && (
         <ArtifactPanel
           currentConvId={viewConvId}
           currentTask={currentTask}
           collapsed={artifactsCollapsed}
           onOpen={setPreviewId}
+          onOpenWorkbench={setWorkbenchPath}
           onCollapse={() => {
             setArtifactsCollapsed((v) => {
               localStorage.setItem(LS_ARTIFACTS, v ? '0' : '1')
@@ -133,6 +138,14 @@ export default function App() {
       )}
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <ArtifactOpenHost artifactId={previewId} onClose={() => setPreviewId(null)} />
+      {currentTask && (
+        <WorkbenchViewer
+          taskId={currentTask.id}
+          conversationId={viewConvId}
+          path={workbenchPath}
+          onClose={() => setWorkbenchPath(null)}
+        />
+      )}
     </div>
     </ErrorBoundary>
   )
