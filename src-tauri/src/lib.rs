@@ -79,31 +79,59 @@ fn set_model_settings(
     Ok(())
 }
 
-/// 只返回布尔：钥匙串对应角色是否已有 key（永不返回 key 本体）。
+/// 保存百度云文档解析凭证（PaddleOCR-VL 的 AK/SK）到钥匙串两 account，成功后重启 sidecar
+/// 使 spawn env 注入生效。字段非空才写（留空 = 保持原值）；两字段全空报错。
+/// 凭证永不返回、永不进 HTTP。
+#[tauri::command]
+fn set_baidu_ocr_keys(api_key: String, secret_key: String) -> Result<(), String> {
+    let ak = api_key.trim();
+    let sk = secret_key.trim();
+    if ak.is_empty() && sk.is_empty() {
+        return Err("请填写 API Key 与 Secret Key".into());
+    }
+    if !ak.is_empty() {
+        sidecar::keychain_set(sidecar::KEYRING_ACCOUNT_BAIDU_AK, ak)
+            .map_err(|e| format!("保存钥匙串失败: {e}"))?;
+    }
+    if !sk.is_empty() {
+        sidecar::keychain_set(sidecar::KEYRING_ACCOUNT_BAIDU_SK, sk)
+            .map_err(|e| format!("保存钥匙串失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 只返回布尔：钥匙串对应 account 是否已有值（永不返回本体）。
+/// role = "llm" | "vlm" | "baidu-ocr-api" | "baidu-ocr-secret"。
 #[tauri::command]
 fn get_api_key_has_value(role: String) -> Result<bool, String> {
     let account = match role.as_str() {
         "llm" => sidecar::KEYRING_ACCOUNT_LLM,
         "vlm" => sidecar::KEYRING_ACCOUNT_VLM,
+        "baidu-ocr-api" => sidecar::KEYRING_ACCOUNT_BAIDU_AK,
+        "baidu-ocr-secret" => sidecar::KEYRING_ACCOUNT_BAIDU_SK,
         _ => return Err(format!("未知角色: {role}")),
     };
     Ok(sidecar::keychain_has_value(account))
 }
 
-/// 在系统文件管理器中定位工作区里的产物文件。
+/// 在系统文件管理器中定位文件。
 ///
-/// path 仅允许 `data/workspace/` 下的绝对路径（做 canonicalize 前缀校验），
-/// 防止被诱导去打开工作区外的敏感文件。非 Tauri 环境不可用。
+/// path 仅允许两个前缀下的绝对路径（做 canonicalize 前缀校验），
+/// 防止被诱导去打开任意敏感文件：`data/workspace/`（产物）与 `data/`（设置页的
+/// 数据目录/日志入口）。非 Tauri 环境不可用。
 #[tauri::command]
 fn reveal_in_folder(app: AppHandle, path: String) -> Result<(), String> {
     let root = sidecar::workspace_dir()
         .canonicalize()
         .map_err(|e| format!("无法解析工作区路径: {e}"))?;
+    let data_root = sidecar::data_dir()
+        .canonicalize()
+        .map_err(|e| format!("无法解析数据目录: {e}"))?;
     let target = PathBuf::from(&path)
         .canonicalize()
         .map_err(|e| format!("无法解析文件路径: {e}"))?;
-    if !target.starts_with(&root) {
-        return Err("路径不在工作区范围内".into());
+    if !target.starts_with(&root) && !target.starts_with(&data_root) {
+        return Err("路径不在允许范围内".into());
     }
     app.opener()
         .reveal_item_in_dir(target.to_str().ok_or("路径含非法字符")?)
@@ -147,6 +175,7 @@ pub fn run() {
             get_sidecar_info,
             get_model_settings,
             set_model_settings,
+            set_baidu_ocr_keys,
             get_api_key_has_value,
             reveal_in_folder
         ])

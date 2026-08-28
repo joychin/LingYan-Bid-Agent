@@ -4,8 +4,8 @@
 //!   1. 选空闲端口（127.0.0.1:0 → drop 取端口）→ 生成随机 token → spawn python sidecar
 //!   2. 轮询 /api/healthz（1s×30）→ 失败 kill 后指数退避重启（上限 3 次）
 //!   3. 退出时杀整个进程树
-//!   4. 提供 commands：get_sidecar_info / get_model_settings / set_model_settings / get_api_key_has_value
-//!      —— 按角色（llm 对话模型 / vlm 视觉模型）组织，双角色共用同一 settings.json 真值。
+//!   4. 提供 commands：get_sidecar_info / get_model_settings / set_model_settings /
+//!      get_api_key_has_value / set_baidu_ocr_keys —— 按角色组织，共用同一 settings.json 真值。
 
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -22,6 +22,8 @@ use uuid::Uuid;
 pub const KEYRING_SERVICE: &str = "tender-agent";
 pub const KEYRING_ACCOUNT_LLM: &str = "llm-api-key";
 pub const KEYRING_ACCOUNT_VLM: &str = "vlm-api-key";
+pub const KEYRING_ACCOUNT_BAIDU_AK: &str = "baidu-ocr-api-key";
+pub const KEYRING_ACCOUNT_BAIDU_SK: &str = "baidu-ocr-secret-key";
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com/v1";
 const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
@@ -36,10 +38,14 @@ pub struct SidecarInfo {
 }
 
 /// 单角色模型配置（llm 或 vlm）。vlm 未配置时为全空串。
+/// image_support 仅 llm 块有值：透传 settings.json 的该字段（Python 侧写入），
+/// 不透传会在保存 key 重写文件时把它抹掉。
 #[derive(Clone, Default, Serialize)]
 pub struct RoleSettings {
     pub base_url: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_support: Option<bool>,
 }
 
 /// 双角色模型设置：llm 恒有值（spawn 必需），vlm 可空（未配置=知识库图片/扫描件走降级链）。
@@ -75,6 +81,7 @@ impl Default for ModelSettings {
             llm: RoleSettings {
                 base_url: DEFAULT_BASE_URL.to_string(),
                 model: DEFAULT_MODEL.to_string(),
+                image_support: None,
             },
             vlm: RoleSettings::default(),
         }
@@ -95,6 +102,10 @@ fn sidecar_dir() -> PathBuf {
         }
     }
     PathBuf::from("../sidecar")
+}
+
+pub(crate) fn data_dir() -> PathBuf {
+    sidecar_dir().join("data")
 }
 
 /// 产物工作区目录（与 sidecar app/config.py 的 workspace_dir 一致）：`<sidecar>/data/workspace`。
@@ -149,6 +160,7 @@ fn read_role(v: &serde_json::Value) -> Option<RoleSettings> {
     Some(RoleSettings {
         base_url: base.trim().to_string(),
         model: model.trim().to_string(),
+        image_support: v.get("image_support").and_then(|b| b.as_bool()),
     })
 }
 
@@ -159,9 +171,11 @@ pub fn write_settings_file(s: &ModelSettings) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let mut json = serde_json::json!({
-        "llm": { "base_url": s.llm.base_url, "model": s.llm.model }
-    });
+    let mut llm = serde_json::json!({ "base_url": s.llm.base_url, "model": s.llm.model });
+    if let Some(img) = s.llm.image_support {
+        llm["image_support"] = serde_json::json!(img);
+    }
+    let mut json = serde_json::json!({ "llm": llm });
     if !s.vlm.base_url.is_empty() {
         json["vlm"] = serde_json::json!({ "base_url": s.vlm.base_url, "model": s.vlm.model });
     }
@@ -211,12 +225,13 @@ fn resolve_api_key(account: &str, env_var: &str) -> Option<String> {
 }
 
 /// vlm 为 None（未配置）时不注入任何 VLM_* env，让 sidecar 回退 settings.json 的 vlm 块；
-/// 注入空串会覆盖 settings.json 的配置，故必须「无值不注入」。
+/// 注入空串会覆盖 settings.json 的配置，故必须「无值不注入」。baidu（OCR AK/SK）同理。
 fn spawn_sidecar(
     api_key: Option<String>,
     base_url: &str,
     model: &str,
     vlm: Option<(String, String, String)>, // (api_key, base_url, model)
+    baidu: Option<(String, String)>,       // (api_key, secret_key)
     nonce: &str,
 ) -> std::io::Result<(Child, u16, String)> {
     let port = pick_free_port();
@@ -237,6 +252,9 @@ fn spawn_sidecar(
         .stderr(Stdio::null());
     if let Some((vkey, vbase, vmodel)) = vlm {
         cmd.env("VLM_API_KEY", vkey).env("VLM_BASE_URL", vbase).env("VLM_MODEL", vmodel);
+    }
+    if let Some((ak, sk)) = baidu {
+        cmd.env("BAIDU_OCR_API_KEY", ak).env("BAIDU_OCR_SECRET_KEY", sk);
     }
 
     #[cfg(unix)]
@@ -330,11 +348,20 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
             };
 
             let nonce = Uuid::new_v4().to_string();
+            // 百度 OCR AK/SK：两把钥匙串 account 齐备才注入（单边有值视为未配置，与 sidecar 判定一致）
+            let baidu = match (
+                resolve_api_key(KEYRING_ACCOUNT_BAIDU_AK, "BAIDU_OCR_API_KEY"),
+                resolve_api_key(KEYRING_ACCOUNT_BAIDU_SK, "BAIDU_OCR_SECRET_KEY"),
+            ) {
+                (Some(ak), Some(sk)) => Some((ak, sk)),
+                _ => None,
+            };
             match spawn_sidecar(
                 resolve_api_key(KEYRING_ACCOUNT_LLM, "LLM_API_KEY"),
                 &ms.llm.base_url,
                 &ms.llm.model,
                 vlm,
+                baidu,
                 &nonce,
             ) {
                 Ok((child, port, token)) => {
