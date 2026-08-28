@@ -50,8 +50,14 @@ function StatusDot({ item }: { item: KbItem }) {
   return <span className="kb-dot kb-dot--ok" title="已确认" />
 }
 
-/** 启发式/降级解析档：徽章与警示行用琥珀语义色 */
-const WARN_CONVERSIONS = new Set(['docx-numbered', 'pdf-fontsize', 'vision-unavailable'])
+/** 启发式/降级解析档：徽章与警示行用琥珀语义色（pdf-fontsize 为旧存量 meta 兼容保留） */
+const WARN_CONVERSIONS = new Set([
+  'docx-numbered',
+  'pdf-numbered',
+  'pdf-plain',
+  'pdf-fontsize',
+  'vision-unavailable',
+])
 
 /** 解析概况条：档位徽章 + 数字 chips + 警示（数据来自 meta.json，解析质量摆在明面上） */
 function ParseMetaBar({ meta }: { meta?: KbParseMeta | null }) {

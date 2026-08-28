@@ -30,9 +30,13 @@ _CHUNK = 1024 * 1024
 # 解析档位 → 人话标签（与 tender 解析确认门同款措辞；单一真值在 sidecar）
 CONVERSION_LABELS: dict[str, str] = {
     "docx-native": "样式标题（作者声明）",
-    "docx-numbered": "启发式（中文编号）",
+    "docx-numbered": "中文编号识别（标题印在原文）",
     "pdf-toc": "书签目录（作者声明）",
-    "pdf-fontsize": "启发式（字号判级）",
+    "pdf-link-toc": "目录页超链接（作者自报）",
+    "pdf-printed-toc": "印刷目录页（作者自报）",
+    "pdf-numbered": "中文编号识别（标题印在原文）",
+    "pdf-plain": "未识别出结构",
+    "pdf-fontsize": "启发式（字号判级，旧版）",  # 旧存量 meta 的兼容显示
     "pdf-mixed": "混合（扫描页已转写）",
     "vision": "视觉转写",
     "vision-unavailable": "未识别（VLM 未配置）",

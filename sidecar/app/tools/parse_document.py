@@ -6,8 +6,12 @@
 
 结构识别按可信度分档（meta.conversion 记录，下游引用出处时按档位决定是否署章节名）：
 - docx-native / pdf-toc：作者声明的结构（Word 标题样式 / PDF 书签树）——可信；
-- docx-numbered / pdf-fontsize：启发式（无样式文档的中文编号识别 / 无书签 PDF 的字号
-  判级）——可能有误，产物带警示，出处不署章节名。
+- pdf-link-toc：目录条目自带的内部超链接（Word 目录域生成）——硬标记+精确目标页；
+- pdf-printed-toc：印刷目录页解析（文件自己印的目录）——作者自报，可靠性接近声明档；
+- docx-numbered / pdf-numbered：中文编号识别（标题文字印在原文行上，可回原文验证）
+  ——层级可能不完整，产物带警示；
+- pdf-plain：未识别出结构（无书签/无印刷目录/无编号）——大纲不可用，警示 grep 兜底。
+不使用字号判级（实测政采 PDF 章标题字号常与正文相同、封面全是巨字，信号不成立）。
 pdf 侧另有跨页重复的页眉页脚与纯页码剔除、每页页码锚点 <!-- p:N -->（出处可引页码）。
 txt/md 透传（md 保留 ATX 标题进 outline；txt 无结构走 grep 兜底警示）。
 outline 记录每个标题的行号区间（大文件按区段精读的定位索引）、meta 记录来源 hash/
@@ -93,7 +97,11 @@ def parse_document(path: str) -> str:
     - <文件名>.meta.json：来源文件/sha256/解析路径(conversion)/顶层章节/质量警示
 
     结构识别分档（meta.conversion）：docx-native/pdf-toc=作者声明的结构（Word 样式/
-    PDF 书签），可信；docx-numbered/pdf-fontsize=启发式（编号识别/字号判级），可能有误。
+    PDF 书签），可信；pdf-link-toc=目录页内部超链接（Word 目录域生成的硬标记）；
+    pdf-printed-toc=印刷目录页解析（文件自己印的目录，可靠性接近作者声明）；docx-numbered/pdf-numbered=中文编号识别（标题文字印在原文行上，可
+    回原文验证，但层级可能不完整）；pdf-plain=未识别出结构（大纲不可用，下游改用
+    grep 定位）。不使用字号判级（实测政采 PDF 章标题字号常与正文相同、封面全是
+    巨字，字号信号在这类文档上不成立）。
     同一文件内容未变（hash 一致）时重复调用会跳过重转（跳过同样返回全量概况，
     调用方无需读 meta.json 补数字）。下游分析技能精读时才用 outline.json 按行号
     定位区段；document-parse 阶段不需要读它。
@@ -149,14 +157,18 @@ def parse_document(path: str) -> str:
         top_titles = [n["标题"] for n in outline]
 
         warnings: list[str] = []
-        if n_headings == 0:
+        if info["conversion"] == "pdf-plain":
+            # pdf-plain ⟹ md 无标题行（不足门槛的零星编号已丢弃），必伴随
+            # n_headings==0——用档位专属警示，不与通用无标题警示叠加
+            warnings.append("未识别出章节结构（无书签/无印刷目录/无编号），大纲不可用，请以 grep 全文检索定位")
+        elif n_headings == 0:
             warnings.append("未识别到任何标题层级，大纲导航不可用（改用 grep 关键词定位）")
-        if info["conversion"] in ("docx-numbered", "pdf-fontsize"):
-            warnings.append("结构来自启发式识别（无样式/无书签），层级可能不完整或有误")
-        elif info["conversion"] == "docx-native" and len(top_titles) < 3:
-            # 完整招标文件几乎必有多部分（公告/须知/评标/格式等）；顶层仅 1-2 个 =
-            # 疑似节选卷册或正文章节未标记样式（实测语料：两份顶层 1-2 的均为节选，
-            # 完整标书顶层全部 ≥4）。如实警示，确认门据此提醒用户补传其他卷册。
+        elif info["conversion"] in ("docx-numbered", "pdf-numbered"):
+            warnings.append("结构来自中文编号识别（标题文字印在原文，可回原文验证），层级可能不完整")
+        # 完整招标文件几乎必有多部分（公告/须知/评标/格式等）；顶层仅 1-2 个 =
+        # 疑似节选卷册或结构未完整标记（实测语料：两份顶层 1-2 的均为节选，
+        # 完整标书顶层全部 ≥4）。如实警示，确认门据此提醒用户补传其他卷册。
+        elif len(top_titles) < 3:
             warnings.append(
                 f"顶层章节仅 {len(top_titles)} 个，疑似节选卷册或结构未完整标记，"
                 "结构可能不完整（精读时建议结合 grep 关键词定位）"
@@ -180,8 +192,6 @@ def parse_document(path: str) -> str:
         }
         if "pages" in info:
             meta["pages"] = info["pages"]
-        if "body_size" in info:
-            meta["body_size"] = info["body_size"]
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
         rel = out_dir.relative_to(workspace_dir())

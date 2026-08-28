@@ -151,7 +151,7 @@ def test_bare_name_resolves_from_task_files(ws):
 
 
 def _make_pdf(path):
-    """运行时生成带字号层级的 PDF（标题 18pt / 正文 12pt），验证 PyMuPDF 提取。
+    """运行时生成无书签 PDF（标题与正文同字号——结构只能靠文本信号识别）。
 
     注意 insert_text 不自动换行，正文每行需控制在单行宽度内；总字符 > 100 过 _MIN_TEXT_CHARS。
     默认 Helvetica 无 CJK 字形，中文须用内置中文字体 china-s，否则渲染为占位符。
@@ -164,6 +164,8 @@ def _make_pdf(path):
     page.insert_text((72, 170), "投标人应具备相应资质，并在截止时间前提交投标文件。", fontsize=12, fontname="china-s")
     page.insert_text((72, 220), "第二章 投标人须知", fontsize=18, fontname="china-s")
     page.insert_text((72, 260), "投标人应在截止时间前递交密封投标文件，逾期不予受理。", fontsize=12, fontname="china-s")
+    page.insert_text((72, 320), "第三章 评标办法", fontsize=18, fontname="china-s")
+    page.insert_text((72, 360), "本项目采用综合评分法，评分因素包括技术与商务两部分。", fontsize=12, fontname="china-s")
     doc.save(str(path))
     doc.close()
 
@@ -178,9 +180,10 @@ def test_pdf_convert_and_outline(ws):
     outline = json.loads((out_dir / "招标文件.pdf.outline.json").read_text(encoding="utf-8"))
     meta = json.loads((out_dir / "招标文件.pdf.meta.json").read_text(encoding="utf-8"))
 
-    # 标题（字号启发式）与正文都进 markdown
+    # 标题（中文编号识别）与正文都进 markdown
     assert "# 第一章 招标公告" in md
     assert "# 第二章 投标人须知" in md
+    assert "# 第三章 评标办法" in md
     assert "本项目为测试采购项目" in md
 
     # 行号区间与 md 中标题实际位置一致
@@ -195,9 +198,10 @@ def test_pdf_convert_and_outline(ws):
     assert top["end_line"] == find_line("# 第二章 投标人须知") - 1
 
     assert meta["source"] == "招标文件.pdf"
-    assert meta["conversion"] == "pdf-fontsize"  # 无书签 → 字号启发式档
-    assert meta["headings"] >= 2
+    assert meta["conversion"] == "pdf-numbered"  # 无书签无目录 → 中文编号兜底
+    assert meta["headings"] >= 3
     assert "<!-- p:1 -->" in md  # 页码锚点
+    assert any("中文编号" in w for w in meta["warnings"])
 
 
 def test_convert_and_outline_line_ranges(ws):
@@ -267,7 +271,7 @@ def test_changed_file_reconverts(ws):
 
 
 def _make_pdf_with_toc(path):
-    """带书签的多页 PDF：标题与正文同字号（字号启发式必然失效），结构只能靠书签。"""
+    """带书签的多页 PDF：标题与正文同字号，结构只能靠书签。"""
     doc = pymupdf.open()
     for i, cn in enumerate("一二三", 1):
         page = doc.new_page()
@@ -285,7 +289,7 @@ def _make_pdf_with_toc(path):
 
 
 def test_pdf_bookmark_toc_preferred(ws):
-    """有书签时结构来自书签（作者声明档），同字号下字号启发式本会全军覆没。"""
+    """有书签时结构来自书签（作者声明档），同字号文本下编号兜底不参与。"""
     _make_pdf_with_toc(ws / "书签文件.pdf")
     r = parse_document.invoke({"path": "书签文件.pdf"})
     assert r.startswith("[解析成功]"), r
@@ -298,7 +302,240 @@ def test_pdf_bookmark_toc_preferred(ws):
     assert meta["pages"] == 3
     assert [n["标题"] for n in outline] == ["第一章 测试章节1", "第二章 测试章节2", "第三章 测试章节3"]
     assert "# 第一章 测试章节1" in md
-    assert not any("启发式" in w for w in meta["warnings"])
+    assert not any("警示用词" in w for w in meta["warnings"])  # pdf-toc 无档位警示
+
+
+def _make_pdf_printed_toc(path):
+    """无书签 PDF：结构来自第 2 页印刷目录（真实语料形态——孤立章节号行 +
+    引导点线条目；正文标题也拆行）。封面巨字用于验证不再产生伪标题。"""
+    doc = pymupdf.open()
+    p1 = doc.new_page()
+    p1.insert_text((72, 100), "测试项目采购文件", fontsize=24, fontname="china-s")
+    p1.insert_text((72, 130), "（封面巨字在字号判级时代会全部变成伪标题）", fontsize=12, fontname="china-s")
+    p2 = doc.new_page()
+    p2.insert_text((72, 72), "目 录", fontsize=16, fontname="china-s")
+    p2.insert_text((72, 110), "第一章", fontsize=12, fontname="china-s")
+    p2.insert_text((72, 128), "招标公告....................................1", fontsize=12, fontname="china-s")
+    p2.insert_text((72, 160), "第二章", fontsize=12, fontname="china-s")
+    p2.insert_text((72, 178), "投标人须知..................................3", fontsize=12, fontname="china-s")
+    p2.insert_text((72, 210), "第三章 评标办法.............................5", fontsize=12, fontname="china-s")
+    p3 = doc.new_page()
+    p3.insert_text((72, 72), "第一章", fontsize=12, fontname="china-s")
+    p3.insert_text((72, 90), "招标公告", fontsize=12, fontname="china-s")
+    for j in range(6):
+        p3.insert_text((72, 130 + j * 20), f"公告正文第{j}段，本项目为测试采购项目内容填充。", fontsize=12, fontname="china-s")
+    p4 = doc.new_page()
+    p4.insert_text((72, 72), "第二章", fontsize=12, fontname="china-s")
+    p4.insert_text((72, 90), "投标人须知", fontsize=12, fontname="china-s")
+    for j in range(6):
+        p4.insert_text((72, 130 + j * 20), f"须知正文第{j}段，投标人应遵守各项规定要求。", fontsize=12, fontname="china-s")
+    p5 = doc.new_page()
+    p5.insert_text((72, 72), "第三章 评标办法", fontsize=12, fontname="china-s")
+    for j in range(6):
+        p5.insert_text((72, 110 + j * 20), f"评标正文第{j}段，综合评分法满分一百分整。", fontsize=12, fontname="china-s")
+    doc.save(str(path))
+    doc.close()
+
+
+def test_pdf_printed_toc(ws):
+    """无书签时解析文件自印的目录页，条目回正文定位（pdf-printed-toc 档）。"""
+    _make_pdf_printed_toc(ws / "目录文件.pdf")
+    r = parse_document.invoke({"path": "目录文件.pdf"})
+    assert r.startswith("[解析成功]"), r
+
+    out_dir = _out_parse(ws) / "目录文件.pdf"
+    md = (out_dir / "目录文件.pdf.md").read_text(encoding="utf-8")
+    outline = json.loads((out_dir / "目录文件.pdf.outline.json").read_text(encoding="utf-8"))
+    meta = json.loads((out_dir / "目录文件.pdf.meta.json").read_text(encoding="utf-8"))
+
+    assert meta["conversion"] == "pdf-printed-toc"
+    assert [n["标题"] for n in outline] == ["第一章 招标公告", "第二章 投标人须知", "第三章 评标办法"]
+
+    lines = md.splitlines()
+
+    def find_line(text):
+        return next(i for i, ln in enumerate(lines, 1) if ln.strip() == text)
+
+    # 标题定位在正文页（第 3 页锚点之后），不是目录页
+    assert find_line("# 第一章 招标公告") > find_line("<!-- p:3 -->")
+    assert find_line("# 第三章 评标办法") > find_line("<!-- p:5 -->")
+    # 封面巨字与目录页条目不再是伪标题
+    assert "# 测试项目采购文件" not in md
+    assert sum(1 for ln in lines if ln.startswith("# ")) == 3
+    # 拆行标题被并成一个标题行（章节号行不再单独留在正文）
+    assert "招标公告" in md
+
+
+def _make_pdf_with_enumeration(path):
+    """无书签无目录：正文含「本文件包括下述内容」式自枚举清单（连续 L1 编号行）。"""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "招标文件包括下述内容", fontsize=12, fontname="china-s")
+    for i, name in enumerate(["商务文件", "技术文件", "附件"], 1):
+        page.insert_text((72, 96 + i * 22), f"第{'一二三'[i - 1]}部分 {name}", fontsize=12, fontname="china-s")
+    page.insert_text((72, 170), "以下为各部分正文内容。", fontsize=12, fontname="china-s")
+    for cn, title in (("一", "投标邀请"), ("二", "投标人须知"), ("三", "评标办法")):
+        y = 190 + "一二三".index(cn) * 90
+        page.insert_text((72, y), f"第{cn}章 {title}", fontsize=12, fontname="china-s")
+        for j in range(3):
+            page.insert_text(
+                (72, y + 24 + j * 20),
+                f"第{cn}章正文第{j}段，填充足够内容避免扫描页误判。{'x' * 5}",
+                fontsize=12,
+                fontname="china-s",
+            )
+    doc.save(str(path))
+    doc.close()
+
+
+def test_pdf_numbered_skips_enumeration_list(ws):
+    """自枚举清单（连续「第X部分」行）不识别为标题；真章节照常识别。"""
+    _make_pdf_with_enumeration(ws / "清单文件.pdf")
+    r = parse_document.invoke({"path": "清单文件.pdf"})
+    assert r.startswith("[解析成功]"), r
+
+    out_dir = _out_parse(ws) / "清单文件.pdf"
+    md = (out_dir / "清单文件.pdf.md").read_text(encoding="utf-8")
+    meta = json.loads((out_dir / "清单文件.pdf.meta.json").read_text(encoding="utf-8"))
+    outline = json.loads((out_dir / "清单文件.pdf.outline.json").read_text(encoding="utf-8"))
+
+    assert meta["conversion"] == "pdf-numbered"
+    assert "# 第一部分" not in md
+    assert [n["标题"] for n in outline] == ["第一章 投标邀请", "第二章 投标人须知", "第三章 评标办法"]
+
+
+def _make_pdf_split_headings(path, chapters=3):
+    """无书签无目录：正文标题拆行（孤立章节号一行 + 标题文字一行）。"""
+    doc = pymupdf.open()
+    titles = [("第一章", "招标公告"), ("第二章", "投标人须知"), ("第三章", "评标办法")]
+    for prefix, title in titles[:chapters]:
+        p = doc.new_page()
+        p.insert_text((72, 72), prefix, fontsize=12, fontname="china-s")
+        p.insert_text((72, 90), title, fontsize=12, fontname="china-s")
+        for j in range(4):
+            p.insert_text((72, 130 + j * 20), f"{title}正文第{j}段，本项目为测试采购项目。", fontsize=12, fontname="china-s")
+    doc.save(str(path))
+    doc.close()
+
+
+def test_pdf_numbered_merges_split_heading(ws):
+    """孤立章节号行与下一行标题并成一个完整标题（不再只留裸章节号）。"""
+    _make_pdf_split_headings(ws / "拆行标题.pdf")
+    r = parse_document.invoke({"path": "拆行标题.pdf"})
+    assert r.startswith("[解析成功]"), r
+
+    out_dir = _out_parse(ws) / "拆行标题.pdf"
+    md = (out_dir / "拆行标题.pdf.md").read_text(encoding="utf-8")
+    outline = json.loads((out_dir / "拆行标题.pdf.outline.json").read_text(encoding="utf-8"))
+    meta = json.loads((out_dir / "拆行标题.pdf.meta.json").read_text(encoding="utf-8"))
+
+    assert meta["conversion"] == "pdf-numbered"
+    assert [n["标题"] for n in outline] == ["第一章 招标公告", "第二章 投标人须知", "第三章 评标办法"]
+    # 标题行是合并后的完整标题，标题文字不再单独留在正文
+    assert "# 第一章 招标公告" in md
+    assert md.splitlines().count("招标公告") == 0
+
+
+def test_pdf_plain_drops_subthreshold_marks(ws):
+    """仅 1-2 个编号标题不过 pdf-numbered 门槛：marks 丢弃，md 不留标题行——
+    档位声明（大纲不可用）与 outline 保持一致，不自相矛盾。"""
+    _make_pdf_split_headings(ws / "两章文件.pdf", chapters=2)
+    r = parse_document.invoke({"path": "两章文件.pdf"})
+    assert r.startswith("[解析成功]"), r
+
+    out_dir = _out_parse(ws) / "两章文件.pdf"
+    md = (out_dir / "两章文件.pdf.md").read_text(encoding="utf-8")
+    outline = json.loads((out_dir / "两章文件.pdf.outline.json").read_text(encoding="utf-8"))
+    meta = json.loads((out_dir / "两章文件.pdf.meta.json").read_text(encoding="utf-8"))
+
+    assert meta["conversion"] == "pdf-plain"
+    assert outline == []
+    assert not any(ln.startswith("# ") for ln in md.splitlines())
+    assert any("未识别出章节结构" in w for w in meta["warnings"])
+
+
+def _make_pdf_link_toc(path):
+    """无书签 PDF：目录页条目带内部跳转链接（Word 导出的常见形态）——
+    链接矩形即条目、目标即物理页。正文标题拆行（章节号与标题分两行）。"""
+    doc = pymupdf.open()
+    p1 = doc.new_page()
+    p1.insert_text((72, 100), "测试项目采购文件", fontsize=24, fontname="china-s")
+    p2 = doc.new_page()
+    p2.insert_text((72, 60), "目 录", fontsize=16, fontname="china-s")
+    entries = [("第一章 招标公告", 3), ("第二章 投标人须知", 4), ("第三章 评标办法", 5)]
+    for title, target in entries:
+        p2.insert_text((72, 100 + (target - 3) * 26), f"{title}..........{target - 2}", fontsize=12, fontname="china-s")
+    # 先建齐全部正文页，再回填目录链接（insert_link 会解析目标页 xref）
+    for title, _ in entries:
+        page = doc.new_page()
+        page.insert_text((72, 72), title.split()[0], fontsize=12, fontname="china-s")
+        page.insert_text((72, 90), title.split()[1], fontsize=12, fontname="china-s")
+        for j in range(5):
+            page.insert_text(
+                (72, 130 + j * 20),
+                f"{title}正文第{j}段，填充足够内容避免扫描页误判。",
+                fontsize=12,
+                fontname="china-s",
+            )
+    # Page 对象在 new_page 后会失效，重新取回再插链接；矩形贴紧行高（真实
+    # Word 导出的链接矩形即条目文本范围）
+    p2 = doc[1]
+    for i, (title, target) in enumerate(entries):
+        y = 100 + i * 26
+        p2.insert_link(
+            {
+                "kind": pymupdf.LINK_GOTO,
+                "from": pymupdf.Rect(60, y - 2, 520, y + 10),
+                "page": target - 1,
+                "to": pymupdf.Point(0, 0),
+            }
+        )
+    doc.save(str(path))
+    doc.close()
+
+
+def test_pdf_link_toc(ws):
+    """目录条目自带 GOTO 链接 → pdf-link-toc；定位收窄到目标页，标题拆行合并。"""
+    _make_pdf_link_toc(ws / "链接目录.pdf")
+    r = parse_document.invoke({"path": "链接目录.pdf"})
+    assert r.startswith("[解析成功]"), r
+
+    out_dir = _out_parse(ws) / "链接目录.pdf"
+    md = (out_dir / "链接目录.pdf.md").read_text(encoding="utf-8")
+    outline = json.loads((out_dir / "链接目录.pdf.outline.json").read_text(encoding="utf-8"))
+    meta = json.loads((out_dir / "链接目录.pdf.meta.json").read_text(encoding="utf-8"))
+
+    assert meta["conversion"] == "pdf-link-toc"
+    assert [n["标题"] for n in outline] == ["第一章 招标公告", "第二章 投标人须知", "第三章 评标办法"]
+
+    lines = md.splitlines()
+
+    def find_line(text):
+        return next(i for i, ln in enumerate(lines, 1) if ln.strip() == text)
+
+    # 标题定位在链接目标页（第 3/4/5 物理页锚点之后），不在目录页
+    assert find_line("# 第一章 招标公告") > find_line("<!-- p:3 -->")
+    assert find_line("# 第三章 评标办法") > find_line("<!-- p:5 -->")
+    assert sum(1 for ln in lines if ln.startswith("# ")) == 3
+
+
+def test_pdf_plain_when_no_structure(ws):
+    """无书签/无目录/无编号 → pdf-plain，警示 grep 兜底。"""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "采购需求说明", fontsize=12, fontname="china-s")
+    for j in range(8):
+        page.insert_text((72, 100 + j * 20), f"需求{j}：系统应当支持相关功能特性与性能指标。", fontsize=12, fontname="china-s")
+    doc.save(str(ws / "无结构.pdf"))
+    doc.close()
+
+    r = parse_document.invoke({"path": "无结构.pdf"})
+    assert r.startswith("[解析成功]"), r
+    meta = json.loads((_out_parse(ws) / "无结构.pdf" / "无结构.pdf.meta.json").read_text(encoding="utf-8"))
+    outline = json.loads((_out_parse(ws) / "无结构.pdf" / "无结构.pdf.outline.json").read_text(encoding="utf-8"))
+    assert meta["conversion"] == "pdf-plain"
+    assert outline == []
+    assert any("未识别出章节结构" in w for w in meta["warnings"])
 
 
 def _make_pdf_with_header_footer(path, npages=4):
@@ -345,7 +582,7 @@ def _make_unstyled_docx(path):
 
 
 def test_docx_numbered_fallback(ws):
-    """无样式文档兜底：中文编号识别为标题（启发式档，meta 带警示）。"""
+    """无样式文档兜底：中文编号识别为标题（编号档，meta 带层级警示）。"""
     _make_unstyled_docx(ws / "无样式.docx")
     r = parse_document.invoke({"path": "无样式.docx"})
     assert r.startswith("[解析成功]"), r
@@ -355,7 +592,7 @@ def test_docx_numbered_fallback(ws):
     meta = json.loads((out_dir / "无样式.docx.meta.json").read_text(encoding="utf-8"))
     outline = json.loads((out_dir / "无样式.docx.outline.json").read_text(encoding="utf-8"))
     assert meta["conversion"] == "docx-numbered"
-    assert any("启发式" in w for w in meta["warnings"])
+    assert any("中文编号" in w for w in meta["warnings"])
     assert md.count("#") >= 3
     assert [n["标题"] for n in outline] == ["第一章 招标公告"]
     assert outline[0]["children"][0]["标题"] == "一、投标须知"

@@ -122,11 +122,16 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   skill `tender-analysis`（七节要点提取，第 0 步=前置检查：sources.json 就绪+产物齐备+新鲜；
   purpose 下沉 references/ 文件级、单项可重跑；导航硬纪律=先读 out/parse/<文件名>/
   <文件名>.outline.json 按行号取区段、补充文件同纪律，禁止整读全文；**出处引用键**：
-  必带行号区间「章节名（L412-L430，第23页）」，章节名只在作者声明档
-  （docx-native/pdf-toc）署名，启发式档只给行号+页码）+
+  必带行号区间「章节名（L412-L430，第23页）」，章节名在作者声明/自报档
+  （docx-native/pdf-toc/pdf-link-toc/pdf-printed-toc）与编号档（docx-numbered/pdf-numbered，
+  标题印在原文可验证）署名，pdf-plain 只给行号+页码）+
   工具 `parse_document`（docx/pdf/txt/md→md + 带行号区间的 outline.json + meta.json；
   **结构识别分档**（meta.conversion）：docx 样式 / PDF 书签 get_toc 优先（作者声明，
-  命中率<50% 回退）/ 无样式 docx 中文编号兜底 / 无书签 pdf 字号判级（启发式带警示）；
+  命中率<50% 回退）/ 无书签 pdf 走**目录页超链接**（条目自带 GOTO 链接：矩形即标题、
+  目标即物理页，pdf-link-toc，实测语料 14/17 命中）→ **印刷目录页解析**（解析文件自印的
+  目录条目、回正文逐条定位，pdf-printed-toc）→ 中文编号兜底（docx-numbered/pdf-numbered，标题印在
+  原文可验证）→ pdf-plain（无结构，警示 grep 兜底）；**字号判级已删除**（2026-08-28
+  实测证伪：政采 PDF 章标题字号常与正文相同、封面全是巨字，17 份语料 3/3 全灭）；
   **PDF 页眉页脚剔除**（跨页重复条带+纯页码）+ 每页 `<!-- p:N -->` 页码锚点；txt/md
   透传（gb18030 兜底）；meta 含 pages/top_level(前12)/tables；同 hash 幂等、扫描件兜底、
   workspace containment、裸文件名回退任务 files/；.doc 明确拒绝提示另存为 .docx）+
@@ -246,7 +251,13 @@ kb_items+磁盘 md 重建（启动 `rebuild_kb_index`）；同 hash 上传 API �
 - `npm run dev:browser`：浏览器模式一条命令（concurrently 拉起 sidecar[8765] + frontend；
   前端经 Vite dev proxy 同源访问 `/api`，无 CORS）。
 - 纯 sidecar：`cd sidecar && uv sync && uv run --env-file .env python -m app.main --port 8765`。
-- 前端：`cd frontend && npm run lint`（oxlint）、`npm run build`（`tsc -b && vite build`，含类型检查）。
+- 前端：`cd frontend && npm run lint`（oxlint，配置在 `.oxlintrc.json`）、`npm run typecheck`
+  （`tsc -b`，tsconfig 已开 strict）、`npm run build`（含类型检查）。
+- `./check.sh`：一键全栈检查（sidecar=ruff+pytest / frontend=oxlint+tsc+vitest+build /
+  rust=cargo check+clippy `-D warnings`；可 `./check.sh sidecar|frontend|rust` 单跑）。
+  Python lint = `uv run ruff check app tests`（select 默认+isort；formatter 暂未启用）。
+- sidecar 日志双写：stderr 控制台 + `data/logs/sidecar.log`（滚动 5MB×3）；Tauri 模式下
+  stdio 被置 null，查后端问题直接看该文件（Rust 侧日志在 `~/Library/Logs/<bundle-id>/`）。
 - 未配置钥匙串 key 时 sidecar 仍可起，但 agent 调用会报「LLM_API_KEY 未设置」。
 - 浏览器模式（`npm run dev:browser`，前端经 proxy 访问的）8765 sidecar 用的是
   `sidecar/.env` 里的 `LLM_API_KEY`——它可能是占位/无效 key（会报 401 invalid key），真实 key

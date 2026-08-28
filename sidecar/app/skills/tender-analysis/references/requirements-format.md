@@ -19,13 +19,14 @@
 ## 二、必须有的章节（mandatory chapters）
 | 序号 | 章节名称 | 归属(bidPart) | 原文出处线索 |
 |---|---|---|---|
-| 1 | 法定代表人授权委托书 | qualification | 附件2 |
-（归属取值：qualification 资格 / commercial 商务 / technical 技术 / pricing 报价 / unknown）
+| 1 | 法定代表人授权委托书 | qualification | 招标文件.docx 投标人须知 3.4（L521-L523） |
+（归属取值：qualification 资格 / commercial 商务 / technical 技术 / pricing 报价 / unknown；
+出处线索须带行号区间，每行带文件名或「同文件」标记——格式见 shared-rules）
 
 ## 三、招标方给出的章节示例 / 模板（templates）
 | 序号 | 模板名称 | 归属(bidPart) | 对应必须章节 | 原文出处线索 |
 |---|---|---|---|---|
-| 1 | 投标函格式 | commercial | 投标函 | 附件3 |
+| 1 | 投标函格式 | commercial | 投标函 | 同文件 第六章 格式三（L171-L172） |
 
 ## 待澄清登记
 -（有则列，无则省略）

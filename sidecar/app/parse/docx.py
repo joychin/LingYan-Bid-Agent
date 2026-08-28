@@ -5,17 +5,12 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from docx import Document
 
 from . import ParseResult, register
-
-_CN_NUM = "一二三四五六七八九十百千零〇两"
-_HEADING_L1_RE = re.compile(rf"^第[{_CN_NUM}0-9]{{1,8}}[章节篇部分]")
-_HEADING_L2_RE = re.compile(rf"^[{_CN_NUM}]{{1,6}}、")
-_HEADING_L3_RE = re.compile(rf"^[（(][{_CN_NUM}0-9]{{1,8}}[)）]")
+from .numbering import numbered_heading_level
 
 
 def _heading_level(p) -> int:
@@ -46,18 +41,8 @@ def _is_numbered(p) -> bool:
 
 
 def _numbered_heading_level(text: str) -> int:
-    """中文编号启发式（仅无样式文档兜底）：第X章→L1 / 一、→L2 /（一）→L3。
-
-    行长 ≤60 且不以句读结尾——排除长句与正文段落。"""
-    if len(text) > 60 or text.endswith(("。", "；", "，", "：", ",", ";")):
-        return 0
-    if _HEADING_L1_RE.match(text):
-        return 1
-    if _HEADING_L2_RE.match(text):
-        return 2
-    if _HEADING_L3_RE.match(text):
-        return 3
-    return 0
+    """中文编号启发式（仅无样式文档兜底）：实现移至 numbering.py（与 pdf 兜底共用）。"""
+    return numbered_heading_level(text)
 
 
 def _cell_text(cell) -> str:

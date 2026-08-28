@@ -23,7 +23,7 @@ from pathlib import Path
 from .. import config as cfg
 from .. import db
 from ..parse import convert as parse_convert
-from ..parse import count_nodes, outline_with_lines, sha256_file
+from ..parse import count_nodes, outline_with_lines
 from ..parse import image as parse_image
 from ..parse import pdf as parse_pdf
 from ..vlm import VlmUnavailable
@@ -99,8 +99,8 @@ def run_ingest(kid: str) -> dict:
     n_headings = count_nodes(outline)
     if n_headings == 0 and md_text:
         warnings.append("未识别到标题结构，检索按固定窗口切段")
-    if info.get("conversion") in ("docx-numbered", "pdf-fontsize"):
-        warnings.append("结构来自启发式识别（无样式/无书签），层级可能不完整或有误")
+    if info.get("conversion") in ("docx-numbered", "pdf-numbered"):
+        warnings.append("结构来自中文编号识别（标题印在原文，可验证），层级可能不完整")
 
     md_path, outline_path, meta_path = store.kb_parse_paths(file_name)
     meta_path.parent.mkdir(parents=True, exist_ok=True)
