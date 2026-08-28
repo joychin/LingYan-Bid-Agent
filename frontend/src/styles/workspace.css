@@ -1,8 +1,9 @@
 /* ============================================================
  * Workspace Shell · 组件级设计系统
  * 来源：workspace-dna-prototype.html（studied-DNA）
- * 仅供预览页入口 import；与 index.css 完全隔离，真实 App 不受影响。
- * 待组件确认后，将本文件 token/类提升进 index.css 并接线。
+ * 真实 App 与预览页共用（main.tsx 与 preview 入口均 import 本文件）。
+ * --paper/--panel/--ink/--brand 等 token 在 index.css 有一份同值副本
+ * （供不引本文件的场景）；改值须两处同步，以本文件为准。
  * ============================================================ */
 
 :root {

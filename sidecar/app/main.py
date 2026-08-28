@@ -133,7 +133,8 @@ async def auth_middleware(request: Request, call_next):
     if token and request.url.path.startswith("/api") and request.url.path != "/api/healthz":
         auth = request.headers.get("Authorization", "")
         if auth != f"Bearer {token}":
-            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+            # 与 HTTPException 的 {"detail"} 信封统一（前端 request 层 detail ?? error 两读兼容）
+            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
     return await call_next(request)
 
 

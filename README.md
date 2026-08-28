@@ -33,21 +33,26 @@ Python sidecar（FastAPI + uvicorn）
 ```
 ├── sidecar/            Python sidecar（FastAPI + DeepAgents）
 │   ├── app/
-│   │   ├── main.py     FastAPI 入口（--port；鉴权/CORS/lifespan）
-│   │   ├── config.py   env 读取（DATA_DIR 默认 ./data）
-│   │   ├── db.py       sqlite3 三表：conversations / messages / runs（WAL）
-│   │   ├── agent.py    build_agent + run_stream（实时发布事件）
-│   │   ├── events.py   LangGraph 流 → §5.5 事件的唯一映射层
+│   │   ├── main.py     FastAPI 入口（--port；鉴权/CORS/lifespan；日志双写 stderr+文件）
+│   │   ├── config.py   env+settings.json 双角色配置（llm/vlm）
+│   │   ├── db.py       sqlite3：tasks/conversations/messages/runs/run_traces/artifact_index/kb（WAL）
+│   │   ├── db_migrations.py  user_version 编号迁移（schema 变更在此追加）
+│   │   ├── agent.py    build_agent + run_stream（实时发布事件/流式断点重试/协作取消）
+│   │   ├── events.py   LangGraph 流 → §5.5 事件的唯一映射层 + run 边界 payload 构造
+│   │   ├── contracts/  契约单一事实源（events/dto pydantic 模型 → 生成前端 TS 类型）
 │   │   ├── bus.py      每会话 asyncio.Queue 订阅表
-│   │   ├── api/        conversations / settings / sse
-│   │   ├── tools/      tender_toc.py（convert/extract/build 三工具）
-│   │   └── skills/     tender-analysis + tender-toc（SKILL.md）
-│   └── data/           运行时生成（gitignore）：app.db / agent.db / workspace/
+│   │   ├── api/        tasks/conversations/runs/settings/sse/files/artifacts/knowledge
+│   │   ├── tools/      LLM 工具（parse_document/assemble_tender/publish/read/…）
+│   │   ├── parse/      确定性解析注册表（docx/pdf/txt/md → md+outline+meta）
+│   │   ├── knowledge/  公司资料库（FTS5 jieba 检索/入库管线）
+│   │   └── skills/     document-parse + tender-analysis + tender-outline（SKILL.md）
+│   ├── scripts/        gen_ts_types.py（契约 TS 类型生成）
+│   └── data/           运行时生成（gitignore）：app.db / agent.db / workspace/ / logs/
 ├── frontend/           React 19 + Vite + Tailwind（shadcn 风格，手写组件）
-│   └── src/            api(client/sse) · hooks · components
+│   └── src/            api(client/sse/events.gen/dto.gen) · hooks(含 runReducer+vitest) · components
 ├── src-tauri/          Tauri 2 壳（sidecar 生命周期 / 钥匙串 / commands）
-│   ├── src/sidecar.rs  spawn·healthz·指数退避重启·进程树清理
-│   └── src/lib.rs      commands：get_sidecar_info / get/set_llm_settings / get_api_key_has_value
+│   ├── src/sidecar.rs  spawn·healthz·指数退避重启·进程树清理·双角色设置
+│   └── src/lib.rs      commands：get_sidecar_info / get/set_model_settings / get_api_key_has_value / reveal_in_folder
 └── tender-agent-mvp-prd.md
 ```
 

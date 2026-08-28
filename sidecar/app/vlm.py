@@ -11,6 +11,9 @@ import base64
 import mimetypes
 from pathlib import Path
 
+from openai import APIConnectionError, InternalServerError, OpenAI, RateLimitError
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+
 from . import config as cfg
 
 
@@ -18,13 +21,16 @@ class VlmUnavailable(Exception):
     """VLM 未配置。调用方捕获后走降级链，不当错误展示。"""
 
 
+# 瞬时错误（连接/超时/5xx/429）在客户端内两连试（1s 间隔）；其余（鉴权/参数/配额）原样抛。
+# agent.py 的主 LLM 流式断点重试是另一套定制语义（checkpoint 续跑），互不相干。
+_TRANSIENT_ERRORS = (APIConnectionError, InternalServerError, RateLimitError)
+
+
 def vlm_available() -> bool:
     return bool(cfg.vlm_base_url() and cfg.vlm_api_key() and cfg.vlm_model())
 
 
 def _client():
-    from openai import OpenAI
-
     return OpenAI(
         api_key=cfg.vlm_api_key(),
         base_url=cfg.vlm_base_url(),
@@ -33,10 +39,16 @@ def _client():
     )
 
 
+@retry(
+    retry=retry_if_exception_type(_TRANSIENT_ERRORS),
+    stop=stop_after_attempt(2),
+    wait=wait_fixed(1),
+    reraise=True,
+)
 def vlm_read_image(image_path: Path, prompt: str) -> str:
     """读图返回纯文本回复（同步；调用方 asyncio.to_thread 包裹）。
 
-    未配置时抛 VlmUnavailable；网络/API 错误原样抛，由调用方决定重试或降级。
+    未配置时抛 VlmUnavailable；瞬时网络/API 错误在此两连试，仍失败原样抛由调用方降级。
     """
     if not vlm_available():
         raise VlmUnavailable("VLM 未配置")

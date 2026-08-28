@@ -9,6 +9,8 @@ import asyncio
 import logging
 
 from langchain_deepseek import ChatDeepSeek
+from openai import APIConnectionError, InternalServerError, RateLimitError
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from . import config as cfg
 from . import db
@@ -20,6 +22,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_TITLE = "新对话"
 MAX_INPUT_CHARS = 500
 MAX_TITLE_LEN = 30
+
+# 瞬时错误两连试（与 vlm.py 同款；agent.py 流式断点重试是另一套定制语义）
+_TRANSIENT_ERRORS = (APIConnectionError, InternalServerError, RateLimitError)
 
 _TITLE_PROMPT = (
     "为下面这条用户消息所在的对话起一个简短的中文标题（6~16 个字），"
@@ -49,6 +54,12 @@ async def maybe_generate_title(cid: str, user_text: str) -> None:
         )
 
 
+@retry(
+    retry=retry_if_exception_type(_TRANSIENT_ERRORS),
+    stop=stop_after_attempt(2),
+    wait=wait_fixed(1),
+    reraise=True,
+)
 def _generate(api_key: str, user_text: str) -> str | None:
     model = ChatDeepSeek(
         api_key=api_key,
