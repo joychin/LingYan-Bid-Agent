@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Eye, EyeOff, FileText, FolderOpen, Image as ImageIcon, Pencil, Plus, Sparkles, Star, Trash2, X } from 'lucide-react'
+import { Check, ChevronDown, Eye, EyeOff, FileText, FolderOpen, Image as ImageIcon, Pencil, Plus, Search, Sparkles, Star, Trash2, X } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ModalShell } from '@/components/ui/ModalShell'
@@ -27,61 +28,6 @@ const SECTIONS: { id: SectionId; title: string; icon: typeof Sparkles }[] = [
   { id: 'models', title: '模型', icon: Sparkles },
   { id: 'parse', title: '文档解析', icon: FileText },
   { id: 'general', title: '通用', icon: FolderOpen },
-]
-
-/** 厂商预设：只是填表快捷方式不当真值，选中后任何字段都可改；模型列表会过时，少而精。 */
-const VENDOR_PRESETS: { name: string; baseUrl: string; models: { name: string; imageSupport: boolean }[] }[] = [
-  {
-    name: 'DeepSeek',
-    baseUrl: 'https://api.deepseek.com/v1',
-    models: [
-      { name: 'deepseek-v4-flash', imageSupport: false },
-      { name: 'deepseek-chat', imageSupport: false },
-      { name: 'deepseek-reasoner', imageSupport: false },
-    ],
-  },
-  {
-    name: 'Moonshot（Kimi）',
-    baseUrl: 'https://api.moonshot.cn/v1',
-    models: [
-      { name: 'kimi-k2', imageSupport: false },
-      { name: 'kimi-latest', imageSupport: false },
-    ],
-  },
-  {
-    name: '阿里云百炼',
-    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    models: [
-      { name: 'qwen-max', imageSupport: false },
-      { name: 'qwen-plus', imageSupport: false },
-      { name: 'qwen-vl-max', imageSupport: true },
-    ],
-  },
-  {
-    name: 'OpenAI',
-    baseUrl: 'https://api.openai.com/v1',
-    models: [
-      { name: 'gpt-4o', imageSupport: true },
-      { name: 'gpt-4.1', imageSupport: true },
-    ],
-  },
-  {
-    name: '智谱',
-    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    models: [
-      { name: 'glm-4.6', imageSupport: false },
-      { name: 'glm-4.5v', imageSupport: true },
-    ],
-  },
-  {
-    name: '火山方舟',
-    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
-    models: [
-      { name: 'doubao-seed-1.6', imageSupport: true },
-      { name: 'doubao-1.5-pro', imageSupport: false },
-    ],
-  },
-  { name: '自定义', baseUrl: '', models: [] },
 ]
 
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
@@ -172,7 +118,9 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
 }
 
 // ---------------------------------------------------------------------------
-// 模型区：profile 列表制（多模型；key 走钥匙串 per-model account，永不进 HTTP）
+// 模型区：profile 列表制（多模型；Key 存本地库 app_settings，只写不回读）。
+// 添加/编辑是二级弹窗（WorkBuddy 式）：提供商可搜索下拉 → 厂商预设只填 Key+选模型，
+// 自定义才露接口地址；厂商预设只是填表快捷方式不当真值。
 // ---------------------------------------------------------------------------
 
 /** 列表/表单共用的本地形状（编辑中的草稿；保存时全量 PUT） */
@@ -185,12 +133,149 @@ interface LocalModel {
   keySaved: boolean
 }
 
+interface VendorPreset {
+  key: string
+  /** 下拉里显示的全名 */
+  label: string
+  /** 列表行 / 自动命名用的短名 */
+  short: string
+  baseUrl: string
+  mono: string
+  color: string
+  models: { name: string; imageSupport: boolean }[]
+}
+
+const VENDOR_PRESETS: VendorPreset[] = [
+  {
+    key: 'deepseek',
+    label: '深度求索 / DeepSeek',
+    short: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com/v1',
+    mono: 'D',
+    color: '#4D6BFE',
+    models: [
+      { name: 'deepseek-v4-flash', imageSupport: false },
+      { name: 'deepseek-chat', imageSupport: false },
+      { name: 'deepseek-reasoner', imageSupport: false },
+    ],
+  },
+  {
+    key: 'moonshot',
+    label: 'Kimi / Moonshot',
+    short: 'Kimi',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    mono: 'K',
+    color: '#16191E',
+    models: [
+      { name: 'kimi-k2', imageSupport: false },
+      { name: 'kimi-latest', imageSupport: false },
+    ],
+  },
+  {
+    key: 'dashscope',
+    label: '阿里云百炼 / DashScope',
+    short: '百炼',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    mono: 'A',
+    color: '#FF6A00',
+    models: [
+      { name: 'qwen-max', imageSupport: false },
+      { name: 'qwen-plus', imageSupport: false },
+      { name: 'qwen-vl-max', imageSupport: true },
+    ],
+  },
+  {
+    key: 'zhipu',
+    label: '智谱 / GLM',
+    short: '智谱',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    mono: 'Z',
+    color: '#3859FF',
+    models: [
+      { name: 'glm-4.6', imageSupport: false },
+      { name: 'glm-4.5v', imageSupport: true },
+    ],
+  },
+  {
+    key: 'volc',
+    label: '火山方舟 / Volcengine',
+    short: '方舟',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    mono: 'V',
+    color: '#1664FF',
+    models: [
+      { name: 'doubao-seed-1.6', imageSupport: true },
+      { name: 'doubao-1.5-pro', imageSupport: false },
+    ],
+  },
+  {
+    key: 'openai',
+    label: 'OpenAI',
+    short: 'OpenAI',
+    baseUrl: 'https://api.openai.com/v1',
+    mono: 'O',
+    color: '#10A37F',
+    models: [
+      { name: 'gpt-4o', imageSupport: true },
+      { name: 'gpt-4.1', imageSupport: true },
+    ],
+  },
+]
+
+const CUSTOM_PRESET: VendorPreset = {
+  key: 'custom',
+  label: '自定义 / Custom',
+  short: '自定义',
+  baseUrl: '',
+  mono: '',
+  color: '',
+  models: [],
+}
+
+const ALL_PRESETS = [...VENDOR_PRESETS, CUSTOM_PRESET]
+
+const presetOfBaseUrl = (url: string | undefined): VendorPreset | undefined =>
+  ALL_PRESETS.find((p) => p.baseUrl && p.baseUrl === url)
+
+const toModelBody = (m: LocalModel): ModelBody => ({
+  id: m.id,
+  name: m.name || m.id,
+  base_url: m.baseUrl,
+  model: m.model,
+  image_support: m.imageSupport,
+})
+
+/** 显示名自动派生：厂商=preset 短名（同厂商第二个起追加模型名）；自定义=模型名 */
+const deriveName = (list: LocalModel[], id: string, preset: VendorPreset, model: string): string => {
+  const m = model.trim()
+  if (preset.key === 'custom') return m || '自定义模型'
+  return list.some((x) => x.id !== id && x.name === preset.short) ? `${preset.short} · ${m}` : preset.short
+}
+
+function PresetAvatar({ p, className }: { p: VendorPreset; className?: string }) {
+  if (p.key === 'custom') {
+    return (
+      <span className={cn('grid h-5 w-5 shrink-0 place-items-center rounded border border-dashed border-line text-muted-foreground', className)}>
+        <Plus className="h-3 w-3" />
+      </span>
+    )
+  }
+  return (
+    <span
+      className={cn('grid h-5 w-5 shrink-0 place-items-center rounded text-[11px] font-semibold text-white', className)}
+      style={{ backgroundColor: p.color }}
+    >
+      {p.mono}
+    </span>
+  )
+}
+
 function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSettings>> | undefined }) {
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [models, setModels] = useState<LocalModel[]>([])
   const [defaultModel, setDefaultModel] = useState('')
-  // null=列表态；'new'=新增；否则=编辑该 id
+  // null=列表态；'new'=新增；否则=编辑该 id（弹窗盖在列表上）
   const [editing, setEditing] = useState<string | 'new' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -210,18 +295,17 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
     }
   }, [settings])
 
-  const persist = async (list: LocalModel[], dflt: string) => {
+  const commit = (list: LocalModel[], dflt: string) => {
+    setModels(list)
+    setDefaultModel(dflt)
+    void queryClient.invalidateQueries({ queryKey: ['settings'] })
+  }
+
+  const persistList = async (list: LocalModel[], dflt: string): Promise<boolean> => {
     setError(null)
-    const body: ModelBody[] = list.map((m) => ({
-      id: m.id,
-      name: m.name || m.id,
-      base_url: m.baseUrl,
-      model: m.model,
-      image_support: m.imageSupport,
-    }))
     try {
-      await putModels(body, dflt)
-      void queryClient.invalidateQueries({ queryKey: ['settings'] })
+      await putModels(list.map(toModelBody), dflt)
+      commit(list, dflt)
       return true
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -229,366 +313,560 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
     }
   }
 
-  const saveFromForm = async (draft: LocalModel, isNew: boolean) => {
-    const list = isNew ? [...models, draft] : models.map((m) => (m.id === draft.id ? draft : m))
-    // 唯一一条时自动设为默认；默认模型被删时回落第一条
-    let dflt = defaultModel
-    if (!list.some((m) => m.id === dflt)) dflt = list[0]?.id ?? ''
-    if (list.length === 1) dflt = list[0].id
-    if (!(await persist(list, dflt))) return
-    setDefaultModel(dflt)
-    setEditing(null)
-    toast(isNew ? '模型已添加' : '模型已保存', 'success')
-  }
-
   const removeModel = async (m: LocalModel) => {
-    if (!window.confirm(`删除模型「${m.name}」？（已保存的 API Key 会保留在钥匙串，重新添加同 id 可复用）`)) return
+    if (!window.confirm(`删除模型「${m.name}」？其已保存的 API Key 将一并停用。`)) return
     const list = models.filter((x) => x.id !== m.id)
     let dflt = defaultModel
     if (dflt === m.id) dflt = list[0]?.id ?? ''
-    if (!(await persist(list, dflt))) return
-    setDefaultModel(dflt)
+    if (!(await persistList(list, dflt))) return
     toast('模型已删除', 'success')
   }
 
   const setAsDefault = async (m: LocalModel) => {
-    if (!(await persist(models, m.id))) return
-    setDefaultModel(m.id)
+    if (!(await persistList(models, m.id))) return
     toast(`「${m.name}」已设为默认`, 'success')
-  }
-
-  if (editing !== null) {
-    const isNew = editing === 'new'
-    const current = isNew ? null : (models.find((m) => m.id === editing) ?? null)
-    return (
-      <ModelForm
-        key={editing}
-        initial={current}
-        isNew={isNew}
-        error={error}
-        onSave={saveFromForm}
-        onCancel={() => setEditing(null)}
-        onError={setError}
-      />
-    )
   }
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">
-          可配置任意多个模型（不同供应商各配各的）；勾选「支持图片输入」的模型会用于知识库图片
-          / 扫描件识别。带 ★ 的是默认模型（后台轻量任务与新会话使用）。
-        </p>
-        <Button size="sm" onClick={() => setEditing('new')}>
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-muted/30 px-4 py-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">本地配置</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            模型与 API Key 均保存在本机数据库，不上传；勾选「图片输入」的模型用于知识库图片 / 扫描件识别。
+          </p>
+        </div>
+        <Button size="sm" className="shrink-0" onClick={() => setEditing('new')}>
           <Plus className="mr-1 h-3.5 w-3.5" />
           添加模型
         </Button>
       </div>
 
+      {models.length > 0 && <p className="text-xs font-medium text-muted-foreground">已保存模型</p>}
       {models.length === 0 && (
         <p className="rounded-lg border border-dashed border-line p-6 text-center text-sm text-muted-foreground">
-          还没有配置模型——点击「添加模型」，选一家厂商预设后只需填写 API Key
+          还没有配置模型——点击「添加模型」，选一家厂商后只需填写 API Key
         </p>
       )}
 
-      {models.map((m) => (
-        <div key={m.id} className="flex items-center gap-3 rounded-lg border border-line p-3">
-          <button
-            type="button"
-            onClick={() => void setAsDefault(m)}
-            title={defaultModel === m.id ? '默认模型' : '设为默认'}
-            className={`grid h-6 w-6 shrink-0 place-items-center rounded-md transition-colors ${
-              defaultModel === m.id
-                ? 'text-amber-500'
-                : 'text-muted-foreground/40 hover:bg-muted hover:text-muted-foreground'
-            }`}
-          >
-            <Star className={`h-4 w-4 ${defaultModel === m.id ? 'fill-current' : ''}`} />
-          </button>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5">
-              <span className="truncate text-sm font-medium">{m.name}</span>
-              {m.imageSupport && (
-                <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-accent-soft px-1.5 py-px text-[10px] text-primary">
-                  <ImageIcon className="h-2.5 w-2.5" />
-                  图片
+      {models.map((m) => {
+        const isDefault = defaultModel === m.id
+        return (
+          <div key={m.id} className="flex items-center gap-3 rounded-xl border border-line px-3.5 py-3">
+            <button
+              type="button"
+              onClick={() => void setAsDefault(m)}
+              title={isDefault ? '默认模型' : '设为默认'}
+              className={`grid h-6 w-6 shrink-0 place-items-center rounded-md transition-colors ${
+                isDefault ? 'text-amber-500' : 'text-muted-foreground/40 hover:bg-muted hover:text-muted-foreground'
+              }`}
+            >
+              <Star className={`h-4 w-4 ${isDefault ? 'fill-current' : ''}`} />
+            </button>
+            <PresetAvatar p={presetOfBaseUrl(m.baseUrl) ?? CUSTOM_PRESET} />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-sm font-medium">{m.name}</span>
+                {isDefault && (
+                  <span className="shrink-0 rounded bg-muted px-1.5 py-px text-[10px] text-muted-foreground">默认</span>
+                )}
+                {m.imageSupport && (
+                  <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-accent-soft px-1.5 py-px text-[10px] text-primary">
+                    <ImageIcon className="h-2.5 w-2.5" />
+                    图片
+                  </span>
+                )}
+                <span className={cn('ml-auto shrink-0 text-[10px]', m.keySaved ? 'text-success' : 'text-error')}>
+                  {m.keySaved ? 'Key 已配置' : 'Key 未配置'}
                 </span>
-              )}
-              <span
-                className={`ml-auto shrink-0 text-[10px] ${m.keySaved ? 'text-success' : 'text-error'}`}
-              >
-                {m.keySaved ? 'Key 已配置' : 'Key 未配置'}
-              </span>
+              </div>
+              <p className="truncate font-mono text-xs text-muted-foreground">
+                {m.model} · {m.baseUrl.replace(/^https?:\/\//, '')}
+              </p>
             </div>
-            <p className="truncate font-mono text-xs text-muted-foreground">
-              {m.model} · {m.baseUrl.replace(/^https?:\/\//, '')}
-            </p>
+            <button
+              type="button"
+              title="编辑"
+              aria-label="编辑"
+              onClick={() => setEditing(m.id)}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <Pencil className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              title="删除"
+              aria-label="删除"
+              onClick={() => void removeModel(m)}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-error"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
           </div>
-          <Button size="sm" variant="outline" onClick={() => setEditing(m.id)}>
-            <Pencil className="mr-1 h-3 w-3" />
-            编辑
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => void removeModel(m)}>
-            <Trash2 className="h-3 w-3" />
-          </Button>
-        </div>
-      ))}
+        )
+      })}
 
       {error && <p className="text-sm text-error">{error}</p>}
+
+      {editing !== null && (
+        <ModelDialog
+          key={editing}
+          isNew={editing === 'new'}
+          initial={editing === 'new' ? null : (models.find((m) => m.id === editing) ?? null)}
+          models={models}
+          defaultModel={defaultModel}
+          onCommit={commit}
+          onClose={() => setEditing(null)}
+        />
+      )}
     </div>
   )
 }
 
-/** 新增/编辑表单：厂商预设下拉 → 只需填 Key；模型从预设列表选或自定义 */
-function ModelForm({
+// --- 添加/编辑模型二级弹窗 -------------------------------------------------
+
+function Field({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1.5">
+      <label className="block text-[13px] font-medium">{label}</label>
+      {children}
+    </div>
+  )
+}
+
+/** 提供商下拉：可搜索、带厂商色块；分组=API 厂商 / 其他（自定义） */
+function ProviderSelect({ value, onChange }: { value: string; onChange: (key: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t && !t.closest('[data-provider-select]')) setOpen(false)
+    }
+    document.addEventListener('pointerdown', onDoc)
+    return () => document.removeEventListener('pointerdown', onDoc)
+  }, [open])
+
+  const kw = q.trim().toLowerCase()
+  const hit = ALL_PRESETS.filter(
+    (p) => !kw || p.label.toLowerCase().includes(kw) || p.short.toLowerCase().includes(kw),
+  )
+  const vendors = hit.filter((p) => p.key !== 'custom')
+  const hasCustom = hit.some((p) => p.key === 'custom')
+
+  const row = (p: VendorPreset) => (
+    <button
+      key={p.key}
+      type="button"
+      onClick={() => {
+        onChange(p.key)
+        setOpen(false)
+        setQ('')
+      }}
+      className={cn(
+        'flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm',
+        p.key === value ? 'bg-accent-soft' : 'hover:bg-secondary',
+      )}
+    >
+      <PresetAvatar p={p} />
+      <span className="min-w-0 flex-1 truncate">{p.label}</span>
+      {p.key === value && <Check className="h-4 w-4 shrink-0 text-primary" />}
+    </button>
+  )
+
+  return (
+    <div
+      className="relative"
+      data-provider-select
+      data-dropdown-open={open || undefined}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape' && open) {
+          e.stopPropagation() // 只关下拉，不关弹窗（closed 时放行给上层）
+          setOpen(false)
+        }
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex h-9 w-full items-center gap-2.5 rounded-lg border border-line bg-card px-3 text-sm transition-colors hover:bg-secondary/50"
+      >
+        <PresetAvatar p={ALL_PRESETS.find((p) => p.key === value) ?? CUSTOM_PRESET} />
+        <span className="min-w-0 flex-1 truncate text-left">
+          {(ALL_PRESETS.find((p) => p.key === value) ?? CUSTOM_PRESET).label}
+        </span>
+        <ChevronDown className={cn('h-4 w-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')} />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 right-0 top-full z-20 mt-1.5 rounded-xl border border-line bg-card py-1 shadow-[0_8px_18px_rgba(16,24,40,0.12)]">
+          <div className="flex items-center gap-2 border-b border-line px-3 py-2">
+            <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <input
+              autoFocus
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="搜索提供商"
+              className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            />
+          </div>
+          <div className="max-h-60 overflow-y-auto py-1">
+            {vendors.length > 0 && <p className="px-3 pb-1 pt-1.5 text-[11px] text-muted-foreground">API 厂商</p>}
+            {vendors.map(row)}
+            {hasCustom && (
+              <>
+                <div className="my-1 border-t border-line" />
+                <p className="px-3 pb-1 pt-1 text-[11px] text-muted-foreground">其他</p>
+                {ALL_PRESETS.filter((p) => p.key === 'custom').map(row)}
+              </>
+            )}
+            {hit.length === 0 && <p className="px-3 py-2 text-sm text-muted-foreground">无匹配的提供商</p>}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 预设模型下拉：preset.models + 「自定义模型名…」逃生口 */
+function ModelNameSelect({
+  preset,
+  value,
+  onPick,
+  onCustom,
+}: {
+  preset: VendorPreset
+  value: string
+  onPick: (m: { name: string; imageSupport: boolean }) => void
+  onCustom: () => void
+}) {
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t && !t.closest('[data-model-name-select]')) setOpen(false)
+    }
+    document.addEventListener('pointerdown', onDoc)
+    return () => document.removeEventListener('pointerdown', onDoc)
+  }, [open])
+
+  return (
+    <div
+      className="relative flex-1"
+      data-model-name-select
+      data-dropdown-open={open || undefined}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape' && open) {
+          e.stopPropagation() // 只关下拉，不关弹窗（closed 时放行给上层）
+          setOpen(false)
+        }
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex h-9 w-full items-center gap-2 rounded-lg border border-line bg-card px-3 text-sm transition-colors hover:bg-secondary/50"
+      >
+        <span className="min-w-0 flex-1 truncate text-left font-mono text-[13px]">{value || '选择模型'}</span>
+        <ChevronDown className={cn('h-4 w-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')} />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 right-0 top-full z-20 mt-1.5 max-h-64 overflow-y-auto rounded-xl border border-line bg-card py-1 shadow-[0_8px_18px_rgba(16,24,40,0.12)]">
+          {preset.models.map((m) => (
+            <button
+              key={m.name}
+              type="button"
+              onClick={() => {
+                onPick(m)
+                setOpen(false)
+              }}
+              className={cn(
+                'flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm',
+                m.name === value ? 'bg-accent-soft' : 'hover:bg-secondary',
+              )}
+            >
+              <span className="min-w-0 flex-1 truncate font-mono text-[13px]">{m.name}</span>
+              {m.imageSupport && <ImageIcon className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="支持图片" />}
+              {m.name === value && <Check className="h-4 w-4 shrink-0 text-primary" />}
+            </button>
+          ))}
+          <div className="my-1 border-t border-line" />
+          <button
+            type="button"
+            onClick={() => {
+              onCustom()
+              setOpen(false)
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-muted-foreground hover:bg-secondary"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            自定义模型名…
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ModelDialog({
   initial,
   isNew,
-  error,
-  onSave,
-  onCancel,
-  onError,
+  models,
+  defaultModel,
+  onCommit,
+  onClose,
 }: {
   initial: LocalModel | null
   isNew: boolean
-  error: string | null
-  onSave: (draft: LocalModel, isNew: boolean) => void
-  onCancel: () => void
-  onError: (e: string | null) => void
+  models: LocalModel[]
+  defaultModel: string
+  onCommit: (list: LocalModel[], dflt: string) => void
+  onClose: () => void
 }) {
   const { toast } = useToast()
-  const [presetIdx, setPresetIdx] = useState(() => {
-    if (initial) {
-      const i = VENDOR_PRESETS.findIndex((p) => p.baseUrl && p.baseUrl === initial.baseUrl)
-      if (i >= 0) return i
-    }
-    return VENDOR_PRESETS.length - 1 // 自定义
-  })
-  const [name, setName] = useState(initial?.name ?? '')
-  const [baseUrl, setBaseUrl] = useState(initial?.baseUrl ?? '')
-  const [model, setModel] = useState(initial?.model ?? '')
+  const queryClient = useQueryClient()
+  // 新增默认第一家厂商预设（地址/模型一并预填），编辑按 baseUrl 反推
+  const [providerKey, setProviderKey] = useState(
+    () => presetOfBaseUrl(initial?.baseUrl)?.key ?? (initial ? 'custom' : VENDOR_PRESETS[0].key),
+  )
+  const preset = ALL_PRESETS.find((p) => p.key === providerKey) ?? CUSTOM_PRESET
+  const [baseUrl, setBaseUrl] = useState(initial?.baseUrl ?? (VENDOR_PRESETS[0].baseUrl as string))
+  const [model, setModel] = useState(initial?.model ?? VENDOR_PRESETS[0].models[0]?.name ?? '')
   const [customModel, setCustomModel] = useState(() => {
     if (!initial) return false
-    const p = VENDOR_PRESETS.find((p) => p.baseUrl && p.baseUrl === initial.baseUrl)
-    return !p || !p.models.some((mm) => mm.name === initial.model)
+    const p = presetOfBaseUrl(initial.baseUrl)
+    return !p || !p.models.some((m) => m.name === initial.model)
   })
-  const [imageSupport, setImageSupport] = useState(initial?.imageSupport ?? false)
+  const [imageSupport, setImageSupport] = useState(
+    initial?.imageSupport ?? (VENDOR_PRESETS[0].models[0]?.imageSupport ?? false),
+  )
   const [key, setKey] = useState('')
   const [keySaved, setKeySaved] = useState(initial?.keySaved ?? false)
   const [showKey, setShowKey] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
-
-  const preset = VENDOR_PRESETS[presetIdx]
+  const [error, setError] = useState<string | null>(null)
 
   // 已保存过的 profile id 沿用（Key 按模型 id 存本地库）；新模型生成 uuid
   const [pid] = useState(initial?.id ?? `m_${crypto.randomUUID().slice(0, 8)}`)
 
-  const applyPreset = (i: number) => {
-    setPresetIdx(i)
-    const p = VENDOR_PRESETS[i]
+  // Escape 关本弹窗：必须挂 window 捕获段——点「添加模型」后焦点常停在弹窗后面的
+  // 列表按钮上，keydown 目标不在卡片子树，卡片上的 React onKeyDown 不在传播路径里，
+  // 事件会直达 window 把设置窗一起关掉。下拉打开时让位（下拉的 React handler
+  // 会 stopPropagation 截停在 React root，同样到不了 ModalShell 的 window 监听）。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      const t = e.target as HTMLElement | null
+      if (t && t.closest('[data-dropdown-open]')) return
+      e.stopPropagation()
+      onClose()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onClose])
+
+  const applyProvider = (k: string) => {
+    setProviderKey(k)
+    const p = ALL_PRESETS.find((x) => x.key === k) ?? CUSTOM_PRESET
     if (p.baseUrl) setBaseUrl(p.baseUrl)
-    if (!name && p.name !== '自定义') setName(p.name)
     if (p.models.length > 0) {
       setModel(p.models[0].name)
       setImageSupport(p.models[0].imageSupport)
       setCustomModel(false)
     } else {
-      setCustomModel(true)
+      setCustomModel(true) // 自定义：保留当前地址供编辑
     }
+    setError(null)
   }
 
-  const pickPresetModel = (m: { name: string; imageSupport: boolean } | null) => {
-    if (m) {
-      setModel(m.name)
-      setImageSupport(m.imageSupport)
-    } else {
-      setCustomModel(true)
-      setModel('')
+  /** 保存模型配置（+ 可选的新 Key）。返回错误文案，null=成功（不关弹窗，由调用方决定） */
+  const persist = async (): Promise<string | null> => {
+    const draft: LocalModel = {
+      id: pid,
+      name: deriveName(models, pid, preset, model),
+      baseUrl: baseUrl.trim(),
+      model: model.trim(),
+      imageSupport,
+      keySaved: keySaved || !!key.trim(),
     }
-  }
-
-  const saveKey = async () => {
-    onError(null)
+    if (!draft.model) return '请填写模型名称'
+    if (!draft.baseUrl) return '请填写接口地址'
+    const list = isNew ? [...models, draft] : models.map((m) => (m.id === pid ? draft : m))
+    // 唯一一条时自动设为默认；默认模型被删时回落第一条
+    let dflt = defaultModel
+    if (!list.some((m) => m.id === dflt)) dflt = list[0]?.id ?? ''
+    if (list.length === 1) dflt = list[0].id
     try {
-      await putModelKey(pid, key)
-      setKey('')
-      setKeySaved(true)
-      toast('API Key 已保存，即时生效', 'success')
+      await putModels(list.map(toModelBody), dflt)
+      if (key.trim()) {
+        await putModelKey(pid, key.trim())
+        setKey('')
+        setKeySaved(true)
+      }
+      onCommit(list, dflt)
+      void queryClient.invalidateQueries({ queryKey: ['settings'] })
+      return null
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e))
+      return e instanceof Error ? e.message : String(e)
     }
+  }
+
+  const save = async () => {
+    setError(null)
+    setSaving(true)
+    const err = await persist()
+    setSaving(false)
+    if (err) {
+      setError(err)
+      return
+    }
+    toast(isNew ? '模型已添加' : '模型已保存', 'success')
+    onClose()
   }
 
   const test = async () => {
-    onError(null)
+    setError(null)
     setTesting(true)
     try {
-      // 先保存表单值（进列表）再测试，避免「测的是旧配置」
-      const draft: LocalModel = { id: pid, name: name.trim() || pid, baseUrl: baseUrl.trim(), model: model.trim(), imageSupport, keySaved }
-      await onSave(draft, isNew)
+      const err = await persist() // 先静默保存再测试，避免「测的是旧配置」
+      if (err) {
+        setError(err)
+        return
+      }
       const r = await testModelConnection({ model: pid })
       toast(r.ok ? '连接正常' : '连接失败', r.ok ? 'success' : 'error')
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e))
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setTesting(false)
     }
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={onCancel}
-          className="text-xs text-muted-foreground transition-colors hover:text-foreground"
-        >
-          ← 返回模型列表
-        </button>
-        <span className="text-sm font-medium">{isNew ? '添加模型' : `编辑：${initial?.name}`}</span>
-      </div>
-
-      <div className="space-y-3 rounded-lg border border-line p-3">
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">厂商预设</label>
-          <div className="flex flex-wrap gap-1.5">
-            {VENDOR_PRESETS.map((p, i) => (
-              <button
-                key={p.name}
-                type="button"
-                onClick={() => applyPreset(i)}
-                className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                  presetIdx === i ? 'border-primary bg-accent-soft text-primary' : 'hover:bg-secondary'
-                }`}
-              >
-                {p.name}
-              </button>
-            ))}
-          </div>
-          <p className="text-[11px] text-muted-foreground">
-            选预设后只需填 API Key；模型、地址都可再改。
-          </p>
-        </div>
-
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">名称</label>
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={preset.name === '自定义' ? '如：DeepSeek 主力' : preset.name} />
-        </div>
-
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">Base URL</label>
-          <Input
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder={preset.baseUrl || 'https://api.example.com/v1'}
-          />
-        </div>
-
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">模型</label>
-          {preset.models.length > 0 && !customModel ? (
-            <div className="flex flex-wrap gap-1.5">
-              {preset.models.map((mm) => (
-                <button
-                  key={mm.name}
-                  type="button"
-                  onClick={() => pickPresetModel(mm)}
-                  className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                    model === mm.name ? 'border-primary bg-accent-soft text-primary' : 'hover:bg-secondary'
-                  }`}
-                >
-                  {mm.imageSupport && <ImageIcon className="h-3 w-3" />}
-                  {mm.name}
-                  {model === mm.name && <Check className="h-3 w-3" />}
-                </button>
-              ))}
-              <button
-                type="button"
-                onClick={() => pickPresetModel(null)}
-                className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary"
-              >
-                自定义…
-              </button>
-            </div>
-          ) : (
-            <div className="flex gap-2">
-              <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="模型名，如 deepseek-v4-flash" />
-              {preset.models.length > 0 && (
-                <Button size="sm" variant="outline" onClick={() => setCustomModel(false)}>
-                  预设列表
-                </Button>
-              )}
-            </div>
-          )}
-        </div>
-
-        <label className="flex cursor-pointer items-center gap-2 text-xs">
-          <input
-            type="checkbox"
-            checked={imageSupport}
-            onChange={(e) => setImageSupport(e.target.checked)}
-            className="accent-[var(--brand)]"
-          />
-          <span className="font-medium">支持图片输入</span>
-          <span className="text-muted-foreground">
-            （勾选后该模型将用于知识库图片 / 扫描件识别；能否真的读图以模型实际能力为准）
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
+      <div className="relative z-10 flex w-[min(92vw,480px)] flex-col overflow-hidden rounded-2xl border bg-card shadow-md">
+        <div className="flex items-center gap-2.5 border-b border-line px-5 py-4">
+          <h3 className="text-[15px] font-semibold">{isNew ? '添加模型' : '编辑模型'}</h3>
+          <span className="rounded-full bg-muted px-2.5 py-1 text-[11px] text-muted-foreground">
+            仅支持 OpenAI 兼容协议 API
           </span>
-        </label>
-
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            API Key {keySaved && <span className="text-success">（已保存）</span>}
-          </label>
-          <div className="relative">
-            <Input
-              type={showKey ? 'text' : 'password'}
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              placeholder={keySaved ? '已配置，输入新值可更换' : 'sk-…（保存到本地库，只写不回读）'}
-              className="pr-9"
-            />
-            <button
-              type="button"
-              onClick={() => setShowKey(!showKey)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              aria-label={showKey ? '隐藏 Key' : '显示 Key'}
-            >
-              {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto grid h-7 w-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label="关闭"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </div>
 
-        <div className="flex gap-2">
-          <Button
-            size="sm"
-            disabled={!baseUrl.trim() || !model.trim()}
-            onClick={() =>
-              onSave(
-                { id: pid, name: name.trim() || pid, baseUrl: baseUrl.trim(), model: model.trim(), imageSupport, keySaved },
-                isNew,
-              )
+        <div className="space-y-4 px-5 py-4">
+          <Field label="提供商">
+            <ProviderSelect value={providerKey} onChange={applyProvider} />
+          </Field>
+
+          {preset.key === 'custom' && (
+            <Field label="接口地址">
+              <Input
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="https://api.example.com/v1"
+              />
+            </Field>
+          )}
+
+          <Field
+            label={
+              <>
+                API Key {keySaved && <span className="ml-1 font-normal text-success">已保存</span>}
+              </>
             }
           >
-            保存
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={!key}
-            onClick={saveKey}
-          >
-            保存 Key
-          </Button>
+            <div className="relative">
+              <Input
+                type={showKey ? 'text' : 'password'}
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                placeholder={keySaved ? '已配置，输入新值可更换' : '输入你的 API Key'}
+                className="pr-9"
+              />
+              <button
+                type="button"
+                onClick={() => setShowKey(!showKey)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                aria-label={showKey ? '隐藏 Key' : '显示 Key'}
+              >
+                {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+          </Field>
+
+          <Field label="模型名称">
+            {preset.models.length > 0 && !customModel ? (
+              <ModelNameSelect
+                preset={preset}
+                value={model}
+                onPick={(m) => {
+                  setModel(m.name)
+                  setImageSupport(m.imageSupport)
+                }}
+                onCustom={() => {
+                  setCustomModel(true)
+                  setModel('')
+                }}
+              />
+            ) : (
+              <div className="flex gap-2">
+                <Input
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder="输入模型参数值，例如 gpt-4o 或 openai/gpt-4o"
+                />
+                {preset.models.length > 0 && (
+                  <Button size="sm" variant="outline" className="shrink-0" onClick={() => setCustomModel(false)}>
+                    预设
+                  </Button>
+                )}
+              </div>
+            )}
+          </Field>
+
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={imageSupport}
+              onChange={(e) => setImageSupport(e.target.checked)}
+              className="accent-[var(--brand)]"
+            />
+            图片输入
+            <span className="text-xs text-muted-foreground">勾选后用于知识库图片 / 扫描件识别</span>
+          </label>
+        </div>
+
+        <div className="flex items-center gap-2 border-t border-line px-5 py-3.5">
+          {error ? (
+            <p className="min-w-0 flex-1 truncate text-sm text-error">{error}</p>
+          ) : (
+            <span className="flex-1" />
+          )}
           <Button size="sm" variant="outline" disabled={testing} onClick={test}>
             {testing ? '测试中…' : '测试'}
           </Button>
-          <Button size="sm" variant="outline" onClick={onCancel}>
+          <Button size="sm" variant="outline" onClick={onClose}>
             取消
+          </Button>
+          <Button size="sm" disabled={saving} onClick={save}>
+            {saving ? '保存中…' : '保存'}
           </Button>
         </div>
       </div>
-
-      {error && <p className="text-sm text-error">{error}</p>}
     </div>
   )
 }
