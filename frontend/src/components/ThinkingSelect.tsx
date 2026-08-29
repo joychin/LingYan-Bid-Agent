@@ -42,17 +42,17 @@ export function ThinkingSelect({
     >
       <button
         type="button"
-        className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[13px] font-medium text-foreground transition-colors hover:bg-secondary"
+        className="flex items-center gap-0.5 rounded px-1 py-0.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary"
         onClick={() => setOpen(!open)}
         title="思考强度：随每条消息生效"
       >
-        <Brain className="h-4 w-4 text-muted-foreground" />
+        <Brain className="h-3.5 w-3.5 text-muted-foreground" />
         <span>{current.label}</span>
-        <ChevronDown className={cn('h-3.5 w-3.5 text-muted-foreground transition-transform', open && 'rotate-180')} />
+        <ChevronDown className={cn('h-3 w-3 text-muted-foreground transition-transform', open && 'rotate-180')} />
       </button>
 
       {open && (
-        <div className="absolute bottom-full right-0 z-30 mb-2 w-64 rounded-[var(--radius)] border border-line bg-card py-1.5 shadow-[0_-2px_8px_rgba(16,24,40,0.04),0_8px_18px_rgba(16,24,40,0.1)]">
+        <div className="absolute bottom-full right-0 z-30 mb-2 w-56 rounded-[var(--radius)] border border-line bg-card py-1.5 shadow-[0_-2px_8px_rgba(16,24,40,0.04),0_8px_18px_rgba(16,24,40,0.1)]">
           <p className="px-2.5 pb-1 pt-0.5 text-[11px] text-muted-foreground">思考强度（对下一条消息生效）</p>
           {LEVELS.map((l) => (
             <button
