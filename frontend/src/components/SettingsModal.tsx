@@ -26,7 +26,7 @@ type SectionId = 'models' | 'parse' | 'general'
 
 const SECTIONS: { id: SectionId; title: string; icon: typeof Sparkles }[] = [
   { id: 'models', title: '模型', icon: Sparkles },
-  { id: 'parse', title: '文档解析', icon: FileText },
+  { id: 'parse', title: 'PaddleOCR-VL设置', icon: FileText },
   { id: 'general', title: '通用', icon: FolderOpen },
 ]
 
@@ -70,7 +70,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
         </button>
       </div>
       <div className="flex min-h-0 flex-1">
-        <nav className="flex w-40 shrink-0 flex-col gap-1 border-r bg-muted/40 p-2">
+        <nav className="flex w-44 shrink-0 flex-col gap-1 border-r bg-muted/40 p-2">
           {SECTIONS.map((s) => {
             const Icon = s.icon
             const active = section === s.id
@@ -79,7 +79,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                 key={s.id}
                 type="button"
                 onClick={() => setSection(s.id)}
-                className={`flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                className={`flex items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-left text-sm transition-colors ${
                   active ? 'bg-secondary font-medium text-primary' : 'text-muted-foreground hover:bg-secondary/60'
                 }`}
               >
