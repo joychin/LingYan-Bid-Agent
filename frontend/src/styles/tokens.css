@@ -1,0 +1,136 @@
+/* Tender Agent Design Tokens · v1.2
+ * 来源：docs/designtokens/（Ardot 画布 720053744468339）vendor 副本，运行时唯一叶子层。
+ * 48 token · 5 集合（Color/Spacing/Radius/Typography/Shadow）· Light + Dark 双 mode。
+ * 切换暗色：<html data-theme="dark">（main.tsx 首帧前写入；token 名不变只换值）。
+ * 本文件不含组件配方（.btn-primary 等）——应用组件体系在 workspace.css。
+ */
+
+/* ─── 打包字体（顶层规则，须在 :root 之外） ──────
+ * 西文用打包的 Inter variable（344KB woff2，SIL OFL，license 在 public/fonts/ 同目录）；
+ * 中文走平台原生栈：macOS 落 PingFang SC、Windows 落 Microsoft YaHei、Linux 落 Noto Sans SC——
+ * Inter 无 CJK 字形自然穿透到系统字体，与 OS 菜单/对话框混排零割裂（2026-08-29 用户拍板；
+ * 设计稿的 Sarasa 方案暂不采用，改回先改 docs/designtokens 再同步本文件）。 */
+@font-face {
+  font-family: 'Inter';
+  src:
+    url('/fonts/InterVariable.woff2') format('woff2-variations'),
+    url('/fonts/InterVariable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ─── Light mode（默认） ──────────────────────── */
+:root {
+  color-scheme: light;
+
+  /* 文字 */
+  --Color-text-primary:     #1A1D21;
+  --Color-text-secondary:   #5B616B;
+  --Color-text-tertiary:    #9AA1AB;
+  --Color-text-disabled:    #C2C5CA;
+  --Color-text-on-color:    #FFFFFF;
+
+  /* 背景 */
+  --Color-bg-canvas:        #FFFFFF;
+  --Color-bg-surface:       #F6F7F9;
+  --Color-bg-subtle:        #F0F2F5;
+  --Color-bg-inverse:       #1A1D21;
+
+  /* 边框 */
+  --Color-border-default:   #E6E8EC;
+  --Color-border-strong:    #D9DDE3;  /* 仓内补充（原 --line-2），待回传 Ardot */
+
+  /* 品牌 */
+  --Color-brand-primary:        #2563EB;
+  --Color-brand-primary-hover:  #1D4ED8;
+  --Color-brand-primary-soft:   #DBEAFE;
+
+  /* 语义（纯色，tint 用 color-mix 现场派生，第二个色用 --Color-bg-canvas 跟随模式） */
+  --Color-success:          #10B981;
+  --Color-warning:          #F59E0B;
+  --Color-danger:           #EF4444;
+
+  /* 间距 · 8 档 */
+  --Spacing-space-2:  2px;
+  --Spacing-space-4:  4px;
+  --Spacing-space-8:  8px;
+  --Spacing-space-12: 12px;
+  --Spacing-space-16: 16px;
+  --Spacing-space-24: 24px;
+  --Spacing-space-32: 32px;
+  --Spacing-space-48: 48px;
+
+  /* 圆角 · 4 档 */
+  --Radius-radius-4:   4px;
+  --Radius-radius-8:   8px;
+  --Radius-radius-12:  12px;
+  --Radius-radius-full: 9999px;
+
+  /* 字号 · 9 档 */
+  --Typography-font-size-xs:   12px;
+  --Typography-font-size-sm:   13px;
+  --Typography-font-size-base: 14px;
+  --Typography-font-size-md:   16px;
+  --Typography-font-size-lg:   18px;
+  --Typography-font-size-xl:   20px;
+  --Typography-font-size-2xl:  24px;
+  --Typography-font-size-3xl:  30px;
+  --Typography-font-size-4xl:  40px;
+
+  /* 字重 · 4 档 */
+  --Typography-font-weight-regular:  400;
+  --Typography-font-weight-medium:   500;
+  --Typography-font-weight-semibold: 600;
+  --Typography-font-weight-bold:     700;
+
+  /* 字体族 */
+  --Typography-font-family-base: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui,
+    'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --Typography-font-family-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* 阴影 · 5 档（Light） */
+  --Shadow-shadow-none: none;
+  --Shadow-shadow-xs:   0 1px 2px rgba(15, 15, 15, 0.04);
+  --Shadow-shadow-sm:   0 1px 2px rgba(15, 15, 15, 0.04), 0 1px 3px rgba(15, 15, 15, 0.06);
+  --Shadow-shadow-md:   0 4px 6px rgba(15, 15, 15, 0.06), 0 1px 2px rgba(15, 15, 15, 0.04);
+  --Shadow-shadow-lg:   0 16px 32px -8px rgba(15, 15, 15, 0.16), 0 1px 2px rgba(15, 15, 15, 0.04);
+}
+
+/* ─── Dark mode（覆盖；token 名不变只换值） ────── */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --Color-text-primary:     #E6E8EC;
+  --Color-text-secondary:   #9AA1AB;
+  --Color-text-tertiary:    #6B7280;
+  --Color-text-disabled:    #4B5563;
+  --Color-text-on-color:    #1A1D21;
+
+  --Color-bg-canvas:        #1A1D21;
+  --Color-bg-surface:       #0D0F12;
+  --Color-bg-subtle:        #25282E;
+  --Color-bg-inverse:       #FFFFFF;
+
+  --Color-border-default:   #2E3238;
+  --Color-border-strong:    #3A3F46;  /* 仓内补充（原 --line-2），待回传 Ardot */
+
+  --Color-brand-primary:        #3B82F6;
+  --Color-brand-primary-hover:  #60A5FA;
+  --Color-brand-primary-soft:   #1E3A8A;
+
+  --Color-success:          #34D399;
+  --Color-warning:          #FBBF24;
+  --Color-danger:           #F87171;
+
+  --Shadow-shadow-none: none;
+  --Shadow-shadow-xs:   0 1px 2px rgba(0, 0, 0, 0.30);
+  --Shadow-shadow-sm:   0 1px 2px rgba(0, 0, 0, 0.30), 0 1px 3px rgba(0, 0, 0, 0.40);
+  --Shadow-shadow-md:   0 4px 6px rgba(0, 0, 0, 0.40), 0 1px 2px rgba(0, 0, 0, 0.30);
+  --Shadow-shadow-lg:   0 16px 32px -8px rgba(0, 0, 0, 0.60), 0 1px 2px rgba(0, 0, 0, 0.30);
+}
+
+/* ─── 派生 tint 配方（不存 token，现场派生） ──────
+ * .bg-success-soft { background: color-mix(in srgb, var(--Color-success) 12%, var(--Color-bg-canvas)); }
+ * 注意第二个色用 var(--Color-bg-canvas) 而非硬编码 white，暗色下派生结果自动跟随。
+ */

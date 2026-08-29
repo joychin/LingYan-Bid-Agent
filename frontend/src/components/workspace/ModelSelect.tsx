@@ -57,7 +57,7 @@ export function ModelSelect({
       </button>
 
       {open && (
-        <div className="absolute bottom-full right-0 z-30 mb-2 w-52 rounded-[var(--radius)] border border-line bg-card py-1.5 shadow-[0_-2px_8px_rgba(16,24,40,0.04),0_8px_18px_rgba(16,24,40,0.1)]">
+        <div className="absolute bottom-full right-0 z-30 mb-2 w-52 rounded-[var(--Radius-radius-12)] border border-line bg-card py-1.5 shadow-md">
           <p className="px-2.5 pb-1 pt-0.5 text-[11px] text-muted-foreground">模型（对下一条消息生效）</p>
           {options.length === 0 && (
             <p className="px-2.5 py-1.5 text-xs text-muted-foreground">还没有配置模型</p>

@@ -51,7 +51,7 @@ export function CircularLoader({ className, size = 'md' }: { className?: string;
         sizeClass[size],
         className,
       )}
-      style={{ borderColor: 'var(--primary)', borderTopColor: 'transparent' }}
+      style={{ borderColor: 'var(--Color-brand-primary)', borderTopColor: 'transparent' }}
     >
       <LoaderShell />
     </div>
@@ -67,7 +67,7 @@ export function ClassicLoader({ className, size = 'md' }: { className?: string; 
           key={i}
           className="absolute left-1/2 top-0 rounded-full"
           style={{
-            background: 'var(--primary)',
+            background: 'var(--Color-brand-primary)',
             height: bar.h,
             width: bar.w,
             marginLeft: bar.ml,
@@ -88,7 +88,7 @@ export function PulseLoader({ className, size = 'md' }: { className?: string; si
     <div className={cn('relative', sizeClass[size], className)}>
       <div
         className="absolute inset-0 rounded-full border-2"
-        style={{ borderColor: 'var(--primary)', ...anim('thin-pulse', '1.5s', 'ease-in-out') }}
+        style={{ borderColor: 'var(--Color-brand-primary)', ...anim('thin-pulse', '1.5s', 'ease-in-out') }}
       />
       <LoaderShell />
     </div>
@@ -100,7 +100,7 @@ export function PulseDotLoader({ className, size = 'md' }: { className?: string;
   return (
     <div
       className={cn('rounded-full', s, className)}
-      style={{ background: 'var(--primary)', ...anim('pulse-dot', '1.2s', 'ease-in-out') }}
+      style={{ background: 'var(--Color-brand-primary)', ...anim('pulse-dot', '1.2s', 'ease-in-out') }}
     >
       <LoaderShell />
     </div>
@@ -116,7 +116,7 @@ export function DotsLoader({ className, size = 'md' }: { className?: string; siz
         <div
           key={i}
           className={cn('rounded-full', dot)}
-          style={{ background: 'var(--primary)', ...anim('bounce-dots', '1.4s', 'ease-in-out'), animationDelay: `${i * 160}ms` }}
+          style={{ background: 'var(--Color-brand-primary)', ...anim('bounce-dots', '1.4s', 'ease-in-out'), animationDelay: `${i * 160}ms` }}
         />
       ))}
       <LoaderShell />
@@ -133,7 +133,7 @@ export function TypingLoader({ className, size = 'md' }: { className?: string; s
         <div
           key={i}
           className={cn('rounded-full', dot)}
-          style={{ background: 'var(--primary)', ...anim('typing', '1s'), animationDelay: `${i * 250}ms` }}
+          style={{ background: 'var(--Color-brand-primary)', ...anim('typing', '1s'), animationDelay: `${i * 250}ms` }}
         />
       ))}
       <LoaderShell />
@@ -151,7 +151,7 @@ export function WaveLoader({ className, size = 'md' }: { className?: string; siz
         <div
           key={i}
           className={cn('rounded-full', widths)}
-          style={{ background: 'var(--primary)', height: heights[i], ...anim('wave', '1s', 'ease-in-out'), animationDelay: `${i * 100}ms` }}
+          style={{ background: 'var(--Color-brand-primary)', height: heights[i], ...anim('wave', '1s', 'ease-in-out'), animationDelay: `${i * 100}ms` }}
         />
       ))}
       <LoaderShell />
@@ -168,7 +168,7 @@ export function BarsLoader({ className, size = 'md' }: { className?: string; siz
         <div
           key={i}
           className={cn('h-full', widths)}
-          style={{ background: 'var(--primary)', ...anim('wave-bars', '1.2s', 'ease-in-out'), animationDelay: `${i * 0.2}s` }}
+          style={{ background: 'var(--Color-brand-primary)', ...anim('wave-bars', '1.2s', 'ease-in-out'), animationDelay: `${i * 0.2}s` }}
         />
       ))}
       <LoaderShell />
@@ -182,10 +182,10 @@ export function TerminalLoader({ className, size = 'md' }: { className?: string;
   const box = { sm: 'h-4', md: 'h-5', lg: 'h-6' }[size]
   return (
     <div className={cn('flex items-center space-x-1', box, className)}>
-      <span className={cn('font-mono', text)} style={{ color: 'var(--primary)' }}>
+      <span className={cn('font-mono', text)} style={{ color: 'var(--Color-brand-primary)' }}>
         {'>'}
       </span>
-      <div className={cn(cursor)} style={{ background: 'var(--primary)', ...anim('blink', '1s', 'step-end') }} />
+      <div className={cn(cursor)} style={{ background: 'var(--Color-brand-primary)', ...anim('blink', '1s', 'step-end') }} />
       <LoaderShell />
     </div>
   )
@@ -206,7 +206,7 @@ export function TextShimmerLoader({ text = 'Thinking', className, size = 'md' }:
     <div
       className={cn('text-shimmer font-medium', textSize, className)}
       style={{
-        backgroundImage: 'linear-gradient(to right, var(--muted-foreground) 40%, var(--foreground) 60%, var(--muted-foreground) 80%)',
+        backgroundImage: 'linear-gradient(to right, var(--Color-text-secondary) 40%, var(--Color-text-primary) 60%, var(--Color-text-secondary) 80%)',
       }}
     >
       {text}
@@ -218,12 +218,12 @@ export function TextDotsLoader({ className, text = 'Thinking', size = 'md' }: { 
   const textSize = { sm: 'text-xs', md: 'text-sm', lg: 'text-base' }[size]
   return (
     <div className={cn('inline-flex items-center', className)}>
-      <span className={cn('font-medium', textSize)} style={{ color: 'var(--primary)' }}>
+      <span className={cn('font-medium', textSize)} style={{ color: 'var(--Color-brand-primary)' }}>
         {text}
       </span>
       <span className="inline-flex">
         {[0.2, 0.4, 0.6].map((d) => (
-          <span key={d} style={{ color: 'var(--primary)', ...anim('loading-dots', '1.4s'), animationDelay: `${d}s` }}>
+          <span key={d} style={{ color: 'var(--Color-brand-primary)', ...anim('loading-dots', '1.4s'), animationDelay: `${d}s` }}>
             .
           </span>
         ))}

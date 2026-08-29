@@ -14,6 +14,17 @@ if ('__TAURI_INTERNALS__' in window && /Mac/i.test(navigator.userAgent)) {
   document.documentElement.classList.add('mac-tauri')
 }
 
+// 主题首帧落位（防闪白）：localStorage 记忆优先，否则跟随系统；
+// 值与 styles/tokens.css 的 [data-theme="dark"] 选择器约定对齐
+const LS_THEME = 'tender-agent.theme'
+const storedTheme = localStorage.getItem(LS_THEME)
+document.documentElement.dataset.theme =
+  storedTheme === 'dark' || storedTheme === 'light'
+    ? storedTheme
+    : window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? 'dark'
+      : 'light'
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

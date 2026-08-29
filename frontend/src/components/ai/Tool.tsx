@@ -61,7 +61,7 @@ export function Tool({
       case 'output-error':
         return <span className={cn(base, 'bg-red-100 text-red-700')}>Error</span>
       default:
-        return <span className={cn(base, 'bg-gray-100 text-gray-700')}>Pending</span>
+        return <span className={cn(base, 'bg-muted text-muted-foreground')}>Pending</span>
     }
   })()
 

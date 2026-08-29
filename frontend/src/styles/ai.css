@@ -47,8 +47,8 @@
 }
 
 @keyframes text-blink {
-  0%, 100% { color: var(--primary); }
-  50% { color: var(--muted-foreground); }
+  0%, 100% { color: var(--Color-brand-primary); }
+  50% { color: var(--Color-text-secondary); }
 }
 
 @keyframes loading-dots {

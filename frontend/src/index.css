@@ -1,3 +1,4 @@
+@import "./styles/tokens.css";
 @import "tailwindcss";
 @import "./styles/ai.css";
 
@@ -17,97 +18,72 @@ button:disabled {
   cursor: default;
 }
 
-/* §1 设计 Tokens（Workspace Shell 设计系统，源 workspace-dna-prototype.html）。light only。 */
-:root {
-  --background: #ffffff;          /* paper */
-  --foreground: #1a1d21;          /* ink */
-  --card: #ffffff;
-  --card-foreground: #1a1d21;
-  --primary: #2563eb;             /* accent 蓝 */
-  --primary-foreground: #ffffff;
-  --secondary: #f0f2f5;           /* panel-2（用户气泡底） */
-  --secondary-foreground: #1a1d21;
-  --muted: #f6f7f9;               /* panel（hover 底） */
-  --muted-foreground: #5b616b;    /* ink-2 次要文字 */
-  --accent: #f0f2f5;              /* hover 底 */
-  --accent-foreground: #1a1d21;
-  --border: #e6e8ec;              /* line */
-  --input: #e6e8ec;
-  --ring: #2563eb;
-  --radius: 0.625rem;             /* 10px */
-
-  /* §1 语义色 */
-  --success: #10b981;
-  --warning: #f59e0b;
-  --error: #ef4444;
-
-  /* 兼容：popover 用白卡；destructive 映射到 error 语义 */
-  --popover: #ffffff;
-  --popover-foreground: #1a1d21;
-  --destructive: #ef4444;
-  --destructive-foreground: #ffffff;
-
-  /* workspace 组件类引用的语义 token（与 workspace.css 同值，供真实 App 使用） */
-  --paper: #ffffff;
-  --panel: #f6f7f9;
-  --panel-2: #f0f2f5;
-  --ink: #1a1d21;
-  --ink-2: #5b616b;
-  --ink-3: #9aa1ab;
-  --brand: #2563eb;                 /* 品牌主色（workspace 组件用 --brand，不占 --accent） */
-  --accent-soft: #eaf1fe;
-  --line: #e6e8ec;
-  --line-2: #d9dde3;
-  --radius-sm: 7px;
-  --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
-  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
-    "Noto Sans SC", "Segoe UI", Roboto, system-ui, sans-serif;
+/* 主题翻转瞬间全局禁用过渡（App.toggleTheme 挂/摘 .theme-switching 类）：
+   带 background/color transition 的元素（会话选中高亮等）若照常补间，
+   翻转帧会残留旧主题色块，暗色下亮块糊底特别晃眼；翻转本应是瞬时的。 */
+html.theme-switching,
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: none !important;
 }
 
+/* 设计 token 真值在 ./styles/tokens.css（vendor 自 docs/designtokens，Light+Dark 双 mode）。
+   这里只做 Tailwind 工具映射——工具类名（text-ink / border-line / bg-muted 等）保持历史
+   名字不变，指针全部直连 --Color-*，暗色由叶子层翻转自动生效，勿在此层再存色值。 */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-accent-soft: var(--accent-soft);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  --color-success: var(--success);
-  --color-warning: var(--warning);
-  --color-error: var(--error);
-  --color-line: var(--line);
-  --color-line-2: var(--line-2);
-  --color-ink: var(--ink);
-  --color-ink-2: var(--ink-2);
-  --color-ink-3: var(--ink-3);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--Color-bg-canvas);
+  --color-foreground: var(--Color-text-primary);
+  --color-card: var(--Color-bg-canvas);
+  --color-card-foreground: var(--Color-text-primary);
+  --color-popover: var(--Color-bg-canvas);
+  --color-popover-foreground: var(--Color-text-primary);
+  --color-primary: var(--Color-brand-primary);
+  --color-primary-foreground: var(--Color-text-on-color);
+  --color-secondary: var(--Color-bg-subtle);
+  --color-secondary-foreground: var(--Color-text-primary);
+  --color-muted: var(--Color-bg-surface);
+  --color-muted-foreground: var(--Color-text-secondary);
+  --color-accent: var(--Color-bg-subtle);
+  --color-accent-foreground: var(--Color-text-primary);
+  --color-accent-soft: var(--Color-brand-primary-soft);
+  --color-destructive: var(--Color-danger);
+  --color-destructive-foreground: var(--Color-text-on-color);
+  --color-border: var(--Color-border-default);
+  --color-input: var(--Color-border-default);
+  --color-ring: var(--Color-brand-primary);
+  --color-success: var(--Color-success);
+  --color-warning: var(--Color-warning);
+  --color-error: var(--Color-danger);
+  --color-line: var(--Color-border-default);
+  --color-line-2: var(--Color-border-strong);
+  --color-ink: var(--Color-text-primary);
+  --color-ink-2: var(--Color-text-secondary);
+  --color-ink-3: var(--Color-text-tertiary);
+  --color-surface: var(--Color-bg-surface);
+  --color-subtle: var(--Color-bg-subtle);
+
+  /* 阴影覆盖 Tailwind 默认刻度 → 新 Shadow token（dark 值自动跟随） */
+  --shadow-xs: var(--Shadow-shadow-xs);
+  --shadow-sm: var(--Shadow-shadow-sm);
+  --shadow-md: var(--Shadow-shadow-md);
+  --shadow-lg: var(--Shadow-shadow-lg);
+
+  /* 圆角严格对齐新刻度：卡片/弹窗 12，行/按钮/输入 8 */
+  --radius-md: var(--Radius-radius-8);
+  --radius-lg: var(--Radius-radius-12);
+  --radius-xl: var(--Radius-radius-12);
 }
 
 @layer base {
   * {
-    border-color: var(--border);
+    border-color: var(--Color-border-default);
   }
   body {
     margin: 0;
-    background: var(--background);
-    color: var(--foreground);
-    /* 中性 grotesque：系统 CJK 栈（源 workspace-dna-prototype） */
-    font-family: var(--font);
+    background: var(--Color-bg-canvas);
+    color: var(--Color-text-primary);
+    font-family: var(--Typography-font-family-base);
     font-size: 14px;
     -webkit-font-smoothing: antialiased;
   }

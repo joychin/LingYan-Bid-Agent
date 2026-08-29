@@ -228,7 +228,7 @@ export function InterruptCard({
   if (wizard) return <WizardCard requests={requests} disabled={disabled} {...wizard} />
 
   return (
-    <div className="w-full rounded-lg border border-line bg-panel px-3 py-2.5 text-sm">
+    <div className="w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm">
       <div className="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
         <ShieldQuestion className="h-3.5 w-3.5" />
         助手请求执行以下操作，等待你的确认
@@ -295,7 +295,7 @@ function WizardCard({
   const showProgress = total > 1
 
   return (
-    <div className="w-full rounded-lg border border-line bg-panel px-3 py-2.5 text-sm">
+    <div className="w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm">
       <div className="flex items-center justify-between text-[12px] font-medium text-muted-foreground">
         <span className="inline-flex items-center gap-1.5">
           {question ? (

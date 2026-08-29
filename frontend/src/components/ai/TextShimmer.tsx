@@ -24,7 +24,7 @@ export function TextShimmer({
       className={cn('text-shimmer font-medium', className)}
       style={
         {
-          backgroundImage: `linear-gradient(to right, var(--muted-foreground) ${50 - dynamicSpread}%, var(--foreground) 50%, var(--muted-foreground) ${50 + dynamicSpread}%)`,
+          backgroundImage: `linear-gradient(to right, var(--Color-text-secondary) ${50 - dynamicSpread}%, var(--Color-text-primary) 50%, var(--Color-text-secondary) ${50 + dynamicSpread}%)`,
           animationDuration: `${duration}s`,
         } as CSSProperties
       }

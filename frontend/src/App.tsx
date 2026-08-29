@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { Sidebar } from '@/components/Sidebar'
 import { ChatView } from '@/components/ChatView'
@@ -14,6 +14,7 @@ import { useTasks, taskOfConversation } from '@/hooks/useTasks'
 
 const LS_SIDEBAR = 'tender-agent.sidebar-collapsed'
 const LS_ARTIFACTS = 'tender-agent.artifacts-collapsed'
+const LS_THEME = 'tender-agent.theme'
 
 export default function App() {
   const { data: conversations = [] } = useConversations()
@@ -31,6 +32,10 @@ export default function App() {
   const [pendingSend, setPendingSend] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(LS_SIDEBAR) === '1')
   const [artifactsCollapsed, setArtifactsCollapsed] = useState(() => localStorage.getItem(LS_ARTIFACTS) === '1')
+  // 主题：首帧由 main.tsx 写 documentElement（localStorage 优先，否则跟随系统），这里只同步 React 态驱动图标
+  const [theme, setTheme] = useState<'light' | 'dark'>(() =>
+    document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light',
+  )
 
   // 左右面板开关（常驻中栏顶栏两端，见 ChatHeader）：开关全局只此一处
   const toggleSidebar = () =>
@@ -38,6 +43,20 @@ export default function App() {
       localStorage.setItem(LS_SIDEBAR, v ? '0' : '1')
       return !v
     })
+  const themeGuard = useRef<number | undefined>(undefined)
+  // 主题切换：翻转瞬间挂 theme-switching 类全局禁用过渡——.chat-item 选中高亮等带
+  // background transition 的元素若照常补间，暗色翻转瞬间会残留一块旧主题亮色，特别晃眼；
+  // 100ms 后摘类，hover 淡入等微交互不受影响（连点时 clearTimeout 重置窗口）
+  const toggleTheme = () => {
+    const root = document.documentElement
+    const next = root.dataset.theme === 'dark' ? 'light' : 'dark'
+    localStorage.setItem(LS_THEME, next)
+    root.classList.add('theme-switching')
+    root.dataset.theme = next
+    window.clearTimeout(themeGuard.current)
+    themeGuard.current = window.setTimeout(() => root.classList.remove('theme-switching'), 100)
+    setTheme(next)
+  }
   const toggleArtifacts = () =>
     setArtifactsCollapsed((v) => {
       localStorage.setItem(LS_ARTIFACTS, v ? '0' : '1')
@@ -92,6 +111,8 @@ export default function App() {
         onOpenKnowledge={() => setActiveView('kb')}
         activeView={activeView}
         onOpenSettings={() => setSettingsOpen(true)}
+        theme={theme}
+        onToggleTheme={toggleTheme}
         collapsed={sidebarCollapsed}
       />
       <main className="main">

@@ -1,0 +1,192 @@
+/* Tender Agent Design Tokens · v1.2
+ * 来源: Ardot 文件 720053744468339
+ * 48 token · 5 集合 · Light + Dark 双 mode
+ *
+ * 切换暗色：<html data-theme="dark">
+ * 跟系统：@media (prefers-color-scheme: dark) { :root[data-theme="auto"] { /* Dark 值 */ } }
+ */
+
+/* ─── Light mode（默认） ──────────────────────── */
+:root {
+  /* 文字 */
+  --Color-text-primary:     #1A1D21;
+  --Color-text-secondary:   #5B616B;
+  --Color-text-tertiary:    #9AA1AB;
+  --Color-text-disabled:    #C2C5CA;
+  --Color-text-on-color:    #FFFFFF;
+
+  /* 背景 */
+  --Color-bg-canvas:        #FFFFFF;
+  --Color-bg-surface:       #F6F7F9;
+  --Color-bg-subtle:        #F0F2F5;
+  --Color-bg-inverse:       #1A1D21;
+
+  /* 边框 */
+  --Color-border-default:   #E6E8EC;
+
+  /* 品牌 */
+  --Color-brand-primary:        #2563EB;
+  --Color-brand-primary-hover:  #1D4ED8;
+  --Color-brand-primary-soft:   #DBEAFE;
+
+  /* 语义（纯色，tint 用 color-mix 派生） */
+  --Color-success:          #10B981;
+  --Color-warning:          #F59E0B;
+  --Color-danger:           #EF4444;
+
+  /* 间距 · 8 档 */
+  --Spacing-space-2:  2px;
+  --Spacing-space-4:  4px;
+  --Spacing-space-8:  8px;
+  --Spacing-space-12: 12px;
+  --Spacing-space-16: 16px;
+  --Spacing-space-24: 24px;
+  --Spacing-space-32: 32px;
+  --Spacing-space-48: 48px;
+
+  /* 圆角 · 4 档 */
+  --Radius-radius-4:   4px;
+  --Radius-radius-8:   8px;
+  --Radius-radius-12:  12px;
+  --Radius-radius-full: 9999px;
+
+  /* 字号 · 9 档 */
+  --Typography-font-size-xs:   12px;
+  --Typography-font-size-sm:   13px;
+  --Typography-font-size-base: 14px;
+  --Typography-font-size-md:   16px;
+  --Typography-font-size-lg:   18px;
+  --Typography-font-size-xl:   20px;
+  --Typography-font-size-2xl:  24px;
+  --Typography-font-size-3xl:  30px;
+  --Typography-font-size-4xl:  40px;
+
+  /* 字重 · 4 档 */
+  --Typography-font-weight-regular:  400;
+  --Typography-font-weight-medium:   500;
+  --Typography-font-weight-semibold: 600;
+  --Typography-font-weight-bold:     700;
+
+  /* 字体族 */
+  --Typography-font-family-base: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif
+  --Typography-font-family-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* 阴影 · 5 档（Light） */
+  --Shadow-shadow-none: none;
+  --Shadow-shadow-xs:   0 1px 2px rgba(15, 15, 15, 0.04);
+  --Shadow-shadow-sm:   0 1px 2px rgba(15, 15, 15, 0.04), 0 1px 3px rgba(15, 15, 15, 0.06);
+  --Shadow-shadow-md:   0 4px 6px rgba(15, 15, 15, 0.06), 0 1px 2px rgba(15, 15, 15, 0.04);
+  --Shadow-shadow-lg:   0 16px 32px -8px rgba(15, 15, 15, 0.16), 0 1px 2px rgba(15, 15, 15, 0.04);
+}
+
+/* ─── Dark mode（覆盖） ────────────────────────── */
+[data-theme="dark"] {
+  --Color-text-primary:     #E6E8EC;
+  --Color-text-secondary:   #9AA1AB;
+  --Color-text-tertiary:    #6B7280;
+  --Color-text-disabled:    #4B5563;
+  --Color-text-on-color:    #1A1D21;
+
+  --Color-bg-canvas:        #1A1D21;
+  --Color-bg-surface:       #0D0F12;
+  --Color-bg-subtle:        #25282E;
+  --Color-bg-inverse:       #FFFFFF;
+
+  --Color-border-default:   #2E3238;
+
+  --Color-brand-primary:        #3B82F6;
+  --Color-brand-primary-hover:  #60A5FA;
+  --Color-brand-primary-soft:   #1E3A8A;
+
+  --Color-success:          #34D399;
+  --Color-warning:          #FBBF24;
+  --Color-danger:           #F87171;
+
+  --Shadow-shadow-none: none;
+  --Shadow-shadow-xs:   0 1px 2px rgba(0, 0, 0, 0.30);
+  --Shadow-shadow-sm:   0 1px 2px rgba(0, 0, 0, 0.30), 0 1px 3px rgba(0, 0, 0, 0.40);
+  --Shadow-shadow-md:   0 4px 6px rgba(0, 0, 0, 0.40), 0 1px 2px rgba(0, 0, 0, 0.30);
+  --Shadow-shadow-lg:   0 16px 32px -8px rgba(0, 0, 0, 0.60), 0 1px 2px rgba(0, 0, 0, 0.30);
+}
+
+/* ─── 派生 tint 配方（不存 token） ──────────────── */
+
+.bg-success-soft { background: color-mix(in srgb, var(--Color-success) 12%, var(--Color-bg-canvas)); }
+.bg-warning-soft { background: color-mix(in srgb, var(--Color-warning) 12%, var(--Color-bg-canvas)); }
+.bg-danger-soft  { background: color-mix(in srgb, var(--Color-danger)  12%, var(--Color-bg-canvas)); }
+
+/* ─── 组件配方 Recipes（直接抄） ────────────────── */
+
+/* 按钮 - 主要 */
+.btn-primary {
+  padding: var(--Spacing-space-8) var(--Spacing-space-16);
+  border-radius: var(--Radius-radius-8);
+  background: var(--Color-brand-primary);
+  color: var(--Color-text-on-color);
+  font-size: var(--Typography-font-size-base);
+  font-weight: var(--Typography-font-weight-medium);
+  font-family: var(--Typography-font-family-base);
+  border: none;
+  cursor: pointer;
+}
+.btn-primary:hover { background: var(--Color-brand-primary-hover); }
+
+/* 按钮 - 次要 */
+.btn-secondary {
+  padding: var(--Spacing-space-8) var(--Spacing-space-16);
+  border-radius: var(--Radius-radius-8);
+  background: var(--Color-bg-canvas);
+  border: 1px solid var(--Color-border-default);
+  color: var(--Color-text-primary);
+  font-size: var(--Typography-font-size-base);
+  font-weight: var(--Typography-font-weight-medium);
+  font-family: var(--Typography-font-family-base);
+  cursor: pointer;
+}
+
+/* 输入框 */
+.input {
+  height: 40px;
+  padding: var(--Spacing-space-8) var(--Spacing-space-12);
+  border-radius: var(--Radius-radius-8);
+  border: 1px solid var(--Color-border-default);
+  background: var(--Color-bg-canvas);
+  color: var(--Color-text-primary);
+  font-size: var(--Typography-font-size-base);
+  font-family: var(--Typography-font-family-base);
+  outline: none;
+}
+.input:focus { border-color: var(--Color-brand-primary); }
+
+/* 状态标签（Linear 风格：灰底 + 彩色点） */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--Spacing-space-4);
+  padding: var(--Spacing-space-4) var(--Spacing-space-12);
+  border-radius: var(--Radius-radius-full);
+  background: var(--Color-bg-subtle);
+  color: var(--Color-text-primary);
+  font-size: var(--Typography-font-size-sm);
+  font-weight: var(--Typography-font-weight-medium);
+  font-family: var(--Typography-font-family-base);
+}
+.status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: var(--Radius-radius-full);
+  background: var(--dot-color, var(--Color-text-tertiary));
+}
+.status-success { --dot-color: var(--Color-success); }
+.status-warning { --dot-color: var(--Color-warning); }
+.status-danger  { --dot-color: var(--Color-danger); }
+
+/* 卡片 */
+.card {
+  padding: var(--Spacing-space-16);
+  border-radius: var(--Radius-radius-12);
+  border: 1px solid var(--Color-border-default);
+  background: var(--Color-bg-canvas);
+  box-shadow: var(--Shadow-shadow-sm);
+}

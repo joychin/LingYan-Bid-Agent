@@ -36,7 +36,7 @@ function ChildStep({ step }: { step: ToolStep }) {
       <CollapsibleContent className="overflow-hidden">
         <div className="ml-4 space-y-1 border-l border-line py-0.5 pl-2 text-[12px] text-muted-foreground">
           {isError && step.error ? (
-            <p className="whitespace-pre-wrap break-all" style={{ color: 'var(--error)' }}>{step.error}</p>
+            <p className="whitespace-pre-wrap break-all" style={{ color: 'var(--Color-danger)' }}>{step.error}</p>
           ) : step.summary ? (
             <p className="art-result line-clamp-6 whitespace-pre-wrap break-all">{step.summary}</p>
           ) : isRunning ? (
@@ -131,7 +131,7 @@ export function SubagentCard({ step }: { step: ToolStep }) {
             </div>
           )}
           {isError && step.error ? (
-            <p className="art-result" style={{ color: 'var(--error)' }}>
+            <p className="art-result" style={{ color: 'var(--Color-danger)' }}>
               {step.error}
             </p>
           ) : isRunning ? (

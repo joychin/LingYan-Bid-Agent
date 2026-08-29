@@ -293,7 +293,7 @@ export function PreviewPage() {
             </div>
           </GalleryCell>
           <GalleryCell label="UserBar">
-            <div className="gallery-card" style={{ padding: 0, background: 'var(--panel)', border: '1px solid var(--line)' }}>
+            <div className="gallery-card" style={{ padding: 0, background: 'var(--Color-bg-surface)', border: '1px solid var(--Color-border-default)' }}>
               <UserBar
                 name="陈卓"
                 actions={
@@ -402,7 +402,7 @@ export function PreviewPage() {
 
         <GallerySection title="输入区">
           <GalleryCell label="Composer">
-            <div style={{ border: '1px solid var(--line)', borderRadius: 14, width: '100%' }}>
+            <div style={{ border: '1px solid var(--Color-border-default)', borderRadius: 14, width: '100%' }}>
               <Composer />
             </div>
           </GalleryCell>

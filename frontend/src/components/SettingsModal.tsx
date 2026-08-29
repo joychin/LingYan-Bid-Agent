@@ -588,7 +588,7 @@ function RoleSelect({
       </button>
 
       {open && (
-        <div className="absolute bottom-full right-0 z-20 mb-1.5 w-56 rounded-lg border border-line bg-card py-1 shadow-[0_-2px_8px_rgba(16,24,40,0.06),0_8px_18px_rgba(16,24,40,0.12)]">
+        <div className="absolute bottom-full right-0 z-20 mb-1.5 w-56 rounded-lg border border-line bg-card py-1 shadow-md">
           {item('', emptyLabel)}
           {options.length > 0 && <div className="my-1 border-t border-line" />}
           {options.map((o) => item(o.id, o.label))}
@@ -676,7 +676,7 @@ function ProviderSelect({ value, onChange }: { value: string; onChange: (key: st
       </button>
 
       {open && (
-        <div className="absolute left-0 right-0 top-full z-20 mt-1.5 rounded-xl border border-line bg-card py-1 shadow-[0_8px_18px_rgba(16,24,40,0.12)]">
+        <div className="absolute left-0 right-0 top-full z-20 mt-1.5 rounded-xl border border-line bg-card py-1 shadow-md">
           <div className="flex items-center gap-2 border-b border-line px-3 py-2">
             <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             <input
@@ -751,7 +751,7 @@ function ModelNameSelect({
       </button>
 
       {open && (
-        <div className="absolute left-0 right-0 top-full z-20 mt-1.5 max-h-64 overflow-y-auto rounded-xl border border-line bg-card py-1 shadow-[0_8px_18px_rgba(16,24,40,0.12)]">
+        <div className="absolute left-0 right-0 top-full z-20 mt-1.5 max-h-64 overflow-y-auto rounded-xl border border-line bg-card py-1 shadow-md">
           {preset.models.map((m) => (
             <button
               key={m.name}

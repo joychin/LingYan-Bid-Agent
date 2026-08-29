@@ -413,8 +413,13 @@ kb_items+磁盘 md 重建（启动 `rebuild_kb_index`）；同 hash 上传 API �
     Reasoning/ChainOfThought/Steps/Source/FileUpload/ThinkingBar/Tool），全部手抄适配、
     零第三方依赖，动画 keyframes 集中在 `styles/ai.css`。吸收新 prompt-kit 组件照此先例：
     抄源码思路适配到语义 token，不引 radix/cva/motion（详见记忆 prompt-kit-visual-adoption）。
-  - 设计 token：`index.css` 定义 `--paper/--panel/--ink/--line/--accent-soft` 等（light only），
-    `styles/workspace.css` 是 Workspace 组件设计系统；UI 改动优先用这些语义变量。
+  - 设计 token：真值 = `src/styles/tokens.css`（vendor 自 `docs/designtokens/`，v1.2 五集合
+    `--Color-*/--Spacing-*/--Radius-*/--Typography-*/--Shadow-*`，Light + Dark 双 mode：暗色由
+    `[data-theme="Dark"]` 变量翻转自动生效，开关在侧栏 UserBar、偏好存 `tender-agent.theme`，
+    首帧由 main.tsx 落位防闪白）；`index.css` 只做 Tailwind `@theme inline` 工具映射（工具类名
+    沿用 text-ink/border-line/bg-muted 等历史名，指针直连 --Color-*），`styles/workspace.css`
+    是 Workspace 组件设计系统、只消费 token 不定义色值；状态 tint 用 color-mix(语义色, bg-canvas)
+    现场派生、不硬编码浅色；UI 改动优先用语义变量，找不到 token = 加 token。
   - `preview.html`（→ `src/preview/`）是独立组件预览入口：只引 workspace.css，
     不引 index.css/Tailwind/后端；验证纯 UI 组件时用它，别在预览页引 Tailwind 工具类。
 

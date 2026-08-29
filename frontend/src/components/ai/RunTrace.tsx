@@ -54,7 +54,7 @@ function ToolStepRow({ step }: { step: ToolStep }) {
             <div className="break-all font-mono text-xs text-muted-foreground/80">{arg}</div>
           )}
           {step.status === 'error' && step.error ? (
-            <div className="art-result" style={{ color: 'var(--error)' }}>
+            <div className="art-result" style={{ color: 'var(--Color-danger)' }}>
               {step.error}
             </div>
           ) : step.summary ? (

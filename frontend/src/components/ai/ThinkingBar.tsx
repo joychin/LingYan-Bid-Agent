@@ -35,7 +35,7 @@ export function ThinkingBar({
           type="button"
           onClick={onStop}
           className="border-b border-dotted text-sm text-muted-foreground transition-colors hover:border-foreground hover:text-foreground"
-          style={{ borderColor: 'var(--muted-foreground)' }}
+          style={{ borderColor: 'var(--Color-text-secondary)' }}
         >
           {stopLabel}
         </button>

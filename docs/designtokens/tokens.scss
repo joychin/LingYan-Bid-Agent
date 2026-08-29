@@ -1,0 +1,140 @@
+// Tender Agent Design Tokens · v1.2
+// 48 token · 5 集合 · Light + Dark 双 mode
+// 注意：SCSS 变量只有 Light 值，Dark 用 CSS 变量覆盖（见 tokens.css）
+
+// ─── 文字 ─────────────────────────────────────────
+$Color-text-primary:     #1A1D21;
+$Color-text-secondary:   #5B616B;
+$Color-text-tertiary:    #9AA1AB;
+$Color-text-disabled:    #C2C5CA;
+$Color-text-on-color:    #FFFFFF;
+
+// ─── 背景 ─────────────────────────────────────────
+$Color-bg-canvas:        #FFFFFF;
+$Color-bg-surface:       #F6F7F9;
+$Color-bg-subtle:        #F0F2F5;
+$Color-bg-inverse:       #1A1D21;
+
+// ─── 边框 ─────────────────────────────────────────
+$Color-border-default:   #E6E8EC;
+
+// ─── 品牌 ─────────────────────────────────────────
+$Color-brand-primary:        #2563EB;
+$Color-brand-primary-hover:  #1D4ED8;
+$Color-brand-primary-soft:   #DBEAFE;
+
+// ─── 语义 ─────────────────────────────────────────
+$Color-success:          #10B981;
+$Color-warning:          #F59E0B;
+$Color-danger:           #EF4444;
+
+// ─── 间距 · 8 档 ──────────────────────────────────
+$Spacing-space-2:  2px;
+$Spacing-space-4:  4px;
+$Spacing-space-8:  8px;
+$Spacing-space-12: 12px;
+$Spacing-space-16: 16px;
+$Spacing-space-24: 24px;
+$Spacing-space-32: 32px;
+$Spacing-space-48: 48px;
+
+// ─── 圆角 · 4 档 ──────────────────────────────────
+$Radius-radius-4:   4px;
+$Radius-radius-8:   8px;
+$Radius-radius-12:  12px;
+$Radius-radius-full: 9999px;
+
+// ─── 字号 · 9 档 ──────────────────────────────────
+$Typography-font-size-xs:   12px;
+$Typography-font-size-sm:   13px;
+$Typography-font-size-base: 14px;
+$Typography-font-size-md:   16px;
+$Typography-font-size-lg:   18px;
+$Typography-font-size-xl:   20px;
+$Typography-font-size-2xl:  24px;
+$Typography-font-size-3xl:  30px;
+$Typography-font-size-4xl:  40px;
+
+// ─── 字重 · 4 档 ──────────────────────────────────
+$Typography-font-weight-regular:  400;
+$Typography-font-weight-medium:   500;
+$Typography-font-weight-semibold: 600;
+$Typography-font-weight-bold:     700;
+
+// ─── 字体族 ───────────────────────────────────────
+$Typography-font-family-base: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+$Typography-font-family-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+// ─── 阴影（只列 Light 值；Dark 用 CSS 覆盖） ─────
+$Shadow-shadow-none: none;
+$Shadow-shadow-xs:   0 1px 2px rgba(15, 15, 15, 0.04);
+$Shadow-shadow-sm:   0 1px 2px rgba(15, 15, 15, 0.04), 0 1px 3px rgba(15, 15, 15, 0.06);
+$Shadow-shadow-md:   0 4px 6px rgba(15, 15, 15, 0.06), 0 1px 2px rgba(15, 15, 15, 0.04);
+$Shadow-shadow-lg:   0 16px 32px -8px rgba(15, 15, 15, 0.16), 0 1px 2px rgba(15, 15, 15, 0.04);
+
+// ─── Dark 模式：另写一份 CSS 覆盖 ──────────────────
+// 推荐用 CSS 变量（@use 'tokens' as t; 拿不到 Dark 值）
+// 用 SCSS 时建议在组件里用 :root[data-theme="dark"] { ... } 局部覆盖
+$Dark-Color-text-primary:     #E6E8EC;
+$Dark-Color-text-secondary:   #9AA1AB;
+$Dark-Color-text-tertiary:    #6B7280;
+$Dark-Color-text-disabled:    #4B5563;
+$Dark-Color-text-on-color:    #1A1D21;
+$Dark-Color-bg-canvas:        #1A1D21;
+$Dark-Color-bg-surface:       #0D0F12;
+$Dark-Color-bg-subtle:        #25282E;
+$Dark-Color-bg-inverse:       #FFFFFF;
+$Dark-Color-border-default:   #2E3238;
+$Dark-Color-brand-primary:        #3B82F6;
+$Dark-Color-brand-primary-hover:  #60A5FA;
+$Dark-Color-brand-primary-soft:   #1E3A8A;
+$Dark-Color-success:          #34D399;
+$Dark-Color-warning:          #FBBF24;
+$Dark-Color-danger:           #F87171;
+
+// ─── 派生 mixin ───────────────────────────────────
+@mixin bg-success-soft { background: color-mix(in srgb, #{$Color-success} 12%, #{$Color-bg-canvas}); }
+@mixin bg-warning-soft { background: color-mix(in srgb, #{$Color-warning} 12%, #{$Color-bg-canvas}); }
+@mixin bg-danger-soft  { background: color-mix(in srgb, #{$Color-danger}  12%, #{$Color-bg-canvas}); }
+
+// ─── 组件配方 ─────────────────────────────────────
+@mixin btn-base {
+  padding: $Spacing-space-8 $Spacing-space-16;
+  border-radius: $Radius-radius-8;
+  font-size: $Typography-font-size-base;
+  font-weight: $Typography-font-weight-medium;
+  font-family: $Typography-font-family-base;
+  border: none;
+  cursor: pointer;
+}
+@mixin btn-primary {
+  @include btn-base;
+  background: $Color-brand-primary;
+  color: $Color-text-on-color;
+  &:hover { background: $Color-brand-primary-hover; }
+}
+@mixin btn-secondary {
+  @include btn-base;
+  background: $Color-bg-canvas;
+  border: 1px solid $Color-border-default;
+  color: $Color-text-primary;
+}
+@mixin input {
+  height: 40px;
+  padding: $Spacing-space-8 $Spacing-space-12;
+  border-radius: $Radius-radius-8;
+  border: 1px solid $Color-border-default;
+  background: $Color-bg-canvas;
+  color: $Color-text-primary;
+  font-size: $Typography-font-size-base;
+  font-family: $Typography-font-family-base;
+  outline: none;
+  &:focus { border-color: $Color-brand-primary; }
+}
+@mixin card {
+  padding: $Spacing-space-16;
+  border-radius: $Radius-radius-12;
+  border: 1px solid $Color-border-default;
+  background: $Color-bg-canvas;
+  box-shadow: $Shadow-shadow-sm;
+}

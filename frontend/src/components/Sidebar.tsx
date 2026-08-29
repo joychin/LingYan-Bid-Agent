@@ -5,10 +5,12 @@ import {
   Folder,
   FolderOpen,
   MoreHorizontal,
+  Moon,
   Package,
   Pencil,
   Plus,
   Settings,
+  Sun,
   Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -40,6 +42,9 @@ export interface SidebarProps {
   /** 主区形态：决定知识库入口的 active 态 */
   activeView?: 'chat' | 'kb'
   onOpenSettings: () => void
+  /** 当前主题（图标即状态）；切换由 App 落 localStorage + documentElement */
+  theme: 'light' | 'dark'
+  onToggleTheme: () => void
   collapsed: boolean
 }
 
@@ -72,6 +77,8 @@ export function Sidebar({
   onOpenKnowledge,
   activeView = 'chat',
   onOpenSettings,
+  theme,
+  onToggleTheme,
   collapsed,
 }: SidebarProps) {
   const { data: conversations = [], isLoading } = useConversations()
@@ -307,6 +314,12 @@ export function Sidebar({
               className={cn('h-2 w-2 rounded-full', STATUS_DOT[sidecarStatus])}
               title={`服务${STATUS_LABEL[sidecarStatus]}`}
             />
+            <IconButtonAction
+              title={theme === 'dark' ? '切换亮色模式' : '切换暗色模式'}
+              onClick={onToggleTheme}
+            >
+              {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </IconButtonAction>
             <IconButtonAction title="设置" onClick={onOpenSettings}>
               <Settings className="h-4 w-4" />
             </IconButtonAction>
