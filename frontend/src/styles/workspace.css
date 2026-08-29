@@ -132,26 +132,27 @@
 .side-head {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   min-height: 50px;
   padding: 0 16px;
 }
-.side-head button {
-  border: none;
-  background: transparent;
-  color: var(--ink-3);
-  cursor: pointer;
+/* 面板开关：侧栏头 / 中栏顶栏 / KB 头共用（图标即状态：Close=收起 / Open=展开） */
+.head-toggle {
+  flex: none;
   width: 24px;
   height: 24px;
+  border: none;
   border-radius: 6px;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
   display: grid;
   place-items: center;
 }
-.side-head button:hover {
+.head-toggle:hover {
   background: var(--panel-2);
   color: var(--ink);
 }
-.side-head button svg {
+.head-toggle svg {
   width: 15px;
   height: 15px;
   stroke: currentColor;
@@ -591,9 +592,10 @@
   border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
+  gap: 8px;
 }
 .chat-head-inner {
-  width: 100%;
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1163,23 +1165,7 @@
   opacity: 0;
   border-left: none;
 }
-.product.expanded {
-  position: fixed;
-  inset: 0 0 0 auto; /* 右缘锚定 */
-  z-index: 60;
-  width: 100vw;
-  height: 100vh;
-  border-left: none;
-  opacity: 1;
-}
-.product.expanded.closing {
-  animation: none;
-  width: 300px;
-  transition: width 0.25s ease;
-}
-.product.expanded .resizer {
-  pointer-events: none;
-}
+/* v3 起全屏档（.product.expanded 100vw）已删除：工作区态由 .ap-shell.wide 覆盖式展开取代 */
 .product-head {
   display: flex;
   align-items: center;
@@ -1492,27 +1478,6 @@
   transition: none;
 }
 
-.side-toggle {
-  position: absolute;
-  left: 0;
-  top: 14px;
-  z-index: 30;
-  width: 24px;
-  height: 24px;
-  border-radius: 0 6px 6px 0;
-  border: 1px solid var(--line);
-  border-left: none;
-  background: var(--paper);
-  color: var(--ink-2);
-  cursor: pointer;
-  display: none;
-  place-items: center;
-  box-shadow: var(--shadow);
-}
-.side.collapsed ~ .main .side-toggle {
-  display: grid;
-}
-
 /* ---------- macOS 红绿灯悬浮让位（Overlay 标题栏，仅 mac-tauri 生效） ----------
  * 实测（Swift 探针复现 tao inset 几何）：按钮顶边 = y-9、高 14、水平间距 23，
  * 即 y=34 时灯簇占 x 13–73、y 25–39（中心 32 = side-head 标签中心），内容让到 78px */
@@ -1520,11 +1485,7 @@
   padding-left: 78px;
 }
 /* 侧栏收起后主区顶到窗口左缘：header 行高 50、内容原居中在 25，
- * padding-top 14 + flex 居中 → 中心 32 = 红绿灯中心线，水平让出灯簇 78px；
- * 展开按钮回贴左缘但下移避开红绿灯（灯占 y 25–39、原生标题栏容器到 y 48） */
-:root.mac-tauri .side.collapsed ~ .main .side-toggle {
-  top: 56px;
-}
+ * padding-top 14 + flex 居中 → 中心 32 = 红绿灯中心线，水平让出灯簇 78px */
 :root.mac-tauri .side.collapsed ~ .main .chat-head {
   padding: 14px 16px 0 78px;
 }
@@ -1539,47 +1500,10 @@
 :root.mac-tauri .product.expanded .product-head {
   padding: 14px 16px 0 78px;
 }
-.side-toggle svg {
-  width: 14px;
-  height: 14px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 2;
-}
-
-.product-toggle {
-  position: absolute;
-  right: 0;
-  top: 14px;
-  z-index: 30;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px 0 0 6px;
-  border: 1px solid var(--line);
-  border-right: none;
-  background: var(--paper);
-  color: var(--ink-2);
-  cursor: pointer;
-  display: none;
-  place-items: center;
-  box-shadow: var(--shadow);
-}
-.product.collapsed + .product-toggle {
-  display: grid;
-}
-.product-toggle svg {
-  width: 14px;
-  height: 14px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 2;
-}
-
 /* focus visibility */
 .icon-ghost:focus-visible,
 .new-btn:focus-visible,
-.side-toggle:focus-visible,
-.product-toggle:focus-visible,
+.head-toggle:focus-visible,
 .artifact:focus-visible,
 .chat-item:focus-visible,
 .avatar:focus-visible,
@@ -1721,6 +1645,562 @@
   margin-left: auto;
 }
 
+/* ============================================================
+ * 产物面板 v3（2026-08-29 修订方案）：作用域分组列表 + 右侧工作区。
+ * 阶段 1 先在 preview.html 原型（ArtifactPanelNext，假数据）；
+ * 确认后阶段 4 迁移主 App（ArtifactPanel.tsx 复用本段，替换 .ft 树形态）。
+ * 设计依据：方案 v2 走查——轻组头（VS Code OUTLINE 式）、行=主动作+状态标、
+ * 最深缩进 ≤2 层、转正信息对（正式稿↔同名草稿）分组相邻。
+ * ============================================================ */
+/* 槽位：grid 里的 300px 占位；面板 absolute 锚右缘，展开时向左覆盖在主区之上
+   （用户裁定：展开不得挤压聊天区，抽屉式浮层 + 投影表达层级） */
+.ap-slot {
+  position: relative;
+  grid-area: product;
+  width: 300px;
+  min-width: 0;
+  /* 开合动画与左侧栏（.side）同款：0.2s ease，聊天区推挤同步 */
+  transition: width 0.2s ease;
+}
+.ap-slot.collapsed {
+  width: 0 !important;
+}
+.ap-slot.collapsed .ap-shell {
+  width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.ap-slot.dragging,
+.ap-shell.dragging {
+  transition: none;
+}
+.ap-shell {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  align-items: stretch;
+  width: 300px;
+  min-width: 0;
+  background: var(--panel);
+  overflow: hidden;
+  transition: width 0.2s ease, opacity 0.2s ease;
+}
+/* 竖分隔线只画 header 以下（用户明令：header 段与中栏 ChatHeader 无缝连成一条白带）。
+ * 用 ::after 而非 border-left：面板体左缘本有 border，但 header 段需要断开，
+ * 且 overflow:hidden 的裁剪盒是 padding box，伪元素盖不到 border 区 */
+.ap-shell::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50px;
+  bottom: 0;
+  width: 1px;
+  background: var(--line);
+}
+.ap-shell.wide {
+  width: 880px;
+  box-shadow: -24px 0 48px rgba(16, 24, 40, 0.22), -2px 0 0 rgba(16, 24, 40, 0.06);
+}
+.ap-shell.wide::after {
+  background: var(--line-2);
+}
+
+/* ---------- 导航列 ---------- */
+.ap-nav {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  width: 300px;
+  min-width: 0;
+}
+.ap-shell.wide .ap-nav {
+  width: 260px;
+  border-right: 1px solid var(--line);
+}
+.ap-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 50px;
+  padding: 0 12px 0 16px;
+  flex: none;
+  /* 与 ChatHeader 同色同高同分隔线（用户明令）：中栏+右栏 header 连成一条白带，
+   * 面板体仍是 --panel 灰，header 靠这条底线与 body 分界 */
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+}
+.ap-head-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ap-head-actions {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+}
+.ap-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 10px 16px;
+}
+
+/* 分组：轻组头（小字常驻，参考 VS Code OUTLINE / Linear Workspace） */
+.ap-group {
+  margin-top: 10px;
+}
+.ap-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--ink-3);
+  user-select: none;
+}
+.ap-group-head.clickable {
+  width: 100%;
+  border: none;
+  background: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.ap-group-head.clickable:hover {
+  color: var(--ink-2);
+  background: var(--panel-2);
+}
+.ap-count {
+  font-weight: 500;
+  color: var(--ink-3);
+  opacity: 0.8;
+}
+.ap-chev {
+  width: 12px;
+  height: 12px;
+  margin-left: auto;
+  stroke: var(--ink-3);
+  fill: none;
+  stroke-width: 2;
+}
+
+/* 产物行：主动作 = 打开；状态标一个；提升动作 hover 显现 */
+.ap-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 4px 6px 4px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.ap-row:hover,
+.ap-row.active {
+  background: var(--panel-2);
+}
+.ap-row.active {
+  box-shadow: inset 2px 0 0 var(--brand);
+}
+.ap-row.compact {
+  min-height: 25px;
+  padding-left: 4px;
+}
+.ap-row-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--ink);
+}
+/* 状态标：≤3 种视觉处理（NN/g），作用域靠分组表达、状态只标行 */
+.ap-status {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.ap-status.baseline {
+  background: var(--accent-soft);
+  color: var(--brand);
+}
+.ap-status.pending {
+  background: #fef3c7;
+  color: #b45309;
+}
+.ap-status.regen {
+  background: transparent;
+  color: var(--ink-3);
+  opacity: 0.75;
+}
+/* 行尾槽：状态标与提升动作同位叠放（固定宽防跳动），hover 交叉淡入 */
+.ap-row-tail {
+  position: relative;
+  flex: none;
+  width: 54px;
+  height: 20px;
+}
+.ap-row-tail > .ap-status {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: fit-content;
+  transition: opacity 0.12s;
+}
+.ap-row-tail > .ap-row-action {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: fit-content;
+  height: 20px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+/* 提升动作：hover 淡入（opacity 约定，不 display 切换），并顶替「待转正」标避免一行两动作 */
+.ap-row-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: none;
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 500;
+  font-family: inherit;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  cursor: pointer;
+}
+.ap-row-action:hover {
+  color: #b45309;
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+.ap-row:hover .ap-row-action {
+  opacity: 1;
+  pointer-events: auto;
+}
+.ap-row:hover .ap-status.pending {
+  opacity: 0;
+}
+/* 带提升动作的行（会话稿）：hover 时标被动作顶替（含普通「仅本会话」灰标） */
+.ap-row:hover.has-action .ap-row-tail > .ap-status {
+  opacity: 0;
+}
+.ap-row-action svg {
+  width: 11px;
+  height: 11px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+}
+.ap-pen {
+  width: 10px;
+  height: 10px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+}
+
+/* 工作台小节：组内第二层，标题更弱 */
+.ap-wb {
+  padding-left: 8px;
+}
+.ap-sub {
+  margin-top: 2px;
+}
+.ap-sub-head {
+  padding: 3px 6px;
+  font-size: 11px;
+  color: var(--ink-3);
+  opacity: 0.85;
+}
+.ap-empty {
+  padding: 6px 6px 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
+/* ---------- 工作区（ws 态右侧编辑区） ---------- */
+.ap-ws {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+}
+.ap-ws-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 50px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.ap-ws-docico {
+  width: 15px;
+  height: 15px;
+  stroke: var(--ink-2);
+  fill: none;
+  stroke-width: 1.7;
+  flex: none;
+}
+.ap-ws-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 作用域徽标：走查问题 5 的修复演示——打开器标题恒显作用域 */
+.ap-scope-badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--brand);
+  font-size: 11px;
+  font-weight: 500;
+}
+.ap-scope-badge.conv {
+  background: var(--panel-2);
+  color: var(--ink-2);
+}
+.ap-ws-contract {
+  flex: none;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.ap-ws-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.ap-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line-2);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: 0.12s;
+}
+.ap-btn svg {
+  width: 13px;
+  height: 13px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+}
+.ap-btn:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+.ap-btn.ghost {
+  border-color: transparent;
+  color: var(--ink-2);
+}
+.ap-btn.ghost:hover {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+.ap-btn.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #fff;
+}
+.ap-btn.primary:hover {
+  background: #000;
+  color: #fff;
+}
+.ap-ws-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 18px 24px;
+}
+
+/* 来源核对警示条（amber，复刻 DirectoryProcessor Banner） */
+.ap-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid #fcd34d;
+  background: #fffbeb;
+  color: #92400e;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ap-banner-ico {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #f59e0b;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  margin-top: 1px;
+}
+/* 项目信息 chips */
+.ap-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 14px;
+}
+.ap-chip {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--ink-2);
+  font-size: 11px;
+}
+/* 章节文档卡 */
+.ap-doc {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.ap-doc-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.ap-doc-head svg {
+  width: 14px;
+  height: 14px;
+  stroke: var(--ink-2);
+  fill: none;
+  stroke-width: 1.7;
+}
+.ap-doc-meta {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+.ap-node {
+  padding-top: 9px;
+  padding-bottom: 3px;
+}
+.ap-node-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  margin-right: 6px;
+}
+.ap-node-desc {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  line-height: 1.55;
+  margin-top: 2px;
+}
+/* 四色来源标（语义对齐 DirectoryProcessor：MAND 红 / TPL 蓝 / REQ teal / SCORE amber） */
+.ap-src {
+  display: inline-block;
+  padding: 0 5px;
+  margin-right: 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  vertical-align: 1px;
+}
+.ap-src.mand {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.ap-src.tpl {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.ap-src.req {
+  background: #ccfbf1;
+  color: #0f766e;
+}
+.ap-src.score {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+/* ---------- 转正确认小模态（不可逆动作专用） ---------- */
+.ap-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(0, 0, 0, 0.35);
+  display: grid;
+  place-items: center;
+}
+.ap-modal {
+  width: min(92vw, 430px);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(16, 24, 40, 0.18);
+  overflow: hidden;
+}
+.ap-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  border-bottom: 1px solid var(--line);
+}
+.ap-modal-body {
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--ink);
+}
+.ap-modal-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.ap-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+
 /* 知识库视图：主区内两栏（左 300px 文件栏 + 右内容画布），参考 Notion 式极简扁平 */
 .kb-view {
   display: flex;
@@ -1759,6 +2239,12 @@
   height: 50px;
   padding: 0 16px;
   flex: none;
+}
+.kb-side-head-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 .kb-title {
   font-size: 14px;

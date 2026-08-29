@@ -1,9 +1,11 @@
-import { useRef, useState } from 'react'
-import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen, Maximize2, Minimize2 } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { ChevronDown, ChevronRight, FileText, Maximize2, Minimize2, PanelRightClose } from 'lucide-react'
 import type { Artifact, Task, WorkbenchFile } from '@/api/client'
 import { useConversationArtifacts, useTaskArtifacts } from '@/hooks/useArtifacts'
-import { useConversations } from '@/hooks/useConversations'
 import { useWorkbench } from '@/hooks/useWorkbench'
+import { PromoteConfirmModal } from '@/components/PromoteConfirmModal'
+import { ArtifactOpenHost } from '@/components/ArtifactOpenHost'
+import { WorkbenchViewer } from '@/components/WorkbenchViewer'
 import { kindIcon } from '@/artifacts/registry'
 import { cn } from '@/lib/utils'
 
@@ -12,14 +14,16 @@ const MIN_W = 240
 const MAX_W = 560
 
 /**
- * Workspace 右栏产物面板 v2：一棵朴素文件夹树——项目文件/会话产物/工作文件
- * 三根平铺（面板只展示当前任务，任务名不再占一层根），往下纯嵌套
- * （工作台 = 任务 out/ 的 md 过程产物）。
- * 行上不带任何小字后缀（修订/来源状态在查看器头部徽章条里看）。
- * 无任务上下文（草稿态）时 App 不渲染本面板。
+ * 产物面板 v3（方案 v2 阶段 4a/4b）：作用域分组列表 + 覆盖式工作区。
+ *
+ * 三分组 = 任务正式成果 / 本会话产物 / 任务工作台（默认折叠）；行 = 名称 + 一个状态标
+ * （[任务基线]/[待转正]/[仅本会话]/[可重生成]/[解析只读]），提升动作（转正）hover 淡入、
+ * 走 PromoteConfirmModal 确认。最深缩进 ≤2 层；转正信息对（同名正式稿↔草稿）分组相邻。
+ * previewId / workbenchPath 非空时进入工作区态：面板向左覆盖展开（880px，不挤压聊天），
+ * 编辑器（ArtifactOpenHost / WorkbenchViewer）嵌入右侧；Esc 或关闭按钮收起。
  */
 
-/** 工作台文件的显示名：分析八件+目录主文件用业务名，其余（fragments/解析）用文件名。 */
+/** 工作台文件显示名：分析八件+目录主文件用业务名，其余用文件名。 */
 const WB_NAMES: Record<string, string> = {
   'analysis/structure.md': '结构事实',
   'analysis/requirements-qualification.md': '资格要求',
@@ -36,52 +40,53 @@ export function ArtifactPanel({
   currentConvId,
   currentTask,
   collapsed,
+  previewId,
+  workbenchPath,
   onOpen,
   onOpenWorkbench,
+  onClearPreview,
   onCollapse,
 }: {
   currentConvId: string | null
   currentTask: Task | null
   collapsed: boolean
+  previewId: string | null
+  workbenchPath: string | null
   onOpen: (id: string) => void
   onOpenWorkbench: (path: string) => void
+  onClearPreview: () => void
   onCollapse: () => void
 }) {
   const { data: taskArtifacts = [], isLoading: loadingTask } = useTaskArtifacts(currentTask?.id ?? null)
   const { data: convArtifacts = [], isLoading: loadingConv } = useConversationArtifacts(currentConvId)
-  const { data: conversations = [] } = useConversations()
   const { data: workbench = [], isLoading: loadingWorkbench } = useWorkbench(currentTask?.id ?? null)
-  const convTitle = conversations.find((c) => c.id === currentConvId)?.title
   const [width, setWidth] = useState(DEFAULT_W)
-  const [expanded, setExpanded] = useState(false)
-  const [closing, setClosing] = useState(false)
+  const [wbOpen, setWbOpen] = useState(false)
+  const [promoteTarget, setPromoteTarget] = useState<Artifact | null>(null)
   const [dragging, setDragging] = useState(false)
   const appRect = useRef<DOMRect | null>(null)
 
-  const handleCollapseToggle = () => {
-    setExpanded(false)
-    setClosing(false)
-    setWidth(DEFAULT_W)
-    onCollapse()
-  }
+  const wsOpen = !collapsed && (!!previewId || !!workbenchPath)
 
-  const handleExpandToggle = () => {
-    if (expanded) {
-      setClosing(true)
-      window.setTimeout(() => {
-        setExpanded(false)
-        setClosing(false)
-        setWidth(DEFAULT_W)
-      }, 260)
-    } else {
-      setExpanded(true)
+  // 工作区态 Esc = 收起编辑器回导航（模态壳消失后由面板接管）
+  useEffect(() => {
+    if (!wsOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClearPreview()
     }
-  }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [wsOpen, onClearPreview])
 
   const artifactRow = (a: Artifact) => {
+    const formal = a.scope === 'task'
     const icon = kindIcon(a.kind)
     return (
-      <div key={a.artifact_id} className="ft-row" onClick={() => onOpen(a.artifact_id)}>
+      <div
+        key={a.artifact_id}
+        className={cn('ap-row', !formal && 'has-action')}
+        onClick={() => onOpen(a.artifact_id)}
+      >
         {icon ? (
           <span className={cn('ft-ico', icon.cls)}>{icon.mark}</span>
         ) : (
@@ -89,179 +94,214 @@ export function ArtifactPanel({
             <FileText className="ft-ico-svg" />
           </span>
         )}
-        <span className="ft-name truncate">{a.display_name}</span>
+        <span className="ap-row-name truncate">{a.display_name}</span>
+        <span className="ap-row-tail">
+          {!formal && (
+            <button
+              type="button"
+              className="ap-row-action"
+              title="复制到任务正式成果（原件保留，覆盖自动留恢复点）"
+              onClick={(e) => {
+                e.stopPropagation()
+                setPromoteTarget(a)
+              }}
+            >
+              转正
+            </button>
+          )}
+          <span className={cn('ap-status', formal ? 'baseline' : a.promotion_proposed ? 'pending' : 'regen')}>
+            {formal ? '任务基线' : a.promotion_proposed ? '待转正' : '仅本会话'}
+          </span>
+        </span>
       </div>
     )
   }
 
-  const wbRow = (f: WorkbenchFile) => (
-    <div key={f.path} className="ft-row" onClick={() => onOpenWorkbench(f.path)} title={f.path}>
+  // 解析去重：每个源文件只列一行主稿（<stem>.md），源文件夹层不再展开
+  const parseRows: WorkbenchFile[] = []
+  {
+    const parseFiles = workbench.filter((f) => f.path.startsWith('parse/'))
+    const seen = new Set<string>()
+    for (const f of parseFiles) {
+      const src = f.path.split('/')[1] ?? ''
+      if (!src || seen.has(src)) continue
+      seen.add(src)
+      const main = parseFiles.find((p) => p.path === `parse/${src}/${src}.md`) ?? f
+      parseRows.push(main)
+    }
+  }
+  const analysisFiles = workbench.filter((f) => f.path.startsWith('analysis/'))
+  const outlineRoots = workbench.filter((f) => f.path.startsWith('outline/') && !f.path.startsWith('outline/fragments/'))
+  const fragments = workbench.filter((f) => f.path.startsWith('outline/fragments/'))
+
+  const wbRow = (f: WorkbenchFile, name?: string) => (
+    <div key={f.path} className="ap-row compact" onClick={() => onOpenWorkbench(f.path)} title={f.path}>
       <span className="ft-ico-glyph">
         <FileText className="ft-ico-svg" />
       </span>
-      <span className="ft-name truncate">{WB_NAMES[f.path] ?? f.path.split('/').pop()}</span>
+      <span className="ap-row-name truncate">{name ?? WB_NAMES[f.path] ?? f.path.split('/').pop()}</span>
+      <span className="ap-row-tail">
+        <span className="ap-status regen">{f.editable ? '可重生成' : '解析只读'}</span>
+      </span>
     </div>
   )
 
   return (
     <>
-      <aside
-        className={cn('product', collapsed && 'collapsed', expanded && 'expanded', closing && 'closing', dragging && 'dragging')}
-        style={collapsed || expanded ? undefined : { width }}
+      <div
+        className={cn('ap-slot', collapsed && 'collapsed', dragging && 'dragging')}
+        style={collapsed ? undefined : { width: wsOpen ? undefined : width }}
       >
-        <div
-          className="resizer"
-          onMouseDown={(e) => {
-            if (collapsed || expanded) return
-            e.preventDefault()
-            appRect.current = e.currentTarget.closest('.app')?.getBoundingClientRect() ?? null
-            setDragging(true)
-            const onMove = (ev: MouseEvent) => {
-              if (!appRect.current) return
-              setWidth(Math.max(MIN_W, Math.min(MAX_W, appRect.current.right - ev.clientX)))
-            }
-            const onUp = () => {
-              setDragging(false)
-              window.removeEventListener('mousemove', onMove)
-              window.removeEventListener('mouseup', onUp)
-            }
-            window.addEventListener('mousemove', onMove)
-            window.addEventListener('mouseup', onUp)
-          }}
-        />
-        <div
-          className="product-head"
-          onClick={handleCollapseToggle}
-          title="收起面板"
-          role="button"
+        <aside
+          className={cn('ap-shell', wsOpen && 'wide', collapsed && 'collapsed', dragging && 'dragging')}
+          style={collapsed || wsOpen ? undefined : { width }}
         >
-          <span className="product-title">工作空间文件</span>
-          <ChevronDown className="product-chev" />
-          <div className="panel-actions">
-            <button
-              type="button"
-              className="panel-btn"
-              title={expanded ? '缩小' : '放大'}
-              onClick={(e) => {
-                e.stopPropagation()
-                handleExpandToggle()
-              }}
-            >
-              {expanded ? <Minimize2 /> : <Maximize2 />}
-            </button>
+          <div className="ap-nav">
+          <div
+            className="resizer"
+            onMouseDown={(e) => {
+              if (collapsed) return
+              e.preventDefault()
+              appRect.current = e.currentTarget.closest('.app')?.getBoundingClientRect() ?? null
+              setDragging(true)
+              const onMove = (ev: MouseEvent) => {
+                if (!appRect.current) return
+                setWidth(Math.max(MIN_W, Math.min(MAX_W, appRect.current.right - ev.clientX)))
+              }
+              const onUp = () => {
+                setDragging(false)
+                window.removeEventListener('mousemove', onMove)
+                window.removeEventListener('mouseup', onUp)
+              }
+              window.addEventListener('mousemove', onMove)
+              window.addEventListener('mouseup', onUp)
+            }}
+          />
+          <div className="ap-head">
+            <span className="ap-head-title">产物 · {currentTask?.title ?? '当前任务'}</span>
+            <div className="ap-head-actions">
+              {wsOpen ? (
+                <button type="button" className="panel-btn" title="缩小面板" onClick={onClearPreview}>
+                  <Minimize2 />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="panel-btn"
+                  title="放大面板（打开最近产物）"
+                  disabled={taskArtifacts.length === 0 && convArtifacts.length === 0}
+                  onClick={() => {
+                    const target = taskArtifacts[0] ?? convArtifacts[0]
+                    if (target) onOpen(target.artifact_id)
+                  }}
+                >
+                  <Maximize2 />
+                </button>
+              )}
+              <button type="button" className="panel-btn" title="收起产物面板" onClick={onCollapse}>
+                <PanelRightClose />
+              </button>
+            </div>
           </div>
-        </div>
 
-        <div className="product-body file-tree">
-          <TreeFolder
-            title="项目文件"
-            loading={loadingTask}
-            empty={taskArtifacts.length === 0 ? '暂无 · 转正自会话产物' : undefined}
-          >
-            {taskArtifacts.map(artifactRow)}
-          </TreeFolder>
-          <TreeFolder
-            title={convTitle ? `会话产物 · ${convTitle}` : '会话产物'}
-            loading={loadingConv}
-            empty={convArtifacts.length === 0 && workbench.length === 0 ? '暂无' : undefined}
-          >
-            {convArtifacts.map(artifactRow)}
-            <WorkbenchTree files={workbench} loading={loadingWorkbench} row={wbRow} />
-          </TreeFolder>
-        </div>
-      </aside>
-      <button type="button" className="product-toggle" title="展开产物面板" onClick={handleCollapseToggle}>
-        <ChevronRight />
-      </button>
-    </>
-  )
-}
+          <div className="ap-body">
+            {/* 任务正式成果 */}
+            <div className="ap-group">
+              <div className="ap-group-head">
+                <span>任务正式成果</span>
+                {taskArtifacts.length > 0 && <span className="ap-count">{taskArtifacts.length}</span>}
+              </div>
+              {loadingTask ? (
+                <p className="ap-empty">加载中…</p>
+              ) : taskArtifacts.length === 0 ? (
+                <p className="ap-empty">
+                  还没有任务正式成果。
+                  <br />
+                  会话产物经你确认后，会成为任务共享成果。
+                </p>
+              ) : (
+                taskArtifacts.map(artifactRow)
+              )}
+            </div>
 
-/** 文件夹节点：头部 = 旋转箭头 + Folder/FolderOpen 交叉淡入，整行折叠；纯类名嵌套缩进。 */
-function TreeFolder({
-  title,
-  titleHint,
-  children,
-  loading,
-  empty,
-}: {
-  title: string
-  titleHint?: string
-  children?: React.ReactNode
-  loading?: boolean
-  empty?: string
-}) {
-  const [open, setOpen] = useState(true)
-  return (
-    <section className={cn('ft-folder', !open && 'collapsed')}>
-      <button type="button" className="ft-folder-head" title={titleHint} onClick={() => setOpen(!open)}>
-        <ChevronRight className="ft-chev" />
-        <span className="ft-folder-ico">
-          <Folder className="ico-closed" />
-          <FolderOpen className="ico-open" />
-        </span>
-        <span className="ft-folder-title truncate">{title}</span>
-      </button>
-      <div className="ft-folder-body">
-        {loading && <p className="ft-empty">加载产物…</p>}
-        {!loading && empty !== undefined && <p className="ft-empty">{empty}</p>}
-        {children}
+            {/* 本会话产物 */}
+            <div className="ap-group">
+              <div className="ap-group-head">
+                <span>本会话产物</span>
+                {convArtifacts.length > 0 && <span className="ap-count">{convArtifacts.length}</span>}
+              </div>
+              {loadingConv ? (
+                <p className="ap-empty">加载中…</p>
+              ) : convArtifacts.length === 0 ? (
+                <p className="ap-empty">
+                  本会话还没有产物。
+                  <br />
+                  Agent 生成目录、矩阵或笔记后，会显示在这里。
+                </p>
+              ) : (
+                convArtifacts.map(artifactRow)
+              )}
+            </div>
+
+            {/* 任务工作台：默认折叠一层 */}
+            <div className="ap-group">
+              <button type="button" className="ap-group-head clickable" onClick={() => setWbOpen((v) => !v)}>
+                <span>任务工作台</span>
+                {workbench.length > 0 && <span className="ap-count">{workbench.length}</span>}
+                {wbOpen ? <ChevronDown className="ap-chev" /> : <ChevronRight className="ap-chev" />}
+              </button>
+              {wbOpen &&
+                (loadingWorkbench ? (
+                  <p className="ap-empty">加载中…</p>
+                ) : workbench.length === 0 ? (
+                  <p className="ap-empty">
+                    尚未生成内容。
+                    <br />
+                    解析、分析或目录流程运行后，过程文件会显示在这里。
+                  </p>
+                ) : (
+                  <div className="ap-wb">
+                    {parseRows.length > 0 && (
+                      <div className="ap-sub">
+                        <div className="ap-sub-head">解析</div>
+                        {parseRows.map((f) => wbRow(f, f.path.split('/')[1]))}
+                      </div>
+                    )}
+                    {analysisFiles.length > 0 && (
+                      <div className="ap-sub">
+                        <div className="ap-sub-head">分析</div>
+                        {analysisFiles.map((f) => wbRow(f))}
+                      </div>
+                    )}
+                    {(outlineRoots.length > 0 || fragments.length > 0) && (
+                      <div className="ap-sub">
+                        <div className="ap-sub-head">目录</div>
+                        {outlineRoots.map((f) => wbRow(f))}
+                        {fragments.map((f) => {
+                          const stem = (f.path.split('/').pop() ?? '').replace(/\.[^.]+$/, '')
+                          return wbRow(f, `分册 · ${stem}`)
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ))}
+            </div>
+          </div>
+          </div>
+          {wsOpen &&
+            (workbenchPath ? (
+              <WorkbenchViewer
+                taskId={currentTask?.id ?? null}
+                conversationId={currentConvId}
+                path={workbenchPath}
+                onClose={onClearPreview}
+              />
+            ) : (
+              <ArtifactOpenHost artifactId={previewId} onClose={onClearPreview} />
+            ))}
+        </aside>
       </div>
-    </section>
-  )
-}
-
-/** 工作文件子树：任务共享的 out/ 过程产物（解析/分析/目录），随当前会话展示。 */
-function WorkbenchTree({
-  files,
-  loading,
-  row,
-}: {
-  files: WorkbenchFile[]
-  loading: boolean
-  row: (f: WorkbenchFile) => React.ReactNode
-}) {
-  const parseFiles = files.filter((f) => f.path.startsWith('parse/'))
-  const analysisFiles = files.filter((f) => f.path.startsWith('analysis/'))
-  const outlineFiles = files.filter((f) => f.path.startsWith('outline/'))
-  // 解析按源文件（第二段）分夹；目录下 fragments 归子夹
-  const parseGroups = new Map<string, WorkbenchFile[]>()
-  for (const f of parseFiles) {
-    const src = f.path.split('/')[1] ?? ''
-    parseGroups.set(src, [...(parseGroups.get(src) ?? []), f])
-  }
-  const outlineRoots = outlineFiles.filter((f) => !f.path.startsWith('outline/fragments/'))
-  const fragments = outlineFiles.filter((f) => f.path.startsWith('outline/fragments/'))
-
-  if (loading) {
-    return (
-      <TreeFolder title="工作文件" loading>
-        <></>
-      </TreeFolder>
-    )
-  }
-  return (
-    <TreeFolder
-      title="工作文件"
-      titleHint="任务内所有会话共享同一份工作文件（解析→分析→目录的过程产物）"
-      empty={files.length === 0 ? '暂无 · 流水线产物' : undefined}
-    >
-      {parseGroups.size > 0 && (
-        <TreeFolder title="解析">
-          {[...parseGroups.entries()].map(([src, list]) => (
-            <TreeFolder key={src} title={src}>
-              {list.map(row)}
-            </TreeFolder>
-          ))}
-        </TreeFolder>
-      )}
-      {analysisFiles.length > 0 && <TreeFolder title="分析">{analysisFiles.map(row)}</TreeFolder>}
-      {outlineFiles.length > 0 && (
-        <TreeFolder title="目录">
-          {outlineRoots.map(row)}
-          {fragments.length > 0 && <TreeFolder title="fragments">{fragments.map(row)}</TreeFolder>}
-        </TreeFolder>
-      )}
-    </TreeFolder>
+      <PromoteConfirmModal artifact={promoteTarget} onClose={() => setPromoteTarget(null)} />
+    </>
   )
 }

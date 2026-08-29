@@ -23,7 +23,6 @@ import {
 } from '@/api/client'
 import { markdownComponents } from '@/components/ChatMessage'
 import { mdRemarkPlugins } from '@/lib/markdown'
-import { ModalShell } from '@/components/ui/ModalShell'
 import { useToast } from '@/context/Toast'
 
 /** REQ/MAND/TPL/SCORE 登记表所在文件：行序=编号，增删行会整体漂移（assemble 解析协议）。 */
@@ -211,11 +210,13 @@ export function WorkbenchViewer({
   if (!path || !taskId) return null
   if (!data) {
     return (
-      <ModalShell onClose={onClose}>
-        <div className="p-6 text-center text-sm text-muted-foreground">
-          {isLoading ? '加载工作台文件…' : isError ? `加载失败：${error instanceof Error ? error.message : String(error)}` : ''}
+      <div className="ap-ws">
+        <div className="ap-ws-body">
+          <div className="p-6 text-center text-sm text-muted-foreground">
+            {isLoading ? '加载工作台文件…' : isError ? `加载失败：${error instanceof Error ? error.message : String(error)}` : ''}
+          </div>
         </div>
-      </ModalShell>
+      </div>
     )
   }
 
@@ -263,7 +264,7 @@ export function WorkbenchViewer({
   }
 
   return (
-    <ModalShell onClose={onClose}>
+    <div className="ap-ws">
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
         <span className="truncate text-sm font-semibold">{display}</span>
         <span className="rounded-full bg-accent px-2 py-0.5 text-xs text-muted-foreground">工作台</span>
@@ -400,6 +401,6 @@ export function WorkbenchViewer({
           </div>
         )}
       </div>
-    </ModalShell>
+    </div>
   )
 }

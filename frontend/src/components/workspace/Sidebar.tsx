@@ -64,10 +64,10 @@ export function Sidebar({
   return (
     <aside className={cn('side', collapsed && 'collapsed')}>
       <div className="side-head">
-        <span>{title}</span>
-        <button type="button" title="收起侧栏" onClick={onCollapse}>
+        <button type="button" className="head-toggle" title="收起侧栏" onClick={onCollapse}>
           <PanelLeftClose />
         </button>
+        <span>{title}</span>
       </div>
       <div className="side-scroll">
         {quickNav.length > 0 && (

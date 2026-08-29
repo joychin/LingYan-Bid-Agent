@@ -34,6 +34,12 @@ class ContentUpdate(BaseModel):
     force: bool = False
 
 
+class PromoteRequest(BaseModel):
+    # 用户确认转正时所见的内容版本号：不符返回 409（内容在你查看后已被更新），
+    # 防「看到的是 v3、点下按钮复制走的却是 v5」。None = 旧客户端跳过校验。
+    source_content_seq: int | None = None
+
+
 @router.get("/contracts")
 async def list_contracts():
     return {
@@ -166,11 +172,13 @@ async def restore_artifact(aid: str):
 
 
 @router.post("/artifacts/{aid}/promote")
-async def promote_artifact(aid: str):
+async def promote_artifact(aid: str, body: PromoteRequest = PromoteRequest()):
     """过程稿转正：复制到所属任务的正式稿（用户点头的那一下）。
 
+    - source_content_seq 版本绑定：不符返回 409——用户确认的是他看到的那一份内容，
+      不是「点击当下的 current」（同会话后续 run 可能已重新发布覆盖过程稿）
     - 过程稿原件保留（转正=复制）；task-single 正式稿已有同类 → 覆盖 + 恢复点
-    - 新正式稿记 derived_from（最薄谱系）；来源过程稿清除「建议转正」标记
+    - 新正式稿记 derived_from + derived_from_seq（最薄谱系）；来源过程稿清除「建议转正」标记
     - 不发 SSE（不在 run 内，seq 契约无宿主）——前端 promote 成功后自行刷新产物列表
     """
     row = db.get_artifact_index(aid)
@@ -181,6 +189,11 @@ async def promote_artifact(aid: str):
     cid = row.get("conversation_id")
     if not cid:
         raise HTTPException(status_code=422, detail="该产物不是会话过程稿，无需转正")
+    if body.source_content_seq is not None and body.source_content_seq != row["content_seq"]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"产物内容在你查看后已被更新（当前版本号 {row['content_seq']}），请查看最新版后再转正",
+        )
     conv = db.get_conversation(cid)
     task_id = (conv or {}).get("task_id")
     if not task_id:
@@ -203,6 +216,7 @@ async def promote_artifact(aid: str):
             source={"skill": "promote", "thread_id": cid, "run_id": None},
             task_id=task_id,
             derived_from=aid,
+            derived_from_seq=row["content_seq"],
         )
     except publish.PublishError as e:
         raise HTTPException(status_code=422, detail=str(e))

@@ -9,6 +9,8 @@ import {
   FolderOpen,
   Inbox,
   Loader2,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   RefreshCw,
   Search,
@@ -147,7 +149,14 @@ interface UploadState {
   percent: number
 }
 
-export function KnowledgeView() {
+export function KnowledgeView({
+  sidebarOpen,
+  onToggleSidebar,
+}: {
+  /** App 侧栏开/关态：开关常驻本栏头部，图标随状态切换（Close=收起 / Open=展开） */
+  sidebarOpen: boolean
+  onToggleSidebar: () => void
+}) {
   const { data } = useKbItems()
   const items = data?.items ?? []
   const { data: typeInfo } = useKbTypes()
@@ -248,7 +257,17 @@ export function KnowledgeView() {
         }}
       >
         <div className="kb-side-head" data-tauri-drag-region>
-          <span className="kb-title" data-tauri-drag-region>知识库</span>
+          <div className="kb-side-head-left">
+            <button
+              type="button"
+              className="head-toggle"
+              title={sidebarOpen ? '收起侧栏' : '展开侧栏'}
+              onClick={onToggleSidebar}
+            >
+              {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
+            </button>
+            <span className="kb-title" data-tauri-drag-region>知识库</span>
+          </div>
           <button type="button" className="kb-add" title="上传资料" onClick={() => fileInputRef.current?.click()}>
             <Plus className="h-4 w-4" />
           </button>

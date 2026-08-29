@@ -1,17 +1,20 @@
-import { FileText, FolderOpen, Upload } from 'lucide-react'
+import { useState } from 'react'
+import { FileText, FolderOpen } from 'lucide-react'
 import type { Artifact } from '@/api/client'
 import { isTauri, revealInFolder } from '@/api/client'
 import { contractLabel, kindIcon } from '@/artifacts/registry'
 import { formatRelativeTime, cn } from '@/lib/utils'
-import { usePromoteArtifact } from '@/hooks/useArtifacts'
+import { PromoteConfirmModal } from '@/components/PromoteConfirmModal'
 import { useToast } from '@/context/Toast'
 
-/** 聊天内产物卡：整卡可点击打开对应 Processor；过程稿带「转正」入口（AI 建议时高亮）。
- *  图标与右侧产物面板共用 kindIcon 语义色板（registry.kindIcon）——色块+字符+22px 卡片变体。 */
+/** 聊天内产物卡：整卡可点击打开对应 Processor（v3：面板工作区态）。
+ *  过程稿带「转正」入口 → PromoteConfirmModal 确认（带 content_seq，409 软确认）。
+ *  图标与右侧产物面板共用 kindIcon 语义色板（registry.kindIcon）。 */
 export function ArtifactCard({ artifact, onOpen }: { artifact: Artifact; onOpen: (id: string) => void }) {
   const { toast } = useToast()
-  const promote = usePromoteArtifact()
+  const [confirming, setConfirming] = useState(false)
   const icon = kindIcon(artifact.kind)
+  const formal = artifact.scope === 'task'
 
   const handleReveal = async (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -45,9 +48,9 @@ export function ArtifactCard({ artifact, onOpen }: { artifact: Artifact; onOpen:
               AI 建议转正
             </span>
           )}
-          {artifact.scope === 'task' && (
+          {formal && (
             <span className="shrink-0 rounded-full bg-accent-soft px-1.5 py-px text-[10px] font-medium text-muted-foreground">
-              项目文件
+              任务正式成果
             </span>
           )}
         </div>
@@ -55,13 +58,12 @@ export function ArtifactCard({ artifact, onOpen }: { artifact: Artifact; onOpen:
           {contractLabel(artifact.kind)} · 更新于 {formatRelativeTime(artifact.updated_at)}
         </p>
       </div>
-      {artifact.scope === 'conversation' && (
+      {!formal && (
         <button
           type="button"
-          disabled={promote.isPending}
           onClick={(e) => {
             e.stopPropagation()
-            promote.mutate(artifact.artifact_id)
+            setConfirming(true)
           }}
           className={cn(
             'flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors',
@@ -71,8 +73,7 @@ export function ArtifactCard({ artifact, onOpen }: { artifact: Artifact; onOpen:
           )}
           title="复制到任务项目文件（原件保留，覆盖自动留恢复点）"
         >
-          <Upload className="h-3.5 w-3.5" />
-          转正
+          转为正式成果
         </button>
       )}
       {isTauri() && (
@@ -87,6 +88,7 @@ export function ArtifactCard({ artifact, onOpen }: { artifact: Artifact; onOpen:
           <FolderOpen className="h-4 w-4" />
         </button>
       )}
+      <PromoteConfirmModal artifact={confirming ? artifact : null} onClose={() => setConfirming(false)} />
     </div>
   )
 }

@@ -320,9 +320,13 @@ export function listArtifacts(scope?: { task_id?: string; conversation_id?: stri
   return request(`/artifacts${qs ? `?${qs}` : ''}`)
 }
 
-/** 过程稿转正到任务正式稿（用户点头的那一下）：复制不移动，正式稿覆盖留恢复点。 */
-export function promoteArtifact(id: string): Promise<{ ok: boolean; artifact: Artifact }> {
-  return request(`/artifacts/${id}/promote`, { method: 'POST', body: '{}' })
+/** 过程稿转正到任务正式稿（用户点头的那一下）：复制不移动，正式稿覆盖留恢复点。
+ *  带用户确认时所见的内容版本号——后端不符返回 409（内容已被更新，请查看最新版后再转正）。 */
+export function promoteArtifact(id: string, sourceContentSeq?: number): Promise<{ ok: boolean; artifact: Artifact }> {
+  return request(`/artifacts/${id}/promote`, {
+    method: 'POST',
+    body: JSON.stringify({ source_content_seq: sourceContentSeq ?? null }),
+  })
 }
 
 export function listContracts(): Promise<{ contracts: ArtifactContract[] }> {

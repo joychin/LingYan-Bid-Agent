@@ -1,13 +1,10 @@
 import { useEffect, useState } from 'react'
-import { ChevronRight } from 'lucide-react'
 import { Sidebar } from '@/components/Sidebar'
 import { ChatView } from '@/components/ChatView'
 import { ChatHeader } from '@/components/ChatHeader'
 import { KnowledgeView } from '@/components/KnowledgeView'
 import { SettingsModal } from '@/components/SettingsModal'
 import { ArtifactPanel } from '@/components/ArtifactPanel'
-import { ArtifactOpenHost } from '@/components/ArtifactOpenHost'
-import { WorkbenchViewer } from '@/components/WorkbenchViewer'
 import { SidecarBanner } from '@/components/SidecarBanner'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { reconcileContracts } from '@/artifacts/registry'
@@ -33,6 +30,18 @@ export default function App() {
   const [pendingSend, setPendingSend] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(LS_SIDEBAR) === '1')
   const [artifactsCollapsed, setArtifactsCollapsed] = useState(() => localStorage.getItem(LS_ARTIFACTS) === '1')
+
+  // 左右面板开关（常驻中栏顶栏两端，见 ChatHeader）：开关全局只此一处
+  const toggleSidebar = () =>
+    setSidebarCollapsed((v) => {
+      localStorage.setItem(LS_SIDEBAR, v ? '0' : '1')
+      return !v
+    })
+  const toggleArtifacts = () =>
+    setArtifactsCollapsed((v) => {
+      localStorage.setItem(LS_ARTIFACTS, v ? '0' : '1')
+      return !v
+    })
 
   // 契约对账：sidecar 契约目录 vs 客户端 Processor 覆盖（缺失告警，防半接入状态）
   useEffect(() => {
@@ -83,31 +92,22 @@ export default function App() {
         activeView={activeView}
         onOpenSettings={() => setSettingsOpen(true)}
         collapsed={sidebarCollapsed}
-        onCollapse={() => {
-          setSidebarCollapsed((v) => {
-            localStorage.setItem(LS_SIDEBAR, v ? '0' : '1')
-            return !v
-          })
-        }}
+        onCollapse={toggleSidebar}
       />
       <main className="main">
-        <button
-          type="button"
-          className="side-toggle"
-          title="展开侧栏"
-          onClick={() => {
-            setSidebarCollapsed(false)
-            localStorage.setItem(LS_SIDEBAR, '0')
-          }}
-        >
-          <ChevronRight />
-        </button>
         <SidecarBanner />
         {activeView === 'kb' ? (
-          <KnowledgeView />
+          <KnowledgeView sidebarOpen={!sidebarCollapsed} onToggleSidebar={toggleSidebar} />
         ) : (
           <>
-            <ChatHeader task={currentTask} conversation={viewConv} />
+            <ChatHeader
+              task={currentTask}
+              conversation={viewConv}
+              sidebarCollapsed={sidebarCollapsed}
+              onToggleSidebar={toggleSidebar}
+              rightCollapsed={artifactsCollapsed}
+              onToggleRight={toggleArtifacts}
+            />
             <ChatView
               key={viewConvId ?? 'root'}
               convId={viewConvId}
@@ -120,32 +120,26 @@ export default function App() {
         )}
       </main>
       {/* 产物面板是对话工作台的一部分：知识库视图/无会话上下文（草稿态）不渲染
-          （grid auto 列自动收 0，卸载即停内部轮询） */}
+          （grid auto 列自动收 0，卸载即停内部轮询）。
+          v3：previewId/workbenchPath 驱动面板工作区态，编辑器嵌入面板右侧（覆盖展开），
+          不再用居中模态。 */}
       {activeView !== 'kb' && currentTask && (
         <ArtifactPanel
           currentConvId={viewConvId}
           currentTask={currentTask}
           collapsed={artifactsCollapsed}
+          previewId={previewId}
+          workbenchPath={workbenchPath}
           onOpen={setPreviewId}
           onOpenWorkbench={setWorkbenchPath}
-          onCollapse={() => {
-            setArtifactsCollapsed((v) => {
-              localStorage.setItem(LS_ARTIFACTS, v ? '0' : '1')
-              return !v
-            })
+          onClearPreview={() => {
+            setPreviewId(null)
+            setWorkbenchPath(null)
           }}
+          onCollapse={toggleArtifacts}
         />
       )}
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <ArtifactOpenHost artifactId={previewId} onClose={() => setPreviewId(null)} />
-      {currentTask && (
-        <WorkbenchViewer
-          taskId={currentTask.id}
-          conversationId={viewConvId}
-          path={workbenchPath}
-          onClose={() => setWorkbenchPath(null)}
-        />
-      )}
     </div>
     </ErrorBoundary>
   )

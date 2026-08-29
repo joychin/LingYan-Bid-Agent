@@ -56,6 +56,7 @@ def publish_artifact(
     conversation_id: str | None = None,
     propose_promotion: bool = False,
     derived_from: str | None = None,
+    derived_from_seq: int | None = None,
 ) -> dict:
     """发布（或按 task-single 语义更新）一个 Artifact，返回 manifest。
 
@@ -63,6 +64,8 @@ def publish_artifact(
     propose_promotion: 会话过程稿挂「建议转正」标记（正式稿每次写入都由用户
     点头——AI 只能建议，转正走 POST /artifacts/{aid}/promote）。
     derived_from: 转正复制品的来源产物 id（最薄谱系）。
+    derived_from_seq: 转正时来源产物的内容版本号（与 derived_from 同批写入；
+    仅首次建包落 manifest——manifest write-once，覆盖路径靠恢复点兜底）。
     """
     if task_id and conversation_id:
         raise PublishError("task_id 与 conversation_id 互斥，发布作用域只能二选一")
@@ -149,6 +152,7 @@ def publish_artifact(
                 "run_id": source.get("run_id"),
             },
             "derived_from": derived_from,
+            "derived_from_seq": derived_from_seq,
             "created_at": _now(),
         }
         artifact_store.create_package(manifest, content_text)

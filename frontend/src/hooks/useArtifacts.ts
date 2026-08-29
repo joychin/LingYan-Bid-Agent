@@ -36,17 +36,19 @@ export function useArtifactContent(id: string | null) {
   })
 }
 
-/** 过程稿转正（用户点头）：成功后刷新两层列表并提示。 */
+/** 过程稿转正（用户点头）：带确认时所见 content_seq，后端不符返回 409（内容已被更新）。
+ *  409 时同样刷新两层列表——卡片上的版本号和内容随后对齐最新，用户查看后可再次转正。 */
 export function usePromoteArtifact() {
   const queryClient = useQueryClient()
   const { toast } = useToast()
   return useMutation({
-    mutationFn: (id: string) => promoteArtifact(id),
+    mutationFn: ({ id, seq }: { id: string; seq?: number }) => promoteArtifact(id, seq),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['artifacts'] })
       toast(`已转正「${data.artifact.display_name}」到项目文件`, 'success')
     },
     onError: (e) => {
+      queryClient.invalidateQueries({ queryKey: ['artifacts'] })
       toast(e instanceof Error ? e.message : String(e), 'error')
     },
   })

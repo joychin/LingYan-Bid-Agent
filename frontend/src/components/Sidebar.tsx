@@ -218,9 +218,11 @@ export function Sidebar({
           window.addEventListener('mouseup', onUp)
         }}
       />
+      {/* 收缩钮常驻侧栏头部最左（mac 上红绿灯右侧）；收起后展开钮由 ChatHeader 接管 */}
       <div className="side-head" data-tauri-drag-region>
         <button
           type="button"
+          className="head-toggle"
           title="收起侧栏"
           onClick={() => {
             setWidth(SIDE_DEFAULT_W)

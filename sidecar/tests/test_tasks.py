@@ -267,6 +267,45 @@ def test_promote_endpoint_flow(client):
     assert client.post(f"/api/artifacts/{formal['artifact_id']}/promote").status_code == 422
 
 
+def test_promote_version_binding(client):
+    """promote 版本绑定：source_content_seq 不符 409（用户确认的是他看到的那份内容），
+    一致则成功且新正式稿 manifest 记 derived_from_seq。"""
+    conv = create_conversation(client)
+    tid, cid = conv["task_id"], conv["id"]
+    m = publish.publish_artifact(DIR_KEY, _dir_content("v1"), conversation_id=cid)
+    aid = m["artifact_id"]
+    seq1 = db.get_artifact_index(aid)["content_seq"]
+
+    # 旧版本号 → 409（内容在用户查看后被更新过）
+    r = client.post(f"/api/artifacts/{aid}/promote", json={"source_content_seq": seq1 + 5})
+    assert r.status_code == 409
+    assert "已被更新" in r.json()["detail"]
+    # 409 后未产生正式稿
+    assert client.get("/api/artifacts", params={"task_id": tid}).json()["artifacts"] == []
+
+    # 同会话重发布覆盖过程稿（seq+1）后，旧 seq 依然 409
+    publish.publish_artifact(DIR_KEY, _dir_content("v2"), conversation_id=cid)
+    assert client.post(
+        f"/api/artifacts/{aid}/promote", json={"source_content_seq": seq1}
+    ).status_code == 409
+
+    # 当前版本号一致 → 成功，manifest 记 derived_from_seq = 转正时的来源版本
+    cur_seq = db.get_artifact_index(aid)["content_seq"]
+    r = client.post(f"/api/artifacts/{aid}/promote", json={"source_content_seq": cur_seq})
+    assert r.status_code == 200
+    formal_row = db.get_artifact_index(r.json()["artifact"]["artifact_id"])
+    manifest = artifact_store.read_manifest(formal_row["artifact_id"], formal_row)
+    assert manifest["derived_from"] == aid
+    assert manifest["derived_from_seq"] == cur_seq
+
+    # 转正后再改过程稿：已转正内容不受影响（复制品语义）
+    publish.publish_artifact(DIR_KEY, _dir_content("v3"), conversation_id=cid)
+    formal = client.get("/api/artifacts", params={"task_id": tid}).json()["artifacts"][0]
+    assert json.loads(
+        artifact_store.read_content(formal["artifact_id"], formal)
+    )["response_documents"][0]["name"] == "v2"
+
+
 # ---------- 进度便签工具 ----------
 
 

@@ -479,3 +479,71 @@ db 的 NULL/NULL 查询分支删除；前端 `scope` 类型收窄为 `task | con
 | 5 | 删任务整目录 mv 归档 | 一次移动完成软归档，files/out 也入档可找回 |
 | 6 | 无任务禁上传（不建收件箱） | 会话本就强制归属任务；禁用+提示最简 |
 | 7 | 开发期清库切换、不写迁移 | 沿用 P4 先例（老数据清空重建） |
+
+---
+
+## 17. 方案 v2 修订（2026-08-29，已实施）
+
+> 2026-08-29 会话/任务/产物体系两轮调研（Claude Projects/LangGraph/OpenAI Agents/Dagster/Git-OCI/MCP
+> + Carbon/NN/g/VS Code/Linear 实证）与本地像素级走查后定稿的修订。核心结论：双层产物模型
+> 与业界一致不推翻；补三件工程修正 + 面板 v3。**本节是这些改动的唯一事实来源。**
+
+### 17.1 语义定稿
+
+- **`formal/` = 任务共享当前基线**（canonical），可继续编辑、可被后续转正覆盖——不是最终
+  提交版。用户直接编辑正式稿是核心价值，无需再审批。不可变提交包（Release）**明确推迟**
+  到 export_docx（Phase 3-4）同期设计。
+- **转正（P4，作用域转换）与候选采纳（P5，内容更新）是两条独立确认线**，不合并。
+- **临时文件不进 Artifact Registry**：`drafts/<run_id>/` 是 Run Scratch，`out/` 是任务工作台
+  （Pipeline Materialization，可重生成），只有登记过的包才是 Artifact。
+- 术语表（UI 统一用语）：formal Artifact=任务正式成果、conversation Artifact=本会话产物、
+  out/=任务工作台、promote=转为任务正式成果（弃「项目文件/过程稿/工作文件/转正」旧词）。
+
+### 17.2 转正版本绑定（P0.1）
+
+- `POST /artifacts/{aid}/promote` 接受 `source_content_seq`（可选，旧调用兼容）：不符返回
+  409「产物内容在你查看后已被更新（当前版本号 N），请查看最新版后再转正」——用户确认的
+  是他**看到的那一份内容**，不是点击当下的 current（低频但属正确性缺陷，修法便宜）。
+- `publish.publish_artifact` 新增 `derived_from_seq`：仅**首次建包**随 `derived_from` 写入
+  manifest（write-once 不变；task-single 覆盖路径继续走恢复点）。content_seq 在索引重建时
+  会重置为 1，只配做在线探测；持久版本身份用 content_hash（待 manifest 契约演进时一并加）。
+- 前端转正一律走 `PromoteConfirmModal`（复制语义+覆盖警告+恢复点说明的确认卡；
+  ArtifactCard 与面板行共用），409 时 invalidate 产物列表 + toast 引导重看最新版。
+
+### 17.3 Agent 文件工具写边界（P0.3）
+
+- `app/fs_guard.py` `GuardedBackend(FilesystemBackend)`：覆写 write/edit/delete，路径命中
+  黑名单返回 `Result(error="[写入被拒绝]…")`（deepagents 转错误 ToolMessage，不打崩 run）。
+- 黑名单（仅写）：`formal/**`、`threads/*/art_*/**`、`archive/**`、`skills/**`（段级匹配；
+  skills 加拦因启动同步会静默覆盖模型写入）。**读完全放开**（tender-analysis 导航硬纪律
+  依赖 read_file 读解析大纲）；`out/`、`drafts/`、`files/` 正常可写。
+- 动因：通用文件工具可直改包内部，绕过 schema 校验/content_seq/恢复点/「正式稿只能用户
+  写入」边界——产品规则必须在工具层成立，不能只写在 SKILL.md。
+
+### 17.4 产物面板 v3（P0.2，已落地主 App）
+
+- **作用域分组列表替代文件树**（走查实证：旧树把转正信息对物理分离——正式稿在树顶、
+  同名草稿埋第 5 层；5 层缩进 300px 内截断）。三分组：任务正式成果 / 本会话产物 /
+  任务工作台（默认折叠）；行 = 名称 + 一个状态标（[任务基线]蓝/[待转正]amber/
+  [仅本会话][可重生成][解析只读]灰），转正动作 hover 淡入（opacity 约定，不 display 切换）。
+- **覆盖式工作区**：`previewId/workbenchPath` 非空时面板向左覆盖展开 880px（`.ap-shell.wide`
+  absolute 锚右缘 + 投影；用户裁定：**不得挤压聊天区**），编辑器（ArtifactOpenHost/
+  WorkbenchViewer）嵌入右侧；Esc/关闭收起。**居中模态只留给不可逆确认**（PromoteConfirmModal）。
+- `ArtifactOpenHost`/`WorkbenchViewer` 去掉 ModalShell 改为纯内容 pane（两个 Processor 本就
+  无壳容器自适应，零改造）；打开器标题恒显作用域徽标。旧 `.product.expanded` 全屏档删除。
+- 空态 = 引导文案（何时会出现什么），弃「暂无·流水线产物」黑话；解析源文件去重（每源文件
+  只列一行主稿）；fragments 显示为「分册·<册名>」。
+- 原型：`ArtifactPanelNext.tsx`（preview.html 假数据）保留作视觉参照；`ap-*` 样式段
+  （workspace.css）按可迁移质量编写，主 App 面板直接复用。
+
+### 17.5 决策记录
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | formal = 当前基线，非最终提交版 | 用户直接编辑是核心价值；Release 推迟到 export_docx 同期 |
+| 2 | promote 绑定 source_content_seq | 用户批准的是所见的版本；seq 便宜且复用 409 乐观锁先例 |
+| 3 | derived_from_seq 仅首建写 manifest | manifest write-once；覆盖路径靠恢复点兜底 |
+| 4 | 文件工具只拦写不拦读 | 流水线导航纪律依赖 read_file；一刀切打断 tender-analysis/outline |
+| 5 | 面板 = 分组列表 + 覆盖工作区 | 树形态物理分离转正信息对；模态遮死聊天上下文（走查实证） |
+| 6 | 转正/候选采纳两条独立确认线 | 作用域转换（P4）与内容更新（P5）触发时机、UI、API 语义均不同 |
+| 7 | 原型先行（preview.html 假数据） | 用户前台确认形态后才动主 App；两轮反馈（覆盖展开/删返回钮）零成本消化 |

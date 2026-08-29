@@ -19,7 +19,6 @@ from datetime import datetime, timezone
 
 import httpx
 from deepagents import create_deep_agent
-from deepagents.backends.filesystem import FilesystemBackend
 from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
 from langchain_core.exceptions import ModelConnectionError, ModelRateLimitError, ModelTimeoutError
 from langchain_core.messages import SystemMessage
@@ -30,6 +29,7 @@ from langgraph.types import Command
 from . import artifact_store, db, events, runctx
 from . import config as cfg
 from .bus import publish
+from .fs_guard import GuardedBackend
 from .tools import TOOLS
 
 logger = logging.getLogger(__name__)
@@ -284,7 +284,9 @@ def build_agent(profile: cfg.ModelProfile | None = None):
 
     agent = create_deep_agent(
         model=model,
-        backend=FilesystemBackend(root_dir=str(cfg.workspace_dir())),
+        # 写保护后端：通用文件工具对产物包/归档/技能目录只读（fs_guard，
+        # P0.3）——读完全放开，out/ 与 drafts/ 正常可写
+        backend=GuardedBackend(root_dir=str(cfg.workspace_dir())),
         tools=TOOLS,
         subagents=SUBAGENTS,
         skills=["skills/"],  # 未加载时在 main 启动日志提示换写法（见 README）
