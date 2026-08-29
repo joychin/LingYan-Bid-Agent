@@ -41,3 +41,20 @@ def test_referenced_files_exist(skill_dir: Path):
     text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     for rel in set(re.findall(r"references/[\w.-]+\.md", text)):
         assert (skill_dir / rel).is_file(), f"SKILL.md 引用的 {rel} 不存在"
+
+
+GUIDELINES = skills_source_dir() / "_shared" / "response-guidelines.md"
+
+
+def test_response_guidelines_shared_file_exists():
+    """用户回复规范共享文件存在（唯一源；_shared/ 无 SKILL.md 不算 skill）。"""
+    assert GUIDELINES.is_file(), "_shared/response-guidelines.md 不存在"
+
+
+@pytest.mark.parametrize("skill_dir", SKILLS, ids=lambda p: p.name)
+def test_skills_reference_response_guidelines(skill_dir: Path):
+    """每个业务 skill 的 SKILL.md 都引用用户回复规范（先读规范再执行）。"""
+    text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert "_shared/response-guidelines.md" in text, (
+        f"{skill_dir.name} 未引用 _shared/response-guidelines.md"
+    )

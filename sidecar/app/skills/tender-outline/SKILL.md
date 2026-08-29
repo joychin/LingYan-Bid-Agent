@@ -10,6 +10,12 @@ description: 生成投标文件目录（章节规划）时使用。用户要求�
 
 ## 概述
 
+先读 `skills/_shared/response-guidelines.md`（用户回复规范）。缺节/新文件的降级影响、
+三道清理的跳过原因必须向用户声明；发布的是草稿，提醒转正时措辞必须是
+「建议你确认为正式成果」，不得宣称已进入正式稿。向用户转述流程时用实际名称与
+顺序（响应文件分解、目录初稿、查漏补缺、评分对齐、走查定稿、组装发布），
+不说 R1/R2 等内部代号，不把三道清理改名或新造说法（如「查冗」）。
+
 一进一出：输入 `out/analysis/` 要点产物，输出 `out/outline/tender-response-docs.md`
 （目录中间态；多册并发时各册先落 `out/outline/fragments/<册名>.md` 再合并），经
 `assemble_tender` 组装发布为 `tender.directory` 过程稿 + 建议转正。

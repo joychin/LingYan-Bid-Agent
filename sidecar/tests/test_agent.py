@@ -205,6 +205,17 @@ def test_subagent_specs():
     assert "禁止调用 ask_human" in writer["system_prompt"]
 
 
+def test_system_prompt_response_guidelines():
+    """主 prompt 含用户回复规范入口与「用户语言」硬约束（内部路径/实现名词不进回复）。"""
+    import inspect
+
+    from app.agent import build_agent
+
+    src = inspect.getsource(build_agent)
+    assert "_shared/response-guidelines.md" in src, "主 prompt 缺少回复规范入口"
+    assert "用户语言" in src, "主 prompt 缺少用户语言约束"
+
+
 # ---- 瞬时 LLM 错误自动重试（2026-08-27 全量测试 T07 API 流断的修复）----
 
 
