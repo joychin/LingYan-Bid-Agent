@@ -27,68 +27,6 @@ fn get_sidecar_info(state: State<'_, Arc<SidecarManager>>) -> Result<SidecarInfo
     }
 }
 
-/// 保存某模型 profile 的 API Key 到钥匙串 account model-key-<id>，成功后重启 sidecar
-/// 使 MODEL_KEYS 注入生效。key 非空才写（留空 = 保持原值）、永不返回、永不进 HTTP；
-/// profile 的 base_url/model 等非机密字段经 HTTP PUT /settings/models 持久化。
-#[tauri::command]
-fn set_model_key(state: State<'_, Arc<SidecarManager>>, model_id: String, api_key: String) -> Result<(), String> {
-    let pid = model_id.trim();
-    if pid.is_empty() {
-        return Err("缺少模型 id".into());
-    }
-    let key = api_key.trim();
-    if key.is_empty() {
-        return Err("请填写 API Key".into());
-    }
-    let account = format!("model-key-{pid}");
-    sidecar::keychain_set(&account, key).map_err(|e| format!("保存钥匙串失败: {e}"))?;
-    // 触发 supervisor 重启 sidecar（新 MODEL_KEYS 生效）
-    state.restart_requested.store(true, std::sync::atomic::Ordering::SeqCst);
-    Ok(())
-}
-
-/// 保存百度云文档解析凭证（PaddleOCR-VL 的 AK/SK）到钥匙串两 account，成功后重启 sidecar
-/// 使 spawn env 注入生效。字段非空才写（留空 = 保持原值）；两字段全空报错。
-/// 凭证永不返回、永不进 HTTP。
-#[tauri::command]
-fn set_baidu_ocr_keys(api_key: String, secret_key: String) -> Result<(), String> {
-    let ak = api_key.trim();
-    let sk = secret_key.trim();
-    if ak.is_empty() && sk.is_empty() {
-        return Err("请填写 API Key 与 Secret Key".into());
-    }
-    if !ak.is_empty() {
-        sidecar::keychain_set(sidecar::KEYRING_ACCOUNT_BAIDU_AK, ak)
-            .map_err(|e| format!("保存钥匙串失败: {e}"))?;
-    }
-    if !sk.is_empty() {
-        sidecar::keychain_set(sidecar::KEYRING_ACCOUNT_BAIDU_SK, sk)
-            .map_err(|e| format!("保存钥匙串失败: {e}"))?;
-    }
-    Ok(())
-}
-
-/// 只返回布尔：钥匙串对应 account 是否已有值（永不返回本体）。
-/// role = "llm" | "vlm" | "baidu-ocr-api" | "baidu-ocr-secret" | "model:<profile_id>"
-/// （model: 前缀按 profile 查 model-key-<id>，旧 account 兜底语义同 resolve_model_key）。
-#[tauri::command]
-fn get_api_key_has_value(role: String) -> Result<bool, String> {
-    if let Some(pid) = role.strip_prefix("model:") {
-        if pid.trim().is_empty() {
-            return Err("缺少模型 id".into());
-        }
-        return Ok(sidecar::resolve_model_key(pid).is_some());
-    }
-    let account = match role.as_str() {
-        "llm" => sidecar::KEYRING_ACCOUNT_LLM,
-        "vlm" => sidecar::KEYRING_ACCOUNT_VLM,
-        "baidu-ocr-api" => sidecar::KEYRING_ACCOUNT_BAIDU_AK,
-        "baidu-ocr-secret" => sidecar::KEYRING_ACCOUNT_BAIDU_SK,
-        _ => return Err(format!("未知角色: {role}")),
-    };
-    Ok(sidecar::keychain_has_value(account))
-}
-
 /// 在系统文件管理器中定位文件。
 ///
 /// path 仅允许两个前缀下的绝对路径（做 canonicalize 前缀校验），
@@ -146,13 +84,7 @@ pub fn run() {
             sidecar::run_supervisor(app.handle().clone(), mgr.clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            get_sidecar_info,
-            set_model_key,
-            set_baidu_ocr_keys,
-            get_api_key_has_value,
-            reveal_in_folder
-        ])
+        .invoke_handler(tauri::generate_handler![get_sidecar_info, reveal_in_folder])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
