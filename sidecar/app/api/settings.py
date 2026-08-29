@@ -27,9 +27,17 @@ class ModelBody(BaseModel):
     image_support: bool = False
 
 
+class BackgroundRolesBody(BaseModel):
+    """后台任务角色 → profile id（空串=跟随缺省：extract 回 default，vision 走自动解析）。"""
+
+    extract: str = ""
+    vision: str = ""
+
+
 class ModelsBody(BaseModel):
     models: list[ModelBody]
     default_model: str
+    background_roles: BackgroundRolesBody | None = None
 
 
 def _validate_base_url(v: str) -> str:
@@ -62,6 +70,7 @@ async def get_settings():
     return {
         "models": [_profile_to_api(p) for p in cfg.model_profiles()],
         "default_model": cfg.default_model_id(),
+        "background_roles": cfg.background_roles(),
         "ocr": {
             "configured": bool(cfg.baidu_ocr_api_key() and cfg.baidu_ocr_secret_key()),
         },
@@ -81,6 +90,13 @@ async def put_settings_models(body: ModelsBody):
         raise HTTPException(status_code=422, detail="模型 id 重复")
     if body.default_model not in ids:
         raise HTTPException(status_code=422, detail="default_model 必须是 models 之一")
+    if body.background_roles is not None:
+        for role, pid in (
+            ("extract", body.background_roles.extract.strip()),
+            ("vision", body.background_roles.vision.strip()),
+        ):
+            if pid and pid not in ids:
+                raise HTTPException(status_code=422, detail=f"后台任务角色 {role} 引用了未知模型：{pid}")
 
     normalized: list[cfg.ModelProfile] = []
     for m, mid in zip(body.models, ids):
@@ -98,6 +114,10 @@ async def put_settings_models(body: ModelsBody):
         )
 
     cfg.save_models(normalized, body.default_model)
+    if body.background_roles is not None:
+        cfg.set_background_roles(
+            {"extract": body.background_roles.extract, "vision": body.background_roles.vision}
+        )
     # 模型列表变了：清 agent 缓存（按 profile 惰性重建，毫秒级；无 key 的 profile 在
     # 实际被选用时才报错，不影响其他 profile）
     await rebuild_agent()

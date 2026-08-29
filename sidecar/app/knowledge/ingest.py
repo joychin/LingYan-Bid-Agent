@@ -270,18 +270,23 @@ def reindex_item(kid: str) -> None:
 
 
 def _extract(item: dict, md_text: str) -> None:
-    """LLM 元数据抽取 → suggested_metadata（doc_type 同步到条目；business 永不覆盖）。"""
+    """LLM 元数据抽取 → suggested_metadata（doc_type 同步到条目；business 永不覆盖）。
+
+    模型走 extract 角色（设置页「后台任务模型」，未指定回落 default）——抽取是
+    后台轻任务，可与主对话用不同的（更便宜的）模型。
+    """
     kid = item["id"]
     if len((md_text or "").strip()) < _MIN_EXTRACT_CHARS:
         db.kb_update_item(kid, extract_status="skipped", error=None)
         return
-    api_key = cfg.llm_api_key()
+    profile = cfg.resolve_extract_profile()
+    api_key = cfg.model_key(profile.id)
     if not api_key:
         db.kb_update_item(kid, extract_status="skipped", error=None)
         return
     db.kb_update_item(kid, extract_status="running")
     try:
-        suggested = _call_extract(api_key, item["file_name"], md_text)
+        suggested = _call_extract(api_key, profile, item["file_name"], md_text)
     except Exception as e:
         db.kb_update_item(kid, extract_status="failed", error=f"元数据抽取失败：{e}")
         return
@@ -297,10 +302,10 @@ def _extract(item: dict, md_text: str) -> None:
     )
 
 
-def _call_extract(api_key: str, file_name: str, md_text: str) -> dict | None:
+def _call_extract(api_key: str, profile, file_name: str, md_text: str) -> dict | None:
     from langchain_deepseek import ChatDeepSeek
 
-    model = ChatDeepSeek(api_key=api_key, base_url=cfg.llm_base_url(), model=cfg.llm_model(), timeout=60)
+    model = ChatDeepSeek(api_key=api_key, base_url=profile.base_url, model=profile.model, timeout=60)
     prompt = build_extract_prompt(file_name, md_text)
     resp = model.invoke([("system", EXTRACT_SYSTEM), ("user", prompt)])
     raw = getattr(resp, "content", "")

@@ -38,6 +38,13 @@ export interface ArtifactContract {
   editable: boolean;
   default_display_name: string;
 }
+/**
+ * 后台任务角色 → profile id（空串=跟随缺省：extract 回 default，vision 自动解析）。
+ */
+export interface BackgroundRoles {
+  extract?: string;
+  vision?: string;
+}
 export interface Conversation {
   id: string;
   task_id?: string | null;
@@ -165,6 +172,7 @@ export interface SendMessageResult {
 export interface Settings {
   models: ModelProfile[];
   default_model: string;
+  background_roles: BackgroundRoles;
   ocr: OcrSettings;
   paths: SettingsPaths;
 }

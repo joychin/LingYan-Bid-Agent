@@ -92,6 +92,38 @@ def test_put_models_validations(client):
     assert r.status_code == 422
 
 
+def test_put_models_background_roles_roundtrip(client):
+    """后台任务角色：PUT 随 models 全量写，GET 回显；未知 id 拒绝；不传=保留现值。"""
+    base = {
+        "models": [
+            {"id": "m1", "base_url": "https://x.example/v1", "model": "m"},
+            {"id": "m2", "base_url": "https://y.example/v1", "model": "v", "image_support": True},
+        ],
+        "default_model": "m1",
+    }
+    client.put("/api/settings/models", json=base)
+    # 带 roles 写入
+    r = client.put(
+        "/api/settings/models",
+        json={**base, "background_roles": {"extract": "m2", "vision": "m2"}},
+    )
+    assert r.status_code == 200
+    data = client.get("/api/settings").json()
+    assert data["background_roles"] == {"extract": "m2", "vision": "m2"}
+    # 不传 roles = 保留现值（模型弹窗保存不碰角色）
+    client.put("/api/settings/models", json=base)
+    assert client.get("/api/settings").json()["background_roles"] == {"extract": "m2", "vision": "m2"}
+    # 引用未知模型 → 422
+    r = client.put(
+        "/api/settings/models",
+        json={**base, "background_roles": {"extract": "ghost", "vision": ""}},
+    )
+    assert r.status_code == 422
+    # 空串清空
+    client.put("/api/settings/models", json={**base, "background_roles": {"extract": "", "vision": ""}})
+    assert client.get("/api/settings").json()["background_roles"] == {"extract": "", "vision": ""}
+
+
 def test_keys_endpoint_roundtrip_and_get_never_returns(client):
     """PUT /settings/keys 写本地库；GET 永不回读 Key（只回 key_configured 布尔）。"""
     client.put(

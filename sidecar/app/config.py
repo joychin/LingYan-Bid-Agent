@@ -89,6 +89,7 @@ _KV_PROFILES = "model_profiles"
 _KV_DEFAULT = "default_model"
 _KV_KEYS = "model_keys"
 _KV_BAIDU = "baidu_ocr"
+_KV_ROLES = "background_roles"
 
 
 def _kv_get(key: str) -> object | None:
@@ -286,12 +287,51 @@ def llm_model() -> str:
 
 
 def resolve_vision() -> ModelProfile | None:
-    """视觉能力解析：default 若支持图片，否则第一个 image_support 的 profile。"""
+    """视觉能力解析：显式 vision 角色优先（用户在设置页指定；未知 id 回落自动），
+    否则 default 若支持图片，否则第一个 image_support 的 profile。"""
+    explicit = background_roles().get("vision") or ""
+    if explicit:
+        p = get_profile(explicit)
+        if p is not None:
+            return p
     profiles = model_profiles()
     dflt = get_profile(default_model_id())
     if dflt and dflt.image_support:
         return dflt
     return next((p for p in profiles if p.image_support), None)
+
+
+def resolve_extract_profile() -> ModelProfile:
+    """知识库 metadata 抽取角色：显式指定优先（未知 id 回落），否则 default profile。
+    抽取是后台轻任务，用户可指定便宜模型而主对话继续用旗舰。"""
+    explicit = background_roles().get("extract") or ""
+    if explicit:
+        p = get_profile(explicit)
+        if p is not None:
+            return p
+    return get_profile(default_model_id()) or _builtin_default_profile()
+
+
+def background_roles() -> dict[str, str]:
+    """后台任务角色 → profile id（空串=跟随缺省行为）。"""
+    raw = _kv_get(_KV_ROLES)
+    out = {"extract": "", "vision": ""}
+    if isinstance(raw, dict):
+        for k in ("extract", "vision"):
+            v = raw.get(k)
+            if isinstance(v, str) and v.strip():
+                out[k] = v.strip()
+    return out
+
+
+def set_background_roles(roles: dict[str, str]) -> None:
+    _kv_set(
+        _KV_ROLES,
+        {
+            "extract": (roles.get("extract") or "").strip(),
+            "vision": (roles.get("vision") or "").strip(),
+        },
+    )
 
 
 def baidu_ocr_api_key() -> str | None:

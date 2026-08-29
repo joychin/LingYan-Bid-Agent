@@ -132,6 +132,35 @@ def test_resolve_vision(tmp_path, monkeypatch):
     assert config.resolve_vision().id == "m1"
 
 
+def test_background_roles_roundtrip_and_resolution(tmp_path, monkeypatch):
+    _init(tmp_path, monkeypatch)
+    config.save_models(
+        [
+            config.ModelProfile(id="m1", name="A", base_url="https://a/v1", model="a-1"),
+            config.ModelProfile(id="m2", name="B", base_url="https://b/v1", model="b-1", image_support=True),
+        ],
+        "m1",
+    )
+    # 缺省：抽取回 default（m1），视觉走自动解析（default 无图 → m2）
+    assert config.background_roles() == {"extract": "", "vision": ""}
+    assert config.resolve_extract_profile().id == "m1"
+    assert config.resolve_vision().id == "m2"
+
+    # 显式指派优先
+    config.set_background_roles({"extract": "m2", "vision": "m2"})
+    assert config.resolve_extract_profile().id == "m2"
+    assert config.resolve_vision().id == "m2"
+
+    # 未知 id 回落（模型被删后的自愈路径）
+    config.set_background_roles({"extract": "ghost", "vision": "ghost"})
+    assert config.resolve_extract_profile().id == "m1"
+    assert config.resolve_vision().id == "m2"
+
+    # 空串=清空角色
+    config.set_background_roles({"extract": "", "vision": ""})
+    assert config.background_roles() == {"extract": "", "vision": ""}
+
+
 def test_baidu_keys_db_with_env_fallback(tmp_path, monkeypatch):
     _init(tmp_path, monkeypatch)
     monkeypatch.setenv("BAIDU_OCR_API_KEY", "env-ak")

@@ -240,14 +240,24 @@ export interface ModelBody {
   image_support?: boolean
 }
 
-/** 全量覆盖写模型列表 + 默认模型（真值在 sidecar app.db，前端是唯一写者）。 */
+/** 后台任务角色（空串=跟随缺省：抽取回默认模型，视觉走自动解析）。 */
+export interface BackgroundRolesBody {
+  extract?: string
+  vision?: string
+}
+
+/** 全量覆盖写模型列表 + 默认模型（真值在 sidecar app.db，前端是唯一写者）。
+ *  background_roles 可选：不传=服务端保留现值（模型弹窗保存不碰角色）。 */
 export function putModels(
   models: ModelBody[],
   defaultModel: string,
+  backgroundRoles?: BackgroundRolesBody,
 ): Promise<{ ok: boolean }> {
+  const body: Record<string, unknown> = { models, default_model: defaultModel }
+  if (backgroundRoles) body.background_roles = backgroundRoles
   return request('/settings/models', {
     method: 'PUT',
-    body: JSON.stringify({ models, default_model: defaultModel }),
+    body: JSON.stringify(body),
   })
 }
 

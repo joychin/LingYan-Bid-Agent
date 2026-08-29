@@ -81,9 +81,17 @@ class SettingsPaths(BaseModel):
     log_file: str
 
 
+class BackgroundRoles(BaseModel):
+    """后台任务角色 → profile id（空串=跟随缺省：extract 回 default，vision 自动解析）。"""
+
+    extract: str = ""
+    vision: str = ""
+
+
 class Settings(BaseModel):
     models: list[ModelProfile]
     default_model: str
+    background_roles: BackgroundRoles
     ocr: OcrSettings
     paths: SettingsPaths
 

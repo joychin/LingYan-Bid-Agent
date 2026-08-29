@@ -290,6 +290,7 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
   const queryClient = useQueryClient()
   const [models, setModels] = useState<LocalModel[]>([])
   const [defaultModel, setDefaultModel] = useState('')
+  const [roles, setRoles] = useState<{ extract: string; vision: string }>({ extract: '', vision: '' })
   // null=列表态；'new'=新增；否则=编辑该 id（弹窗盖在列表上）
   const [editing, setEditing] = useState<string | 'new' | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -307,6 +308,10 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
         })),
       )
       setDefaultModel(settings.default_model)
+      setRoles({
+        extract: settings.background_roles?.extract || '',
+        vision: settings.background_roles?.vision || '',
+      })
     }
   }, [settings])
 
@@ -316,10 +321,15 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
     void queryClient.invalidateQueries({ queryKey: ['settings'] })
   }
 
-  const persistList = async (list: LocalModel[], dflt: string): Promise<boolean> => {
+  const persistList = async (
+    list: LocalModel[],
+    dflt: string,
+    rolesOverride?: { extract: string; vision: string },
+  ): Promise<boolean> => {
     setError(null)
     try {
-      await putModels(list.map(toModelBody), dflt)
+      const r = rolesOverride ?? roles
+      await putModels(list.map(toModelBody), dflt, { extract: r.extract, vision: r.vision })
       commit(list, dflt)
       return true
     } catch (e) {
@@ -333,8 +343,21 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
     const list = models.filter((x) => x.id !== m.id)
     let dflt = defaultModel
     if (dflt === m.id) dflt = list[0]?.id ?? ''
-    if (!(await persistList(list, dflt))) return
+    // 被删模型若被指派为后台角色，一并清空（服务端对未知 id 也会回落，双保险）
+    const nextRoles = { ...roles }
+    if (nextRoles.extract === m.id) nextRoles.extract = ''
+    if (nextRoles.vision === m.id) nextRoles.vision = ''
+    setRoles(nextRoles)
+    if (!(await persistList(list, dflt, nextRoles))) return
     toast('模型已删除', 'success')
+  }
+
+  const changeRole = async (key: 'extract' | 'vision', pid: string) => {
+    if (roles[key] === pid) return
+    const next = { ...roles, [key]: pid }
+    setRoles(next)
+    if (!(await persistList(models, defaultModel, next))) return
+    toast('后台任务模型已更新，即时生效', 'success')
   }
 
   return (
@@ -404,6 +427,37 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
 
       {error && <p className="text-sm text-error">{error}</p>}
 
+      <div className="space-y-3 rounded-xl border border-line bg-muted/30 px-4 py-3">
+        <p className="text-sm font-medium">后台任务模型</p>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[13px] font-medium">知识库 metadata 抽取</p>
+            <p className="text-xs text-muted-foreground">为上传条目建议类型与字段（可指定便宜模型省 token）</p>
+          </div>
+          <RoleSelect
+            value={roles.extract}
+            emptyLabel="跟随默认模型"
+            options={models.map((m) => ({ id: m.id, label: m.name }))}
+            onChange={(pid) => void changeRole('extract', pid)}
+          />
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[13px] font-medium">知识库视觉转写</p>
+            <p className="text-xs text-muted-foreground">图片 / 扫描页转文字（仅列已勾选「图片输入」的模型）</p>
+          </div>
+          <RoleSelect
+            value={roles.vision}
+            emptyLabel="自动（默认模型优先）"
+            options={models.filter((m) => m.imageSupport).map((m) => ({ id: m.id, label: m.name }))}
+            onChange={(pid) => void changeRole('vision', pid)}
+          />
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          文档解析本身不走大模型（本地确定性解析 + PaddleOCR-VL 云端）；这里的模型只用于解析后的后台轻任务。
+        </p>
+      </div>
+
       {editing !== null && (
         <ModelDialog
           key={editing}
@@ -414,6 +468,83 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
           onCommit={commit}
           onClose={() => setEditing(null)}
         />
+      )}
+    </div>
+  )
+}
+
+// --- 后台任务角色下拉（小面板向上弹，避免被设置窗底边裁掉） -----------------
+
+function RoleSelect({
+  value,
+  emptyLabel,
+  options,
+  onChange,
+}: {
+  value: string
+  emptyLabel: string
+  options: { id: string; label: string }[]
+  onChange: (pid: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t && !t.closest('[data-role-select]')) setOpen(false)
+    }
+    document.addEventListener('pointerdown', onDoc)
+    return () => document.removeEventListener('pointerdown', onDoc)
+  }, [open])
+
+  const current = options.find((o) => o.id === value)
+
+  const item = (pid: string, label: string) => (
+    <button
+      key={pid || '__empty__'}
+      type="button"
+      onClick={() => {
+        onChange(pid)
+        setOpen(false)
+      }}
+      className={cn(
+        'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs',
+        pid === value ? 'bg-accent-soft' : 'hover:bg-secondary',
+      )}
+    >
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {pid === value && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
+    </button>
+  )
+
+  return (
+    <div
+      className="relative shrink-0"
+      data-role-select
+      onKeyDown={(e) => {
+        if (e.key === 'Escape' && open) {
+          e.stopPropagation()
+          setOpen(false)
+        }
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex h-7 items-center gap-1.5 rounded-md border border-line bg-card px-2 text-xs transition-colors hover:bg-secondary/50"
+        title="后台任务使用的模型"
+      >
+        <span className="max-w-[170px] truncate">{value ? (current?.label ?? value) : emptyLabel}</span>
+        <ChevronDown className={cn('h-3 w-3 text-muted-foreground transition-transform', open && 'rotate-180')} />
+      </button>
+
+      {open && (
+        <div className="absolute bottom-full left-0 z-20 mb-1.5 w-56 rounded-lg border border-line bg-card py-1 shadow-[0_-2px_8px_rgba(16,24,40,0.06),0_8px_18px_rgba(16,24,40,0.12)]">
+          {item('', emptyLabel)}
+          {options.length > 0 && <div className="my-1 border-t border-line" />}
+          {options.map((o) => item(o.id, o.label))}
+        </div>
       )}
     </div>
   )
