@@ -540,7 +540,7 @@ function RoleSelect({
       </button>
 
       {open && (
-        <div className="absolute bottom-full left-0 z-20 mb-1.5 w-56 rounded-lg border border-line bg-card py-1 shadow-[0_-2px_8px_rgba(16,24,40,0.06),0_8px_18px_rgba(16,24,40,0.12)]">
+        <div className="absolute bottom-full right-0 z-20 mb-1.5 w-56 rounded-lg border border-line bg-card py-1 shadow-[0_-2px_8px_rgba(16,24,40,0.06),0_8px_18px_rgba(16,24,40,0.12)]">
           {item('', emptyLabel)}
           {options.length > 0 && <div className="my-1 border-t border-line" />}
           {options.map((o) => item(o.id, o.label))}
