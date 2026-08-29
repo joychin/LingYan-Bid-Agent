@@ -11,7 +11,7 @@
 
 import sqlite3
 
-LATEST = 11
+LATEST = 12
 
 
 def _add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -72,6 +72,12 @@ MIGRATIONS: list[tuple[int, object]] = [
         lambda c: _add_column(
             c, "runs", "model",
             "ALTER TABLE runs ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+        ),
+    ),
+    (
+        12,
+        lambda c: c.execute(
+            "CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         ),
     ),
 ]

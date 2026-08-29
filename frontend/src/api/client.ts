@@ -240,7 +240,7 @@ export interface ModelBody {
   image_support?: boolean
 }
 
-/** 全量覆盖写模型列表 + 默认模型（settings.json 是唯一真值，前端是唯一写者）。 */
+/** 全量覆盖写模型列表 + 默认模型（真值在 sidecar app.db，前端是唯一写者）。 */
 export function putModels(
   models: ModelBody[],
   defaultModel: string,
@@ -248,6 +248,22 @@ export function putModels(
   return request('/settings/models', {
     method: 'PUT',
     body: JSON.stringify({ models, default_model: defaultModel }),
+  })
+}
+
+/** 保存模型 API Key 到本地库（只写不读；即时生效无需重启）。 */
+export function putModelKey(modelId: string, apiKey: string): Promise<{ ok: boolean }> {
+  return request('/settings/keys', {
+    method: 'PUT',
+    body: JSON.stringify({ model_id: modelId, api_key: apiKey }),
+  })
+}
+
+/** 保存百度云文档解析 AK/SK 到本地库（只写不读；token 缓存即作废）。 */
+export function putOcrKeys(apiKey: string, secretKey: string): Promise<{ ok: boolean }> {
+  return request('/settings/ocr-keys', {
+    method: 'PUT',
+    body: JSON.stringify({ api_key: apiKey, secret_key: secretKey }),
   })
 }
 

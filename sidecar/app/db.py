@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS runs(
   pause_msg_id TEXT,
   thinking TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS app_settings(
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS artifact_index(
   artifact_id TEXT PRIMARY KEY,
   task_id TEXT,
@@ -412,6 +415,31 @@ def list_messages(cid: str) -> list[dict]:
     finally:
         conn.close()
     return [dict(r) for r in rows]
+
+
+def get_setting(key: str) -> str | None:
+    """app_settings KV 读（2026-08-29 起模型配置与凭证的真值存储；value 为 JSON 文本）。
+    表不存在（init_db 前的极早读取）按无值处理。"""
+    conn = _conn()
+    try:
+        row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        conn.close()
+    return row["value"] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    conn = _conn()
+    try:
+        conn.execute(
+            "INSERT INTO app_settings(key, value) VALUES(?,?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+    finally:
+        conn.close()
 
 
 def create_run(cid: str, thinking: str = "low", model: str = "") -> dict:

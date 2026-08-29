@@ -7,7 +7,9 @@ import { ModalShell } from '@/components/ui/ModalShell'
 import {
   getSettings,
   isTauri,
+  putModelKey,
   putModels,
+  putOcrKeys,
   revealInFolder,
   testModelConnection,
   type ModelBody,
@@ -375,20 +377,11 @@ function ModelForm({
   const [keySaved, setKeySaved] = useState(initial?.keySaved ?? false)
   const [showKey, setShowKey] = useState(false)
   const [testing, setTesting] = useState(false)
-  const tauri = isTauri()
 
   const preset = VENDOR_PRESETS[presetIdx]
 
-  // 已保存过的 profile id 沿用（钥匙串 account 按id）；新模型生成 uuid
+  // 已保存过的 profile id 沿用（Key 按模型 id 存本地库）；新模型生成 uuid
   const [pid] = useState(initial?.id ?? `m_${crypto.randomUUID().slice(0, 8)}`)
-
-  useEffect(() => {
-    if (tauri && initial) {
-      void window.__TAURI_INTERNALS__?.invoke('get_api_key_has_value', { role: `model:${initial.id}` })
-        .then((has) => setKeySaved(Boolean(has)))
-        .catch(() => {})
-    }
-  }, [tauri, initial])
 
   const applyPreset = (i: number) => {
     setPresetIdx(i)
@@ -417,10 +410,10 @@ function ModelForm({
   const saveKey = async () => {
     onError(null)
     try {
-      await window.__TAURI_INTERNALS__?.invoke('set_model_key', { modelId: pid, apiKey: key })
+      await putModelKey(pid, key)
       setKey('')
       setKeySaved(true)
-      toast('API Key 已保存到钥匙串，正在重启服务…', 'success')
+      toast('API Key 已保存，即时生效', 'success')
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e))
     }
@@ -542,35 +535,28 @@ function ModelForm({
           </span>
         </label>
 
-        {tauri ? (
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              API Key {keySaved && <span className="text-success">（已保存到钥匙串）</span>}
-            </label>
-            <div className="relative">
-              <Input
-                type={showKey ? 'text' : 'password'}
-                value={key}
-                onChange={(e) => setKey(e.target.value)}
-                placeholder={keySaved ? '已配置，输入新值可更换' : '输入后保存到钥匙串并重启 sidecar'}
-                className="pr-9"
-              />
-              <button
-                type="button"
-                onClick={() => setShowKey(!showKey)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                aria-label={showKey ? '隐藏 Key' : '显示 Key'}
-              >
-                {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
-            </div>
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">
+            API Key {keySaved && <span className="text-success">（已保存）</span>}
+          </label>
+          <div className="relative">
+            <Input
+              type={showKey ? 'text' : 'password'}
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              placeholder={keySaved ? '已配置，输入新值可更换' : 'sk-…（保存到本地库，只写不回读）'}
+              className="pr-9"
+            />
+            <button
+              type="button"
+              onClick={() => setShowKey(!showKey)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label={showKey ? '隐藏 Key' : '显示 Key'}
+            >
+              {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
           </div>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            浏览器开发模式下 Key 经环境变量 MODEL_KEYS 配置（sidecar/.env，JSON 形如
-            {' {"<模型id>": "sk-…"}'}）。
-          </p>
-        )}
+        </div>
 
         <div className="flex gap-2">
           <Button
@@ -585,11 +571,14 @@ function ModelForm({
           >
             保存
           </Button>
-          {tauri && (
-            <Button size="sm" variant="outline" disabled={!key} onClick={saveKey}>
-              保存 Key
-            </Button>
-          )}
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!key}
+            onClick={saveKey}
+          >
+            保存 Key
+          </Button>
           <Button size="sm" variant="outline" disabled={testing} onClick={test}>
             {testing ? '测试中…' : '测试'}
           </Button>
@@ -605,45 +594,28 @@ function ModelForm({
 }
 
 // ---------------------------------------------------------------------------
-// 文档解析区：百度云 PaddleOCR-VL（AK/SK 走钥匙串两 account）
+// 文档解析区：百度云 PaddleOCR-VL（AK/SK 存本地库，只写不回读）
 // ---------------------------------------------------------------------------
 
 function ParseSection() {
   const { toast } = useToast()
+  const queryClient = useQueryClient()
   const [apiKey, setApiKey] = useState('')
   const [secretKey, setSecretKey] = useState('')
-  const [akSaved, setAkSaved] = useState(false)
-  const [skSaved, setSkSaved] = useState(false)
   const [showSecret, setShowSecret] = useState(false)
   const [testing, setTesting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const tauri = isTauri()
-
-  useEffect(() => {
-    if (tauri) {
-      void Promise.all(
-        (['baidu-ocr-api', 'baidu-ocr-secret'] as const).map(async (role, i) => {
-          try {
-            const has = await window.__TAURI_INTERNALS__?.invoke('get_api_key_has_value', { role })
-            if (i === 0) setAkSaved(Boolean(has))
-            else setSkSaved(Boolean(has))
-          } catch {
-            /* 查询失败按未配置显示 */
-          }
-        }),
-      )
-    }
-  }, [tauri])
+  const { data: settings } = useQuery({ queryKey: ['settings'], queryFn: getSettings })
+  const configured = settings?.ocr.configured ?? false
 
   const saveKeys = async () => {
     setError(null)
     try {
-      await window.__TAURI_INTERNALS__?.invoke('set_baidu_ocr_keys', { apiKey, secretKey })
-      if (apiKey) setAkSaved(true)
-      if (secretKey) setSkSaved(true)
+      await putOcrKeys(apiKey, secretKey)
       setApiKey('')
       setSecretKey('')
-      toast('文档解析凭证已保存到钥匙串，正在重启服务…', 'success')
+      void queryClient.invalidateQueries({ queryKey: ['settings'] })
+      toast('文档解析凭证已保存，即时生效', 'success')
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
@@ -674,55 +646,45 @@ function ParseSection() {
       </div>
 
       <div className="space-y-3 rounded-lg border border-line p-3">
-        {tauri ? (
-          <>
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">
-                API Key（AK）{akSaved && <span className="text-success">（已保存到钥匙串）</span>}
-              </label>
-              <Input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder={akSaved ? '已配置，输入新值可更换' : '百度智能云应用的 API Key'}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">
-                Secret Key（SK）{skSaved && <span className="text-success">（已保存到钥匙串）</span>}
-              </label>
-              <div className="relative">
-                <Input
-                  type={showSecret ? 'text' : 'password'}
-                  value={secretKey}
-                  onChange={(e) => setSecretKey(e.target.value)}
-                  placeholder={skSaved ? '已配置，输入新值可更换' : '百度智能云应用的 Secret Key'}
-                  className="pr-9"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowSecret(!showSecret)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  aria-label={showSecret ? '隐藏 SK' : '显示 SK'}
-                >
-                  {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <Button size="sm" disabled={!apiKey && !secretKey} onClick={saveKeys}>
-                保存到钥匙串
-              </Button>
-              <Button size="sm" variant="outline" disabled={testing} onClick={testConnection}>
-                {testing ? '测试中…' : '测试'}
-              </Button>
-            </div>
-          </>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            浏览器开发模式下凭证经环境变量 BAIDU_OCR_API_KEY / BAIDU_OCR_SECRET_KEY 配置（sidecar/.env）。
-          </p>
-        )}
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">
+            API Key（AK）{configured && <span className="text-success">（已保存）</span>}
+          </label>
+          <Input
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder={configured ? '已配置，输入新值可更换' : '百度智能云应用的 API Key'}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">Secret Key（SK）</label>
+          <div className="relative">
+            <Input
+              type={showSecret ? 'text' : 'password'}
+              value={secretKey}
+              onChange={(e) => setSecretKey(e.target.value)}
+              placeholder={configured ? '已配置，输入新值可更换' : '百度智能云应用的 Secret Key'}
+              className="pr-9"
+            />
+            <button
+              type="button"
+              onClick={() => setShowSecret(!showSecret)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label={showSecret ? '隐藏 SK' : '显示 SK'}
+            >
+              {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Button size="sm" disabled={!apiKey && !secretKey} onClick={saveKeys}>
+            保存
+          </Button>
+          <Button size="sm" variant="outline" disabled={testing} onClick={testConnection}>
+            {testing ? '测试中…' : '测试'}
+          </Button>
+        </div>
         {error && <p className="text-sm text-error">{error}</p>}
       </div>
     </div>

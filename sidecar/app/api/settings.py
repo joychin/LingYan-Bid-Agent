@@ -1,14 +1,13 @@
 """Settings 端点：多模型 profile 列表读写 + 连通性测试。
 
-API Key 永不接受 HTTP 修改——每个 profile 的 key 只经环境变量 MODEL_KEYS
-（Tauri 侧改钥匙串后重启 sidecar 注入）。base_url/model/image_support/name 与
-default_model 持久化到 data/settings.json（与 Tauri 共享的单一配置真值，形状
-{models: [...], default_model}）。
-PUT /settings/models 后清空 agent 缓存（按 profile 惰性重建）。
+配置与凭证的真值在 app.db 的 app_settings KV 表（用户明令 2026-08-29 弃钥匙串）：
+模型列表/默认模型经 PUT /settings/models，Key 经 PUT /settings/keys（只写不读——
+GET 永不回回 Key，只回 key_configured 布尔），百度 AK/SK 经 PUT /settings/ocr-keys。
+env 只作兜底读取（.env 开发习惯不变）。变更即时生效（agent 缓存清空惰性重建），
+无需重启服务。
 """
 
 import asyncio
-import json
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query
@@ -83,35 +82,66 @@ async def put_settings_models(body: ModelsBody):
     if body.default_model not in ids:
         raise HTTPException(status_code=422, detail="default_model 必须是 models 之一")
 
-    normalized: list[dict] = []
+    normalized: list[cfg.ModelProfile] = []
     for m, mid in zip(body.models, ids):
         base_url = _validate_base_url(m.base_url or "")
         if not (m.model or "").strip():
             raise HTTPException(status_code=422, detail=f"模型 {mid} 缺少 model 名")
         normalized.append(
-            {
-                "id": mid,
-                "name": (m.name or "").strip() or mid,
-                "base_url": base_url,
-                "model": m.model.strip(),
-                "image_support": m.image_support,
-            }
+            cfg.ModelProfile(
+                id=mid,
+                name=(m.name or "").strip() or mid,
+                base_url=base_url,
+                model=m.model.strip(),
+                image_support=m.image_support,
+            )
         )
 
-    data = cfg._file_overrides()
-    data["models"] = normalized
-    data["default_model"] = body.default_model
-    # 迁移收尾：新形状写入即清旧结构（双角色块与更旧扁平键），避免两处真值
-    data.pop("llm", None)
-    data.pop("vlm", None)
-    data.pop("base_url", None)
-    data.pop("model", None)
-    cfg.settings_path().parent.mkdir(parents=True, exist_ok=True)
-    with open(cfg.settings_path(), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    # 模型列表变了：清 agent 缓存（按 profile 惰性重建；无 key 的 profile 在
+    cfg.save_models(normalized, body.default_model)
+    # 模型列表变了：清 agent 缓存（按 profile 惰性重建，毫秒级；无 key 的 profile 在
     # 实际被选用时才报错，不影响其他 profile）
     await rebuild_agent()
+    return {"ok": True}
+
+
+class KeyBody(BaseModel):
+    model_id: str
+    api_key: str
+
+
+@router.put("/settings/keys")
+async def put_settings_key(body: KeyBody):
+    """保存模型 Key 到本地库（用户明令 2026-08-29：凭证存 SQLite，弃钥匙串）。
+
+    安全性质保留：GET 永不回读 Key（只回 key_configured 布尔）；本端点只写不读。
+    即时生效（agent 缓存清空惰性重建），无需重启服务。
+    """
+    pid = body.model_id.strip()
+    key = body.api_key.strip()
+    if not pid:
+        raise HTTPException(status_code=422, detail="model_id 不能为空")
+    if not key:
+        raise HTTPException(status_code=422, detail="api_key 不能为空")
+    cfg.set_model_key(pid, key)
+    await rebuild_agent()
+    return {"ok": True}
+
+
+class OcrKeysBody(BaseModel):
+    api_key: str
+    secret_key: str
+
+
+@router.put("/settings/ocr-keys")
+async def put_settings_ocr_keys(body: OcrKeysBody):
+    ak, sk = body.api_key.strip(), body.secret_key.strip()
+    if not ak or not sk:
+        raise HTTPException(status_code=422, detail="API Key 与 Secret Key 均不能为空")
+    cfg.set_baidu_ocr_keys(ak, sk)
+    # AK/SK 换取的 access_token 缓存作废，下次解析用新凭证重取
+    from ..baidu_ocr import _reset_token_cache
+
+    _reset_token_cache()
     return {"ok": True}
 
 

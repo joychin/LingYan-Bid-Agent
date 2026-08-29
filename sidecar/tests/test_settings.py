@@ -1,4 +1,4 @@
-"""/api/settings：多模型 profile 列表读写、迁移、校验、连通测试。"""
+"""/api/settings：多模型 profile 列表读写（app.db 真值）、迁移、校验、连通测试、Key 端点。"""
 
 import json
 
@@ -16,9 +16,11 @@ def test_get_settings_default_single_profile(client):
 
 
 def test_get_settings_migrates_legacy_roles(client):
-    """旧 {llm, vlm} 双角色 → default + vision 两条 profile（读侧迁移）。"""
+    """旧 {llm, vlm} 双角色 settings.json → default + vision 两条 profile（一次性导入）。"""
     from app import config as cfg
+    from app import db
 
+    db.init_db()
     cfg.settings_path().parent.mkdir(parents=True, exist_ok=True)
     cfg.settings_path().write_text(
         json.dumps(
@@ -39,24 +41,7 @@ def test_get_settings_migrates_legacy_roles(client):
     assert dflt["image_support"] is True  # 旧 llm 块的 image_support 保留
 
 
-def test_get_settings_migrates_legacy_flat(client):
-    """更旧扁平 {base_url, model} → default profile。"""
-    from app import config as cfg
-
-    cfg.settings_path().parent.mkdir(parents=True, exist_ok=True)
-    cfg.settings_path().write_text(
-        json.dumps({"base_url": "https://legacy.example.com/v1", "model": "legacy-model"}),
-        encoding="utf-8",
-    )
-    data = client.get("/api/settings").json()
-    dflt = data["models"][0]
-    assert dflt["id"] == "default"
-    assert dflt["base_url"] == "https://legacy.example.com/v1"
-
-
-def test_put_models_roundtrip_and_legacy_cleanup(client):
-    from app import config as cfg
-
+def test_put_models_roundtrip(client):
     r = client.put(
         "/api/settings/models",
         json={
@@ -73,23 +58,10 @@ def test_put_models_roundtrip_and_legacy_cleanup(client):
     data = client.get("/api/settings").json()
     assert [m["id"] for m in data["models"]] == ["m1", "m2"]
     assert data["default_model"] == "m1"
+    # 真值在 db（settings.json 不再被写）
+    from app import config as cfg
 
-    raw = json.loads(cfg.settings_path().read_text(encoding="utf-8"))
-    assert "llm" not in raw and "vlm" not in raw and "base_url" not in raw  # 旧键清掉
-    assert raw["default_model"] == "m1"
-
-
-def test_put_models_key_configured_via_env(client, monkeypatch):
-    monkeypatch.setenv("MODEL_KEYS", '{"m1": "sk-test"}')
-    client.put(
-        "/api/settings/models",
-        json={
-            "models": [{"id": "m1", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-v4-flash"}],
-            "default_model": "m1",
-        },
-    )
-    data = client.get("/api/settings").json()
-    assert data["models"][0]["key_configured"] is True
+    assert not cfg.settings_path().exists() or "m1" not in cfg.settings_path().read_text(encoding="utf-8")
 
 
 def test_put_models_validations(client):
@@ -120,8 +92,8 @@ def test_put_models_validations(client):
     assert r.status_code == 422
 
 
-def test_settings_test_model(client, monkeypatch):
-    monkeypatch.setenv("MODEL_KEYS", '{"m1": "sk-test"}')
+def test_keys_endpoint_roundtrip_and_get_never_returns(client):
+    """PUT /settings/keys 写本地库；GET 永不回读 Key（只回 key_configured 布尔）。"""
     client.put(
         "/api/settings/models",
         json={
@@ -129,8 +101,28 @@ def test_settings_test_model(client, monkeypatch):
             "default_model": "m1",
         },
     )
+    assert client.get("/api/settings").json()["models"][0]["key_configured"] is False
 
-    # 未配 key 的模型 → 400
+    r = client.put("/api/settings/keys", json={"model_id": "m1", "api_key": "sk-test-123"})
+    assert r.status_code == 200
+    data = client.get("/api/settings").json()
+    assert data["models"][0]["key_configured"] is True
+    assert "sk-test-123" not in json.dumps(data)  # GET 永不回读
+
+    # 空值 422；未知模型也可写（先配 key 后配模型的顺序容忍）
+    assert client.put("/api/settings/keys", json={"model_id": "m1", "api_key": " "}).status_code == 422
+    assert client.put("/api/settings/keys", json={"model_id": " ", "api_key": "k"}).status_code == 422
+
+
+def test_ocr_keys_endpoint(client):
+    r = client.put("/api/settings/ocr-keys", json={"api_key": "ak-1", "secret_key": "sk-1"})
+    assert r.status_code == 200
+    assert client.get("/api/settings").json()["ocr"]["configured"] is True
+    # 空值 422
+    assert client.put("/api/settings/ocr-keys", json={"api_key": "", "secret_key": "s"}).status_code == 422
+
+
+def test_settings_test_model(client):
     client.put(
         "/api/settings/models",
         json={
@@ -141,9 +133,12 @@ def test_settings_test_model(client, monkeypatch):
             "default_model": "m1",
         },
     )
+    # 未配 key 的模型 → 400
     r = client.get("/api/settings/test?model=m2")
     assert r.status_code == 400
 
+    # 配 key 后成功（mock OpenAI）
+    client.put("/api/settings/keys", json={"model_id": "m1", "api_key": "sk-test"})
     calls = {}
 
     class FakeResp:
@@ -157,15 +152,20 @@ def test_settings_test_model(client, monkeypatch):
     class FakeClient:
         chat = type("Chat", (), {"completions": FakeCompletions()})()
 
-    monkeypatch.setattr("openai.OpenAI", lambda **kw: FakeClient(), raising=False)
-    r = client.get("/api/settings/test?model=m1")
+    import openai
+
+    original = openai.OpenAI
+    openai.OpenAI = lambda **kw: FakeClient()
+    try:
+        r = client.get("/api/settings/test?model=m1")
+    finally:
+        openai.OpenAI = original
     assert r.status_code == 200
     assert r.json() == {"ok": True, "model": "m1"}
     assert calls["kwargs"]["model"] == "x-1"
 
-    # 不存在的模型 → 404
+    # 不存在的模型 → 404；两个参数都没有 → 422
     assert client.get("/api/settings/test?model=nope").status_code == 404
-    # 两个参数都没有 → 422
     assert client.get("/api/settings/test").status_code == 422
 
 
@@ -201,7 +201,6 @@ def test_message_with_model_profile_stored_on_run(client, monkeypatch):
 
     from app import db
 
-    monkeypatch.setenv("MODEL_KEYS", '{"m1": "sk-1", "m2": "sk-2"}')
     client.put(
         "/api/settings/models",
         json={
