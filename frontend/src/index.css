@@ -1,6 +1,22 @@
 @import "tailwindcss";
 @import "./styles/ai.css";
 
+/* 可点击元素一律手型光标（用户明令 2026-08-29）：Tailwind v4 preflight 不给
+   button 设 pointer，裸按钮/选项/链接会露系统箭头，这里统一兜底；
+   .ft-row（产物/工作台行，div onClick）本属 workspace.css，暂放此处。 */
+button:not(:disabled),
+[role='button'],
+summary,
+label,
+select,
+a,
+.ft-row {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: default;
+}
+
 /* §1 设计 Tokens（Workspace Shell 设计系统，源 workspace-dna-prototype.html）。light only。 */
 :root {
   --background: #ffffff;          /* paper */
