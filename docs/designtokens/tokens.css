@@ -11,28 +11,28 @@
   /* 文字 */
   --Color-text-primary:     #1A1D21;
   --Color-text-secondary:   #5B616B;
-  --Color-text-tertiary:    #9AA1AB;
+  --Color-text-tertiary:    #8A8F98;
   --Color-text-disabled:    #C2C5CA;
   --Color-text-on-color:    #FFFFFF;
 
   /* 背景 */
   --Color-bg-canvas:        #FFFFFF;
-  --Color-bg-surface:       #F6F7F9;
-  --Color-bg-subtle:        #F0F2F5;
+  --Color-bg-surface:       #F7F6F4;
+  --Color-bg-subtle:        #F0EFEB;
   --Color-bg-inverse:       #1A1D21;
 
   /* 边框 */
-  --Color-border-default:   #E6E8EC;
+  --Color-border-default:   #E8E6E1;
 
   /* 品牌 */
-  --Color-brand-primary:        #2563EB;
-  --Color-brand-primary-hover:  #1D4ED8;
-  --Color-brand-primary-soft:   #DBEAFE;
+  --Color-brand-primary:        #0F766E;
+  --Color-brand-primary-hover:  #115E59;
+  --Color-brand-primary-soft:   #E6F4F1;
 
   /* 语义（纯色，tint 用 color-mix 派生） */
-  --Color-success:          #10B981;
-  --Color-warning:          #F59E0B;
-  --Color-danger:           #EF4444;
+  --Color-success:          #15803D;
+  --Color-warning:          #B45309;
+  --Color-danger:           #B91C1C;
 
   /* 间距 · 8 档 */
   --Spacing-space-2:  2px;
@@ -87,16 +87,16 @@
   --Color-text-disabled:    #4B5563;
   --Color-text-on-color:    #1A1D21;
 
-  --Color-bg-canvas:        #1A1D21;
-  --Color-bg-surface:       #0D0F12;
-  --Color-bg-subtle:        #25282E;
+  --Color-bg-canvas:        #1C1B1A;
+  --Color-bg-surface:       #141312;
+  --Color-bg-subtle:        #262524;
   --Color-bg-inverse:       #FFFFFF;
 
-  --Color-border-default:   #2E3238;
+  --Color-border-default:   #35322E;
 
-  --Color-brand-primary:        #3B82F6;
-  --Color-brand-primary-hover:  #60A5FA;
-  --Color-brand-primary-soft:   #1E3A8A;
+  --Color-brand-primary:        #2DD4BF;
+  --Color-brand-primary-hover:  #5EEAD4;
+  --Color-brand-primary-soft:   #134E4A;
 
   --Color-success:          #34D399;
   --Color-warning:          #FBBF24;

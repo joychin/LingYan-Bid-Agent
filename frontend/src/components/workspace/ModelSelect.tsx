@@ -46,14 +46,14 @@ export function ModelSelect({
     >
       <button
         type="button"
-        className="flex items-center gap-0.5 rounded px-1 py-0.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary"
+        className="flex items-center gap-1 rounded px-1.5 py-1 text-sm font-medium text-foreground transition-colors hover:bg-secondary"
         onClick={() => setOpen(!open)}
         title="选择模型：随每条消息生效"
       >
-        <span className="max-w-[120px] truncate" title={current?.name}>
+        <span className="max-w-[160px] truncate" title={current?.name}>
           {current?.name ?? '模型'}
         </span>
-        <ChevronDown className={cn('h-3 w-3 text-muted-foreground transition-transform', open && 'rotate-180')} />
+        <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', open && 'rotate-180')} />
       </button>
 
       {open && (

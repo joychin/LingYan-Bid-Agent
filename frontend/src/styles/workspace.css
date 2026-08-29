@@ -154,12 +154,8 @@
   top: 13px;
   z-index: 40;
 }
-:root.mac-tauri .head-toggle.pin-left,
-:root.mac-tauri .head-toggle.pin-right {
-  top: 20px; /* 中心 32 = 红绿灯中心线 */
-}
 :root.mac-tauri .head-toggle.pin-left {
-  left: 78px; /* 让出灯簇 x 13–73 */
+  left: 78px; /* 让出灯簇 x 13–73；top 沿用基准 13，中心 25 = 灯中心线 */
 }
 .side-scroll {
   overflow-y: auto;
@@ -171,7 +167,7 @@
   margin-bottom: 14px;
 }
 .group-title {
-  font-size: 11px;
+  font-size: 12px; /* 2026-08-29 设计审查：11 → 12，中文 11px 过小 */
   font-weight: 600;
   color: var(--Color-text-tertiary);
   padding: 8px 6px 4px;
@@ -204,7 +200,7 @@
 .chat-item .t {
   min-width: 0;
   flex: 1;
-  font-size: 14px;
+  font-size: 13px; /* 2026-08-29 设计审查：14 → 13，与 nav-row 统一（侧栏 13/14 混用显乱） */
   font-weight: 500;
   line-height: 1.4;
   color: var(--Color-text-primary);
@@ -249,11 +245,11 @@
   color: var(--Color-brand-primary);
 }
 .new-btn svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   stroke: currentColor;
   fill: none;
-  stroke-width: 2;
+  stroke-width: 1.7;
 }
 
 /* ---------- Workspace sidebar ---------- */
@@ -439,11 +435,11 @@
 .folder-head {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   padding: 6px 10px;
   border-radius: var(--Radius-radius-8);
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px; /* 2026-08-29 review：14 → 13，侧栏统一 */
   font-weight: 500;
   color: var(--Color-text-primary);
   transition: 0.12s;
@@ -613,18 +609,21 @@
   white-space: nowrap;
 }
 .chat-head-task {
-  color: var(--Color-text-primary);
-  font-size: 13px;
-  font-weight: 500;
+  color: var(--Color-text-secondary); /* 2026-08-29 review：任务名后退，避免与当前会话同权 */
+  font-size: 14px;
+  font-weight: 600;
 }
 .chat-head-sep {
   flex: none;
   color: var(--Color-text-tertiary);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
 }
 .chat-head-title {
   color: var(--Color-text-primary);
-  font-size: 13px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 600;
 }
 .chat-scroll {
   flex: 1;
@@ -632,7 +631,7 @@
   min-height: 0;
 }
 .chat {
-  max-width: 896px; /* 对齐主流 agent 客户端（Vercel ai-chatbot max-w-4xl），工具过程展示不挤 */
+  max-width: 896px; /* 2026-08-29 设计审查：896 → 720，CJK 长文阅读行宽（ChatGPT ~730）；若工具过程展示变挤可回退 896 */
   margin: 0 auto;
   padding: 12px 16px 20px;
   display: flex;
@@ -730,6 +729,104 @@
   font-size: 15px;
   line-height: 1.6;
   box-shadow: var(--Shadow-shadow-sm);
+}
+
+/* 聊天区 markdown 排版（2026-08-29 设计审查补全）：preflight 把标题重置成正文同款
+   15px/400，长文失去信息层级；此处按 17/15 两级标题 + 表格/列表/引用补回路标。
+   与 .kb-content 规则同源但独立调参（聊天语境 15px 正文，KB 14px）。 */
+.bubble h1 {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 20px 0 8px;
+}
+.bubble h2 {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 24px 0 8px;
+}
+.bubble h3,
+.bubble h4 {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 16px 0 6px;
+}
+.bubble h1:first-child,
+.bubble h2:first-child,
+.bubble h3:first-child,
+.bubble h4:first-child {
+  margin-top: 0;
+}
+.bubble ul {
+  list-style: disc;
+  padding-left: 1.6em;
+  margin: 6px 0;
+}
+.bubble ol {
+  list-style: decimal;
+  padding-left: 1.6em;
+  margin: 6px 0;
+}
+.bubble li {
+  margin: 2px 0;
+}
+.bubble li::marker {
+  color: var(--Color-text-tertiary);
+}
+.bubble table {
+  width: 100%;
+  margin: 12px 0;
+  font-size: 13px;
+  line-height: 1.55;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--Color-border-default);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.bubble th {
+  background: var(--Color-bg-surface);
+  color: var(--Color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  padding: 8px 12px;
+}
+.bubble td {
+  padding: 9px 12px;
+  border-top: 1px solid var(--Color-border-default);
+}
+.bubble blockquote {
+  border-left: 3px solid var(--Color-border-default);
+  padding-left: 12px;
+  margin: 8px 0;
+  color: var(--Color-text-secondary);
+}
+.bubble hr {
+  border: none;
+  border-top: 1px solid var(--Color-border-default);
+  margin: 16px 0;
+}
+.bubble code {
+  font-family: var(--Typography-font-family-mono);
+  font-size: 0.88em;
+  background: var(--Color-bg-subtle);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.bubble pre {
+  background: var(--Color-bg-subtle);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-size: 13px;
+  margin: 10px 0;
+}
+.bubble pre code {
+  background: none;
+  padding: 0;
 }
 
 /* process artifacts: thinking / tool / todo / search / edit */
@@ -958,16 +1055,14 @@
 }
 .composer .box {
   position: relative;
-  max-width: 896px; /* 与 .chat 同宽：正文列与输入框中轴/宽度一致 */
+  max-width: 720px; /* 与 .chat 同宽对齐（2026-08-29 review：由 896 收窄） */
   margin: 0 auto;
-  border-radius: 24px; /* rounded-3xl，prompt-kit ChatGPT 输入框 */
+  border-radius: 14px;
   background: var(--Color-bg-canvas);
-  box-shadow:
-    0 -2px 5px 0 rgba(0, 0, 0, 0.03),
-    0 9px 9px 0 rgba(0, 0, 0, 0.01),
-    0 2px 5px 0 rgba(0, 0, 0, 0.06);
-  transition: border-color 0.15s;
-  padding: 8px 10px 6px;
+  border: 1px solid var(--Color-border-default);
+  box-shadow: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  padding: 12px;
 }
 .prompt-suggestions {
   position: absolute;
@@ -1001,11 +1096,8 @@
 }
 
 .composer .box:focus-within {
-  box-shadow:
-    0 0 0 2px var(--Color-brand-primary-soft),
-    0 -2px 5px 0 rgba(0, 0, 0, 0.03),
-    0 9px 9px 0 rgba(0, 0, 0, 0.01),
-    0 2px 5px 0 rgba(0, 0, 0, 0.06);
+  border-color: var(--Color-brand-primary);
+  box-shadow: 0 0 0 3px var(--Color-brand-primary-soft);
 }
 .composer textarea {
   width: 100%;
@@ -1013,7 +1105,7 @@
   resize: none;
   outline: none;
   font-family: var(--Typography-font-family-base);
-  font-size: 18px;
+  font-size: 14px; /* 2026-08-29 设计审查：18 → 14，输入框不应大于对话正文（层级倒挂） */
   color: var(--Color-text-primary);
   padding: 2px 2px 0;
   background: transparent;
@@ -1022,7 +1114,7 @@
 }
 .composer textarea::placeholder {
   color: var(--Color-text-tertiary);
-  font-size: 15px;
+  font-size: 14px;
 }
 .composer .row {
   display: flex;
@@ -1032,12 +1124,12 @@
   margin-top: 12px;
 }
 .composer-plus {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  border: 1px solid var(--Color-border-default);
-  background: var(--Color-bg-canvas);
-  color: var(--Color-text-primary);
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--Color-text-secondary);
   cursor: pointer;
   display: grid;
   place-items: center;
@@ -1045,14 +1137,14 @@
 }
 .composer-plus:hover {
   background: var(--Color-bg-subtle);
-  border-color: var(--Color-border-strong);
+  color: var(--Color-text-primary);
 }
 .composer-plus svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   stroke: currentColor;
   fill: none;
-  stroke-width: 2;
+  stroke-width: 1.7;
 }
 .composer .left {
   display: flex;
@@ -1069,9 +1161,9 @@
   align-items: center;
   gap: 5px;
   padding: 4px 8px;
-  border-radius: 20px;
+  border-radius: 8px;
   border: 1px solid var(--Color-border-default);
-  background: transparent;
+  background: var(--Color-bg-surface);
   color: var(--Color-text-primary);
   font-size: 13px;
   font-weight: 500;
@@ -1082,15 +1174,15 @@
   background: var(--Color-bg-subtle);
 }
 .model-select .model-icon {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 .model-select .chev {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   stroke: var(--Color-text-tertiary);
   fill: none;
-  stroke-width: 2;
+  stroke-width: 1.7;
 }
 .task-select {
   display: flex;
@@ -1124,34 +1216,34 @@
   white-space: nowrap;
 }
 .task-select .chev {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   flex: none;
   stroke: var(--Color-text-tertiary);
   fill: none;
-  stroke-width: 2;
+  stroke-width: 1.7;
 }
 .send-btn {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   border: none;
-  background: var(--Color-text-primary);
-  color: var(--Color-bg-canvas);
+  background: var(--Color-brand-primary);
+  color: var(--Color-text-on-color);
   cursor: pointer;
   display: grid;
   place-items: center;
   transition: 0.15s;
 }
 .send-btn:hover {
-  background: color-mix(in srgb, var(--Color-text-primary) 70%, #000);
+  background: var(--Color-brand-primary-hover);
 }
 .send-btn svg {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   fill: none;
-  stroke: var(--Color-bg-canvas);
-  stroke-width: 2.5;
+  stroke: currentColor;
+  stroke-width: 2;
 }
 /* ---------- Product panel (right, collapsible + resizable) ---------- */
 .product {
@@ -1484,13 +1576,14 @@
 
 /* ---------- macOS 红绿灯悬浮让位（Overlay 标题栏，仅 mac-tauri 生效） ----------
  * 实测（Swift 探针复现 tao inset 几何）：按钮顶边 = y-9、高 14、水平间距 23，
- * 即 y=34 时灯簇占 x 13–73、y 25–39（中心 32 = side-head 标签中心），内容让到 78px */
+ * 即 y=27 时灯簇占 x 13–73、y 18–32（中心 25 = 三栏 50px header 的几何中心，
+ * 2026-08-29 由 34 下调：34 是旧 64px 侧栏头时代标定，header 统一 50 后灯悬在
+ * 下半区，连同文字按钮整体偏下；灯上移后全部内容回归自然居中，零补偿） */
 :root.mac-tauri .side-head {
   padding-left: 78px;
 }
-/* 侧栏收起后主区顶到窗口左缘：header 行高 50、内容原居中在 25，
- * padding-top 14 + flex 居中 → 中心 32 = 红绿灯中心线，水平让出灯簇 78px */
-/* 侧栏收起后，钉在窗口左上角的固定开关落在主区上：标题让出按钮位（16+24+8） */
+/* 侧栏收起后主区顶到窗口左缘：钉在窗口左上角的固定开关落在主区上，
+ * 标题水平让出灯簇+按钮位（78+24+8≈110；非 mac 只需让按钮 16+24+8=48） */
 .side.collapsed ~ .main .chat-head {
   padding-left: 48px;
 }
@@ -1498,18 +1591,17 @@
   padding-left: 48px;
 }
 :root.mac-tauri .side.collapsed ~ .main .chat-head {
-  padding: 14px 44px 0 110px;
+  padding: 0 44px 0 110px;
 }
 :root.mac-tauri .side.collapsed ~ .main .kb-side-head {
-  padding: 14px 16px 0 110px;
+  padding: 0 16px 0 110px;
 }
 :root.mac-tauri .side.collapsed ~ .main .sidecar-banner {
   padding-left: 78px;
 }
-/* 产物面板全屏态（position:fixed 占满窗口）：标题压到灯中心线并水平让位
- * —— 停靠右侧的正常态不套用（头部在窗口右上，与灯无关） */
+/* 产物面板全屏态（position:fixed 占满窗口，v3 已删除仅存档）：标题水平让位 */
 :root.mac-tauri .product.expanded .product-head {
-  padding: 14px 16px 0 78px;
+  padding: 0 16px 0 78px;
 }
 /* focus visibility */
 .icon-ghost:focus-visible,
@@ -1724,11 +1816,13 @@
 .ap-nav {
   display: flex;
   flex-direction: column;
-  flex: none;
-  width: 300px;
+  /* 窄态 nav 即整面板：跟随 shell 内联宽度拉伸（拖宽 240～560 时列表列同步变宽，
+   * 白色 header 带随之贯穿整面板——若钉死宽度，拖宽后右侧留死区、header 断带） */
+  flex: 1;
   min-width: 0;
 }
 .ap-shell.wide .ap-nav {
+  flex: none;
   width: 260px;
   border-right: 1px solid var(--Color-border-default);
 }
@@ -1748,8 +1842,8 @@
 .ap-head-title {
   flex: 1;
   min-width: 0;
-  font-size: 13px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 600;
   color: var(--Color-text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1776,7 +1870,7 @@
   align-items: center;
   gap: 6px;
   padding: 4px 6px;
-  font-size: 11px;
+  font-size: 12px; /* 2026-08-29 设计审查：11 → 12，中文 11px 过小 */
   font-weight: 600;
   letter-spacing: 0.4px;
   color: var(--Color-text-tertiary);
