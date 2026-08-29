@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronDown, Eye, EyeOff, FileText, FolderOpen, Image as ImageIcon, Pencil, Plus, Search, Sparkles, Star, Trash2, X } from 'lucide-react'
+import { Check, ChevronDown, Eye, EyeOff, FileText, FolderOpen, Image as ImageIcon, Pencil, Plus, Search, Sparkles, Trash2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -155,8 +155,8 @@ const VENDOR_PRESETS: VendorPreset[] = [
     color: '#4D6BFE',
     models: [
       { name: 'deepseek-v4-flash', imageSupport: false },
-      { name: 'deepseek-chat', imageSupport: false },
-      { name: 'deepseek-reasoner', imageSupport: false },
+      { name: 'deepseek-v4-pro', imageSupport: false },
+      { name: 'deepseek-v4-flash-vision-exp', imageSupport: true },
     ],
   },
   {
@@ -167,8 +167,9 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'K',
     color: '#16191E',
     models: [
-      { name: 'kimi-k2', imageSupport: false },
-      { name: 'kimi-latest', imageSupport: false },
+      { name: 'kimi-k3', imageSupport: true },
+      { name: 'kimi-k2-thinking', imageSupport: false },
+      { name: 'kimi-k2.7-code', imageSupport: false },
     ],
   },
   {
@@ -179,9 +180,9 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'A',
     color: '#FF6A00',
     models: [
-      { name: 'qwen-max', imageSupport: false },
+      { name: 'qwen3-max', imageSupport: false },
       { name: 'qwen-plus', imageSupport: false },
-      { name: 'qwen-vl-max', imageSupport: true },
+      { name: 'qwen3-vl-plus', imageSupport: true },
     ],
   },
   {
@@ -192,8 +193,9 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'Z',
     color: '#3859FF',
     models: [
-      { name: 'glm-4.6', imageSupport: false },
-      { name: 'glm-4.5v', imageSupport: true },
+      { name: 'glm-5.1', imageSupport: false },
+      { name: 'glm-5', imageSupport: false },
+      { name: 'glm-4.6v', imageSupport: true },
     ],
   },
   {
@@ -205,7 +207,19 @@ const VENDOR_PRESETS: VendorPreset[] = [
     color: '#1664FF',
     models: [
       { name: 'doubao-seed-1.6', imageSupport: true },
-      { name: 'doubao-1.5-pro', imageSupport: false },
+      { name: 'doubao-seed-1.6-flash', imageSupport: true },
+    ],
+  },
+  {
+    key: 'minimax',
+    label: 'MiniMax',
+    short: 'MiniMax',
+    baseUrl: 'https://api.minimaxi.com/v1',
+    mono: 'M',
+    color: '#E8503A',
+    models: [
+      { name: 'MiniMax-M2.5', imageSupport: false },
+      { name: 'MiniMax-M2.5-highspeed', imageSupport: false },
     ],
   },
   {
@@ -216,8 +230,9 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'O',
     color: '#10A37F',
     models: [
-      { name: 'gpt-4o', imageSupport: true },
-      { name: 'gpt-4.1', imageSupport: true },
+      { name: 'gpt-5.6', imageSupport: true },
+      { name: 'gpt-5.5', imageSupport: true },
+      { name: 'gpt-5', imageSupport: true },
     ],
   },
 ]
@@ -322,11 +337,6 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
     toast('模型已删除', 'success')
   }
 
-  const setAsDefault = async (m: LocalModel) => {
-    if (!(await persistList(models, m.id))) return
-    toast(`「${m.name}」已设为默认`, 'success')
-  }
-
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-muted/30 px-4 py-3">
@@ -350,26 +360,12 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
       )}
 
       {models.map((m) => {
-        const isDefault = defaultModel === m.id
         return (
           <div key={m.id} className="flex items-center gap-3 rounded-xl border border-line px-3.5 py-3">
-            <button
-              type="button"
-              onClick={() => void setAsDefault(m)}
-              title={isDefault ? '默认模型' : '设为默认'}
-              className={`grid h-6 w-6 shrink-0 place-items-center rounded-md transition-colors ${
-                isDefault ? 'text-amber-500' : 'text-muted-foreground/40 hover:bg-muted hover:text-muted-foreground'
-              }`}
-            >
-              <Star className={`h-4 w-4 ${isDefault ? 'fill-current' : ''}`} />
-            </button>
             <PresetAvatar p={presetOfBaseUrl(m.baseUrl) ?? CUSTOM_PRESET} />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
                 <span className="truncate text-sm font-medium">{m.name}</span>
-                {isDefault && (
-                  <span className="shrink-0 rounded bg-muted px-1.5 py-px text-[10px] text-muted-foreground">默认</span>
-                )}
                 {m.imageSupport && (
                   <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-accent-soft px-1.5 py-px text-[10px] text-primary">
                     <ImageIcon className="h-2.5 w-2.5" />
@@ -751,7 +747,8 @@ function ModelDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
-      <div className="relative z-10 flex w-[min(92vw,480px)] flex-col overflow-hidden rounded-2xl border bg-card shadow-md">
+      {/* 不能加 overflow-hidden：提供商下拉要从卡片里溢出来，加了会把「自定义」裁掉 */}
+      <div className="relative z-10 flex w-[min(92vw,480px)] flex-col rounded-2xl border bg-card shadow-md">
         <div className="flex items-center gap-2.5 border-b border-line px-5 py-4">
           <h3 className="text-[15px] font-semibold">{isNew ? '添加模型' : '编辑模型'}</h3>
           <span className="rounded-full bg-muted px-2.5 py-1 text-[11px] text-muted-foreground">
