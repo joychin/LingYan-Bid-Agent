@@ -354,7 +354,6 @@ export function InputComposer({
             {leftSlot}
           </div>
           <div className="right">
-            <ThinkingSelect value={thinking} onChange={onThinkingChange} />
             <ModelSelect
               options={
                 settings?.models.map((m) => ({
@@ -368,6 +367,7 @@ export function InputComposer({
               onChange={onModelChange}
               onManage={() => onOpenSettings?.()}
             />
+            <ThinkingSelect value={thinking} onChange={onThinkingChange} />
             {runningBlock ? (
               <button
                 type="button"

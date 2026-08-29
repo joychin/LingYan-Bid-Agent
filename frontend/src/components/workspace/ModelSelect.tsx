@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Check, ChevronDown, Image as ImageIcon, Settings2, Sparkles } from 'lucide-react'
+import { Check, ChevronDown, Image as ImageIcon, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export interface ModelOption {
@@ -46,13 +46,12 @@ export function ModelSelect({
     >
       <button
         type="button"
-        className="task-select"
+        className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[13px] font-medium text-foreground transition-colors hover:bg-secondary"
         onClick={() => setOpen(!open)}
         title="选择模型：随每条消息生效"
       >
-        <Sparkles className="task-icon" />
-        <span className="label">{current?.name ?? '模型'}</span>
-        <ChevronDown className={cn('chev transition-transform', open && 'rotate-180')} />
+        <span className="max-w-[160px] truncate">{current?.name ?? '模型'}</span>
+        <ChevronDown className={cn('h-3.5 w-3.5 text-muted-foreground transition-transform', open && 'rotate-180')} />
       </button>
 
       {open && (
