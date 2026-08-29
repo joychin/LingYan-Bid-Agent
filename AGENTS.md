@@ -10,7 +10,7 @@ Artifact/任务系统的设计与决策唯一事实来源：`artifact-system-des
 ## 结构与分层（重要边界）
 
 ```
-src-tauri/       Tauri 2 壳（Rust）：只做窗口、sidecar 进程管理、钥匙串、IPC command。零业务逻辑
+src-tauri/       Tauri 2 壳（Rust）：只做窗口、sidecar 进程管理、IPC command。零业务逻辑
 frontend/        React 19 + Vite + Tailwind（shadcn 风格手写组件）；只通过 HTTP+SSE 与 sidecar 通信
 sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
 ```
@@ -18,8 +18,12 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
 三条铁律：
 
 1. Rust 不含任何业务逻辑。
-2. API Key 永不出现于 HTTP 载荷与前端 JS 内存；key 由 Rust 从钥匙串读取（llm/vlm 两
-   account：`llm-api-key`/`vlm-api-key`），spawn 时注入 env。
+2. **API Key 存本地库**（2026-08-29 用户明令修订，弃钥匙串）：模型/百度 OCR 的 Key 与
+   全部模型配置存 `app.db` 的 `app_settings` KV 表（明文落盘，威胁模型与 .env 等价），
+   经 sidecar HTTP 写入（`PUT /settings/keys`、`/settings/ocr-keys`），改动即时生效
+   （agent 缓存重建，无重启）。**保留的硬性质：GET /settings 永不回读 Key**——只回
+   `key_configured` 布尔，Key 的 HTTP 载荷只写不读；env（`LLM_API_KEY`/`MODEL_KEYS`/
+   `BAIDU_OCR_*`）只作兜底读取。旧钥匙串条目作废（历史遗留不可见无害）。
 3. 前端只消费 PRD §5.5 事件契约（agent.started / agent.token / tool.called / tool.result /
    agent.completed / agent.error / todo.updated / artifact.created / run.state / ping），
    不依赖 DeepAgents 内部格式。run.state 是 SSE 连接建立时由端点下发的对账事件
@@ -79,24 +83,24 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    command 保存后重启 sidecar，凭证不进 HTTP）；通用页= 数据目录/日志路径 +
    「打开」（**reveal_in_folder 路径前缀从 workspace/ 扩到 data/**）+ 版本号
    （vite define `__APP_VERSION__`）。
-   **多模型 profile 与输入框选模型（2026-08-29，替代上段的 llm/vlm 双角色形状）**：
-   settings.json 换新形状 `{models:[{id,name,base_url,model,image_support}], default_model}`；
+   **多模型 profile 与输入框选模型（2026-08-29，替代上段的 llm/vlm 双角色形状；
+   同日傍晚二改：配置与 Key 真值从 settings.json+钥匙串整体迁到 app.db——见铁则 2）**：
    GET /settings = `{models(含 key_configured), default_model, ocr, paths}`；PUT
-   `/settings/models` 全量覆盖（前端唯一写者）；`/settings/test?model=<id>` 按模型
-   ping（role=ocr 保留）。**vlm 独立角色删除**——视觉能力= 任一 image_support 的
-   profile（`config.resolve_vision()`：default 优先，否则第一个；vlm.py 改读它，
-   VLM_* env 死）。Key：钥匙串 `model-key-<id>` per-profile account，Rust 组
-   `MODEL_KEYS` JSON（{id:key}）spawn 注入（`set_model_key` command 取代
-   set_model_settings；default/vision 两条 id 对旧 llm-api-key/vlm-api-key account
-   读侧兜底，旧 settings 双角色/扁平形状 Python+Rust 两侧读侧迁移）。**按消息选模型**：
-   POST /messages 加 `model`（未知 id 静默回落 default）；runs 加 `model` 列（迁移 11，
-   resume 沿用）；agent 从进程级单例改 **`dict[profile_id]` 缓存**（get_agent(pid)、
-   rebuild=清缓存、saver 共享、in-flight 持引用互不影响、子代理继承同实例）；
-   titler/KB 抽取恒走 default profile（`llm_*` 薄壳保留）。前端：设置模型区改
-   **列表制**（卡片+★默认+编辑/删除+添加表单：厂商预设胶囊→选模型→填 Key；预设带
-   每家模型清单与图片标记）；`ModelSelect` 重写为**下拉选择器**（列全部模型+Check+
-   「管理模型…」尾项，克隆 ThinkingSelect 模式）；选中按会话粘性（localStorage
-   `model-by-conv` map + `model-last`），随每条消息发送。
+   `/settings/models` 全量覆盖（前端唯一写者）；`PUT /settings/keys`（模型 Key）、
+   `PUT /settings/ocr-keys`（百度 AK/SK，写后作废 access_token 缓存）——**只写不读**；
+   `/settings/test?model=<id>` 按模型 ping（role=ocr 保留）。**vlm 独立角色删除**——
+   视觉能力= 任一 image_support 的 profile（`config.resolve_vision()`：default 优先，
+   否则第一个；vlm.py 改读它）。配置真值= app.db `app_settings` KV（键 model_profiles/
+   default_model/model_keys/baidu_ocr；settings.json 仅作一次性导入来源不再写；
+   env 只兜底读取）。**按消息选模型**：POST /messages 加 `model`（未知 id 静默回落
+   default）；runs 加 `model` 列（迁移 11，resume 沿用）；agent 从进程级单例改
+   **`dict[profile_id]` 缓存**（get_agent(pid)、rebuild=清缓存、saver 共享、in-flight
+   持引用互不影响、子代理继承同实例）；titler/KB 抽取恒走 default profile（`llm_*`
+   薄壳保留）。前端：设置模型区改**列表制**（卡片+★默认+编辑/删除+添加表单：厂商
+   预设胶囊→选模型→填 Key；预设带每家模型清单与图片标记）；`ModelSelect` 重写为
+   **下拉选择器**（列全部模型+Check+「管理模型…」尾项，克隆 ThinkingSelect 模式）；
+   选中按会话粘性（localStorage `model-by-conv` map + `model-last`），随每条消息发送。
+   Key 输入框浏览器/桌面两模式统一（都走 HTTP，保存即时生效无重启）。
    **关不掉 bug 教训**：ModalShell 无 open 概念，SettingsModal 必须 `if (!open) return null`
    ——双栏重构时丢过一次（设置窗常驻、关闭回调全生效但 UI 永不卸载）。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
@@ -301,7 +305,7 @@ kb_items+磁盘 md 重建（启动 `rebuild_kb_index`）；同 hash 上传 API �
   Python lint = `uv run ruff check app tests`（select 默认+isort；formatter 暂未启用）。
 - sidecar 日志双写：stderr 控制台 + `data/logs/sidecar.log`（滚动 5MB×3）；Tauri 模式下
   stdio 被置 null，查后端问题直接看该文件（Rust 侧日志在 `~/Library/Logs/<bundle-id>/`）。
-- 未配置钥匙串 key 时 sidecar 仍可起，但 agent 调用会报「LLM_API_KEY 未设置」。
+- 未配置任何模型 Key 时 sidecar 仍可起，但选用该模型对话会报「未配置 API Key」（设置页录入即用）。
 - 浏览器模式（`npm run dev:browser`，前端经 proxy 访问的）8765 sidecar 用的是
   `sidecar/.env` 里的 `LLM_API_KEY`——它可能是占位/无效 key（会报 401 invalid key），真实 key
   只在 Tauri 模式由 Rust 从钥匙串注入。浏览器模式要跑真实对话，需在 `.env` 里配有效 key。
@@ -340,18 +344,19 @@ kb_items+磁盘 md 重建（启动 `rebuild_kb_index`）；同 hash 上传 API �
     连带清 checkpoint；run 中断时已流出的半截回复落库（带「（任务中断）」标记）。
     messages 查询排序用 `created_at, rowid` 决胜（created_at 秒级精度，同秒消息按
     随机 uuid 排序会乱序）。
-  - 模型设置双角色嵌套（2026-08-27）：`data/settings.json` 结构 `{llm:{...},vlm:{...}}`
-    （旧扁平 LLM_* 键兼容迁移），优先级 env > settings.json > 默认值；
-    `app/api/settings.py` GET/PUT 双角色读写+连通性测试，**key 永不接受 HTTP 修改**
-    （GET 只回 key_configured 布尔）；PUT 后 llm 变更即时重建 agent、vlm 是无状态客户端
-    改 env 即生效；Tauri 侧对应 IPC `set_model_settings`（按 role 写 settings.json+钥匙串）。
+  - 模型配置与凭证（2026-08-29 定稿，铁则 2）：真值= `app.db` 的 `app_settings` KV 表
+    （model_profiles/default_model/model_keys/baidu_ocr 四键，JSON 值）；读侧优先级
+    env 兜底（LLM_API_KEY→default、MODEL_KEYS、BAIDU_OCR_*、LLM_BASE_URL/LLM_MODEL
+    覆盖 default profile）> db > 内置默认；旧 settings.json（双角色/扁平/列表形状）
+    在 db 为空且文件有内容时一次性导入。`app/api/settings.py` GET/PUT + keys 端点
+    （**Key 只写不读**，GET 只回 key_configured 布尔）；改动即时生效（清 agent 缓存
+    惰性重建，无重启）。Tauri 侧零参与（无设置类 IPC command）。
   - skills 从 `app/skills/` 启动时同步到 `data/workspace/skills/`（FilesystemBackend root）。
 - **src-tauri**（Rust stable ≥1.85）：
   - `src/sidecar.rs`：选空闲端口 → 随机 token → spawn（`process_group(0)`）→ healthz(nonce 校验,1s×30) →
-    指数退避重启（上限 3 次）→ 退出杀进程树并 wait 回收。模型设置单一真值在
-    `data/settings.json`（`{llm, vlm}` 双角色嵌套，HTTP PUT 与 IPC `set_model_settings`
-    都写它，spawn 前读取注入 env）；key 存钥匙串**两 account**：`llm-api-key`/`vlm-api-key`
-    （vlm 传空 base_url=显式清除配置，llm 空值不覆盖现值；改完触发 supervisor 重启 sidecar）；
+    指数退避重启（上限 3 次）→ 退出杀进程树并 wait 回收。env 只注入 plumbing
+    （SIDECAR_TOKEN + TENDER_HEALTHZ_NONCE）——模型配置与凭证 2026-08-29 起在 sidecar
+    的 app.db，钥匙串/MODEL_KEYS 注入/设置类 command（set_model_key 等）已全部移除；
     `stopping` 标志保证应用退出后 supervisor 不再拉起孤儿进程。
   - 生产分发限制：目前用 `Command` 直接 spawn `.venv/bin/python -m uvicorn` + 自定义 supervisor
     （随机端口/token 注入/healthz 探活/退避重启），dev 期没问题，甚至比官方 `sidecar()` 更强
@@ -360,8 +365,8 @@ kb_items+磁盘 md 重建（启动 `rebuild_kb_index`）；同 hash 上传 API �
     shell 插件 `sidecar()` 拉起（capabilities 配 `shell:allow-spawn`），保留现有 supervisor
     探活/重启逻辑、仅把 python 路径换成打包二进制。
     参考 https://github.com/dieharders/example-tauri-python-server-sidecar
-  - 钥匙串用 macOS `security` CLI 子进程（`keyring` crate 在此 macOS 写 Data Protection 钥匙串，
-    `security` CLI 不可见，无法满足 PRD M3 验收）。
+  - ~~钥匙串用 macOS `security` CLI 子进程~~（2026-08-29 已移除：Key 改存 app.db，见铁则 2；
+    历史：keyring crate 在此 macOS 写 Data Protection 钥匙串，`security` CLI 不可见）。
   - 已装插件仅两枚官方 plumbing：`tauri-plugin-single-instance`（须第一个注册——GUI 双开会撞
     agent.db 单库 checkpoint，二次启动聚焦已有窗口，不做互斥协调）+ `tauri-plugin-window-state`
     （记住窗口大小/位置）；均纯 Rust 侧、零 IPC 权限、前端零依赖。
