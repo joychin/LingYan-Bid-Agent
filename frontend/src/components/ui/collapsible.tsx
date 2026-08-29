@@ -1,8 +1,8 @@
-import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useState } from 'react'
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react'
 import { cn } from '@/lib/utils'
 
-/** 轻量手写 Collapsible（prompt-kit Steps/ChainOfThought 依赖；零 radix，data-state 语义与 radix 对齐）。 */
+/** 轻量手写 Collapsible（prompt-kit Steps/Reasoning 风格组件依赖；零 radix，data-state 语义与 radix 对齐）。 */
 const CollapsibleCtx = createContext<{ open: boolean; toggle: () => void }>({
   open: true,
   toggle: () => {},
@@ -62,25 +62,14 @@ export function CollapsibleContent({
   ...props
 }: HTMLAttributes<HTMLDivElement>) {
   const { open } = useContext(CollapsibleCtx)
-  const outerRef = useRef<HTMLDivElement>(null)
-  const innerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const outer = outerRef.current
-    const inner = innerRef.current
-    if (!outer || !inner) return
-    outer.style.maxHeight = open ? `${inner.scrollHeight}px` : '0px'
-  }, [open, children])
-
   return (
     <div
-      ref={outerRef}
       data-state={open ? 'open' : 'closed'}
-      className={cn('overflow-hidden transition-[max-height] duration-200 ease-out', className)}
-      style={{ maxHeight: '0px' }}
+      className={cn('grid transition-[grid-template-rows] duration-200 ease-out', className)}
+      style={{ gridTemplateRows: open ? '1fr' : '0fr' }}
       {...props}
     >
-      <div ref={innerRef}>{children}</div>
+      <div className="overflow-hidden">{children}</div>
     </div>
   )
 }

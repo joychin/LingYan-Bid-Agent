@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useState } from 'react'
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react'
 import { ChevronDownIcon } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
@@ -74,7 +74,7 @@ export function ReasoningTrigger({
       onClick={() => onOpenChange(!isOpen)}
       {...props}
     >
-      <span className="text-primary">{children}</span>
+      <span>{children}</span>
       <div className={cn('transform transition-transform', isOpen && 'rotate-180')}>
         <ChevronDownIcon className="size-4" />
       </div>
@@ -94,35 +94,22 @@ export function ReasoningContent({
   contentClassName?: string
   markdown?: boolean
 } & HTMLAttributes<HTMLDivElement>) {
-  const contentRef = useRef<HTMLDivElement>(null)
-  const innerRef = useRef<HTMLDivElement>(null)
   const { isOpen } = useReasoningContext()
-
-  useEffect(() => {
-    const outer = contentRef.current
-    const inner = innerRef.current
-    if (!outer || !inner) return
-    const observer = new ResizeObserver(() => {
-      if (isOpen) outer.style.maxHeight = `${inner.scrollHeight}px`
-    })
-    observer.observe(inner)
-    if (isOpen) outer.style.maxHeight = `${inner.scrollHeight}px`
-    return () => observer.disconnect()
-  }, [isOpen])
-
   return (
     <div
-      ref={contentRef}
-      className={cn('overflow-hidden transition-[max-height] duration-150 ease-out', className)}
-      style={{ maxHeight: isOpen ? (contentRef.current?.scrollHeight ?? 0) : '0px' }}
+      data-state={isOpen ? 'open' : 'closed'}
+      className={cn('grid transition-[grid-template-rows] duration-200 ease-out', className)}
+      style={{ gridTemplateRows: isOpen ? '1fr' : '0fr' }}
       {...props}
     >
-      <div ref={innerRef} className={cn('text-muted-foreground', contentClassName)}>
-        {markdown ? (
-          <ReactMarkdown remarkPlugins={mdRemarkPlugins}>{children as string}</ReactMarkdown>
-        ) : (
-          children
-        )}
+      <div className="overflow-hidden">
+        <div className={cn('text-muted-foreground', contentClassName)}>
+          {markdown ? (
+            <ReactMarkdown remarkPlugins={mdRemarkPlugins}>{children as string}</ReactMarkdown>
+          ) : (
+            children
+          )}
+        </div>
       </div>
     </div>
   )

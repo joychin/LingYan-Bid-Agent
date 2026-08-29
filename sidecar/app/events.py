@@ -153,10 +153,14 @@ def _tool_args(args) -> dict:
     return {"raw": str(args)}
 
 
-def _summary(content, limit: int = 400) -> str:
+def _summary(content, limit: int = 4000) -> str:
+    """tool 结果摘要：展开详情要能读到完整输出，上限放宽到 4000 字符；
+    超限时明示截断与完整长度（静默「…」会让用户以为内容残缺）。"""
     s = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
     s = (s or "").strip()
-    return s[:limit] + ("…" if len(s) > limit else "")
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"\n……（已截断，完整输出共 {len(s)} 字符）"
 
 
 _HITL_TEMPLATE_PREFIX = "Tool execution requires approval"

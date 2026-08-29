@@ -1,8 +1,5 @@
 import { CheckCircle, ChevronDown, CirclePause, GitBranch, Loader2, XCircle } from 'lucide-react'
-import { ChainOfThoughtContent } from '@/components/ai/ChainOfThought'
-import { Duration } from '@/components/ai/Duration'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai/Reasoning'
-import { TextShimmer } from '@/components/ai/TextShimmer'
 import { toolDisplayName } from '@/components/ai/toolDisplay'
 import {
   Collapsible,
@@ -13,7 +10,7 @@ import type { ToolStep } from '@/api/sse'
 import { useAutoCollapse } from '@/hooks/useAutoCollapse'
 import { cn } from '@/lib/utils'
 
-/** 子代理内部工具步骤行（轻量版 ChainOfThoughtStep）：图标 + 名称 + 状态，点击看结果。 */
+/** 子代理内部工具步骤行：图标 + 名称 + 状态，点击看结果。 */
 function ChildStep({ step }: { step: ToolStep }) {
   const [open, setOpen] = useAutoCollapse(step.status)
   const isRunning = step.status === 'running'
@@ -34,8 +31,7 @@ function ChildStep({ step }: { step: ToolStep }) {
         )}
         <span className="truncate">{toolDisplayName(step.tool)}</span>
         <span className="shrink-0 text-xs text-muted-foreground/60">· {statusText}</span>
-        <Duration startedAt={step.startedAt} endedAt={step.endedAt} className="ml-auto" />
-        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground/40 transition-transform group-data-[state=open]:rotate-180" />
+        <ChevronDown className="ml-auto size-3.5 shrink-0 text-muted-foreground/40 transition-transform group-data-[state=open]:rotate-180" />
       </CollapsibleTrigger>
       <CollapsibleContent className="overflow-hidden">
         <div className="ml-4 space-y-1 border-l border-line py-0.5 pl-2 text-[12px] text-muted-foreground">
@@ -52,24 +48,23 @@ function ChildStep({ step }: { step: ToolStep }) {
   )
 }
 
-/** 子代理任务卡：task 工具的专属渲染（其余工具走 ChainOfThoughtStep）。
- *  折叠 = 一行流（分支图标 + 状态徽章 + 任务描述）；展开 = 子代理 reasoning（折叠）
+/** 子代理任务卡：task 工具的专属渲染（其余工具走 ToolStepRow）。
+ *  折叠 = 一行流（分支图标 + 工具名 + 状态徽章，不展示业务内容，任务描述在展开区）；
+ *  展开 = 子代理 reasoning（折叠）
  *  + 内部工具调用序列 + 最终报告/错误；展开内容限高滚动（更多内容下翻查看）；
  *  完成后自动收缩（用户手动展开不被覆盖）。
  *  数据契约：tool.called 的 args={description, subagent_type}；子代理内部事件以
  *  agent_id=本卡 tool_call_id 归属（children/reasoning）；tool.result 的 summary/error。 */
-export function SubagentCard({ step, isLast = false }: { step: ToolStep; isLast?: boolean }) {
+export function SubagentCard({ step }: { step: ToolStep }) {
   const [open, setOpen] = useAutoCollapse(step.status)
   const description = typeof step.args?.description === 'string' ? step.args.description : ''
   const subagentType = typeof step.args?.subagent_type === 'string' ? step.args.subagent_type : ''
   const isRunning = step.status === 'running'
   const isError = step.status === 'error'
   const isPaused = step.status === 'paused'
-  const name = description.length > 42 ? `${description.slice(0, 42)}…` : description || '子代理任务'
-  const activity = step.children.find((c) => c.status === 'running')
 
   return (
-    <Collapsible className="group" data-last={isLast} open={open} onOpenChange={setOpen}>
+    <Collapsible className="group" open={open} onOpenChange={setOpen}>
       {step.text ? (
         <p className="whitespace-pre-wrap py-0.5 text-[13px] leading-relaxed text-muted-foreground">
           {step.text}
@@ -80,6 +75,7 @@ export function SubagentCard({ step, isLast = false }: { step: ToolStep; isLast?
         className="flex w-full cursor-pointer items-center gap-2 py-0.5 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
       >
         <GitBranch className="size-4 shrink-0 text-primary" aria-label="子代理任务" />
+        <span className="whitespace-nowrap">{toolDisplayName('task')}</span>
         <span
           className={cn(
             'inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
@@ -103,18 +99,10 @@ export function SubagentCard({ step, isLast = false }: { step: ToolStep; isLast?
           )}
           {isRunning ? '运行中' : isError ? '失败' : isPaused ? '已暂停' : '已完成'}
         </span>
-        <Duration startedAt={step.startedAt} endedAt={step.endedAt} />
-        <span className="min-w-0 flex-1 truncate" title={description}>
-          {isRunning ? (
-            <TextShimmer duration={2.4}>{activity ? `${name} · 正在${toolDisplayName(activity.tool)}` : name}</TextShimmer>
-          ) : (
-            name
-          )}
-        </span>
-        <ChevronDown className="size-4 shrink-0 text-muted-foreground/50 transition-transform group-data-[state=open]:rotate-180" />
+        <ChevronDown className="ml-auto size-4 shrink-0 text-muted-foreground/50 transition-transform group-data-[state=open]:rotate-180" />
       </CollapsibleTrigger>
-      <ChainOfThoughtContent>
-        <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+      <CollapsibleContent className="overflow-hidden">
+        <div className="max-h-72 space-y-2 overflow-y-auto py-1 pr-1">
           {subagentType && (
             <p className="font-mono text-[11px] text-muted-foreground/70">[{subagentType}]</p>
           )}
@@ -154,10 +142,7 @@ export function SubagentCard({ step, isLast = false }: { step: ToolStep; isLast?
             <p className="art-result">{step.summary}</p>
           ) : null}
         </div>
-      </ChainOfThoughtContent>
-      <div className="flex justify-start group-data-[last=true]:hidden">
-        <div className="ml-1.75 h-4 w-px bg-primary/20" />
-      </div>
+      </CollapsibleContent>
     </Collapsible>
   )
 }

@@ -57,20 +57,20 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   }
 
   return (
-    <ModalShell onClose={onClose} cardClassName="h-[min(85vh,620px)] w-[min(92vw,860px)]">
-      <div className="flex items-center justify-between border-b px-4 py-2.5">
-        <h2 className="text-sm font-semibold">设置</h2>
+    <ModalShell onClose={onClose} cardClassName="h-[min(85vh,660px)] w-[min(92vw,920px)]">
+      <div className="flex items-center justify-between border-b px-6 py-4">
+        <h2 className="text-[17px] font-semibold">设置</h2>
         <button
           type="button"
           onClick={onClose}
-          className="grid h-7 w-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="grid h-8 w-8 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           aria-label="关闭设置"
         >
           <X className="h-4 w-4" />
         </button>
       </div>
       <div className="flex min-h-0 flex-1">
-        <nav className="flex w-44 shrink-0 flex-col gap-1 border-r bg-muted/40 p-2">
+        <nav className="flex w-48 shrink-0 flex-col gap-1 border-r bg-muted/40 p-3">
           {SECTIONS.map((s) => {
             const Icon = s.icon
             const active = section === s.id
@@ -83,20 +83,20 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                   active ? 'bg-secondary font-medium text-primary' : 'text-muted-foreground hover:bg-secondary/60'
                 }`}
               >
-                <Icon className="h-4 w-4 shrink-0" />
+                <Icon className="h-[18px] w-[18px] shrink-0" />
                 {s.title}
               </button>
             )
           })}
         </nav>
 
-        <div className="min-w-0 flex-1 overflow-y-auto p-5">
+        <div className="min-w-0 flex-1 overflow-y-auto px-6 py-5">
           {notices.length > 0 && (
             <div className="mb-4 space-y-1.5">
               {notices.map((n) => (
                 <p
                   key={n.text}
-                  className={`rounded-md border px-3 py-1.5 text-xs ${
+                  className={`rounded-lg border px-3.5 py-2 text-[13px] leading-relaxed ${
                     n.level === 'error'
                       ? 'border-error/40 bg-error/5 text-error'
                       : 'border-line bg-muted/50 text-muted-foreground'
@@ -285,6 +285,62 @@ function PresetAvatar({ p, className }: { p: VendorPreset; className?: string })
   )
 }
 
+// --- 排版基本件（WorkBuddy 式）：卡片外框 / 设置行 / 开关，三个 section 共用 ----
+
+/** 设置卡片统一外框：白底靠描边区分层级（不用灰底强调），内边距放大 */
+function Card({ children, className }: { children: React.ReactNode; className?: string }) {
+  return <div className={cn('rounded-xl border border-line px-5 py-4', className)}>{children}</div>
+}
+
+/** 设置行：左「标题+描述」右控件。组内行标题 14/500，卡片独占行 cardTitle 15/600 */
+function SettingRow({
+  title,
+  desc,
+  children,
+  cardTitle,
+  className,
+}: {
+  title: React.ReactNode
+  desc?: React.ReactNode
+  children?: React.ReactNode
+  cardTitle?: boolean
+  className?: string
+}) {
+  return (
+    <div className={cn('flex items-center justify-between gap-4', className)}>
+      <div className="min-w-0">
+        <p className={cn('leading-snug', cardTitle ? 'text-[15px] font-semibold' : 'text-sm font-medium')}>{title}</p>
+        {desc && <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">{desc}</p>}
+      </div>
+      {children != null && <div className="shrink-0">{children}</div>}
+    </div>
+  )
+}
+
+/** 开关（替代原生 checkbox；off 态 line-2、on 态品牌蓝） */
+function Switch({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={cn(
+        'relative h-[22px] w-10 shrink-0 rounded-full transition-colors',
+        checked ? 'bg-primary' : 'bg-line-2',
+      )}
+    >
+      <span
+        className={cn(
+          'absolute left-0.5 top-0.5 h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-transform',
+          checked && 'translate-x-[18px]',
+        )}
+      />
+    </button>
+  )
+}
+
 function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSettings>> | undefined }) {
   const { toast } = useToast()
   const queryClient = useQueryClient()
@@ -362,40 +418,40 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-muted/30 px-4 py-3">
-        <div className="min-w-0">
-          <p className="text-sm font-medium">本地配置</p>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            模型与 API Key 均保存在本机数据库，不上传；勾选「图片输入」的模型用于知识库图片 / 扫描件识别。
-          </p>
-        </div>
-        <Button size="sm" className="shrink-0" onClick={() => setEditing('new')}>
-          <Plus className="mr-1 h-3.5 w-3.5" />
-          添加模型
-        </Button>
-      </div>
+      <Card>
+        <SettingRow
+          cardTitle
+          title="本地配置"
+          desc="模型与 API Key 均保存在本机数据库，不上传；勾选「图片输入」的模型用于知识库图片 / 扫描件识别。"
+        >
+          <Button size="sm" onClick={() => setEditing('new')}>
+            <Plus className="mr-1 h-3.5 w-3.5" />
+            添加模型
+          </Button>
+        </SettingRow>
+      </Card>
 
-      {models.length > 0 && <p className="text-xs font-medium text-muted-foreground">已保存模型</p>}
+      {models.length > 0 && <p className="text-[13px] font-medium text-muted-foreground">已保存模型</p>}
       {models.length === 0 && (
-        <p className="rounded-lg border border-dashed border-line p-6 text-center text-sm text-muted-foreground">
+        <p className="rounded-xl border border-dashed border-line p-6 text-center text-sm text-muted-foreground">
           还没有配置模型——点击「添加模型」，选一家厂商后只需填写 API Key
         </p>
       )}
 
       {models.map((m) => {
         return (
-          <div key={m.id} className="flex items-center gap-3 rounded-xl border border-line px-3.5 py-3">
+          <div key={m.id} className="flex items-center gap-3 rounded-xl border border-line px-4 py-3.5">
             <PresetAvatar p={presetOfBaseUrl(m.baseUrl) ?? CUSTOM_PRESET} />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
                 <span className="truncate text-sm font-medium">{m.name}</span>
                 {m.imageSupport && (
-                  <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-accent-soft px-1.5 py-px text-[10px] text-primary">
+                  <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-accent-soft px-1.5 py-px text-[11px] text-primary">
                     <ImageIcon className="h-2.5 w-2.5" />
                     图片
                   </span>
                 )}
-                <span className={cn('ml-auto shrink-0 text-[10px]', m.keySaved ? 'text-success' : 'text-error')}>
+                <span className={cn('ml-auto shrink-0 text-[11px]', m.keySaved ? 'text-success' : 'text-error')}>
                   {m.keySaved ? 'Key 已配置' : 'Key 未配置'}
                 </span>
               </div>
@@ -427,36 +483,28 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
 
       {error && <p className="text-sm text-error">{error}</p>}
 
-      <div className="space-y-3 rounded-xl border border-line bg-muted/30 px-4 py-3">
-        <p className="text-sm font-medium">后台任务模型</p>
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p className="text-[13px] font-medium">知识库 metadata 抽取</p>
-            <p className="text-xs text-muted-foreground">为上传条目建议类型与字段（可指定便宜模型省 token）</p>
-          </div>
+      <Card className="space-y-4">
+        <p className="text-[15px] font-semibold">后台任务模型</p>
+        <SettingRow title="知识库 metadata 抽取" desc="为上传条目建议类型与字段（可指定便宜模型省 token）">
           <RoleSelect
             value={roles.extract}
             emptyLabel="跟随默认模型"
             options={models.map((m) => ({ id: m.id, label: m.name }))}
             onChange={(pid) => void changeRole('extract', pid)}
           />
-        </div>
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p className="text-[13px] font-medium">知识库视觉转写</p>
-            <p className="text-xs text-muted-foreground">图片 / 扫描页转文字（仅列已勾选「图片输入」的模型）</p>
-          </div>
+        </SettingRow>
+        <SettingRow title="知识库视觉转写" desc="图片 / 扫描页转文字（仅列已勾选「图片输入」的模型）">
           <RoleSelect
             value={roles.vision}
             emptyLabel="自动（默认模型优先）"
             options={models.filter((m) => m.imageSupport).map((m) => ({ id: m.id, label: m.name }))}
             onChange={(pid) => void changeRole('vision', pid)}
           />
-        </div>
-        <p className="text-[11px] text-muted-foreground">
+        </SettingRow>
+        <p className="text-xs leading-relaxed text-muted-foreground">
           文档解析本身不走大模型（本地确定性解析 + PaddleOCR-VL 云端）；这里的模型只用于解析后的后台轻任务。
         </p>
-      </div>
+      </Card>
 
       {editing !== null && (
         <ModelDialog
@@ -509,7 +557,7 @@ function RoleSelect({
         setOpen(false)
       }}
       className={cn(
-        'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs',
+        'flex w-full items-center gap-2 px-2.5 py-2 text-left text-[13px]',
         pid === value ? 'bg-accent-soft' : 'hover:bg-secondary',
       )}
     >
@@ -532,11 +580,11 @@ function RoleSelect({
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="flex h-7 items-center gap-1.5 rounded-md border border-line bg-card px-2 text-xs transition-colors hover:bg-secondary/50"
+        className="flex h-8 items-center gap-1.5 rounded-lg border border-line bg-card px-2.5 text-[13px] transition-colors hover:bg-secondary/50"
         title="后台任务使用的模型"
       >
-        <span className="max-w-[170px] truncate">{value ? (current?.label ?? value) : emptyLabel}</span>
-        <ChevronDown className={cn('h-3 w-3 text-muted-foreground transition-transform', open && 'rotate-180')} />
+        <span className="max-w-[180px] truncate">{value ? (current?.label ?? value) : emptyLabel}</span>
+        <ChevronDown className={cn('h-3.5 w-3.5 text-muted-foreground transition-transform', open && 'rotate-180')} />
       </button>
 
       {open && (
@@ -881,7 +929,7 @@ function ModelDialog({
       {/* 不能加 overflow-hidden：提供商下拉要从卡片里溢出来，加了会把「自定义」裁掉 */}
       <div className="relative z-10 flex w-[min(92vw,480px)] flex-col rounded-2xl border bg-card shadow-md">
         <div className="flex items-center gap-2.5 border-b border-line px-5 py-4">
-          <h3 className="text-[15px] font-semibold">{isNew ? '添加模型' : '编辑模型'}</h3>
+          <h3 className="text-base font-semibold">{isNew ? '添加模型' : '编辑模型'}</h3>
           <span className="rounded-full bg-muted px-2.5 py-1 text-[11px] text-muted-foreground">
             仅支持 OpenAI 兼容协议 API
           </span>
@@ -895,7 +943,7 @@ function ModelDialog({
           </button>
         </div>
 
-        <div className="space-y-4 px-5 py-4">
+        <div className="space-y-5 px-5 py-5">
           <Field label="提供商">
             <ProviderSelect value={providerKey} onChange={applyProvider} />
           </Field>
@@ -966,16 +1014,9 @@ function ModelDialog({
             )}
           </Field>
 
-          <label className="flex cursor-pointer items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={imageSupport}
-              onChange={(e) => setImageSupport(e.target.checked)}
-              className="accent-[var(--brand)]"
-            />
-            图片输入
-            <span className="text-xs text-muted-foreground">勾选后用于知识库图片 / 扫描件识别</span>
-          </label>
+          <SettingRow title="图片输入" desc="勾选后用于知识库图片 / 扫描件识别">
+            <Switch checked={imageSupport} onChange={setImageSupport} label="图片输入" />
+          </SettingRow>
         </div>
 
         <div className="flex items-center gap-2 border-t border-line px-5 py-3.5">
@@ -1043,17 +1084,17 @@ function ParseSection() {
   return (
     <div className="space-y-4">
       <div>
-        <div className="text-sm font-medium">百度云文档解析（PaddleOCR-VL）</div>
-        <p className="mt-0.5 text-xs text-muted-foreground">
+        <div className="text-[15px] font-semibold">百度云文档解析（PaddleOCR-VL）</div>
+        <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
           用于扫描版 PDF、.doc 与图片的云端识别（任务文件区与知识库通用）。按量计费，
           文件内容将发送至百度智能云；不配置时这些文件仅能存档，数字版 PDF 与
           .docx 不受影响（始终本地解析）。
         </p>
       </div>
 
-      <div className="space-y-3 rounded-lg border border-line p-3">
+      <Card className="space-y-4">
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
+          <label className="text-[13px] font-medium text-muted-foreground">
             API Key（AK）{configured && <span className="text-success">（已保存）</span>}
           </label>
           <Input
@@ -1064,7 +1105,7 @@ function ParseSection() {
           />
         </div>
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">Secret Key（SK）</label>
+          <label className="text-[13px] font-medium text-muted-foreground">Secret Key（SK）</label>
           <div className="relative">
             <Input
               type={showSecret ? 'text' : 'password'}
@@ -1092,7 +1133,7 @@ function ParseSection() {
           </Button>
         </div>
         {error && <p className="text-sm text-error">{error}</p>}
-      </div>
+      </Card>
     </div>
   )
 }
@@ -1115,8 +1156,8 @@ function GeneralSection({ settings }: { settings: Awaited<ReturnType<typeof getS
 
   return (
     <div className="space-y-4">
-      <div className="space-y-3 rounded-lg border border-line p-3">
-        <div className="text-sm font-medium">存储与日志</div>
+      <Card className="space-y-4">
+        <div className="text-[15px] font-semibold">存储与日志</div>
         {settings && (
           <>
             <PathRow
@@ -1133,11 +1174,11 @@ function GeneralSection({ settings }: { settings: Awaited<ReturnType<typeof getS
             />
           </>
         )}
-      </div>
-      <div className="rounded-lg border border-line p-3 text-sm">
+      </Card>
+      <Card className="text-sm">
         <span className="text-muted-foreground">版本</span>
         <span className="ml-2 font-mono text-xs">{version}</span>
-      </div>
+      </Card>
     </div>
   )
 }
@@ -1155,9 +1196,9 @@ function PathRow({
 }) {
   const tauri = isTauri()
   return (
-    <div className="space-y-0.5">
+    <div className="space-y-1">
       <div className="flex items-center gap-2">
-        <span className="w-16 shrink-0 text-xs font-medium text-muted-foreground">{label}</span>
+        <span className="w-20 shrink-0 text-[13px] font-medium text-muted-foreground">{label}</span>
         <code className="min-w-0 flex-1 truncate rounded bg-muted/60 px-2 py-0.5 font-mono text-xs">{path}</code>
         {tauri && (
           <Button size="sm" variant="outline" onClick={() => onReveal(path)}>
@@ -1165,7 +1206,7 @@ function PathRow({
           </Button>
         )}
       </div>
-      <p className="pl-[4.5rem] text-xs text-muted-foreground">{hint}</p>
+      <p className="pl-[5.5rem] text-xs leading-relaxed text-muted-foreground">{hint}</p>
     </div>
   )
 }

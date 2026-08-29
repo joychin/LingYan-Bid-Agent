@@ -6,7 +6,6 @@
 
 
 from app import artifact_store
-
 from tests.util import create_task
 
 

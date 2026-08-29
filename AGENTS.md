@@ -69,6 +69,18 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    原样保留，前端「查看参数」仍可见全量）；暂停落库消息在续跑段终止且无新产出时
    经 `db.retire_pause_marker` 把「（等待你的输入…）」改写为「（任务中断）」
    （runs.pause_msg_id 记录暂停消息，PRAGMA 探测 ALTER 迁移）。
+   **契约 additive 扩展（2026-08-28 思考档位）**：`POST /messages` 请求体加
+   `thinking`（low/medium/high，缺省 low；标准 `reasoning_effort` 直传模型，
+   **无关闭项**——deepseek-v4-flash 等现代模型默认开思考）。runs 表加 `thinking`
+   列存档（迁移 10；HITL resume 沿用首段档位、旧库空串兜底 low）。注入点=
+   `agent._RunAwareChatDeepSeek`：覆写 `_get_request_payload` 现读 `runctx` 档位
+   （contextvars 随 to_thread 线程拷贝传播，ToolNode 并行走 langchain_core 的
+   ContextThreadPoolExecutor 同样拷贝 context——子代理派发后模型调用仍读到档位；
+   主 agent 与子代理共用实例、并发 run 互不串扰）；titler 是独立实例不受影响。
+   前端 `ThinkingSelect` 胶囊（composer 底栏 ModelSelect 旁，localStorage
+   `tender-agent.thinking-level` 记忆、默认低，ChatView 持有态——无会话首发的
+   initialSend 路径也要带上）。思考内容显示链路（agent.reasoning 事件 /
+   run_traces.reasoning / DeepThinking 组件）零改动。
    **契约 additive 扩展（2026-08-28 设置重构与文档解析）**：GET /settings 响应加
    `llm.image_support`、顶层 `ocr.configured`（百度 AK/SK 两 env 齐）与
    `paths.{data_dir,log_file}`；PUT 接受 `llm.image_support`（只存 settings.json、
@@ -96,11 +108,30 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    default）；runs 加 `model` 列（迁移 11，resume 沿用）；agent 从进程级单例改
    **`dict[profile_id]` 缓存**（get_agent(pid)、rebuild=清缓存、saver 共享、in-flight
    持引用互不影响、子代理继承同实例）；titler/KB 抽取恒走 default profile（`llm_*`
-   薄壳保留）。前端：设置模型区改**列表制**（卡片+★默认+编辑/删除+添加表单：厂商
-   预设胶囊→选模型→填 Key；预设带每家模型清单与图片标记）；`ModelSelect` 重写为
-   **下拉选择器**（列全部模型+Check+「管理模型…」尾项，克隆 ThinkingSelect 模式）；
-   选中按会话粘性（localStorage `model-by-conv` map + `model-last`），随每条消息发送。
-   Key 输入框浏览器/桌面两模式统一（都走 HTTP，保存即时生效无重启）。
+   薄壳保留）。前端：设置模型区改**列表制**（厂商色块+图标行操作+「本地配置」
+   说明卡；**无默认标识**——default_model 仅作后台兜底=列表首位，用户不可见亦不可选，
+   2026-08-29 用户明令「默认没有任何义务意义」）；添加/编辑走**二级弹窗**（WorkBuddy
+   式 2026-08-29）：标题带「仅支持 OpenAI 兼容协议 API」徽标，提供商可搜索分组下拉
+   （厂商色块；预设=只填 Key+选模型，自定义才露接口地址，模型名下拉带「自定义模型
+   名…」逃生口），显示名自动派生不再手填，保存=putModels+putModelKey 一键（测试=先
+   静默保存再 ping）；**弹窗卡片不能加 overflow-hidden**（提供商下拉要溢出卡片，加了
+   会把「自定义」裁掉）；厂商预设模型清单 2026-08-29 按各家官方文档刷新
+   （DeepSeek V4 系/Kimi k3+K2 系/百炼 qwen3-max+qwen3-vl-plus/智谱 glm-5.x+4.6v/
+   豆包 seed-1.6/MiniMax-M2.5 新增/OpenAI gpt-5.x），会过时、少而精；`ModelSelect`
+   重写为**下拉选择器**（列全部模型+Check+「管理模型…」尾项，克隆 ThinkingSelect
+   模式）；选中按会话粘性（localStorage `model-by-conv` map + `model-last`），
+   随每条消息发送。Key 输入框浏览器/桌面两模式统一（都走 HTTP，保存即时生效无重启）。
+   **二级弹窗 Escape 分层（下拉→弹窗→设置窗逐层关）**：点「添加模型」后焦点常停在
+   弹窗后面的列表按钮上，keydown 目标不在卡片子树，卡片上的 React onKeyDown 根本
+   不在传播路径（事件直达 window 会把设置窗一起关掉）→ 弹窗必须挂 window **捕获段**
+   Escape 监听；下拉打开时经容器 `data-dropdown-open` 标记让位，由下拉自身的
+   React handler stopPropagation 截停在 React root。
+   env 只作兜底读取）。**后台任务模型角色（2026-08-29）**：app_settings 增
+   `background_roles`（{extract, vision}，空=跟随缺省）——知识库 metadata 抽取走
+   `resolve_extract_profile()`（显式>default），视觉转写 `resolve_vision()` 改
+   显式 vision 角色>自动解析；PUT /settings/models 可选收 background_roles
+   （不传=保留现值）；设置模型区「后台任务模型」小节两下拉。文档解析本身仍是
+   确定性管线（解析不走 LLM，角色只覆盖解析后的轻任务）。
    **关不掉 bug 教训**：ModalShell 无 open 概念，SettingsModal 必须 `if (!open) return null`
    ——双栏重构时丢过一次（设置窗常驻、关闭回调全生效但 UI 永不卸载）。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
@@ -139,7 +170,7 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   输入区选择器就地新建）；`app/tools/publish.py`（LLM `publish_artifact`，草稿限当前任务
   `drafts/`，未知契约收拢 doc.note）；`app/tools/read.py`（`read_artifact` 读序两级；
   task-multi 用 artifact_id 指定）；`app/tools/task_progress.py`（进度便签）；
-  `app/runctx.py`（contextvars 传 cid/rid/task_id）。
+  `app/runctx.py`（contextvars 传 cid/rid/task_id/thinking 思考档位）。
   `out/` 是**任务级**技能工作台（`<task>/out/`：parse→analysis→outline→body 的中间产物），
   跨任务互不串台；目录按需创建，启动不预建。
 - **投标流水线 Phase 1（2026-08-25，入口段 2026-08-26 重构）**：旧 tender-toc skill

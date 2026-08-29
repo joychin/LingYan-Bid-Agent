@@ -12,8 +12,9 @@ const MIN_W = 240
 const MAX_W = 560
 
 /**
- * Workspace 右栏产物面板 v2：一棵朴素文件夹树——任务名为根，项目文件/会话产物
- * 是它的一级子文件夹，往下纯嵌套（工作台 = 任务 out/ 的 md 过程产物）。
+ * Workspace 右栏产物面板 v2：一棵朴素文件夹树——项目文件/会话产物/工作文件
+ * 三根平铺（面板只展示当前任务，任务名不再占一层根），往下纯嵌套
+ * （工作台 = 任务 out/ 的 md 过程产物）。
  * 行上不带任何小字后缀（修订/来源状态在查看器头部徽章条里看）。
  * 无任务上下文（草稿态）时 App 不渲染本面板。
  */
@@ -152,22 +153,20 @@ export function ArtifactPanel({
         </div>
 
         <div className="product-body file-tree">
-          <TreeFolder title={currentTask?.title ?? '任务'}>
-            <TreeFolder
-              title="项目文件"
-              loading={loadingTask}
-              empty={taskArtifacts.length === 0 ? '暂无 · 转正自会话产物' : undefined}
-            >
-              {taskArtifacts.map(artifactRow)}
-            </TreeFolder>
-            <TreeFolder
-              title={convTitle ? `会话产物 · ${convTitle}` : '会话产物'}
-              loading={loadingConv}
-              empty={convArtifacts.length === 0 && workbench.length === 0 ? '暂无' : undefined}
-            >
-              {convArtifacts.map(artifactRow)}
-              <WorkbenchTree files={workbench} loading={loadingWorkbench} row={wbRow} />
-            </TreeFolder>
+          <TreeFolder
+            title="项目文件"
+            loading={loadingTask}
+            empty={taskArtifacts.length === 0 ? '暂无 · 转正自会话产物' : undefined}
+          >
+            {taskArtifacts.map(artifactRow)}
+          </TreeFolder>
+          <TreeFolder
+            title={convTitle ? `会话产物 · ${convTitle}` : '会话产物'}
+            loading={loadingConv}
+            empty={convArtifacts.length === 0 && workbench.length === 0 ? '暂无' : undefined}
+          >
+            {convArtifacts.map(artifactRow)}
+            <WorkbenchTree files={workbench} loading={loadingWorkbench} row={wbRow} />
           </TreeFolder>
         </div>
       </aside>

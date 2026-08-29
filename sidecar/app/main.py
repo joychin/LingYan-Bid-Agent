@@ -20,8 +20,7 @@ from fastapi.responses import JSONResponse
 
 from . import config as cfg
 from . import db
-from .api import artifacts, conversations, files, knowledge, runs, sse, tasks
-from .api import workbench
+from .api import artifacts, conversations, files, knowledge, runs, sse, tasks, workbench
 from .api import settings as settings_api
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"

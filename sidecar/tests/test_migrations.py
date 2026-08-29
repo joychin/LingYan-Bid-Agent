@@ -98,6 +98,7 @@ def test_legacy_db_migrates_and_preserves_rows(monkeypatch, tmp_path):
             ("runs", "interrupt"),
             ("runs", "last_seq"),
             ("runs", "pause_msg_id"),
+            ("runs", "thinking"),
             ("run_traces", "duration_ms"),
             ("run_traces", "reasoning"),
             ("conversations", "task_id"),
@@ -106,6 +107,9 @@ def test_legacy_db_migrates_and_preserves_rows(monkeypatch, tmp_path):
         ):
             cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
             assert column in cols, f"{table}.{column} 未迁移"
+
+        # 旧 run 行 thinking 默认空串（读取方兜底 low）
+        assert c.execute("SELECT thinking FROM runs WHERE id='r1'").fetchone()["thinking"] == ""
 
         # runs 重建后 waiting_input 可写、旧行完好（同一断言集）
         c.execute(
