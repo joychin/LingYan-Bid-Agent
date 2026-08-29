@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronRight, FileText, Maximize2, Minimize2, PanelRightClose } from 'lucide-react'
+import { ChevronDown, ChevronRight, FileText, Maximize2, Minimize2 } from 'lucide-react'
 import type { Artifact, Task, WorkbenchFile } from '@/api/client'
 import { useConversationArtifacts, useTaskArtifacts } from '@/hooks/useArtifacts'
 import { useWorkbench } from '@/hooks/useWorkbench'
@@ -12,6 +12,13 @@ import { cn } from '@/lib/utils'
 const DEFAULT_W = 300
 const MIN_W = 240
 const MAX_W = 560
+/* 工作区覆盖态（.ap-shell.wide）宽度：与窄态列宽分开记忆；可拖面板左缘调节，
+ * 上限动态计算给聊天区留 ≥360px */
+const WS_DEFAULT_W = 1000
+const WS_MIN_W = 640
+const wsMaxW = () => Math.max(WS_MIN_W, window.innerWidth - 360)
+/* 窄态列宽上限同样视口感知：聊天区至少留 360px（侧栏按 264 估），小窗口拖不 crush 聊天 */
+const navMaxW = () => Math.max(MIN_W, Math.min(MAX_W, window.innerWidth - 264 - 360))
 
 /**
  * 产物面板 v3（方案 v2 阶段 4a/4b）：作用域分组列表 + 覆盖式工作区。
@@ -19,8 +26,9 @@ const MAX_W = 560
  * 三分组 = 任务正式成果 / 本会话产物 / 任务工作台（默认折叠）；行 = 名称 + 一个状态标
  * （[任务基线]/[待转正]/[仅本会话]/[可重生成]/[解析只读]），提升动作（转正）hover 淡入、
  * 走 PromoteConfirmModal 确认。最深缩进 ≤2 层；转正信息对（同名正式稿↔草稿）分组相邻。
- * previewId / workbenchPath 非空时进入工作区态：面板向左覆盖展开（880px，不挤压聊天），
- * 编辑器（ArtifactOpenHost / WorkbenchViewer）嵌入右侧；Esc 或关闭按钮收起。
+ * previewId / workbenchPath 非空时进入工作区态：面板向左覆盖展开（默认 1000px、
+ * 拖左缘 640px～视口-360 可调，不挤压聊天），编辑器（ArtifactOpenHost / WorkbenchViewer）
+ * 嵌入右侧；Esc 退回列表，右上角钉角开关收起整个面板（再展开回到原编辑位置）。
  */
 
 /** 工作台文件显示名：分析八件+目录主文件用业务名，其余用文件名。 */
@@ -45,7 +53,6 @@ export function ArtifactPanel({
   onOpen,
   onOpenWorkbench,
   onClearPreview,
-  onCollapse,
 }: {
   currentConvId: string | null
   currentTask: Task | null
@@ -55,12 +62,12 @@ export function ArtifactPanel({
   onOpen: (id: string) => void
   onOpenWorkbench: (path: string) => void
   onClearPreview: () => void
-  onCollapse: () => void
 }) {
   const { data: taskArtifacts = [], isLoading: loadingTask } = useTaskArtifacts(currentTask?.id ?? null)
   const { data: convArtifacts = [], isLoading: loadingConv } = useConversationArtifacts(currentConvId)
   const { data: workbench = [], isLoading: loadingWorkbench } = useWorkbench(currentTask?.id ?? null)
   const [width, setWidth] = useState(DEFAULT_W)
+  const [wsWidth, setWsWidth] = useState(() => Math.min(WS_DEFAULT_W, wsMaxW()))
   const [wbOpen, setWbOpen] = useState(false)
   const [promoteTarget, setPromoteTarget] = useState<Artifact | null>(null)
   const [dragging, setDragging] = useState(false)
@@ -154,7 +161,7 @@ export function ArtifactPanel({
       >
         <aside
           className={cn('ap-shell', wsOpen && 'wide', collapsed && 'collapsed', dragging && 'dragging')}
-          style={collapsed || wsOpen ? undefined : { width }}
+          style={collapsed ? undefined : { width: wsOpen ? wsWidth : width }}
         >
           <div className="ap-nav">
           <div
@@ -166,7 +173,10 @@ export function ArtifactPanel({
               setDragging(true)
               const onMove = (ev: MouseEvent) => {
                 if (!appRect.current) return
-                setWidth(Math.max(MIN_W, Math.min(MAX_W, appRect.current.right - ev.clientX)))
+                const next = appRect.current.right - ev.clientX
+                // 窄态调列宽、宽态调整个浮层宽度（用户明令：展开态也能拖左缘调宽）
+                if (wsOpen) setWsWidth(Math.max(WS_MIN_W, Math.min(wsMaxW(), next)))
+                else setWidth(Math.max(MIN_W, Math.min(navMaxW(), next)))
               }
               const onUp = () => {
                 setDragging(false)
@@ -198,9 +208,6 @@ export function ArtifactPanel({
                   <Maximize2 />
                 </button>
               )}
-              <button type="button" className="panel-btn" title="收起产物面板" onClick={onCollapse}>
-                <PanelRightClose />
-              </button>
             </div>
           </div>
 
@@ -294,10 +301,9 @@ export function ArtifactPanel({
                 taskId={currentTask?.id ?? null}
                 conversationId={currentConvId}
                 path={workbenchPath}
-                onClose={onClearPreview}
               />
             ) : (
-              <ArtifactOpenHost artifactId={previewId} onClose={onClearPreview} />
+              <ArtifactOpenHost artifactId={previewId} />
             ))}
         </aside>
       </div>

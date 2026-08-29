@@ -6,7 +6,6 @@ import {
   FolderOpen,
   MoreHorizontal,
   Package,
-  PanelLeftClose,
   Pencil,
   Plus,
   Settings,
@@ -42,7 +41,6 @@ export interface SidebarProps {
   activeView?: 'chat' | 'kb'
   onOpenSettings: () => void
   collapsed: boolean
-  onCollapse: () => void
 }
 
 const SIDE_DEFAULT_W = 264
@@ -75,7 +73,6 @@ export function Sidebar({
   activeView = 'chat',
   onOpenSettings,
   collapsed,
-  onCollapse,
 }: SidebarProps) {
   const { data: conversations = [], isLoading } = useConversations()
   const { data: tasks = [] } = useTasks()
@@ -218,20 +215,9 @@ export function Sidebar({
           window.addEventListener('mouseup', onUp)
         }}
       />
-      {/* 收缩钮常驻侧栏头部最左（mac 上红绿灯右侧）；收起后展开钮由 ChatHeader 接管 */}
-      <div className="side-head" data-tauri-drag-region>
-        <button
-          type="button"
-          className="head-toggle"
-          title="收起侧栏"
-          onClick={() => {
-            setWidth(SIDE_DEFAULT_W)
-            onCollapse()
-          }}
-        >
-          <PanelLeftClose />
-        </button>
-      </div>
+      {/* 收缩开关是钉在窗口左上角的固定按钮（App 渲染 .head-toggle.pin-left），
+          面板从其下方滑入滑出；此行仅承载 mac 红绿灯让位高度 */}
+      <div className="side-head" data-tauri-drag-region />
       <div className="side-scroll">
         <div className="quick-list">
           <NavRow icon={<Plus />} label="新建任务" onClick={onNewSession} />

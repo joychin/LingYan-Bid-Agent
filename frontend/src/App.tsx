@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { Sidebar } from '@/components/Sidebar'
 import { ChatView } from '@/components/ChatView'
 import { ChatHeader } from '@/components/ChatHeader'
@@ -92,22 +93,14 @@ export default function App() {
         activeView={activeView}
         onOpenSettings={() => setSettingsOpen(true)}
         collapsed={sidebarCollapsed}
-        onCollapse={toggleSidebar}
       />
       <main className="main">
         <SidecarBanner />
         {activeView === 'kb' ? (
-          <KnowledgeView sidebarOpen={!sidebarCollapsed} onToggleSidebar={toggleSidebar} />
+          <KnowledgeView />
         ) : (
           <>
-            <ChatHeader
-              task={currentTask}
-              conversation={viewConv}
-              sidebarCollapsed={sidebarCollapsed}
-              onToggleSidebar={toggleSidebar}
-              rightCollapsed={artifactsCollapsed}
-              onToggleRight={toggleArtifacts}
-            />
+            <ChatHeader task={currentTask} conversation={viewConv} />
             <ChatView
               key={viewConvId ?? 'root'}
               convId={viewConvId}
@@ -136,8 +129,28 @@ export default function App() {
             setPreviewId(null)
             setWorkbenchPath(null)
           }}
-          onCollapse={toggleArtifacts}
         />
+      )}
+      {/* 左右面板固定开关（用户定稿 2026-08-29，对齐 ZCode 手感）：钉在窗口顶角，
+          位置不随面板开合变化，面板从其下方滑入滑出，按钮只换图标（图标即状态）。
+          z 40 浮于两侧面板头之上、低于模态 z-50 */}
+      <button
+        type="button"
+        className="head-toggle pin-left"
+        title={sidebarCollapsed ? '展开侧栏' : '收起侧栏'}
+        onClick={toggleSidebar}
+      >
+        {sidebarCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+      </button>
+      {activeView !== 'kb' && currentTask && (
+        <button
+          type="button"
+          className="head-toggle pin-right"
+          title={artifactsCollapsed ? '展开产物面板' : '收起产物面板'}
+          onClick={toggleArtifacts}
+        >
+          {artifactsCollapsed ? <PanelRightOpen /> : <PanelRightClose />}
+        </button>
       )}
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>

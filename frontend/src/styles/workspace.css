@@ -144,7 +144,7 @@
   border-radius: 6px;
   background: transparent;
   color: var(--ink-2);
-  cursor: pointer;
+  cursor: default;
   display: grid;
   place-items: center;
 }
@@ -158,6 +158,27 @@
   stroke: currentColor;
   fill: none;
   stroke-width: 2;
+}
+/* 固定面板开关（用户定稿 2026-08-29，ZCode 式顺滑的关键）：钉在窗口顶角、
+ * 位置不随面板开合变化，面板从其下方滑入滑出，按钮只换图标 */
+.head-toggle.pin-left {
+  position: absolute;
+  left: 16px;
+  top: 13px;
+  z-index: 40;
+}
+.head-toggle.pin-right {
+  position: absolute;
+  right: 16px;
+  top: 13px;
+  z-index: 40;
+}
+:root.mac-tauri .head-toggle.pin-left,
+:root.mac-tauri .head-toggle.pin-right {
+  top: 20px; /* 中心 32 = 红绿灯中心线 */
+}
+:root.mac-tauri .head-toggle.pin-left {
+  left: 78px; /* 让出灯簇 x 13–73 */
 }
 .side-scroll {
   overflow-y: auto;
@@ -588,11 +609,13 @@
 .chat-head {
   flex: none;
   height: 50px;
-  padding: 0 16px;
+  /* 右侧 44px 常驻让位：右面板收起后钉角开关落在主区右上角 */
+  padding: 0 44px 0 16px;
   border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
   gap: 8px;
+  transition: padding 0.2s ease;
 }
 .chat-head-inner {
   flex: 1;
@@ -1486,11 +1509,18 @@
 }
 /* 侧栏收起后主区顶到窗口左缘：header 行高 50、内容原居中在 25，
  * padding-top 14 + flex 居中 → 中心 32 = 红绿灯中心线，水平让出灯簇 78px */
+/* 侧栏收起后，钉在窗口左上角的固定开关落在主区上：标题让出按钮位（16+24+8） */
+.side.collapsed ~ .main .chat-head {
+  padding-left: 48px;
+}
+.side.collapsed ~ .main .kb-side-head {
+  padding-left: 48px;
+}
 :root.mac-tauri .side.collapsed ~ .main .chat-head {
-  padding: 14px 16px 0 78px;
+  padding: 14px 44px 0 110px;
 }
 :root.mac-tauri .side.collapsed ~ .main .kb-side-head {
-  padding: 14px 16px 0 78px;
+  padding: 14px 16px 0 110px;
 }
 :root.mac-tauri .side.collapsed ~ .main .sidecar-banner {
   padding-left: 78px;
@@ -1701,7 +1731,8 @@
   background: var(--line);
 }
 .ap-shell.wide {
-  width: 880px;
+  /* 兜底默认；实际宽度由组件内联 wsWidth 驱动（默认 1000，拖左缘 640～视口-360） */
+  width: 1000px;
   box-shadow: -24px 0 48px rgba(16, 24, 40, 0.22), -2px 0 0 rgba(16, 24, 40, 0.06);
 }
 .ap-shell.wide::after {
@@ -1725,7 +1756,8 @@
   align-items: center;
   gap: 6px;
   height: 50px;
-  padding: 0 12px 0 16px;
+  /* 右侧 48px 让位：钉角收缩开关悬浮于此（App 渲染 .head-toggle.pin-right） */
+  padding: 0 48px 0 16px;
   flex: none;
   /* 与 ChatHeader 同色同高同分隔线（用户明令）：中栏+右栏 header 连成一条白带，
    * 面板体仍是 --panel 灰，header 靠这条底线与 body 分界 */
@@ -1948,7 +1980,9 @@
   align-items: center;
   gap: 8px;
   height: 50px;
-  padding: 0 12px;
+  /* 右侧 48px 让位：编辑器头部不再放关闭钮（右上角归钉角开关，App 级 .pin-right），
+     回列表走 Esc 或导航列头部「缩小面板」 */
+  padding: 0 48px 0 12px;
   border-bottom: 1px solid var(--line);
   flex: none;
 }
@@ -2240,11 +2274,10 @@
   padding: 0 16px;
   flex: none;
 }
-.kb-side-head-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
+/* 顶部栏按钮光标用系统箭头（用户明令 2026-08-29：非手型更现代）；其余可点区域仍走全局手型 */
+.panel-btn,
+.kb-add {
+  cursor: default;
 }
 .kb-title {
   font-size: 14px;

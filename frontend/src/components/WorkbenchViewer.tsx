@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
-import { History, Loader2, NotebookPen, Pencil, X } from 'lucide-react'
+import { History, Loader2, NotebookPen, Pencil } from 'lucide-react'
 import {
   getWorkbenchContent,
   putWorkbenchContent,
@@ -50,12 +50,10 @@ export function WorkbenchViewer({
   taskId,
   conversationId,
   path,
-  onClose,
 }: {
   taskId: string | null
   conversationId: string | null
   path: string | null
-  onClose: () => void
 }) {
   const { toast } = useToast()
   const queryClient = useQueryClient()
@@ -265,7 +263,7 @@ export function WorkbenchViewer({
 
   return (
     <div className="ap-ws">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b pl-4 pr-12 py-3">
         <span className="truncate text-sm font-semibold">{display}</span>
         <span className="rounded-full bg-accent px-2 py-0.5 text-xs text-muted-foreground">工作台</span>
         {header['主文件'] && (
@@ -328,14 +326,6 @@ export function WorkbenchViewer({
               完成编辑
             </button>
           )}
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label="关闭"
-          >
-            <X className="h-4 w-4" />
-          </button>
         </div>
       </div>
 

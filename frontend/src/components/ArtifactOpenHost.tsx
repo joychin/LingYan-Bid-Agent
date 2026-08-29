@@ -7,14 +7,14 @@
  * 不感知任何契约的领域结构。
  */
 
-import { FileText, FolderOpen, Puzzle, X } from 'lucide-react'
+import { FileText, FolderOpen, Puzzle } from 'lucide-react'
 import { artifactKey, isTauri, revealInFolder } from '@/api/client'
 import { useArtifacts, useArtifactContent } from '@/hooks/useArtifacts'
 import { contractLabel, resolveProcessor } from '@/artifacts/registry'
 import { formatRelativeTime, cn } from '@/lib/utils'
 import { useToast } from '@/context/Toast'
 
-export function ArtifactOpenHost({ artifactId, onClose }: { artifactId: string | null; onClose: () => void }) {
+export function ArtifactOpenHost({ artifactId }: { artifactId: string | null }) {
   const { data: artifacts = [] } = useArtifacts()
   const { data, isLoading, isError, error } = useArtifactContent(artifactId)
   const { toast } = useToast()
@@ -51,9 +51,6 @@ export function ArtifactOpenHost({ artifactId, onClose }: { artifactId: string |
               在文件夹中显示
             </button>
           )}
-          <button type="button" className="panel-btn" onClick={onClose} aria-label="关闭">
-            <X />
-          </button>
         </div>
       </div>
       <div className="ap-ws-body">
