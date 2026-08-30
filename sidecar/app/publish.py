@@ -112,7 +112,7 @@ def publish_artifact(
         if existing is not None:
             aid = existing["artifact_id"]
             # 发布即覆盖（文件夹语义）：被覆盖的当前内容先留恢复点，用户可一键恢复上一版
-            prev = artifact_store.read_content(aid, existing)
+            prev = artifact_store.read_content_resolved(aid, existing)
             if prev is not None:
                 artifact_store.save_restore_point(aid, existing, existing["content_seq"], prev)
             artifact_store.replace_current_content(aid, existing, content_text)

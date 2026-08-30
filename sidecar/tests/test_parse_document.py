@@ -717,3 +717,15 @@ def test_same_stem_docx_and_pdf_do_not_collide(ws):
     assert "| 包号 |" not in pdf_md
     meta_docx = json.loads((base / "招标文件.docx" / "招标文件.docx.meta.json").read_text(encoding="utf-8"))
     assert meta_docx["source"] == "招标文件.docx"
+
+
+def test_write_atomic_replaces_and_cleans_tmp(tmp_path):
+    """解析产物原子写：覆盖更新生效、临时文件清理、读者不见截断内容。"""
+    from app.parse import write_atomic
+
+    p = tmp_path / "sub" / "f.json"
+    write_atomic(p, "v1")
+    assert p.read_text(encoding="utf-8") == "v1"
+    write_atomic(p, "v2-longer-content")
+    assert p.read_text(encoding="utf-8") == "v2-longer-content"
+    assert list(p.parent.glob("*.tmp")) == []

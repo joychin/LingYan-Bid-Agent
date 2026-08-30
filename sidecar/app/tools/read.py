@@ -101,7 +101,7 @@ def read_artifact(contract: str, artifact_id: str = "") -> str:
             return f"[无成果] 当前还没有「{c.default_display_name}」（{contract}）；请先运行相应流程生成。"
         where = "会话过程稿" if row.get("conversation_id") else "任务正式稿"
 
-    raw = artifact_store.read_content(row["artifact_id"], row)
+    raw = artifact_store.read_content_resolved(row["artifact_id"], row)
     if raw is None:
         return "[读取失败] 成果文件读取失败，请稍后重试"
     # 校验可解析（正常必然可解析；防御磁盘内容被手工破坏）

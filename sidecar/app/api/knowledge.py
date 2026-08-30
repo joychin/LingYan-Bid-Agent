@@ -211,7 +211,14 @@ async def get_item_content(kid: str):
     if not item:
         raise HTTPException(status_code=404, detail="条目不存在")
     md_path, _, _ = store.kb_parse_paths(item["file_name"])
-    text = md_path.read_text(encoding="utf-8") if md_path.is_file() else ""
+    # 仅解析完成的条目吐正文：重新识别（parsing）期间盘上还是旧 md，直接返回会把
+    # 旧内容当新内容渲染（前端落回「解析中」分支）；failed 同理不吐半截产物。
+    # 降级条目（图片收原件）parse_status 也是 ready、只是 md 缺失返回空串走原件预览。
+    text = (
+        md_path.read_text(encoding="utf-8")
+        if item["parse_status"] == "ready" and md_path.is_file()
+        else ""
+    )
     return {"id": kid, "content": text, "meta": _parse_summary(item["file_name"])}
 
 
@@ -267,7 +274,9 @@ async def retrigger(kid: str):
     item = db.kb_get_item(kid)
     if not item:
         raise HTTPException(status_code=404, detail="条目不存在")
-    schedule_ingest(kid)
+    if not schedule_ingest(kid):
+        # 单飞跳过：明确告知而非 202 静默（前端据此 toast「识别进行中」）
+        raise HTTPException(status_code=409, detail="该条目正在识别中，请稍候")
     return {"ok": True}
 
 

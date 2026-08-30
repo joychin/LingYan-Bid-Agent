@@ -98,6 +98,9 @@ CREATE INDEX IF NOT EXISTS idx_runs_conv ON runs(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_run_traces_message ON run_traces(message_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_index_scope
   ON artifact_index(task_id, conversation_id, kind, schema_id, schema_version);
+-- run 边界 pending_emit（WHERE last_run_id=? AND emitted=0）：每次 run 收尾一次
+CREATE INDEX IF NOT EXISTS idx_artifact_index_last_run
+  ON artifact_index(last_run_id, emitted);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_items_hash ON kb_items(file_hash);
 CREATE INDEX IF NOT EXISTS idx_kb_items_review ON kb_items(review_status);
 """
@@ -483,6 +486,27 @@ def set_setting(key: str, value: str) -> None:
         conn.close()
 
 
+def set_settings_many(items: dict[str, str]) -> None:
+    """app_settings KV 批量写（单事务）。模型列表/默认/后台角色三键语义上是一套
+    配置——逐键 autocommit 时进程中止会留半套（读侧有成员校验兜底，但写入不该
+    依赖兜底）。连接是 autocommit（isolation_level=None），显式 BEGIN 包住。"""
+    conn = _conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.executemany(
+                "INSERT INTO app_settings(key, value) VALUES(?,?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                list(items.items()),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
 def create_run(cid: str, thinking: str = "low", model: str = "") -> dict:
     """创建 run 行。thinking 是本 run 的思考档位（low/medium/high）、model 是选用的
     模型 profile id（空=default），都随行存档——HITL 续跑（resume）时据此恢复，
@@ -512,6 +536,28 @@ def finish_run(rid: str, status: str, error: str | None = None, last_seq: int | 
             )
         else:
             conn.execute("UPDATE runs SET status=?, error=? WHERE id=?", (status, error, rid))
+    finally:
+        conn.close()
+
+
+def finish_run_if_running(rid: str, status: str, error: str | None = None, last_seq: int | None = None) -> bool:
+    """终态守卫版收尾：仅当 run 仍处 running 时写入，返回是否落库。
+
+    供 agent 外层异常兜底使用——worker 分支已落的终态不被覆盖：原始 error 文案
+    不被内部异常文案顶掉、completed 不被翻成 error（error 事件照发，DB 真值不动）。"""
+    conn = _conn()
+    try:
+        if last_seq is not None:
+            cur = conn.execute(
+                "UPDATE runs SET status=?, error=?, last_seq=? WHERE id=? AND status='running'",
+                (status, error, last_seq, rid),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE runs SET status=?, error=? WHERE id=? AND status='running'",
+                (status, error, rid),
+            )
+        return cur.rowcount > 0
     finally:
         conn.close()
 

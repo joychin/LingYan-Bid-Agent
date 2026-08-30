@@ -108,12 +108,42 @@ def test_delete_item(client):
 
 
 def test_retrigger_accepted(client):
+    from app.knowledge import ingest
+
     r = _upload(client, "again.txt", b"# a\n\nx")
     kid = r.json()["id"]
+    # 上传触发的入库在 TestClient 里不执行（占着单飞位）：手动清掉模拟「已跑完」
+    ingest._inflight.discard(kid)
     resp = client.post(f"/api/kb/items/{kid}/retrigger")
     assert resp.status_code == 202
     # 内容端点（未解析完成时为空串，不 500）
     assert client.get(f"/api/kb/items/{kid}/content").status_code == 200
+
+
+def test_retrigger_conflict_while_inflight(client):
+    """单飞：条目已在跑时 retrigger 409（此前 202 静默跳过，用户无从得知）。"""
+    from app.knowledge import ingest
+
+    r = _upload(client, "inflight.txt", b"# i\n\nx")
+    kid = r.json()["id"]
+    ingest._inflight.add(kid)
+    resp = client.post(f"/api/kb/items/{kid}/retrigger")
+    assert resp.status_code == 409
+    assert "识别中" in resp.json()["detail"]
+
+
+def test_content_hidden_until_ready(client):
+    """仅 ready 吐正文：重新识别（parsing）期间盘上的旧 md 不再被当新内容返回。"""
+    from app import db
+    from app.knowledge.ingest import run_ingest
+
+    body = "# 概况\n\n" + "正文内容补充。" * 30
+    r = _upload(client, "stale.txt", body.encode())
+    kid = r.json()["id"]
+    run_ingest(kid)
+    assert "正文内容补充" in client.get(f"/api/kb/items/{kid}/content").json()["content"]
+    db.kb_update_item(kid, parse_status="parsing")
+    assert client.get(f"/api/kb/items/{kid}/content").json()["content"] == ""
 
 
 def test_content_returns_parse_meta(client):

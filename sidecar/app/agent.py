@@ -1096,7 +1096,9 @@ async def run_stream(
                 logger.exception("run_stream 异常收尾落库失败（cid=%s rid=%s）", cid, rid)
         try:
             seq = next_seq()
-            db.finish_run(rid, "error", str(e), last_seq=seq)
+            # 终态守卫：worker 分支已落的终态不被覆盖——error 分支写入的原始错误
+            # 文案不被内部异常顶掉、completed 不被翻成 error（error 事件照发）
+            db.finish_run_if_running(rid, "error", str(e), last_seq=seq)
             # code 恒有键（契约 2026-08-27 additive）：此前此处漏发 code，靠前端 ?? null 兜住
             await publish(
                 cid,

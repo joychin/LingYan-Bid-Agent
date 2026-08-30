@@ -136,7 +136,9 @@ async def update_artifact_content(aid: str, body: ContentUpdate):
     # 终态字段（content_seq/emitted 等）。
     with artifact_store.write_lock:
         row = db.get_artifact_index(aid)
-        if row is None or not artifact_store.package_ready(aid, row):
+        if row is None:
+            raise HTTPException(status_code=404, detail="产物不存在")
+        if not artifact_store.package_ready(aid, row):
             raise HTTPException(status_code=410, detail="产物包已不存在")
         if not body.force and body.base_content_seq != row["content_seq"]:
             raise HTTPException(
@@ -145,7 +147,7 @@ async def update_artifact_content(aid: str, body: ContentUpdate):
             )
         if body.force:
             # 顶掉的是外部写入的新版本 → 留恢复点（用户可反悔）
-            prev = artifact_store.read_content(aid, row)
+            prev = artifact_store.read_content_resolved(aid, row)
             if prev is not None:
                 artifact_store.save_restore_point(aid, row, row["content_seq"], prev)
         artifact_store.replace_current_content(aid, row, content_text)
@@ -182,7 +184,11 @@ async def restore_artifact(aid: str):
         row = db.get_artifact_index(aid)
         if row is None:
             raise HTTPException(status_code=404, detail="产物不存在")
-        current = artifact_store.read_content(aid, row)
+        if not artifact_store.package_ready(aid, row):
+            # 包已缺（manifest 或 current 被外部删）：不复活——否则恢复写回的
+            # content.json 会把残缺包顶回列表（manifest 缺失时更是幽灵数据）
+            raise HTTPException(status_code=410, detail="产物包已不存在")
+        current = artifact_store.read_content_resolved(aid, row)
         if current is not None:
             artifact_store.save_restore_point(aid, row, row["content_seq"], current)  # 恢复可再撤销
         artifact_store.replace_current_content(aid, row, content_text)
@@ -220,7 +226,7 @@ async def promote_artifact(aid: str, body: PromoteRequest = PromoteRequest()):
     if not task_id:
         raise HTTPException(status_code=422, detail="产物所属会话没有关联任务，无法转正")
 
-    raw = artifact_store.read_content(aid, row)
+    raw = artifact_store.read_content_resolved(aid, row)
     if raw is None:
         raise HTTPException(status_code=410, detail="产物内容读取失败")
     try:

@@ -163,6 +163,24 @@ def test_put_force_preserves_fresh_publish_state(client):
     assert row["content_seq"] == stale["content_seq"] + 2  # publish +1、PUT +1
 
 
+def test_read_content_resolved_blocks_escape(client, tmp_path):
+    """containment 读侧（编辑留底/恢复/转正/发布留底/read_artifact 的读取入口）：
+    包内 content.json 被换成指向 workspace 外的 symlink 时返回 None，不外泄。"""
+    _, conv = _task_conv()
+    m = _pub(_content(), conv=conv)
+    aid = m["artifact_id"]
+    assert "技术部分" in artifact_store.read_content_resolved(aid, m)
+
+    outside = tmp_path / "secret.json"
+    outside.write_text('{"stolen": true}', encoding="utf-8")
+    cp = artifact_store.content_path(aid, m)
+    cp.unlink()
+    cp.symlink_to(outside)
+    assert artifact_store.read_content_resolved(aid, m) is None
+    # 非 resolved 版本仍跟随 symlink（对照：防护确实来自 resolve + is_relative_to）
+    assert artifact_store.read_content(aid, m) is not None
+
+
 def test_put_unknown_artifact(client):
     r = client.put(
         "/api/artifacts/art_0000000000ff/content", json={"content": {}, "base_content_seq": 1}

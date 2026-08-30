@@ -113,11 +113,12 @@ async def put_settings_models(body: ModelsBody):
             )
         )
 
-    cfg.save_models(normalized, body.default_model)
-    if body.background_roles is not None:
-        cfg.set_background_roles(
-            {"extract": body.background_roles.extract, "vision": body.background_roles.vision}
-        )
+    roles = (
+        {"extract": body.background_roles.extract, "vision": body.background_roles.vision}
+        if body.background_roles is not None
+        else None
+    )
+    cfg.save_models_and_roles(normalized, body.default_model, roles)
     # 模型列表变了：清 agent 缓存（按 profile 惰性重建，毫秒级；无 key 的 profile 在
     # 实际被选用时才报错，不影响其他 profile）
     await rebuild_agent()
@@ -142,6 +143,10 @@ async def put_settings_key(body: KeyBody):
         raise HTTPException(status_code=422, detail="model_id 不能为空")
     if not key:
         raise HTTPException(status_code=422, detail="api_key 不能为空")
+    # 孤儿 key 防护：只给存在的 profile 存 Key（对齐 put_settings_models 的 roles
+    # 校验先例）——否则写错 id 会静默存一个 GET 永不可见的凭证
+    if cfg.get_profile(pid) is None:
+        raise HTTPException(status_code=404, detail=f"模型 {pid} 不存在，请先保存模型配置")
     cfg.set_model_key(pid, key)
     await rebuild_agent()
     return {"ok": True}

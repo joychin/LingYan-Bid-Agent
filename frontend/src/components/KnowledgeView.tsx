@@ -442,7 +442,10 @@ function ItemDetail({
               disabled={extracting}
               title={extracting ? '信息识别中，稍候' : '重新解析与识别（覆盖建议信息，不动已确认内容）'}
               onClick={() => {
-                void retrigger.mutateAsync(item.id).then(() => toast('已重新触发解析与识别', 'info'))
+                void retrigger
+                  .mutateAsync(item.id)
+                  .then(() => toast('已重新触发解析与识别', 'info'))
+                  .catch((e) => toast(e instanceof Error ? e.message : '重新识别失败', 'error'))
               }}
             >
               <RefreshCw className={cn('h-3.5 w-3.5', retrigger.isPending && 'animate-spin')} />

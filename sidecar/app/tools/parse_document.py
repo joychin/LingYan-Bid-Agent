@@ -36,7 +36,7 @@ from .. import baidu_ocr, runctx
 from ..artifact_store import task_files_dir, task_out_dir
 from ..config import workspace_dir
 from ..parse import convert as parse_convert
-from ..parse import count_nodes, outline_with_lines, sha256_file
+from ..parse import count_nodes, outline_with_lines, sha256_file, write_atomic
 from ..parse.image import IMAGE_EXTS
 
 _MIN_TEXT_CHARS = 100  # 低于此值视为转换失败（扫描件/损坏文件）
@@ -203,8 +203,10 @@ def parse_document(path: str) -> str:
         warnings.extend(info.get("warnings") or [])
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        md_path.write_text(md_text, encoding="utf-8")
-        outline_path.write_text(json.dumps(outline, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 三件套原子写（md → outline → meta，meta 最后写=提交标记）：中断不留
+        # 截断产物，幂等检查（三件齐 + sha 一致）看到的要么是完整旧轮要么是完整新轮
+        write_atomic(md_path, md_text)
+        write_atomic(outline_path, json.dumps(outline, ensure_ascii=False, indent=2))
         meta = {
             "source": src.name,
             "sha256": digest,
@@ -220,7 +222,7 @@ def parse_document(path: str) -> str:
         }
         if "pages" in info:
             meta["pages"] = info["pages"]
-        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_atomic(meta_path, json.dumps(meta, ensure_ascii=False, indent=2))
 
         rel = out_dir.relative_to(workspace_dir())
         return "\n".join(

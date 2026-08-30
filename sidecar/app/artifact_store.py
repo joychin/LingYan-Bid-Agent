@@ -210,6 +210,22 @@ def read_content(aid: str, scope: Mapping) -> str | None:
         return None
 
 
+def read_content_resolved(aid: str, scope: Mapping) -> str | None:
+    """读当前内容（containment 版）：resolve 后必须仍在 workspace 内，越界返回 None。
+
+    写路径读取侧统一走此入口（编辑保存 force 留底 / 恢复 / 转正 / 发布覆盖留底 /
+    read_artifact 工具），与 GET content 同标准——包目录被手工篡改出越界 symlink 时
+    读不到 workspace 外内容。写侧（_atomic_write）仍直写包内路径：写入位置由
+    (aid, scope) 纯函数派生、无用户输入分量，当前威胁模型下不加 resolve。"""
+    p = resolved_content_path(aid, scope)
+    if p is None:
+        return None
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 def list_from_disk() -> list[dict]:
     """结构化扫描各任务目录下的产物包 manifest（供索引重建）。
 

@@ -11,6 +11,14 @@ def test_settings_test_requires_ping_header(client):
     assert client.get("/api/settings/test?model=default").status_code == 403
 
 
+def test_put_key_rejects_unknown_model(client):
+    """孤儿 key 防护：只给已存在的 profile 存 Key（否则写错 id 静默存一个
+    GET 永不可见的凭证）。"""
+    r = client.put("/api/settings/keys", json={"model_id": "ghost", "api_key": "sk-x"})
+    assert r.status_code == 404
+    assert "不存在" in r.json()["detail"]
+
+
 def test_get_settings_default_single_profile(client):
     data = client.get("/api/settings").json()
     # 空配置：内置默认单条（default），key 未配置

@@ -110,6 +110,12 @@ def _kv_set(key: str, value: object) -> None:
     db.set_setting(key, json.dumps(value, ensure_ascii=False))
 
 
+def _kv_set_many(items: dict[str, object]) -> None:
+    from . import db
+
+    db.set_settings_many({k: json.dumps(v, ensure_ascii=False) for k, v in items.items()})
+
+
 def _legacy_profiles_from_file() -> list[ModelProfile]:
     """旧 settings.json（{models} / {llm,vlm} / 扁平）→ profile 列表（读侧迁移）。"""
     data = _legacy_file()
@@ -215,6 +221,24 @@ def save_models(profiles: list[ModelProfile], default_id: str) -> None:
     """全量覆盖写模型列表 + 默认模型（API 层已做校验；env 覆盖只在读侧，不落库）。"""
     _kv_set(_KV_PROFILES, [dataclasses.asdict(p) for p in profiles])
     _kv_set(_KV_DEFAULT, default_id)
+
+
+def save_models_and_roles(
+    profiles: list[ModelProfile], default_id: str, roles: dict[str, str] | None = None
+) -> None:
+    """save_models 的单事务版：profiles/default（及可选 roles）三键一次落库——
+    语义上是一套配置，逐键 autocommit 崩溃会留半套（default_model_id() 读侧
+    成员校验能优雅降级，但写入不应依赖兜底）。"""
+    items: dict[str, object] = {
+        _KV_PROFILES: [dataclasses.asdict(p) for p in profiles],
+        _KV_DEFAULT: default_id,
+    }
+    if roles is not None:
+        items[_KV_ROLES] = {
+            "extract": (roles.get("extract") or "").strip(),
+            "vision": (roles.get("vision") or "").strip(),
+        }
+    _kv_set_many(items)
 
 
 def default_model_id() -> str:

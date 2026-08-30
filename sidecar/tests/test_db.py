@@ -23,6 +23,24 @@ def test_recover_stale_runs(db_env):
     assert db.active_run_exists(cid) is False
 
 
+def test_finish_run_if_running_terminal_guard(db_env):
+    """终态守卫版收尾：仅 running 可写，已终态的 runs 不被覆盖——
+    agent 外层异常兜底不得顶掉 worker 已落的原始错误文案、不得翻转 completed。"""
+    tid = db.create_task("t")["id"]
+    cid = db.create_conversation(tid, "会话")["id"]
+    run = db.create_run(cid)
+    assert db.finish_run_if_running(run["id"], "error", "原始错误", last_seq=9) is True
+    # 已是 error：二次兜底不再覆盖（原始文案与 last_seq 保住）
+    assert db.finish_run_if_running(run["id"], "error", "内部异常文案", last_seq=10) is False
+    row = db.get_run(run["id"])
+    assert row["status"] == "error" and row["error"] == "原始错误" and row["last_seq"] == 9
+    # completed 不被翻成 error
+    run2 = db.create_run(cid)
+    db.finish_run(run2["id"], "completed", last_seq=5)
+    assert db.finish_run_if_running(run2["id"], "error", "boom") is False
+    assert db.get_run(run2["id"])["status"] == "completed"
+
+
 def test_retire_pause_marker(db_env):
     """暂停消息在 run 终止后的标记改写：末尾精确匹配「（等待你的输入…）」→
     「（任务中断）」；已改写/空 id/不匹配后缀的消息不动。"""

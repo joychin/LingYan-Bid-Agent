@@ -26,7 +26,7 @@ from pathlib import Path
 from .. import baidu_ocr, db, vlm
 from .. import config as cfg
 from ..parse import convert as parse_convert
-from ..parse import count_nodes, outline_with_lines
+from ..parse import count_nodes, outline_with_lines, write_atomic
 from ..parse import image as parse_image
 from ..parse import pdf as parse_pdf
 from ..vlm import VlmUnavailable
@@ -53,13 +53,15 @@ _MAX_SCAN_PAGES = 60
 _inflight: set[str] = set()
 
 
-def schedule_ingest(kid: str) -> None:
-    """上传/重触发入口：后台跑完整管线，异常只落条目 error 字段。同一条目单飞。"""
+def schedule_ingest(kid: str) -> bool:
+    """上传/重触发入口：后台跑完整管线，异常只落条目 error 字段。同一条目单飞，
+    返回是否真正调度（False=已在跑，重复触发被跳过）。"""
     if kid in _inflight:
         logger.info("知识库入库在跑，跳过重复触发：%s", kid)
-        return
+        return False
     _inflight.add(kid)
     asyncio.get_running_loop().create_task(_run_safe(kid))
+    return True
 
 
 async def _run_safe(kid: str) -> None:
@@ -140,15 +142,15 @@ def run_ingest(kid: str) -> dict:
         warnings.append("结构来自中文编号识别（标题印在原文，可验证），层级可能不完整")
 
     md_path, outline_path, meta_path = store.kb_parse_paths(file_name)
-    meta_path.parent.mkdir(parents=True, exist_ok=True)
     digest = item["file_hash"]
+    # 三件套原子写（md → outline → meta，meta 最后写=提交标记）：中断不留截断产物，
+    # 内容预览不会读到半截 md。空文本不落 md：md_ready=false 让前端对图片降级条目走
+    # 原件预览；unlink 同时清掉历史 0 字节 md（重新识别可自愈）
     if md_text:
-        md_path.write_text(md_text, encoding="utf-8")
+        write_atomic(md_path, md_text)
     else:
-        # 空文本不落 md：md_ready=false 让前端对图片降级条目走原件预览；
-        # unlink 同时清掉历史 0 字节 md（重新识别可自愈）
         md_path.unlink(missing_ok=True)
-    outline_path.write_text(json.dumps(outline, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_atomic(outline_path, json.dumps(outline, ensure_ascii=False, indent=2))
     meta = {
         "source": file_name,
         "sha256": digest,
@@ -162,7 +164,7 @@ def run_ingest(kid: str) -> dict:
     }
     if "pages" in info:
         meta["pages"] = info["pages"]
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_atomic(meta_path, json.dumps(meta, ensure_ascii=False, indent=2))
 
     reindex_item(kid)
     db.kb_update_item(kid, parse_status="ready")

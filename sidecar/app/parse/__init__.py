@@ -62,6 +62,19 @@ def sha256_file(p: Path) -> str:
     return h.hexdigest()
 
 
+def write_atomic(path: Path, text: str) -> None:
+    """解析产物原子写（tmp + rename）：读者要么看到旧文件要么看到新文件，绝不读到
+    截断内容。tmp 名带随机后缀——工具重跑/入库管线并发写同一目标时互不截断。
+    产物三件套的落盘约定：md → outline → meta 顺序写、meta 最后写（隐式提交标记，
+    幂等检查三件齐 + sha 一致才跳过重解析）。"""
+    import uuid
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 # 带行号区间的标题大纲（依赖惰性导入防循环）
 def outline_with_lines(md_text: str) -> list[dict]:
     from .outline import outline_with_lines as _impl
