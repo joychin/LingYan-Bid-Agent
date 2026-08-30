@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import db
-from ..agent import request_cancel, run_stream
+from ..agent import get_run_snapshot, request_cancel, run_stream
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,32 @@ class DecisionBody(BaseModel):
 
 class ResumeBody(BaseModel):
     decisions: list[DecisionBody] = Field(min_length=1)
+
+
+@router.get("/runs/active")
+async def active_runs():
+    """占用中的 run 清单（running/waiting_input）：侧栏跨会话状态指示的轻量轮询端点。"""
+    return {"runs": db.list_active_runs()}
+
+
+@router.get("/runs/{rid}/snapshot")
+async def snapshot(rid: str):
+    """运行中过程快照：供 SSE 断线/页面重挂恢复 task 卡，不产生消息或执行。"""
+    run = db.get_run(rid)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run 不存在")
+    data = get_run_snapshot(rid) or {
+        "run_id": rid,
+        "tools": [],
+        "todos": [],
+        "reasoning": "",
+    }
+    return {
+        **data,
+        "conversation_id": run["conversation_id"],
+        "status": run["status"],
+        "last_seq": run.get("last_seq"),
+    }
 
 
 @router.post("/runs/{rid}/cancel", status_code=202)
@@ -70,13 +96,17 @@ async def resume(rid: str, body: ResumeBody):
         )
 
     decisions = [d.model_dump(exclude_none=True) for d in body.decisions]
+    # 先条件抢占置 running（resume_run 内 WHERE status='waiting_input'，返回 False
+    # 即已被裁决/状态漂移 → 409），再落 respond 用户消息、spawn 续跑 worker
+    if not db.resume_run(rid):
+        raise HTTPException(status_code=409, detail="该任务不在等待用户输入状态")
     # respond = 用户回答：同步落一条 user message，保持「messages 表是记忆恢复源」
     # 的完整（checkpoint 里是合成 ToolMessage，重建记忆时才不丢用户的回答）
     for d in decisions:
         if d.get("type") == "respond" and (d.get("message") or "").strip():
-            db.create_user_message(run["conversation_id"], d["message"].strip())
+            # run_id 关联：回答与暂停消息同属一个回合（前端按 run 聚合）
+            db.create_user_message(run["conversation_id"], d["message"].strip(), rid=rid)
 
-    db.resume_run(rid)
     asyncio.create_task(
         run_stream(
             run["conversation_id"],

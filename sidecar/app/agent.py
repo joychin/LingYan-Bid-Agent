@@ -9,6 +9,7 @@ agent.stream(stream_mode=["messages","updates"])，把 iter_stream 归一化的�
 """
 
 import asyncio
+import copy
 import dataclasses
 import itertools
 import logging
@@ -25,6 +26,7 @@ from langchain_core.messages import SystemMessage
 from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
+from openai import BadRequestError
 
 from . import artifact_store, db, events, runctx
 from . import config as cfg
@@ -255,6 +257,39 @@ class _RunAwareChatDeepSeek(ChatDeepSeek):
         return payload
 
 
+class _NoThinkingRetryCompletions:
+    """网关「思考回传」400 兜底。
+
+    网关（ingress.lfans.cn）2026-08-29 起对思考模式 + 历史含 tool_calls 的冷回放
+    （HITL resume 重放 checkpoint 是唯一命中场景；热会话有服务端状态不校验）
+    强制要求把历史轮思考内容按 reasoning_text 回传，而其代理层只认
+    reasoning/reasoning_content 且实测回传任何字段都无法满足该校验（2026-08-30
+    全格式探针证实），唯一穿路是 reasoning_effort="none" 关思考重放。
+
+    挂在 openai SDK 的 chat.completions 资源实例上：langchain _stream/_generate
+    都经 client.create(**payload)，撞上该 400 时对当次请求关思考重试一次——只降
+    这一跳的思考，下个请求恢复原档位；其余 400 原样上抛。同步路径专用（agent
+    全链路 sync stream，async client 未用）。
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def create(self, **kwargs):
+        try:
+            return self._inner.create(**kwargs)
+        except BadRequestError as e:
+            if "reasoning_text" not in str(e) or kwargs.get("reasoning_effort") == "none":
+                raise
+            logger.warning(
+                "网关思考回传校验 400（reasoning_text），本请求降级 reasoning_effort=none 重试"
+            )
+            return self._inner.create(**{**kwargs, "reasoning_effort": "none"})
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def build_agent(profile: cfg.ModelProfile | None = None):
     """按模型 profile 构造 DeepAgents 实例（profile=None 走 default profile）。
 
@@ -281,6 +316,9 @@ def build_agent(profile: cfg.ModelProfile | None = None):
         model=p.model,
         timeout=180,
     )
+    # 网关思考回传 400 兜底（_NoThinkingRetryCompletions）：client 是 init 时缓存的
+    # SDK 资源实例字段，直接换成交包装层
+    model.client = _NoThinkingRetryCompletions(model.client)
 
     agent = create_deep_agent(
         model=model,
@@ -302,9 +340,12 @@ def build_agent(profile: cfg.ModelProfile | None = None):
             "（确认主文件与补充角色→parse_document→解析概况经用户确认）；"
             "分析招标文件、提取要点用 tender-analysis 技能（前提是 document-parse 已完成，"
             "读 outline 按行号取区段，禁止整读全文）；"
-            "要点齐后生成投标目录用 tender-outline 技能（R1 确认点→初稿→三道清理→"
+            "要点齐后生成投标目录用 tender-outline 技能（首个确认点：确认响应文件怎么拆分→初稿→三道清理→"
             "assemble_tender 组装发布并提醒转正；多响应文件时并发派发"
             " tender-outline-writer 子代理每册一个，主线程只派发与汇总）。"
+            "向用户介绍能力、流程或产物时只说你确定的内容，不虚构具体章节名、"
+            "步骤名、字段名；没读技能文件前说到概括层（如「按招标文件结构提取"
+            "七个方面的要点」）。"
             "用户上传的文件在当前任务工作目录的 files/ 下（任务目录前缀见任务上下文，"
             "如 <任务目录>/files/招标文件.docx）。"
             "引用结构化成果（如投标目录）时用 read_artifact 按契约读取当前内容（正式稿优先），"
@@ -314,12 +355,24 @@ def build_agent(profile: cfg.ModelProfile | None = None):
                 "（如「读取评分办法」），面向用户说清要做什么，不复述工具用法、"
                 "输出格式等内部规则，也不展开计划、不罗列备选方案；"
                 "完整的进展与结论只在最终回复（不再调用工具的那一轮）给出。"
+                "派发子代理（task）时，description 第一行只写短名本身——不超过 16 字、"
+                "概括该子代理的任务（如「检索中石化 dify 相关招标」），不要以「你是……」"
+                "之类的角色自述开头，并发派发时各卡短名要能相互区分；详细任务说明从"
+                "第二行开始。"
                 "面向用户的回复用用户语言：内部路径（files/、out/、任务目录前缀）与"
                 "实现名词（工具名、文件名如 sources.json、子代理、run）不进回复，"
-                "它们是你操作用的知识、不是用户的操作入口；细则见"
+                "它们是你操作用的知识、不是用户的操作入口；汇报进度与状态按业务阶段"
+                "说（文件是否上传、解析/要点提取/目录的进展），不要用目录状态与技能"
+                "名拼进度清单；细则见"
                 " skills/_shared/response-guidelines.md，执行业务技能时先读它。"
                 "最终回复按「结果 → 影响/风险 → 下一步」组织；需要用户行动时只突出"
-                "一个主要动作，备选路径放次要位置。"
+                "一个主要动作，备选路径放次要位置；结尾不用「你想先做哪一步？」式反问"
+                "把选择抛回给用户，点出建议动作即可。"
+                "回复显示在聊天界面、按 Markdown 渲染：结论先行，清单、对比、状态等"
+                "可枚举内容用列表或表格组织，不写成无结构长段落；简单问题三五句话"
+                "答完即可，不复述用户已知信息、不展开过程流水账（汇报类回复该详尽"
+                "则详尽）。不用 emoji，不用「好的」「当然可以」式寒暄开头。"
+                "排版细则见 skills/_shared/response-guidelines.md。"
                 "缺少关键信息（如资质材料、报价策略）或遇到需要用户拍板的取舍时，"
                 "用 ask_human 向用户提问，不要自行猜测；可以明确推断的小事不要问。"
                 "需要用户在候选项里挑选时，把选项放进 options（「；」分隔）并按是否"
@@ -585,6 +638,8 @@ def _run_agent_stream(
                                 task_step["reasoning"] += payload["text"]
                         else:
                             cur_reasoning.append(payload["text"])
+                        # reasoning chunk 是 token 级高频事件：不在此处更新快照（逐 chunk
+                        # 全树 deepcopy 会拖慢 worker），reasoning 随下一个结构性事件入库
                     elif kind == "token":
                         cur_text_parts.append(payload)  # type: ignore[arg-type]
                         _publish(
@@ -611,6 +666,10 @@ def _run_agent_stream(
                             step["text"] = "".join(cur_text_parts)
                             cur_text_parts.clear()
                         _attach_step(top_steps, step, payload.get("agent_id"))
+                        set_live_trace(
+                            rid,
+                            {"tools": top_steps, "todos": last_todos, "reasoning": "".join(cur_reasoning)},
+                        )
                     elif kind == "tool_result":
                         _publish(
                             events.EVENT_TOOL_RESULT,
@@ -631,6 +690,10 @@ def _run_agent_stream(
                             step["summary"] = payload["summary"]
                             step["error"] = payload.get("error")
                             step["endedAt"] = int(time.time() * 1000)
+                        set_live_trace(
+                            rid,
+                            {"tools": top_steps, "todos": last_todos, "reasoning": "".join(cur_reasoning)},
+                        )
                     elif kind == "todo_updated":
                         todos = payload  # type: ignore[arg-type]
                         last_todos = todos  # type: ignore[assignment]
@@ -647,6 +710,10 @@ def _run_agent_stream(
                                     for t in todos
                                 ],
                             },
+                        )
+                        set_live_trace(
+                            rid,
+                            {"tools": top_steps, "todos": last_todos, "reasoning": "".join(cur_reasoning)},
                         )
                     elif kind == "interrupt":
                         # HITL 暂停：流到此为止，run_stream 落半截消息并转 waiting_input
@@ -683,6 +750,7 @@ def _run_agent_stream(
         logger.exception("agent stream failed")
         error = error or str(e)
     finally:
+        clear_live_trace(rid)
         runctx.clear_run()
         events.clear_subagent_registry(rid)
     # 最终回复 = 最后未封口段（未被 tool.called 跟随）；旁白已挂在 trace 步骤 text 上
@@ -723,9 +791,121 @@ def _freeze_paused_steps(steps: list[dict]) -> list[dict]:
     return [walk(s) for s in steps]
 
 
+def _pause_snapshot(text: str, tools: list[dict]) -> tuple[str, list[dict]]:
+    """interrupt/error 半截回复快照：优先最终回复段，空则用最后一段旁白兜底。
+
+    兜底时同步把该段旁白从 trace 步骤 text 中清空——同一句话不既当落库消息正文
+    又在 trace 旁白行里重复渲染（2026-08-29 实测发现的双写）。
+    """
+    if text.strip():
+        return text, tools
+    narration = _last_narration(tools)
+    if not narration:
+        return "", tools
+    stripped = [
+        {**s, "text": ""} if s.get("text") == narration else s for s in tools
+    ]
+    return narration, stripped
+
+
+def _iter_trace_steps(steps: list[dict]):
+    for s in steps:
+        yield s
+        yield from _iter_trace_steps(s.get("children") or [])
+
+
+def _merge_trace_trees(old: list[dict], new: list[dict]) -> list[dict]:
+    """续跑段收尾时与暂停段步骤树合并：同 step.id（tool_call_id）以新段副本就地替换。
+
+    被门禁拦下的调用在续跑段重发时携带同一 tool_call_id（langgraph 复用原 AIMessage），
+    新副本是终态（含子代理 children），替换旧树里的 paused 冻结副本；新段增量按序
+    追加。保证同一 run 跨暂停/续跑只有一棵连续的执行过程树。
+    """
+    old_ids = {s.get("id") for s in _iter_trace_steps(old) if s.get("id")}
+    repl = {s["id"]: s for s in _iter_trace_steps(new) if s.get("id") in old_ids}
+
+    def swap(steps: list[dict]) -> list[dict]:
+        out = []
+        for s in steps:
+            sid = s.get("id")
+            if sid in repl:
+                out.append(repl[sid])
+                continue
+            children = s.get("children") or []
+            out.append({**s, "children": swap(children)} if children else s)
+        return out
+
+    merged = swap(old)
+    merged.extend(s for s in new if s.get("id") not in old_ids)
+    return merged
+
+
+def _save_merged_trace(rid: str, cid: str, message_id: str | None, trace: dict, duration_ms: int) -> None:
+    """落 trace 前与既有行合并（同 run 暂停→续跑不再整行覆盖丢暂停段）。
+
+    message_id 新值优先；新段无产出（error 半截 message_id=None）时保留旧值，
+    暂停消息继续挂全程 trace。reasoning 拼接、duration 累加（分段计时之和≈全程）。
+    """
+    existing = db.get_run_trace(rid)
+    if existing is None:
+        db.save_run_trace(rid, cid, message_id, trace["tools"], trace["todos"], duration_ms, trace.get("reasoning", ""))
+        return
+    merged_tools = _merge_trace_trees(existing.get("tools") or [], trace["tools"])
+    old_reasoning = existing.get("reasoning") or ""
+    new_reasoning = trace.get("reasoning", "")
+    reasoning = f"{old_reasoning}\n{new_reasoning}" if old_reasoning and new_reasoning else (old_reasoning or new_reasoning)
+    merged_duration = (existing.get("durationMs") or 0) + (duration_ms or 0)
+    db.save_run_trace(
+        rid, cid, message_id or existing.get("message_id"), merged_tools,
+        trace["todos"], merged_duration, reasoning,
+    )
+
+
 # 活跃 run 的协作式取消事件（rid → Event）：POST /runs/{rid}/cancel 置位，
 # worker 线程在下一个流事件边界退出（见 _run_agent_stream）
 CANCEL_EVENTS: dict[str, threading.Event] = {}
+
+# 运行中过程快照：只在当前 sidecar 进程内用于 SSE 断线/页面重挂对账。
+# 终态仍以 app.db 的 run_traces 为历史真值，快照不伪造消息、不轮询 agent.db。
+_LIVE_TRACE_LOCK = threading.Lock()
+_LIVE_TRACES: dict[str, dict] = {}
+
+
+def set_live_trace(rid: str, trace: dict) -> None:
+    with _LIVE_TRACE_LOCK:
+        _LIVE_TRACES[rid] = {
+            "run_id": rid,
+            "tools": copy.deepcopy(trace.get("tools") or []),
+            "todos": copy.deepcopy(trace.get("todos") or []),
+            "reasoning": trace.get("reasoning") or "",
+        }
+
+
+def get_live_trace(rid: str) -> dict | None:
+    with _LIVE_TRACE_LOCK:
+        trace = _LIVE_TRACES.get(rid)
+        return copy.deepcopy(trace) if trace is not None else None
+
+
+def clear_live_trace(rid: str) -> None:
+    with _LIVE_TRACE_LOCK:
+        _LIVE_TRACES.pop(rid, None)
+
+
+def get_run_snapshot(rid: str) -> dict | None:
+    """取运行中快照；进程内没有时回退到已落库的最终/暂停 trace。"""
+    live = get_live_trace(rid)
+    if live is not None:
+        return live
+    trace = db.get_run_trace(rid)
+    if trace is None:
+        return None
+    return {
+        "run_id": rid,
+        "tools": trace.get("tools") or [],
+        "todos": trace.get("todos") or [],
+        "reasoning": trace.get("reasoning") or "",
+    }
 
 
 def request_cancel(rid: str) -> bool:
@@ -762,6 +942,14 @@ async def run_stream(
     # 用户请求停止（POST /runs/{rid}/cancel）：注册协作式取消事件，run 结束时摘除
     cancel_event = threading.Event()
     CANCEL_EVENTS[rid] = cancel_event
+    # 收尾状态预置：异常可能发生在 worker 返回之前（取 agent、发布 started 等），
+    # except 兜底路径需要安全的空值；segment_saved 标记 worker 分支已完成
+    # 半截消息/trace 落库，兜底路径据此防双写
+    text: str = ""
+    error: str | None = None
+    trace: dict = {"tools": [], "todos": []}
+    interrupt: dict | None = None
+    segment_saved = False
     try:
         # per-run 事件序列号（契约 additive 扩展）：所有流事件 data 带 seq（1 起单调递增），
         # 客户端据此去重（双连接重影防线）与检测缺口。ping/run.state（对账）不带。
@@ -788,6 +976,11 @@ async def run_stream(
 
         t0 = time.monotonic()
         task_id = (db.get_conversation(cid) or {}).get("task_id")
+        if task_id:
+            # 目录自愈：骨架预建（2026-08-29）之前创建的任务只有库行、没有磁盘目录，
+            # 纯检索/对话任务也没有按需建目录的时机——run 启动兜底补齐，模型第一步
+            # ls <task_id>/ 不再 path_not_found（mkdir exist_ok，幂等无锁）
+            artifact_store.ensure_task_skeleton(task_id)
         text, error, trace, interrupt = await asyncio.to_thread(
             _run_agent_stream, agent, cid, rid, task_id, _publish, user_text, resume_decisions, cancel_event, thinking
         )
@@ -807,18 +1000,22 @@ async def run_stream(
             db.mark_emitted(row["artifact_id"])
 
         if error:
-            # 最终回复为空时用最后一段旁白兜底（半截消息至少能看到 AI 说到哪了）
-            snapshot_text = text if text.strip() else _last_narration(trace["tools"])
+            # 半截回复快照：优先最终回复段，空则用最后一段旁白兜底（并从 trace 步骤去重）
+            snapshot_text, tools_snapshot = _pause_snapshot(text, trace["tools"])
             if snapshot_text.strip():
                 # 中断 run 的半截回复落库：checkpoint 里模型"说过"这些话（或 dangling 修复后
                 # 仍残留半截上下文），messages 表同步记一份（带中断标记），UI 与模型记忆对齐
-                db.append_assistant_message(cid, snapshot_text.rstrip() + "\n\n（任务中断）")
+                db.append_assistant_message(cid, snapshot_text.rstrip() + "\n\n（任务中断）", rid=rid)
             else:
                 # 续跑段终止且无任何新产出：改写暂停消息的「等待你的输入…」标记，
                 # 否则对话最后一句永远宣称在等输入、与已终止的 run 矛盾
                 db.retire_pause_marker((db.get_run(rid) or {}).get("pause_msg_id"))
-            # 中断 run 的执行过程也落 trace（message_id 空）便于复盘
-            db.save_run_trace(rid, cid, None, trace["tools"], trace["todos"], duration_ms, trace.get("reasoning", ""))
+            # 中断 run 的执行过程也落 trace（与暂停段合并；message_id 空则保留暂停消息挂载）
+            _save_merged_trace(rid, cid, None, {**trace, "tools": tools_snapshot}, duration_ms)
+            segment_saved = True
+            # 先落库后发事件（与 completed 分支一致）：客户端收到终态事件即可立即对账
+            seq = next_seq()
+            db.finish_run(rid, "error", error, last_seq=seq)
             # code（契约 additive）：cancelled=用户主动停止，前端据此中性呈现（非红色错误卡）
             await publish(
                 cid,
@@ -829,23 +1026,30 @@ async def run_stream(
                         cid,
                         error,
                         "cancelled" if error == events.CANCELLED_MESSAGE else None,
-                        next_seq(),
+                        seq,
                     ),
                 },
             )
-            db.finish_run(rid, "error", error)
             return
 
         if interrupt:
-            # HITL 暂停：半截回复落库（沿用「任务中断」先例）+ trace，run 转 waiting_input，
-            # 快照与 last_seq 存进 runs 行——重启后 run.state/前端恢复审批卡、seq 续接都靠它。
-            msg_id = None
-            # 同 error 分支：最终回复为空时用最后一段旁白兜底（被门禁拦下的轮次常无正文）
-            snapshot_text = text if text.strip() else _last_narration(trace["tools"])
-            if snapshot_text.strip():
-                msg_id = db.append_assistant_message(cid, snapshot_text.rstrip() + "\n\n（等待你的输入…）")["id"]
-            db.save_run_trace(rid, cid, msg_id, _freeze_paused_steps(trace["tools"]), trace["todos"], duration_ms, trace.get("reasoning", ""))
+            # HITL 暂停：半截回复落库 + trace，run 转 waiting_input，快照与 last_seq 存进
+            # runs 行——重启后 run.state/前端恢复审批卡、seq 续接都靠它。
+            # 暂停消息**无条件落库**（正文为空就只落标记）：它是回合里首个 assistant 段，
+            # 前端头像头/过程卡的载体——缺失时最终回复会变成全回合第一条 assistant，
+            # 头像头错落到回合尾部（2026-08-30 实测「另一个时空」缺陷的根因）。
+            snapshot_text, tools_snapshot = _pause_snapshot(text, trace["tools"])
+            content = (snapshot_text.rstrip() + "\n\n（等待你的输入…）").lstrip()
+            msg_id = db.append_assistant_message(cid, content, rid=rid)["id"]
+            _save_merged_trace(
+                rid, cid, msg_id,
+                {**trace, "tools": _freeze_paused_steps(tools_snapshot)},
+                duration_ms,
+            )
+            segment_saved = True
+            # 先落库后发事件（与 completed/error 分支一致）
             seq = next_seq()
+            db.interrupt_run(rid, interrupt["requests"], seq, pause_msg_id=msg_id)
             await publish(
                 cid,
                 {
@@ -853,29 +1057,52 @@ async def run_stream(
                     "data": events.interrupt_payload(rid, cid, interrupt["requests"], seq),
                 },
             )
-            db.interrupt_run(rid, interrupt["requests"], seq, pause_msg_id=msg_id)
             return
 
         if not text.strip():
             text = "（空回复）"
-        msg = db.append_assistant_message(cid, text)
-        # 执行过程快照与 assistant 消息关联落库（历史会话/刷新后执行过程仍可见）
-        db.save_run_trace(rid, cid, msg["id"], trace["tools"], trace["todos"], duration_ms, trace.get("reasoning", ""))
-        db.finish_run(rid, "completed")
+        msg = db.append_assistant_message(cid, text, rid=rid)
+        segment_saved = True
+        # 执行过程快照与 assistant 消息关联落库（与暂停段合并成全程一棵树，
+        # 历史会话/刷新后执行过程仍可见）
+        _save_merged_trace(rid, cid, msg["id"], trace, duration_ms)
+        seq = next_seq()
+        db.finish_run(rid, "completed", last_seq=seq)
         await publish(
             cid,
             {
                 "event": events.EVENT_COMPLETED,
-                "data": events.completed_payload(rid, cid, msg["id"], next_seq()),
+                "data": events.completed_payload(rid, cid, msg["id"], seq),
             },
         )
     except Exception as e:
         logger.exception("run_stream failed")
-        db.finish_run(rid, "error", str(e))
-        # code 恒有键（契约 2026-08-27 additive）：此前此处漏发 code，靠前端 ?? null 兜住
-        await publish(
-            cid,
-            {"event": events.EVENT_ERROR, "data": events.error_payload(rid, cid, str(e), None, next_seq())},
-        )
+        # 收尾兜底（与 worker error 分支同规则）：失败前已流出的半截正文与执行过程
+        # 照常落库，否则历史里只剩一条红错、已流出内容全失。worker 分支已完成的
+        # 落库（segment_saved）不重做；零流出（异常在取 agent/发布 started 等）只
+        # 清可能残留的暂停标记（续段场景），不落空 trace。
+        if not segment_saved:
+            try:
+                snapshot_text, tools_snapshot = _pause_snapshot(text, trace["tools"])
+                if snapshot_text.strip() or trace["tools"]:
+                    if snapshot_text.strip():
+                        db.append_assistant_message(cid, snapshot_text.rstrip() + "\n\n（任务中断）", rid=rid)
+                    else:
+                        db.retire_pause_marker((db.get_run(rid) or {}).get("pause_msg_id"))
+                    _save_merged_trace(rid, cid, None, {**trace, "tools": tools_snapshot}, None)
+                else:
+                    db.retire_pause_marker((db.get_run(rid) or {}).get("pause_msg_id"))
+            except Exception:
+                logger.exception("run_stream 异常收尾落库失败（cid=%s rid=%s）", cid, rid)
+        try:
+            seq = next_seq()
+            db.finish_run(rid, "error", str(e), last_seq=seq)
+            # code 恒有键（契约 2026-08-27 additive）：此前此处漏发 code，靠前端 ?? null 兜住
+            await publish(
+                cid,
+                {"event": events.EVENT_ERROR, "data": events.error_payload(rid, cid, str(e), None, seq)},
+            )
+        except Exception:
+            logger.exception("run_stream 终态落库/事件发布失败（cid=%s rid=%s）", cid, rid)
     finally:
         CANCEL_EVENTS.pop(rid, None)

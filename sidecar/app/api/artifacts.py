@@ -128,15 +128,30 @@ async def update_artifact_content(aid: str, body: ContentUpdate):
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"内容不符合契约：{str(e).replace(chr(10), ' ')[:300]}")
 
-    if body.force:
-        # 顶掉的是外部写入的新版本 → 留恢复点（用户可反悔）
-        prev = artifact_store.read_content(aid, row)
-        if prev is not None:
-            artifact_store.save_restore_point(aid, row, row["content_seq"], prev)
-    artifact_store.replace_current_content(aid, row, json.dumps(body.content, ensure_ascii=False, indent=2))
-    new_seq = row["content_seq"] + 1
-    updated_at = _now()
-    db.upsert_artifact_index({**row, "content_seq": new_seq, "updated_at": updated_at})
+    content_text = json.dumps(body.content, ensure_ascii=False, indent=2)
+    # 发布工具跑在 worker 线程，与本端点真并行：与 publish 共用进程内写锁，
+    # 持锁重读索引行再写——用读行时刻的陈旧整行回写会把 publish 刚置位的
+    # emitted/last_run_id 抹掉，导致该次发布的 artifact.created 永不发出。
+    # 作用域（task_id/conversation_id）随 manifest 固定不可变，重读行仅用于
+    # 终态字段（content_seq/emitted 等）。
+    with artifact_store.write_lock:
+        row = db.get_artifact_index(aid)
+        if row is None or not artifact_store.package_ready(aid, row):
+            raise HTTPException(status_code=410, detail="产物包已不存在")
+        if not body.force and body.base_content_seq != row["content_seq"]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"内容已被其他修改更新（当前版本号 {row['content_seq']}），请选择拉取最新或保留你的版本",
+            )
+        if body.force:
+            # 顶掉的是外部写入的新版本 → 留恢复点（用户可反悔）
+            prev = artifact_store.read_content(aid, row)
+            if prev is not None:
+                artifact_store.save_restore_point(aid, row, row["content_seq"], prev)
+        artifact_store.replace_current_content(aid, row, content_text)
+        new_seq = row["content_seq"] + 1
+        updated_at = _now()
+        db.upsert_artifact_index({**row, "content_seq": new_seq, "updated_at": updated_at})
     return {"ok": True, "content_seq": new_seq, "updated_at": updated_at}
 
 
@@ -161,13 +176,19 @@ async def restore_artifact(aid: str):
         except Exception:
             raise HTTPException(status_code=422, detail="恢复点内容不符合当前契约，已拒绝恢复")
 
-    current = artifact_store.read_content(aid, row)
-    if current is not None:
-        artifact_store.save_restore_point(aid, row, row["content_seq"], current)  # 恢复可再撤销
-    artifact_store.replace_current_content(aid, row, json.dumps(content, ensure_ascii=False, indent=2))
-    new_seq = row["content_seq"] + 1
-    updated_at = _now()
-    db.upsert_artifact_index({**row, "content_seq": new_seq, "updated_at": updated_at})
+    content_text = json.dumps(content, ensure_ascii=False, indent=2)
+    # 与 PUT/publish 同一把写锁 + 持锁重读（见 PUT 内注释）
+    with artifact_store.write_lock:
+        row = db.get_artifact_index(aid)
+        if row is None:
+            raise HTTPException(status_code=404, detail="产物不存在")
+        current = artifact_store.read_content(aid, row)
+        if current is not None:
+            artifact_store.save_restore_point(aid, row, row["content_seq"], current)  # 恢复可再撤销
+        artifact_store.replace_current_content(aid, row, content_text)
+        new_seq = row["content_seq"] + 1
+        updated_at = _now()
+        db.upsert_artifact_index({**row, "content_seq": new_seq, "updated_at": updated_at})
     return {"ok": True, "content_seq": new_seq, "updated_at": updated_at}
 
 

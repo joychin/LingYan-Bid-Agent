@@ -109,6 +109,35 @@ def test_runinfo_dto(client):
     assert parsed.requests and parsed.requests[0].tool == "ask_human"
 
 
+def test_active_runs_dto(client):
+    _, conv = _task_conv()
+    run = db.create_run(conv["id"])
+    runs = client.get("/api/runs/active").json()["runs"]
+    parsed = dto.ActiveRun.model_validate(runs[0])
+    assert parsed.conversation_id == conv["id"]
+    assert parsed.status == "running"
+
+    db.interrupt_run(run["id"], [], 0)
+    runs = client.get("/api/runs/active").json()["runs"]
+    parsed = dto.ActiveRun.model_validate(runs[0])
+    assert parsed.status == "waiting_input"
+
+
+def test_run_snapshot_dto(client):
+    from app import agent as agent_mod
+
+    _, conv = _task_conv()
+    run = db.create_run(conv["id"])
+    agent_mod.set_live_trace(run["id"], {"tools": [], "todos": [], "reasoning": "思考"})
+    try:
+        snap = client.get(f"/api/runs/{run['id']}/snapshot").json()
+        parsed = dto.RunTraceSnapshot.model_validate(snap)
+        assert parsed.status == "running"
+        assert parsed.reasoning == "思考"
+    finally:
+        agent_mod.clear_live_trace(run["id"])
+
+
 def test_kb_dto(client):
     for t in client.get("/api/kb/types").json()["types"]:
         dto.KbFieldType.model_validate(t)

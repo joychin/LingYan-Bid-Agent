@@ -52,6 +52,12 @@ src-tauri/gen/
 logs/
 .playwright-mcp/
 
+# ─── 回复风格测量快照（measure_reply_style.py 的落盘产物）──
+sidecar/scripts/reply_style_*.json
+
+# ─── 根目录散落的调试截图（真实图片资产应放 frontend/ 内）──
+/*.png
+
 # ─── 操作系统 / 编辑器 / 工具会话目录 ──────────────────────
 .DS_Store
 Thumbs.db

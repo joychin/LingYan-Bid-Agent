@@ -17,16 +17,11 @@ task-single 语义：同契约同作用域已存在 → 复用 artifact_id 与 m
 
 import json
 import logging
-import threading
 from datetime import datetime, timezone
 
 from . import artifact_store, contracts, db
 
 logger = logging.getLogger(__name__)
-
-# 发布写锁（不可见 plumbing）：串行化发布落盘，防并发首建产生重复成果。
-# 不做任何用户可见的互斥——覆盖策略遵循文件夹语义，冲突由用户在客户端裁决。
-_write_lock = threading.Lock()
 
 
 class PublishError(Exception):
@@ -98,7 +93,10 @@ def publish_artifact(
     source = source or {}
     content_text = json.dumps(content, ensure_ascii=False, indent=2)
 
-    with _write_lock:
+    # 写锁（不可见 plumbing，宿主在 artifact_store）：串行化发布落盘，防并发首建
+    # 产生重复成果；编辑保存/恢复端点写同一包时也持同一把锁（事件循环线程 vs
+    # worker 线程真并行）。不做任何用户可见的互斥——覆盖策略遵循文件夹语义。
+    with artifact_store.write_lock:
         existing = None
         if c.cardinality == "task-single":
             found = db.find_artifact_index(

@@ -23,6 +23,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fi
 
 from . import config as cfg
 from . import parse
+from .parse import image as parse_image
 
 _TOKEN_URL = "https://aip.baidubce.com/oauth/2.0/token"
 _SUBMIT_URL = "https://aip.baidubce.com/rest/2.0/brain/online/v2/paddle-vl-parser/task"
@@ -31,6 +32,13 @@ _POLL_INTERVAL = 5.0  # 秒
 _POLL_TIMEOUT = 300.0  # 秒
 # 提前刷新缓冲，避免 token 在使用中刚好过期
 _TOKEN_REFRESH_BUFFER = 300.0
+
+# 服务端限制的本地前置检查（提前拒绝，省掉整包 base64 的内存与上传等待）：
+# 版式文档 ≤100M、图片 <10M（模块 docstring）
+_MAX_DOC_SUBMIT_BYTES = 100 * 1024 * 1024
+_MAX_IMAGE_SUBMIT_BYTES = 10 * 1024 * 1024
+# 下载结果硬上限：无上限的 resp.text 会把异常/超大响应整体读进内存
+_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 
 _LAYOUT_SKIP = {"header", "footer"}
 
@@ -108,14 +116,42 @@ def _post_form(url: str, data: dict, params: dict | None = None) -> dict:
 
 
 def _download(url: str) -> str:
-    resp = httpx.get(url, timeout=60.0)
-    resp.raise_for_status()
-    return resp.text
+    """流式下载并硬性大小上限（超出抛 RuntimeError 走「解析失败」路径）。"""
+    with httpx.stream("GET", url, timeout=60.0) as resp:
+        resp.raise_for_status()
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in resp.iter_bytes():
+            total += len(chunk)
+            if total > _MAX_DOWNLOAD_BYTES:
+                raise RuntimeError(
+                    f"解析结果超出大小上限（{_MAX_DOWNLOAD_BYTES // (1024 * 1024)}MB）"
+                )
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+    enc = resp.charset_encoding or "utf-8"
+    try:
+        return raw.decode(enc, errors="replace")
+    except LookupError:  # 响应头声明了未知编码名
+        return raw.decode("utf-8", errors="replace")
 
 
 # ===== 文档解析（提交 → 轮询 → 下载 → 拼 markdown） =====
 
 def _submit(path: Path, access_token: str) -> str:
+    # 服务端限制的本地前置检查：超限整包读入+base64（峰值 ≈ 文件大小 ×2.3）
+    # 既浪费内存也必然被服务端拒绝，提前给可读文案
+    limit = (
+        _MAX_IMAGE_SUBMIT_BYTES
+        if path.suffix.lower() in parse_image.IMAGE_EXTS
+        else _MAX_DOC_SUBMIT_BYTES
+    )
+    size = path.stat().st_size
+    if size >= limit:
+        raise RuntimeError(
+            f"文件超出云端解析大小限制（约 {size // (1024 * 1024)}MB，上限 "
+            f"{limit // (1024 * 1024)}MB）：图片请压缩后重试，大文档建议拆分"
+        )
     file_data = base64.b64encode(path.read_bytes()).decode("ascii")
     result = _post_form(
         _SUBMIT_URL,

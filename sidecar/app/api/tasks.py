@@ -40,6 +40,8 @@ async def create_task(body: NewTaskBody):
     if not title:
         raise HTTPException(status_code=422, detail="任务名不能为空")
     task = db.create_task(title)
+    # 预建 files/out/drafts 骨架：agent 开工第一步的 ls 不再 path_not_found
+    artifact_store.ensure_task_skeleton(task["id"])
     conversation = db.create_conversation(task["id"]) if body.with_conversation else None
     return {"task": task, "conversation": conversation}
 
@@ -66,9 +68,14 @@ async def delete_task(tid: str):
     for cid in cids:
         if db.active_run_exists(cid):
             raise HTTPException(status_code=409, detail=f"会话 {cid} 有进行中的任务，无法删除任务")
-    # 磁盘先行：任务目录整体归档（threads/ 过程稿硬删、正式稿/文件/工作台软归档），
-    # 索引行随 db.delete_task 连带清理
-    artifact_store.archive_task(tid)
+    # 磁盘先行：任务目录整体归档（先 mv 到 archive/，成功后归档内 threads/ 硬删）。
+    # 归档失败（磁盘不可写/目标冲突）必须中止且不删库：否则任务与索引行消失、
+    # 磁盘目录残留原位，用户在产品内再也找不回——保留现场让用户裁决。
+    if not artifact_store.archive_task(tid):
+        raise HTTPException(
+            status_code=500,
+            detail="任务目录归档失败（磁盘不可写或归档目标冲突），任务未删除，可重试或手工处理",
+        )
     db.delete_task(tid)
     for cid in cids:
         delete_thread_memory(cid)  # 连带清 agent.db checkpoint，防幽灵记忆

@@ -14,6 +14,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Loader } from '@/components/ai/Loader'
 import {
   useConversations,
   useCreateConversation,
@@ -25,6 +26,8 @@ import { useSidecarHealth } from '@/context/SidecarHealth'
 import { useFileUpload } from '@/context/FileUpload'
 import { useToast } from '@/context/Toast'
 import { useKbBadge } from '@/hooks/useKnowledge'
+import { useActiveRuns } from '@/hooks/useActiveRuns'
+import { markRead, markUnread, useUnreadConvs } from '@/lib/unreadConvs'
 import { cn, formatRelativeTime } from '@/lib/utils'
 import type { Conversation, Task } from '@/api/client'
 import { ChatItem } from '@/components/workspace/ChatItem'
@@ -106,6 +109,25 @@ export function Sidebar({
   const [width, setWidth] = useState(SIDE_DEFAULT_W)
   const [dragging, setDragging] = useState(false)
   const appRect = useRef<DOMRect | null>(null)
+  const activeRuns = useActiveRuns()
+  const unreadConvs = useUnreadConvs()
+  // conv → 占用中 run 状态（running/waiting_input）：会话行 loader 与任务级胶囊的聚合源
+  const activeRunByConv = new Map((activeRuns.data ?? []).map((r) => [r.conversation_id, r.status]))
+  const prevActiveRef = useRef<Map<string, 'running' | 'waiting_input'> | null>(null)
+
+  // 轮询 diff → 未读：run 从占用集消失且当时不在该会话内 → 记未读；进入会话即已读。
+  // 首次拉取只建基线不产生未读（应用关闭期间完成的 run 不补历史）。
+  useEffect(() => {
+    const prev = prevActiveRef.current
+    prevActiveRef.current = activeRunByConv
+    if (prev === null) return
+    for (const cid of prev.keys()) {
+      if (!activeRunByConv.has(cid) && cid !== selectedId) markUnread(cid)
+    }
+  }, [activeRunByConv, selectedId])
+  useEffect(() => {
+    if (selectedId) markRead(selectedId)
+  }, [selectedId])
 
   // 点击菜单外部区域时收起「···」菜单（会话与任务菜单共用）
   useEffect(() => {
@@ -245,7 +267,12 @@ export function Sidebar({
 
         {/* count=任务（文件夹）数：子项是任务文件夹树，不是会话数 */}
         <NavSection title="任务" count={groupByTask(tasks, conversations).length}>
-          {isLoading && <p className="px-3 py-1 text-xs text-muted-foreground">加载中…</p>}
+          {isLoading && (
+            <p className="flex items-center gap-1.5 px-3 py-1 text-xs text-muted-foreground">
+              <Loader variant="classic" size="sm" tone="muted" />
+              加载中…
+            </p>
+          )}
           {!isLoading && tasks.length === 0 && (
             <p className="px-3 py-2 text-xs text-muted-foreground">还没有任务，点「新建任务」开始</p>
           )}
@@ -273,32 +300,34 @@ export function Sidebar({
               }}
               onNewConversation={() => void handleNewConv(g.task.id)}
             >
-              {g.conversations.map((c) => (
-                <ConvItem
-                  key={c.id}
-                  conv={c}
-                  active={c.id === selectedId}
-                  renaming={renamingId === c.id}
-                  renameValue={renameValue}
-                  menuOpen={menuFor === c.id}
-                  onRenameValue={setRenameValue}
-                  onSelect={() => onSelect(c.id)}
-                  onMenuOpen={() => {
-                    setMenuFor(menuFor === c.id ? null : c.id)
-                    setRenamingId(null)
-                  }}
-                  onStartRename={() => {
-                    setRenamingId(c.id)
-                    setRenameValue(c.title)
-                    setMenuFor(null)
-                  }}
-                  onConfirmRename={() => void handleRename(c.id)}
-                  onCancelRename={() => setRenamingId(null)}
-                  onDelete={() => {
-                    setMenuFor(null)
-                    setConfirmError(null)
-                    setConfirmDelete(c)
-                  }}
+                {g.conversations.map((c) => (
+                  <ConvItem
+                    key={c.id}
+                    conv={c}
+                    active={c.id === selectedId}
+                    runStatus={activeRunByConv.get(c.id) ?? null}
+                    unread={unreadConvs.has(c.id)}
+                    renaming={renamingId === c.id}
+                    renameValue={renameValue}
+                    menuOpen={menuFor === c.id}
+                    onRenameValue={setRenameValue}
+                    onSelect={() => onSelect(c.id)}
+                    onMenuOpen={() => {
+                      setMenuFor(menuFor === c.id ? null : c.id)
+                      setRenamingId(null)
+                    }}
+                    onStartRename={() => {
+                      setRenamingId(c.id)
+                      setRenameValue(c.title)
+                      setMenuFor(null)
+                    }}
+                    onConfirmRename={() => void handleRename(c.id)}
+                    onCancelRename={() => setRenamingId(null)}
+                    onDelete={() => {
+                      setMenuFor(null)
+                      setConfirmError(null)
+                      setConfirmDelete(c)
+                    }}
                 />
               ))}
             </TaskFolder>
@@ -548,6 +577,8 @@ function IconButtonAction({
 function ConvItem({
   conv,
   active,
+  runStatus,
+  unread,
   renaming,
   renameValue,
   menuOpen,
@@ -561,6 +592,10 @@ function ConvItem({
 }: {
   conv: Conversation
   active: boolean
+  /** 占用中的 run 状态（running/waiting_input）：左槽转 classic loader */
+  runStatus?: 'running' | 'waiting_input' | null
+  /** 有未读新结果：左槽圆点（进入会话即清除） */
+  unread?: boolean
   renaming: boolean
   renameValue: string
   menuOpen: boolean
@@ -587,12 +622,24 @@ function ConvItem({
       />
     )
   }
+  // 左槽指示：占用中 loader 优先；否则未读圆点。
+  // HITL 等裁决（waiting_input）= 会话级「等待确认」胶囊（右缘），左槽 loader 继续转
+  const indicator = runStatus ? (
+    <Loader variant="classic" size="xs" tone="muted" />
+  ) : unread ? (
+    <span className="unread-dot" />
+  ) : undefined
+  const badge =
+    runStatus === 'waiting_input' ? <span className="wait-pill">等待确认</span> : undefined
   return (
     <div className="relative">
       <ChatItem
         title={conv.title}
-        meta={formatRelativeTime(conv.created_at)}
+        // HITL 等裁决时右缘让位给「等待确认」胶囊，日期不渲染（挤占标题）
+        meta={runStatus === 'waiting_input' ? undefined : formatRelativeTime(conv.created_at)}
         active={active}
+        indicator={indicator}
+        badge={badge}
         onClick={onSelect}
         action={
           <button

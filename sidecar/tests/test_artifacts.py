@@ -136,6 +136,33 @@ def test_restore_roundtrip(client):
     assert "新版" in client.get(f"/api/artifacts/{aid}/content").text
 
 
+def test_put_force_preserves_fresh_publish_state(client):
+    """跨线程竞态防线：PUT 读行后 worker 线程的发布落地（emitted 复位 0、seq+1），
+    编辑保存持锁重读，不得用陈旧整行回写抹掉 emitted/last_run_id——否则该次
+    发布的 artifact.created 永不发出，产物面板失去刷新触发。"""
+    _, conv = _task_conv()
+    m = _pub(_content("v1"), conv=conv, source={"skill": "t", "thread_id": conv["id"], "run_id": "run_a"})
+    aid = m["artifact_id"]
+    db.mark_emitted(aid)  # 模拟 run 边界已发出 artifact.created（emitted=1）
+
+    stale = db.get_artifact_index(aid)  # PUT 已过检查点的读行快照
+    _pub(_content("v2"), conv=conv, source={"skill": "t", "thread_id": conv["id"], "run_id": "run_b"})
+
+    mine = _content("我的版本")
+    r = client.put(
+        f"/api/artifacts/{aid}/content",
+        json={"content": mine, "base_content_seq": stale["content_seq"], "force": True},
+    )
+    assert r.status_code == 200
+
+    row = db.get_artifact_index(aid)
+    assert row["emitted"] == 0  # 未被陈旧行（emitted=1）抹掉
+    assert row["last_run_id"] == "run_b"
+    assert db.pending_emit("run_b"), "run_b 的 artifact.created 账本不得被 PUT 清掉"
+    assert "我的版本" in client.get(f"/api/artifacts/{aid}/content").text
+    assert row["content_seq"] == stale["content_seq"] + 2  # publish +1、PUT +1
+
+
 def test_put_unknown_artifact(client):
     r = client.put(
         "/api/artifacts/art_0000000000ff/content", json={"content": {}, "base_content_seq": 1}

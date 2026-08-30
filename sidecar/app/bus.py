@@ -50,13 +50,29 @@ async def publish(conversation_id: str, event: dict[str, Any]) -> None:
                 # 可丢事件（token/todo/tool 等增量）：客户端靠终态事件+重连对账兜底
                 logger.debug("SSE 队列积压，丢弃事件 %s（cid=%s）", event.get("event"), conversation_id)
                 continue
-            # 必达事件：挤出最旧一条腾位（多为可丢的 token 增量）再入队。
-            # 单事件循环内 get/put 之间无并发，取一条即有空位。
-            try:
-                q.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
+            # 必达事件：挤出最旧的**非必达**事件腾位。单事件循环内以下操作无并发，
+            # 整队列重建一遍找得到可丢事件；若积压全是必达事件（消费者彻底停滞的
+            # 极端态），保序丢弃最旧一条并告警——此时丢哪个都丢失收敛信号。
+            held: list[dict] = []
+            evicted: dict | None = None
+            while True:
+                try:
+                    oldest = q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if evicted is None and oldest.get("event") not in _MUST_DELIVER:
+                    evicted = oldest
+                    continue
+                held.append(oldest)
+            if evicted is None and held:
+                evicted = held.pop(0)  # 全是必达事件：held 头部即最旧一条
+            for e in held:
+                q.put_nowait(e)
+            if evicted is not None:
+                logger.warning(
+                    "SSE 队列积压，丢弃最旧事件 %s（cid=%s）", evicted.get("event"), conversation_id
+                )
             try:
                 q.put_nowait(event)
-            except asyncio.QueueFull:  # 理论不可达（防御）
+            except asyncio.QueueFull:  # 理论不可达（防御：空队列才走到这）
                 logger.error("必达事件入队失败 %s（cid=%s）", event.get("event"), conversation_id)

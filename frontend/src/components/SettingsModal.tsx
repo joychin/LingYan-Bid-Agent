@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronDown, Eye, EyeOff, FileText, FolderOpen, Image as ImageIcon, Pencil, Plus, Search, Sparkles, Trash2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { Loader } from '@/components/ai/Loader'
 import { Input } from '@/components/ui/input'
 import { ModalShell } from '@/components/ui/ModalShell'
 import {
@@ -41,18 +42,26 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
     enabled: open,
   })
 
-  // 能力状态条：按配置现算，配置齐备时不显示（提示不是门禁）
+  // 能力状态条：按配置现算，配置齐备时不显示（提示不是门禁）。
+  // 识别路由 = 文档解析（百度云）→ 图片识别模型（VLM）→ 降级，两条能力互补：
+  // 有云端则 VLM 缺位不报警；无云端时 VLM 覆盖图片/扫描件，唯 .doc 必须走云端。
   const notices: { level: 'error' | 'warn'; text: string }[] = []
   if (settings) {
     const withKey = settings.models.filter((m) => m.key_configured)
     if (withKey.length === 0) {
       notices.push({ level: 'error', text: '没有已配 Key 的模型，无法对话——请添加模型并保存 API Key' })
     }
-    if (!settings.models.some((m) => m.image_support && m.key_configured)) {
-      notices.push({ level: 'warn', text: '没有可用的图片识别模型：知识库图片 / 扫描件将无法识别，仅存档原件' })
-    }
-    if (!settings.ocr.configured) {
-      notices.push({ level: 'warn', text: '未配置文档解析：扫描版 PDF 与 .doc 无法解析（仅能存档）' })
+    const hasVision = settings.models.some((m) => m.image_support && m.key_configured)
+    if (!hasVision && !settings.ocr.configured) {
+      notices.push({
+        level: 'warn',
+        text: '未配置图片识别能力：图片、扫描版 PDF、.doc 均无法识别，仅存档原件——可配置文档解析（百度云），或为模型勾选「图片输入」',
+      })
+    } else if (hasVision && !settings.ocr.configured) {
+      notices.push({
+        level: 'warn',
+        text: '未配置文档解析：仅 .doc 无法识别；图片与扫描版 PDF 将由图片识别模型转写（整本扫描件走云端效果更好）',
+      })
     }
   }
 
@@ -328,12 +337,12 @@ function Switch({ checked, onChange, label }: { checked: boolean; onChange: (v: 
       onClick={() => onChange(!checked)}
       className={cn(
         'relative h-[22px] w-10 shrink-0 rounded-full transition-colors',
-        checked ? 'bg-primary' : 'bg-line-2',
+        checked ? 'bg-inverse' : 'bg-line-2',
       )}
     >
       <span
         className={cn(
-          'absolute left-0.5 top-0.5 h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-transform',
+          'absolute left-0.5 top-0.5 h-[18px] w-[18px] rounded-full bg-canvas shadow-sm transition-transform',
           checked && 'translate-x-[18px]',
         )}
       />
@@ -422,7 +431,7 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
         <SettingRow
           cardTitle
           title="本地配置"
-          desc="模型与 API Key 均保存在本机数据库，不上传；勾选「图片输入」的模型用于知识库图片 / 扫描件识别。"
+          desc="模型与 API Key 均保存在本机数据库，不上传；勾选「图片输入」的模型用于知识库图片 / 扫描件识别（已配置文档解析时优先走百度云，此处为兜底）。"
         >
           <Button size="sm" onClick={() => setEditing('new')}>
             <Plus className="mr-1 h-3.5 w-3.5" />
@@ -1014,7 +1023,10 @@ function ModelDialog({
             )}
           </Field>
 
-          <SettingRow title="图片输入" desc="勾选后用于知识库图片 / 扫描件识别">
+          <SettingRow
+            title="图片输入"
+            desc="勾选后用于知识库图片 / 扫描件识别（已配置文档解析时优先走百度云，此处为兜底）"
+          >
             <Switch checked={imageSupport} onChange={setImageSupport} label="图片输入" />
           </SettingRow>
         </div>
@@ -1026,12 +1038,14 @@ function ModelDialog({
             <span className="flex-1" />
           )}
           <Button size="sm" variant="outline" disabled={testing} onClick={test}>
+            {testing && <Loader variant="circular" size="xs" tone="current" />}
             {testing ? '测试中…' : '测试'}
           </Button>
           <Button size="sm" variant="outline" onClick={onClose}>
             取消
           </Button>
           <Button size="sm" disabled={saving} onClick={save}>
+            {saving && <Loader variant="circular" size="xs" tone="current" />}
             {saving ? '保存中…' : '保存'}
           </Button>
         </div>
@@ -1087,8 +1101,9 @@ function ParseSection() {
         <div className="text-[15px] font-semibold">百度云文档解析（PaddleOCR-VL）</div>
         <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
           用于扫描版 PDF、.doc 与图片的云端识别（任务文件区与知识库通用）。按量计费，
-          文件内容将发送至百度智能云；不配置时这些文件仅能存档，数字版 PDF 与
-          .docx 不受影响（始终本地解析）。
+          文件内容将发送至百度智能云；数字版 PDF 与 .docx 始终本地解析、不受影响。
+          未配置时 .doc 仅能存档，图片与扫描件回退给勾选了「图片输入」的模型本地
+          转写（两者都未配置才仅存档）。
         </p>
       </div>
 
@@ -1129,6 +1144,7 @@ function ParseSection() {
             保存
           </Button>
           <Button size="sm" variant="outline" disabled={testing} onClick={testConnection}>
+            {testing && <Loader variant="circular" size="xs" tone="current" />}
             {testing ? '测试中…' : '测试'}
           </Button>
         </div>

@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { ArrowLeft, ArrowRight, Check, MessageCircleQuestion, ShieldQuestion, X } from 'lucide-react'
 import type { HitlDecision } from '@/api/client'
 import type { InterruptRequest } from '@/api/sse'
+import { TextShimmer } from '@/components/ai/TextShimmer'
+import { toolDisplayName } from '@/components/ai/toolDisplay'
 
 /** respond-only（ask_human 问答型）：只允许 respond。 */
 export function isQuestion(req: InterruptRequest): boolean {
@@ -172,7 +174,7 @@ function OptionList({
 function ApprovalDetail({ req }: { req: InterruptRequest }) {
   return (
     <div className="rounded-md border border-line bg-background px-2 py-1.5">
-      <div className="font-mono text-[12px] font-medium text-ink">{req.tool}</div>
+      <div className="text-[12px] font-medium text-ink">{toolDisplayName(req.tool)}</div>
       {req.description && <div className="mt-0.5 text-xs text-ink-2">{req.description}</div>}
       {Object.keys(req.args ?? {}).length > 0 && (
         <details className="mt-1">
@@ -258,7 +260,7 @@ export function InterruptCard({
           type="button"
           disabled={disabled}
           onClick={() => onDecide(requests.map(() => ({ type: 'approve' })))}
-          className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+          className="inline-flex items-center gap-1 rounded-md bg-inverse px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
         >
           <Check className="h-3.5 w-3.5" />
           批准
@@ -303,10 +305,16 @@ function WizardCard({
           ) : (
             <ShieldQuestion className="h-3.5 w-3.5" />
           )}
-          需要你的输入
+          {/* 问句项按 tool_use 呈现（同过程步骤的「向你提问」行同族），不像确认弹窗 */}
+          {question ? `已询问 ${total} 个问题` : '需要你的确认'}
         </span>
         {showProgress && <span>第 {idx + 1} / {total} 项</span>}
       </div>
+      {question && (
+        <div className="mt-1 text-[12px] text-muted-foreground">
+          <TextShimmer>等待你的回答…</TextShimmer>
+        </div>
+      )}
       {/* 进度线：已完成项数占比（当前项进行中不计入）；中性灰填充 */}
       {showProgress && (
         <div className="mt-1.5 h-0.5 w-full overflow-hidden rounded-full bg-muted">
@@ -411,7 +419,7 @@ function WizardCard({
           type="button"
           disabled={disabled || !answered}
           onClick={() => onNav(1)}
-          className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+          className="inline-flex items-center gap-1 rounded-md bg-inverse px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
         >
           {last ? (showProgress ? '提交全部' : '提交') : '下一项'}
           <ArrowRight className="h-3.5 w-3.5" />

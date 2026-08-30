@@ -69,6 +69,33 @@ def test_conversation_requires_task(client):
     assert client.post("/api/conversations", json={"task_id": "t_nope"}).status_code == 404
 
 
+def test_task_creation_prebuilds_skeleton_dirs(client):
+    """新建任务预建 files/out/drafts：agent 开工第一步的 ls 不再 path_not_found。"""
+    body = create_task(client, "骨架目录任务")
+    tid = body["task"]["id"]
+    assert artifact_store.task_files_dir(tid).is_dir()
+    assert artifact_store.task_out_dir(tid).is_dir()
+    assert artifact_store.task_drafts_dir(tid).is_dir()
+    # threads/ 仍按需创建（按会话粒度）
+    assert not (artifact_store.task_dir(tid) / "threads").exists()
+
+
+def test_skeleton_self_heal_for_legacy_task(client):
+    """骨架预建（2026-08-29）之前创建的旧任务只有库行、没有磁盘目录——run 启动自愈
+    （run_stream 的 ensure_task_skeleton）补齐后，模型 ls 任务根目录不再 path_not_found。"""
+    import shutil
+
+    body = create_task(client, "自愈任务")
+    tid = body["task"]["id"]
+    shutil.rmtree(artifact_store.task_dir(tid))
+    assert not artifact_store.task_dir(tid).exists()
+    # run 启动时的同一入口（幂等 mkdir parents）
+    artifact_store.ensure_task_skeleton(tid)
+    assert artifact_store.task_files_dir(tid).is_dir()
+    assert artifact_store.task_out_dir(tid).is_dir()
+    assert artifact_store.task_drafts_dir(tid).is_dir()
+
+
 # ---------- 双作用域发布与过滤 ----------
 
 
@@ -344,6 +371,44 @@ def test_task_context_block_lists_both_layers(env):
     assert "本会话过程稿" in block and "草稿笔记" in block
 
     assert _task_context_block("t_nope", conv["id"]) == ""
+
+
+def test_delete_task_archival_failure_keeps_task(client, monkeypatch):
+    """归档（mv）失败必须中止且不删库：任务/索引/磁盘目录原样保留，用户可重试——
+    否则任务在产品内消失而目录残留原位，正式稿只能手工找回。"""
+    from tests.util import upload_file
+
+    conv = create_conversation(client, title="会话B")
+    tid, cid = conv["task_id"], conv["id"]
+    m_formal = publish.publish_artifact(DIR_KEY, _dir_content(), task_id=tid)
+    upload_file(client, tid, "招标文件.docx", b"doc")
+
+    real_move = artifact_store.shutil.move
+    fail = {"on": True}
+
+    def flaky_move(src, dst):
+        if fail["on"]:
+            raise OSError("模拟磁盘只读")
+        return real_move(src, dst)
+
+    monkeypatch.setattr(artifact_store.shutil, "move", flaky_move)
+    r = client.delete(f"/api/tasks/{tid}")
+    assert r.status_code == 500
+    assert "归档失败" in r.json()["detail"]
+
+    # 现场完整保留
+    assert db.get_task(tid) is not None
+    assert db.get_conversation(cid) is not None
+    assert db.get_artifact_index(m_formal["artifact_id"]) is not None
+    assert artifact_store.task_dir(tid).is_dir()
+    assert artifact_store.archive_task_dir(tid).exists() is False
+
+    # 恢复磁盘后重试删除成功
+    fail["on"] = False
+    r = client.delete(f"/api/tasks/{tid}")
+    assert r.status_code == 200
+    assert db.get_task(tid) is None
+    assert artifact_store.task_dir(tid).exists() is False
 
 
 # ---------- 删任务归档 ----------

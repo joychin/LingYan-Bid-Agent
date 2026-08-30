@@ -14,14 +14,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
-import { History, Loader2, NotebookPen, Pencil } from 'lucide-react'
+import { History, NotebookPen, Pencil } from 'lucide-react'
+import { Loader } from '@/components/ai/Loader'
 import {
   getWorkbenchContent,
   putWorkbenchContent,
   restoreWorkbench,
   saveWorkbenchNote,
 } from '@/api/client'
-import { markdownComponents } from '@/components/ChatMessage'
+import { markdownComponents } from '@/components/ai/MemoMarkdown'
 import { mdRemarkPlugins } from '@/lib/markdown'
 import { useToast } from '@/context/Toast'
 
@@ -211,7 +212,16 @@ export function WorkbenchViewer({
       <div className="ap-ws">
         <div className="ap-ws-body">
           <div className="p-6 text-center text-sm text-muted-foreground">
-            {isLoading ? '加载工作台文件…' : isError ? `加载失败：${error instanceof Error ? error.message : String(error)}` : ''}
+            {isLoading ? (
+              <span className="inline-flex items-center justify-center gap-2">
+                <Loader variant="classic" size="sm" tone="muted" />
+                加载工作台文件…
+              </span>
+            ) : isError ? (
+              `加载失败：${error instanceof Error ? error.message : String(error)}`
+            ) : (
+              ''
+            )}
           </div>
         </div>
       </div>
@@ -276,7 +286,7 @@ export function WorkbenchViewer({
           <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">已人工修订</span>
         )}
         <div className="ml-auto flex items-center gap-1">
-          {saving && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+          {saving && <Loader variant="circular" size="xs" tone="muted" />}
           {status === 'saved' && <span className="text-xs text-muted-foreground">已保存</span>}
           {status === 'error' && (
             <button type="button" className="text-xs text-red-600 hover:underline" onClick={() => void doSave()}>
@@ -321,7 +331,7 @@ export function WorkbenchViewer({
             <button
               type="button"
               onClick={finishEdit}
-              className="rounded-md bg-primary px-2.5 py-1 text-xs text-primary-foreground hover:opacity-90"
+              className="rounded-md bg-inverse px-2.5 py-1 text-xs text-primary-foreground hover:opacity-90"
             >
               完成编辑
             </button>

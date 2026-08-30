@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { getLatestRun, resumeRun, cancelRun, sendMessage, type HitlDecision, type ThinkingLevel } from '@/api/client'
+import { getLatestRun, getRunSnapshot, resumeRun, cancelRun, sendMessage, type HitlDecision, type ThinkingLevel } from '@/api/client'
 import { subscribeSSE, type ToolStep } from '@/api/sse'
 import { useSidecarHealth } from '@/context/SidecarHealth'
 import { INITIAL_STATE, runReducer, type Action, type RunState } from './runReducer'
@@ -47,6 +47,33 @@ export function useRun(convId: string | null) {
   )
   dispatchRef.current = dispatch
 
+  const restoreSnapshot = useCallback(
+    (runId: string) => {
+      void getRunSnapshot(runId)
+        .then((snapshot) => {
+          const current = stateRef.current
+          // 调用侧守卫（reducer 内还有同口径第二道闸）：已切到别的 run 不应用；
+          // 已收到实时事件（tools 非空）不覆盖。runId 为 null 允许--断线重挂时
+          // run.state 可能还没到，快照本身带权威 runId。
+          if (snapshot.status !== 'running' || (current.runId && current.runId !== runId)) return
+          if (current.tools.length > 0) return
+          dispatch({
+            type: 'snapshot',
+            runId,
+            status: snapshot.status,
+            tools: snapshot.tools,
+            todos: snapshot.todos,
+            reasoningText: snapshot.reasoning ?? '',
+            snapshotSeq: snapshot.last_seq ?? undefined,
+          })
+        })
+        .catch(() => {
+          /* snapshot 是恢复增强，SSE 主链路失败时保持现有状态 */
+        })
+    },
+    [dispatch],
+  )
+
   useEffect(() => {
     if (!convId) return
     // 换会话重挂：状态与记账全部复位（terminalRuns 属于会话生命周期）
@@ -57,6 +84,11 @@ export function useRun(convId: string | null) {
       onEvent: (event, data) => {
         if (data.conversation_id !== convId) return
         dispatch({ type: 'sse', event, data, now: Date.now() })
+        // 断线/重挂对账：run.state=running 且本地过程树为空时拉一次运行快照，
+        // 恢复后端已经在跑的 task 卡（SSE 不补发历史 tool.called）。
+        if (event === 'run.state' && data.status === 'running' && !stateRef.current.tools.length) {
+          restoreSnapshot(data.run_id)
+        }
       },
       onError: () => {
         // 连接失败 ≠ 任务失败：不能把 running 置 false--重连后没有 agent.started 补发，
@@ -68,6 +100,7 @@ export function useRun(convId: string | null) {
         getLatestRun(convId)
           .then(({ run }) => {
             if (run && (run.status === 'running' || run.status === 'waiting_input')) {
+              if (run.status === 'running' && !stateRef.current.tools.length) restoreSnapshot(run.id)
               // 任务仍在执行或等待用户输入：保持现状等事件（waiting_input 由 run.state 对账恢复卡）
               return
             }
@@ -82,7 +115,7 @@ export function useRun(convId: string | null) {
     })
     return () => ctrl.abort()
     // reconnectSeq 递增（sidecar 恢复/换端口）时重挂流
-  }, [convId, queryClient, reconnectSeq, dispatch])
+  }, [convId, queryClient, reconnectSeq, dispatch, restoreSnapshot])
 
   const send = useCallback(
     async (text: string, thinking: ThinkingLevel = 'low', model?: string) => {
@@ -94,14 +127,18 @@ export function useRun(convId: string | null) {
       // 续跑沿用 run 存档的思考档位/模型，此处 thinking/model 不参与
       if (cur.interrupt) {
         const runId = cur.interrupt.runId
-        dispatch({ type: 'remember-sent', text: content })
+        dispatch({ type: 'remember-answer', text: content })
         try {
           await resumeRun(runId, [{ type: 'respond', message: content }])
           // 乐观置 running（真正的 agent.started 随后到达并做同样的事），
-          // 封住「202 到 started 之间」的发送窗口
-          dispatch({ type: 'started', runId, now: Date.now() })
+          // 封住「202 到 started 之间」的发送窗口；continuation 标记续跑段
+          // （RunMessage 去掉回合头、紧贴暂停消息渲染）
+          dispatch({ type: 'started', runId, now: Date.now(), continuation: true, continuationKind: 'answer' })
           // 用户回答已由 sidecar 落为 user message，拉取真值
           void queryClient.invalidateQueries({ queryKey: ['messages', convId] })
+          // 续跑立即使占用清单失效：侧栏 loader 不等 3s 轮询周期
+          void queryClient.invalidateQueries({ queryKey: ['runs', 'active'] })
+          restoreSnapshot(runId)
         } catch (e) {
           // 409 = 已在续跑（连点/竞态窗口）：不置错误卡（run 确实在跑），但向上抛——
           // InputComposer 据此保留输入，静默 resolve 会把用户刚打的回答清掉
@@ -112,11 +149,13 @@ export function useRun(convId: string | null) {
         return
       }
       if (cur.running) return
-      dispatch({ type: 'remember-sent', text: content })
+      dispatch({ type: 'remember-instruction', text: content })
       try {
         await sendMessage(convId, content, thinking, model)
         // user 消息已由 sidecar 落库，拉取真值
         queryClient.invalidateQueries({ queryKey: ['messages', convId] })
+        // 发送立即使占用清单失效：侧栏 loader 不等 3s 轮询周期
+        void queryClient.invalidateQueries({ queryKey: ['runs', 'active'] })
       } catch (e) {
         // 发送失败（如 409 同会话并发）：展示错误并抛出，让调用方恢复输入框
         dispatch({ type: 'send-failed', error: e instanceof Error ? e.message : String(e) })
@@ -134,9 +173,24 @@ export function useRun(convId: string | null) {
       const cur = stateRef.current
       if (!cur.interrupt || cur.running) return false
       const runId = cur.interrupt.runId
+      // respond 回答记入 continuationAnswer：续跑流式气泡的临时回答行数据源。
+      const respondText = decisions
+        .filter((d): d is Extract<HitlDecision, { type: 'respond' }> => d.type === 'respond')
+        .map((d) => d.message.trim())
+        .filter(Boolean)
+        .join('\n')
       try {
         await resumeRun(runId, decisions)
-        dispatch({ type: 'started', runId, now: Date.now() })
+        dispatch({ type: 'remember-answer', text: respondText })
+        dispatch({
+          type: 'started',
+          runId,
+          now: Date.now(),
+          continuation: true,
+          continuationKind: respondText ? 'answer' : 'subagents',
+        })
+        void queryClient.invalidateQueries({ queryKey: ['runs', 'active'] })
+        restoreSnapshot(runId)
         return true
       } catch (e) {
         // 409 = 已在续跑（双击竞态窗口），静默且视为成功
@@ -145,7 +199,7 @@ export function useRun(convId: string | null) {
         return false
       }
     },
-    [dispatch],
+    [dispatch, queryClient, restoreSnapshot],
   )
 
   /** 用户主动停止：置位协作式取消，收敛由随后的 agent.error（「任务已停止」）完成。

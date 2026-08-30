@@ -10,6 +10,7 @@
 
 import type { TodoItem, ToolStep } from './sse'
 import type {
+  ActiveRun,
   Artifact,
   ArtifactContract,
   ArtifactSource,
@@ -23,6 +24,7 @@ import type {
   Message as MessageDto,
   ModelProfile,
   RunInfo,
+  RunTraceSnapshot as RunTraceSnapshotDto,
   SendMessageResult,
   Settings,
   Task,
@@ -32,6 +34,7 @@ import type {
 // ---- REST DTO 类型单一事实源：sidecar app/contracts/dto.py 的 pydantic 模型经
 // scripts/gen_ts_types.py 生成 dto.gen.ts；这里 re-export 保持既有 import 路径不变。----
 export type {
+  ActiveRun,
   Artifact,
   ArtifactContract,
   ArtifactSource,
@@ -169,6 +172,11 @@ export function deleteTask(id: string): Promise<{ ok: boolean }> {
   return request(`/tasks/${id}`, { method: 'DELETE' }, { timeoutMs: 60_000 })
 }
 
+/** 占用中的 run（running/waiting_input）：侧栏跨会话状态指示轮询用。 */
+export function fetchActiveRuns(): Promise<{ runs: ActiveRun[] }> {
+  return request('/runs/active')
+}
+
 export function listConversations(): Promise<{ conversations: Conversation[] }> {
   return request('/conversations')
 }
@@ -212,6 +220,17 @@ export function sendMessage(
 /** 最新 run 状态：SSE 断线期间 run 结束时据此收敛 running 态。 */
 export function getLatestRun(convId: string): Promise<{ run: RunInfo | null }> {
   return request(`/conversations/${convId}/runs/latest`)
+}
+
+/** 运行中过程快照：SSE 断线/页面重挂对账恢复 task 卡。基础字段来自 dto.gen；
+ *  tools 是 trace 步骤树（键序与 ToolStep 同构），前端用客户端类型标注。 */
+export interface RunSnapshot extends Omit<RunTraceSnapshotDto, 'tools' | 'todos'> {
+  tools: ToolStep[]
+  todos: TodoItem[]
+}
+
+export function getRunSnapshot(rid: string): Promise<RunSnapshot> {
+  return request(`/runs/${rid}/snapshot`)
 }
 
 /** HITL 裁决续跑：waiting_input 的 run 以 decisions 从 interrupt 处继续（202 后台执行）。 */
@@ -277,13 +296,15 @@ export function putOcrKeys(apiKey: string, secretKey: string): Promise<{ ok: boo
   })
 }
 
-/** 设置「测试」按钮：model=<profile id> 发最小 chat；ocr 用 AK/SK 换一次 access_token 探活。 */
+/** 设置「测试」按钮：model=<profile id> 发最小 chat；ocr 用 AK/SK 换一次 access_token 探活。
+ *  X-Sidecar-Ping 自定义头为 sidecar 侧要求：跨站触发会被 CORS 预检挡住（防任意
+ *  网页静默触发带 Key 的出站请求）。 */
 export function testModelConnection(
   target: { model: string } | { role: 'ocr' },
 ): Promise<{ ok: boolean }> {
   const qs =
     'model' in target ? `model=${encodeURIComponent(target.model)}` : `role=${target.role}`
-  return request(`/settings/test?${qs}`)
+  return request(`/settings/test?${qs}`, { headers: { 'X-Sidecar-Ping': '1' } })
 }
 
 export function artifactKey(a: Pick<Artifact, 'kind' | 'schema_id' | 'schema_version'>): string {

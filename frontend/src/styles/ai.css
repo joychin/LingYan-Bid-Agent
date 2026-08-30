@@ -2,13 +2,21 @@
 /* keyframes 名与 prompt-kit globals.css 保持一致，供 Loader / TextShimmer 的 inline animation 引用。 */
 
 @keyframes shimmer {
-  0% { background-position: 150% center; }
-  100% { background-position: -150% center; }
+  0% { background-position: 200% center; }
+  100% { background-position: -200% center; }
 }
 
+/* 彗尾式渐隐（亮→暗 15%）：跳变发生在暗处，12 根辐条读起来是平滑旋转；
+   不可用 0→1（亮→全透明硬切），会一顿一顿（2026-08-29 实测反馈） */
 @keyframes spinner-fade {
-  0% { opacity: 0; }
-  100% { opacity: 1; }
+  0% { opacity: 1; }
+  100% { opacity: 0.15; }
+}
+
+/* 轮盘整体连续旋转：纯透明度错峰的亮头只能 30°/步离散跳（经典 iOS spinner 的
+   原理性限制，与帧率无关），叠加同周期同步旋转后亮头连续、彗尾形态不变 */
+@keyframes spinner-rotate {
+  to { transform: rotate(360deg); }
 }
 
 @keyframes thin-pulse {

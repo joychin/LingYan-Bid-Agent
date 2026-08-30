@@ -21,7 +21,7 @@ export function TextShimmer({
 
   return (
     <Component
-      className={cn('text-shimmer font-medium', className)}
+      className={cn('text-shimmer', className)}
       style={
         {
           backgroundImage: `linear-gradient(to right, var(--Color-text-secondary) ${50 - dynamicSpread}%, var(--Color-text-primary) 50%, var(--Color-text-secondary) ${50 + dynamicSpread}%)`,

@@ -6,6 +6,7 @@ import { useWorkbench } from '@/hooks/useWorkbench'
 import { PromoteConfirmModal } from '@/components/PromoteConfirmModal'
 import { ArtifactOpenHost } from '@/components/ArtifactOpenHost'
 import { WorkbenchViewer } from '@/components/WorkbenchViewer'
+import { Loader } from '@/components/ai/Loader'
 import { kindIcon } from '@/artifacts/registry'
 import { cn } from '@/lib/utils'
 
@@ -219,7 +220,7 @@ export function ArtifactPanel({
                 {taskArtifacts.length > 0 && <span className="ap-count">{taskArtifacts.length}</span>}
               </div>
               {loadingTask ? (
-                <p className="ap-empty">加载中…</p>
+                <p className="ap-empty flex items-center gap-1.5"><Loader variant="classic" size="sm" tone="muted" />加载中…</p>
               ) : taskArtifacts.length === 0 ? (
                 <p className="ap-empty">
                   还没有任务正式成果。
@@ -238,7 +239,7 @@ export function ArtifactPanel({
                 {convArtifacts.length > 0 && <span className="ap-count">{convArtifacts.length}</span>}
               </div>
               {loadingConv ? (
-                <p className="ap-empty">加载中…</p>
+                <p className="ap-empty flex items-center gap-1.5"><Loader variant="classic" size="sm" tone="muted" />加载中…</p>
               ) : convArtifacts.length === 0 ? (
                 <p className="ap-empty">
                   本会话还没有产物。
@@ -259,7 +260,7 @@ export function ArtifactPanel({
               </button>
               {wbOpen &&
                 (loadingWorkbench ? (
-                  <p className="ap-empty">加载中…</p>
+                  <p className="ap-empty flex items-center gap-1.5"><Loader variant="classic" size="sm" tone="muted" />加载中…</p>
                 ) : workbench.length === 0 ? (
                   <p className="ap-empty">
                     尚未生成内容。

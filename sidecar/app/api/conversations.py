@@ -131,11 +131,12 @@ async def create_message(cid: str, body: NewMessageBody):
     if not content:
         raise HTTPException(status_code=422, detail="消息内容不能为空")
 
-    msg = db.create_user_message(cid, content)
     thinking = body.thinking or "low"
     # 模型 profile：未知 id（配置已删）静默回落 default，不为此打断对话
     model = body.model if body.model and cfg.get_profile(body.model) else ""
+    # 先建 run 再落用户消息：messages.run_id 关联所属回合（前端按 run 聚合消息段）
     run = db.create_run(cid, thinking, model)
+    msg = db.create_user_message(cid, content, rid=run["id"])
 
     # 自动命名（fire-and-forget）：默认标题时后台生成，条件收敛在 titler 内部
     asyncio.create_task(titler.maybe_generate_title(cid, content))

@@ -80,15 +80,17 @@ export interface SSEHandlers {
   onError?: (err: Error) => void
 }
 
-/** 同会话同时只允许一条订阅：sidecar 重启窗口内旧连接的自动重连可能与新订阅并存，
- *  两路各投一份事件（卡片/token 双份重影）。新订阅先掐死同会话旧连接。 */
-const activeSubs = new Map<string, AbortController>()
+/** 全局同时只允许一条订阅：聊天区一次只显示一个会话，跨会话/同会话都先掐旧再建新。
+ *  这是浏览器「每域名 6 条并发连接」预算的结构性防线——SSE 是长连接，旧连接的 abort
+ *  经 Vite 代理到上游可能残留半开（页面侧已关、代理/上游侧仍 ESTABLISHED），并发多条
+ *  会把连接预算挤爆，后续普通请求（messages 等）永久排队，表现为会话骨架屏永不消失。 */
+let activeCtrl: AbortController | null = null
 
 /** 订阅会话事件流，返回 AbortController（组件卸载时 abort）。 */
 export function subscribeSSE(convId: string, handlers: SSEHandlers): AbortController {
-  activeSubs.get(convId)?.abort()
+  activeCtrl?.abort()
   const ctrl = new AbortController()
-  activeSubs.set(convId, ctrl)
+  activeCtrl = ctrl
   ;(async () => {
     const { baseURL, token } = await getSidecarInfo()
     // React StrictMode 开发模式会「挂载→立刻 abort→重挂载」。abort 若发生在下面的
@@ -135,7 +137,7 @@ export function subscribeSSE(convId: string, handlers: SSEHandlers): AbortContro
       handlers.onError?.(err instanceof Error ? err : new Error(String(err)))
     })
     .finally(() => {
-      if (activeSubs.get(convId) === ctrl) activeSubs.delete(convId)
+      if (activeCtrl === ctrl) activeCtrl = null
     })
   return ctrl
 }

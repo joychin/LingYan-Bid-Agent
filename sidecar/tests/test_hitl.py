@@ -11,7 +11,7 @@ import json
 import sqlite3
 import time
 
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langgraph.types import Command, Interrupt
 
 from app import agent as agent_mod
@@ -215,6 +215,91 @@ def test_run_stream_resume_segment_continues_seq(tmp_path, monkeypatch):
     assert db.get_run(rid)["status"] == "completed"
 
 
+# ---------- 暂停→续跑：run_id 关联 / 旁白去重 / trace 合并 / last_seq 回写 ----------
+
+
+def _segment_one_items() -> list:
+    """首段：已完成步骤 c0 → 旁白 → 被门禁拦下的 t1 → 中断。"""
+    return [
+        ("updates", {"model": {"messages": [AIMessage(content="", tool_calls=[{"name": "ls", "args": {}, "id": "c0"}])]}}),
+        ("updates", {"tools": {"messages": [ToolMessage(content="[]", name="ls", tool_call_id="c0")]}}),
+        ("messages", (AIMessageChunk(content="我先确认一下"), {})),
+        ("updates", {"model": {"messages": [AIMessage(content="", tool_calls=[{"name": "task", "args": {"description": "调研"}, "id": "t1"}])]}}),
+        ("updates", {"__interrupt__": (_make_interrupt(),)}),
+    ]
+
+
+def test_pause_message_run_id_and_narration_dedup(tmp_path, monkeypatch):
+    cid, rid = _setup_conv(tmp_path, monkeypatch)
+    out = _drive_run_stream(monkeypatch, _StubAgent(_segment_one_items()), cid, rid, user_text="hi")
+    assert out[-1][0] == "run.interrupt"
+
+    # 半截消息带 run_id（前端按 run 聚合同一回合的段落）；正文 = 兜底旁白 + 等待标记
+    msgs = db.list_messages(cid)
+    pause = [m for m in msgs if m["role"] == "assistant"][0]
+    assert pause["run_id"] == rid
+    assert pause["content"].startswith("我先确认一下")
+    assert pause["content"].endswith("（等待你的输入…）")
+
+    # 旁白去重：同一段话不再既当消息正文又在 trace 旁白行重复（t1 步骤 text 已清空）
+    trace = db.get_traces_for_messages([pause["id"]])[pause["id"]]
+    by_id = {s["id"]: s for s in trace["tools"]}
+    assert by_id["c0"]["status"] == "done"
+    assert by_id["t1"]["status"] == "paused"
+    assert by_id["t1"]["text"] == ""
+
+
+def test_resume_completion_merges_trace_and_writes_last_seq(tmp_path, monkeypatch):
+    cid, rid = _setup_conv(tmp_path, monkeypatch)
+    _drive_run_stream(monkeypatch, _StubAgent(_segment_one_items()), cid, rid, user_text="hi")
+    pause = [m for m in db.list_messages(cid) if m["role"] == "assistant"][0]
+
+    # 续段：同 id t1 重发并执行完成 + 新增量步骤 c2 + 最终回复
+    items = [
+        ("updates", {"model": {"messages": [AIMessage(content="", tool_calls=[{"name": "task", "args": {"description": "调研"}, "id": "t1"}])]}}),
+        ("updates", {"tools": {"messages": [ToolMessage(content="完成", name="task", tool_call_id="t1")]}}),
+        ("updates", {"model": {"messages": [AIMessage(content="", tool_calls=[{"name": "write_file", "args": {}, "id": "c2"}])]}}),
+        ("updates", {"tools": {"messages": [ToolMessage(content="ok", name="write_file", tool_call_id="c2")]}}),
+        ("messages", (AIMessageChunk(content="检索完成"), {})),
+    ]
+    out = _drive_run_stream(monkeypatch, _StubAgent(items), cid, rid, resume_decisions=[{"type": "approve"}], start_seq=db.get_run(rid)["last_seq"])
+    assert out[-1][0] == "agent.completed"
+
+    # 最终消息带 run_id；trace 合并挂到最终消息（一棵全程树，无重复 id、顺序旧段在前）
+    final = [m for m in db.list_messages(cid) if m["role"] == "assistant"][-1]
+    assert final["run_id"] == rid
+    assert final["content"] == "检索完成"
+    trace = db.get_traces_for_messages([final["id"]])[final["id"]]
+    assert [s["id"] for s in trace["tools"]] == ["c0", "t1", "c2"]
+    assert {s["id"]: s["status"] for s in trace["tools"]}["t1"] == "done"
+
+    # finish_run 回写终态 seq（此前 last_seq 永远停在暂停值）
+    assert db.get_run(rid)["last_seq"] == out[-1][1]["seq"]
+    # 暂停消息仍在，与最终消息同属一个 run（前端单回合聚合依据）
+    assert pause["run_id"] == final["run_id"] == rid
+
+
+def test_resume_error_without_output_keeps_pause_trace(tmp_path, monkeypatch):
+    cid, rid = _setup_conv(tmp_path, monkeypatch)
+    _drive_run_stream(monkeypatch, _StubAgent(_segment_one_items()), cid, rid, user_text="hi")
+    pause = [m for m in db.list_messages(cid) if m["role"] == "assistant"][0]
+
+    class _BoomAgent:
+        def stream(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    out = _drive_run_stream(monkeypatch, _BoomAgent(), cid, rid, resume_decisions=[{"type": "approve"}], start_seq=db.get_run(rid)["last_seq"])
+    assert out[-1][0] == "agent.error"
+
+    # 无产出终止：暂停标记改写为「任务中断」；trace 不丢——message_id 保留暂停消息挂载
+    pause_after = [m for m in db.list_messages(cid) if m["id"] == pause["id"]][0]
+    assert pause_after["content"].endswith("（任务中断）")
+    trace = db.get_traces_for_messages([pause["id"]])[pause["id"]]
+    assert [s["id"] for s in trace["tools"]] == ["c0", "t1"]
+    assert db.get_run(rid)["status"] == "error"
+    assert db.get_run(rid)["last_seq"] == out[-1][1]["seq"]
+
+
 # ---------- db：迁移与恢复 ----------
 
 
@@ -268,6 +353,63 @@ def test_active_run_exists_covers_waiting_input(tmp_path, monkeypatch):
     assert db.active_run_exists(conv["id"]) is True
     db.finish_run(run["id"], "completed")
     assert db.active_run_exists(conv["id"]) is False
+
+
+def test_resume_run_conditional_claim(tmp_path, monkeypatch):
+    """resume_run 条件抢占：仅 waiting_input 可转 running，重复调用返回 False
+    （幂等抢占点——并发重复 resume 只有一个能成功）。"""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    db.init_db()
+    task = db.create_task("t")
+    conv = db.create_conversation(task["id"])
+    run = db.create_run(conv["id"])
+    assert db.resume_run(run["id"]) is False  # running 状态不可 resume
+    db.interrupt_run(run["id"], [], 0)
+    assert db.resume_run(run["id"]) is True
+    assert db.resume_run(run["id"]) is False  # 已是 running，二次抢占失败
+
+
+def test_run_stream_outer_exception_saves_partial_output(tmp_path, monkeypatch):
+    """外层异常兜底：worker 已流出的正文与 trace 落库（此前只标 error，已流出
+    内容全失），终态事件仍发出。"""
+    cid, rid = _setup_conv(tmp_path, monkeypatch)
+    items = [("messages", (AIMessageChunk(content="已流出的结论正文"), {}))]
+    stub = _StubAgent(items)
+
+    def boom(*a, **kw):
+        raise RuntimeError("发布阶段崩溃")
+
+    monkeypatch.setattr(agent_mod.db, "pending_emit", boom)
+    out = _drive_run_stream(monkeypatch, stub, cid, rid, user_text="hi")
+
+    assert out[-1][0] == "agent.error"
+    row = db.get_run(rid)
+    assert row["status"] == "error"
+    # 已流出的正文落库（带中断标记），不是全失；trace 一并落库
+    msgs = db.list_messages(cid)
+    partial = [m for m in msgs if m["role"] == "assistant" and "已流出的结论正文" in m["content"]]
+    assert partial and partial[0]["content"].endswith("（任务中断）")
+    assert db.get_run_trace(rid) is not None
+
+
+def test_run_stream_saved_segment_not_duplicated_on_late_failure(tmp_path, monkeypatch):
+    """completed 分支落库后晚到的异常（trace 落库失败）：兜底不重写消息
+    （segment_saved 防双写），run 标 error 并发 error 事件。"""
+    cid, rid = _setup_conv(tmp_path, monkeypatch)
+    items = [("messages", (AIMessageChunk(content="最终回复"), {}))]
+    stub = _StubAgent(items)
+
+    def flaky_save(*a, **kw):
+        raise RuntimeError("落库后崩溃")
+
+    monkeypatch.setattr(agent_mod, "_save_merged_trace", flaky_save)
+    out = _drive_run_stream(monkeypatch, stub, cid, rid, user_text="hi")
+
+    assert out[-1][0] == "agent.error"
+    msgs = db.list_messages(cid)
+    finals = [m for m in msgs if m["role"] == "assistant" and "最终回复" in m["content"]]
+    assert len(finals) == 1  # 不双写
+    assert db.get_run(rid)["status"] == "error"
 
 
 # ---------- resume 端点 ----------

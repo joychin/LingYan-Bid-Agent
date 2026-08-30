@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS conversations(
 CREATE TABLE IF NOT EXISTS messages(
   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
   role TEXT NOT NULL CHECK(role IN ('user','assistant')),
-  content TEXT NOT NULL, created_at TEXT NOT NULL);
+  content TEXT NOT NULL, created_at TEXT NOT NULL,
+  run_id TEXT);
 CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('running','completed','error','waiting_input')),
@@ -221,24 +222,32 @@ def list_task_conversation_ids(tid: str) -> list[str]:
 
 def delete_task(tid: str) -> None:
     """删任务行及其全部会话数据与产物索引行（过程稿行也带所属 task_id，一并清理）。
-    磁盘上任务目录的归档由调用方（API 层）先处理。"""
+    磁盘上任务目录的归档由调用方（API 层）先处理。六条 DELETE 在单事务内：
+    连接是 autocommit（isolation_level=None），逐条提交时进程中止会留半级联孤儿行
+    （kb_delete_item 同款 BEGIN IMMEDIATE 先例）。"""
     conn = _conn()
     try:
-        conn.execute(
-            "DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE task_id=?)",
-            (tid,),
-        )
-        conn.execute(
-            "DELETE FROM runs WHERE conversation_id IN (SELECT id FROM conversations WHERE task_id=?)",
-            (tid,),
-        )
-        conn.execute(
-            "DELETE FROM run_traces WHERE conversation_id IN (SELECT id FROM conversations WHERE task_id=?)",
-            (tid,),
-        )
-        conn.execute("DELETE FROM conversations WHERE task_id=?", (tid,))
-        conn.execute("DELETE FROM artifact_index WHERE task_id=?", (tid,))
-        conn.execute("DELETE FROM tasks WHERE id=?", (tid,))
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE task_id=?)",
+                (tid,),
+            )
+            conn.execute(
+                "DELETE FROM runs WHERE conversation_id IN (SELECT id FROM conversations WHERE task_id=?)",
+                (tid,),
+            )
+            conn.execute(
+                "DELETE FROM run_traces WHERE conversation_id IN (SELECT id FROM conversations WHERE task_id=?)",
+                (tid,),
+            )
+            conn.execute("DELETE FROM conversations WHERE task_id=?", (tid,))
+            conn.execute("DELETE FROM artifact_index WHERE task_id=?", (tid,))
+            conn.execute("DELETE FROM tasks WHERE id=?", (tid,))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     finally:
         conn.close()
 
@@ -308,15 +317,21 @@ def set_title_if_default(cid: str, title: str) -> bool:
 def delete_conversation(cid: str) -> None:
     """删除会话及其消息/run 记录与「过程稿」索引行（磁盘上 threads/<cid>/ 目录
     由调用方 API 层先清理）。表之间无外键约束（PRAGMA foreign_keys=ON 对未声明
-    FKs 不生效），手动清理子表。
+    FKs 不生效），手动清理子表；单事务防进程中止留半级联孤儿行。
     """
     conn = _conn()
     try:
-        conn.execute("DELETE FROM messages WHERE conversation_id=?", (cid,))
-        conn.execute("DELETE FROM runs WHERE conversation_id=?", (cid,))
-        conn.execute("DELETE FROM run_traces WHERE conversation_id=?", (cid,))
-        conn.execute("DELETE FROM artifact_index WHERE conversation_id=?", (cid,))
-        conn.execute("DELETE FROM conversations WHERE id=?", (cid,))
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DELETE FROM messages WHERE conversation_id=?", (cid,))
+            conn.execute("DELETE FROM runs WHERE conversation_id=?", (cid,))
+            conn.execute("DELETE FROM run_traces WHERE conversation_id=?", (cid,))
+            conn.execute("DELETE FROM artifact_index WHERE conversation_id=?", (cid,))
+            conn.execute("DELETE FROM conversations WHERE id=?", (cid,))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     finally:
         conn.close()
 
@@ -351,6 +366,30 @@ def save_run_trace(
         conn.close()
 
 
+def get_run_trace(run_id: str) -> dict | None:
+    """按 run_id 取单条 trace（续跑段收尾时与既有行合并用，见 agent._save_merged_trace）。"""
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT run_id, message_id, tools, todos, duration_ms, reasoning FROM run_traces WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    try:
+        return {
+            "message_id": row["message_id"],
+            "tools": json.loads(row["tools"] or "[]"),
+            "todos": json.loads(row["todos"] or "[]"),
+            "durationMs": row["duration_ms"],
+            "reasoning": row["reasoning"] or "",
+        }
+    except ValueError:
+        return None
+
+
 def get_traces_for_messages(message_ids: list[str]) -> dict[str, dict]:
     """按 assistant message_id 批量取 trace，解析好 tools/todos/reasoning 返回 {message_id: row}。"""
     if not message_ids:
@@ -378,37 +417,39 @@ def get_traces_for_messages(message_ids: list[str]) -> dict[str, dict]:
     return out
 
 
-def create_user_message(cid: str, content: str) -> dict:
+def create_user_message(cid: str, content: str, rid: str | None = None) -> dict:
     mid = f"m_{uuid.uuid4().hex[:12]}"
     conn = _conn()
     try:
         conn.execute(
-            "INSERT INTO messages(id, conversation_id, role, content, created_at) VALUES (?,?,?,?,?)",
-            (mid, cid, "user", content, _now()),
+            "INSERT INTO messages(id, conversation_id, role, content, created_at, run_id)"
+            " VALUES (?,?,?,?,?,?)",
+            (mid, cid, "user", content, _now(), rid),
         )
     finally:
         conn.close()
-    return {"id": mid, "conversation_id": cid, "role": "user", "content": content, "created_at": _now()}
+    return {"id": mid, "conversation_id": cid, "role": "user", "content": content, "created_at": _now(), "run_id": rid}
 
 
-def append_assistant_message(cid: str, content: str) -> dict:
+def append_assistant_message(cid: str, content: str, rid: str | None = None) -> dict:
     mid = f"m_{uuid.uuid4().hex[:12]}"
     conn = _conn()
     try:
         conn.execute(
-            "INSERT INTO messages(id, conversation_id, role, content, created_at) VALUES (?,?,?,?,?)",
-            (mid, cid, "assistant", content, _now()),
+            "INSERT INTO messages(id, conversation_id, role, content, created_at, run_id)"
+            " VALUES (?,?,?,?,?,?)",
+            (mid, cid, "assistant", content, _now(), rid),
         )
     finally:
         conn.close()
-    return {"id": mid, "conversation_id": cid, "role": "assistant", "content": content, "created_at": _now()}
+    return {"id": mid, "conversation_id": cid, "role": "assistant", "content": content, "created_at": _now(), "run_id": rid}
 
 
 def list_messages(cid: str) -> list[dict]:
     conn = _conn()
     try:
         rows = conn.execute(
-            "SELECT id, conversation_id, role, content, created_at FROM messages "
+            "SELECT id, conversation_id, role, content, created_at, run_id FROM messages "
             "WHERE conversation_id=? ORDER BY created_at ASC, rowid ASC",
             (cid,),
         ).fetchall()
@@ -459,12 +500,18 @@ def create_run(cid: str, thinking: str = "low", model: str = "") -> dict:
     return {"id": rid, "conversation_id": cid, "status": "running", "error": None, "created_at": now, "thinking": thinking, "model": model}
 
 
-def finish_run(rid: str, status: str, error: str | None = None) -> None:
+def finish_run(rid: str, status: str, error: str | None = None, last_seq: int | None = None) -> None:
+    """run 收尾。last_seq 回写终态事件序号（此前只有 interrupt_run 写过——续跑完成后
+    runs.last_seq 永远停在暂停值，对账/排查拿到的是错数）。"""
     conn = _conn()
     try:
-        conn.execute(
-            "UPDATE runs SET status=?, error=? WHERE id=?", (status, error, rid)
-        )
+        if last_seq is not None:
+            conn.execute(
+                "UPDATE runs SET status=?, error=?, last_seq=? WHERE id=?",
+                (status, error, last_seq, rid),
+            )
+        else:
+            conn.execute("UPDATE runs SET status=?, error=? WHERE id=?", (status, error, rid))
     finally:
         conn.close()
 
@@ -501,27 +548,43 @@ def retire_pause_marker(msg_id: str | None) -> bool:
 
     场景：run 暂停后续跑、又在未产出任何新消息时终止（取消/出错）——此时该消息
     是对话最后一句，却宣称在等输入，与已终止的 run 矛盾。只做末尾精确匹配，
-    不动历史中段的暂停消息（那些在时序上真实等待过）。"""
+    不动历史中段的暂停消息（那些在时序上真实等待过）。裸标记消息（无正文、
+    仅标记，提问前零旁白的暂停，2026-08-30 起无条件落库）同样改写。"""
     if not msg_id:
         return False
     suffix = "\n\n（等待你的输入…）"
     conn = _conn()
     try:
         row = conn.execute("SELECT content FROM messages WHERE id=?", (msg_id,)).fetchone()
-        if row is None or not row["content"].endswith(suffix):
+        if row is None:
             return False
-        content = row["content"][: -len(suffix)] + "\n\n（任务中断）"
-        conn.execute("UPDATE messages SET content=? WHERE id=?", (content, msg_id))
+        content = row["content"]
+        new_content: str | None = None
+        if content.endswith(suffix):
+            new_content = content[: -len(suffix)] + "\n\n（任务中断）"
+        elif content == "（等待你的输入…）":
+            new_content = "（任务中断）"
+        if new_content is None:
+            return False
+        conn.execute("UPDATE messages SET content=? WHERE id=?", (new_content, msg_id))
         return True
     finally:
         conn.close()
 
 
-def resume_run(rid: str) -> None:
-    """用户已裁决：转回 running，快照清空（last_seq 保留，续段事件序号续接用）。"""
+def resume_run(rid: str) -> bool:
+    """用户已裁决：转回 running，快照清空（last_seq 保留，续段事件序号续接用）。
+
+    条件 UPDATE（WHERE status='waiting_input'）+ rowcount 判定：幂等抢占点，
+    并发重复 resume 只有一个能成功（当前单进程事件循环下 handler 原子不可达，
+    属一行加固——handler 里未来插入任何 await 前先把守卫做实）。"""
     conn = _conn()
     try:
-        conn.execute("UPDATE runs SET status='running', interrupt=NULL WHERE id=?", (rid,))
+        cur = conn.execute(
+            "UPDATE runs SET status='running', interrupt=NULL WHERE id=? AND status='waiting_input'",
+            (rid,),
+        )
+        return cur.rowcount > 0
     finally:
         conn.close()
 
@@ -555,6 +618,21 @@ def active_run_exists(cid: str) -> bool:
     finally:
         conn.close()
     return row is not None
+
+
+def list_active_runs() -> list[dict]:
+    """全部占用中的 run（running/waiting_input）：GET /runs/active 的数据源，
+    侧栏跨会话「输出中」指示与任务级「等待确认」聚合用。会话级 409 守卫保证
+    每会话至多一条占用。"""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, conversation_id, status FROM runs"
+            " WHERE status IN ('running','waiting_input') ORDER BY rowid"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_latest_run(cid: str) -> dict | None:

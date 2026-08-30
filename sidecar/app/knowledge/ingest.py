@@ -19,10 +19,11 @@ import asyncio
 import json
 import logging
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .. import baidu_ocr, db
+from .. import baidu_ocr, db, vlm
 from .. import config as cfg
 from ..parse import convert as parse_convert
 from ..parse import count_nodes, outline_with_lines
@@ -43,9 +44,21 @@ _JSON_RE = re.compile(r"\{.*\}", re.S)
 # 本地注册表不收、云端文档解析专属的格式（.docx/pdf/txt/md 恒走本地）
 _CLOUD_ONLY_EXTS = {".doc"}
 
+# 本地逐页 VL 转写的扫描页数预算：500 页扫描件串行转写要数小时且烧调用费，
+# 超出封顶并提示配置云端整本解析（云端路径不受此限，服务端自行约束）
+_MAX_SCAN_PAGES = 60
+
+# 在跑条目（单飞）：连点 retrigger / 重复触发时跳过，防同一条目多条管线
+# 并发跑互相覆盖产物、双跑 LLM 抽取（不加队列，跳过即反馈在状态轮询里）
+_inflight: set[str] = set()
+
 
 def schedule_ingest(kid: str) -> None:
-    """上传/重触发入口：后台跑完整管线，异常只落条目 error 字段。"""
+    """上传/重触发入口：后台跑完整管线，异常只落条目 error 字段。同一条目单飞。"""
+    if kid in _inflight:
+        logger.info("知识库入库在跑，跳过重复触发：%s", kid)
+        return
+    _inflight.add(kid)
     asyncio.get_running_loop().create_task(_run_safe(kid))
 
 
@@ -58,6 +71,16 @@ async def _run_safe(kid: str) -> None:
             db.kb_update_item(kid, parse_status="failed", error="入库异常，请重试或查看日志")
         except Exception:
             pass
+    finally:
+        _inflight.discard(kid)
+
+
+def _item_stale(item: dict) -> bool:
+    """写盘前的代际探测（探测+中止，不加锁）：条目已删除，或同路径重传了不同
+    内容（hash 变了）→ 本轮管线作废，不再写盘/写库——旧管线晚到覆盖新结果的
+    竞态从「分钟级解析窗口」收窄到「探测后毫秒级」。"""
+    cur = db.kb_get_item(item["id"])
+    return cur is None or cur["file_hash"] != item["file_hash"]
 
 
 def run_ingest(kid: str) -> dict:
@@ -100,6 +123,10 @@ def run_ingest(kid: str) -> dict:
         return db.kb_get_item(kid) or {}
 
     # ---- ② 产物落盘 + 切段建索引 ----
+    # 代际探测：解析（可能分钟级）期间条目被删/重传 → 本轮作废，不再写盘
+    if _item_stale(item):
+        logger.info("知识库入库中止（条目已删除或重传）：%s", kid)
+        return db.kb_get_item(kid) or {}
     if result is None:
         md_text, info = "", {"conversion": unavailable_conversion, "tables": 0}
         outline: list[dict] = []
@@ -142,6 +169,10 @@ def run_ingest(kid: str) -> dict:
     item = db.kb_get_item(kid) or {}
 
     # ---- ③ 元数据抽取（文本管线；失败不阻塞检索）----
+    # 代际探测：切段建索引期间条目被删/重传 → 本轮作废
+    if _item_stale(item):
+        logger.info("知识库入库中止（条目已删除或重传）：%s", kid)
+        return db.kb_get_item(kid) or {}
     _extract(item, md_text)
     final = db.kb_get_item(kid) or {}
     # 收敛探测（不加锁的最终一致）：确认若发生在管线上半场，②的段重建可能读到
@@ -163,9 +194,13 @@ def _transcribe_image(src: Path, warnings: list[str]):
             warnings.append(f"云端文档解析失败（{e}），回退图片模型识别")
     try:
         return parse_image.transcribe(src)
-    except VlmUnavailable:
-        # 降级：收原件+登记，无文本可检索；确认表单人工填（元数据段在确认时建索引）
-        warnings.append("没有可用的图片识别模型（文档解析也未配置），图片未识别——可在设置中配置后重新识别，或直接在「信息」里手动填写")
+    except VlmUnavailable as e:
+        # 区分「模型没配」与「模型在但拒了这张图」（如超大小上限）——降级提示
+        # 必须给出真实原因，否则用户对着大图一直以为没配模型
+        if vlm.vlm_available():
+            warnings.append(f"图片未识别：{e}")
+        else:
+            warnings.append("没有可用的图片识别模型（文档解析也未配置），图片未识别——可在设置中配置后重新识别，或直接在「信息」里手动填写")
         return None
 
 
@@ -180,13 +215,20 @@ def _fill_scanned_pages(src: Path, result, warnings: list[str]) -> object:
         except Exception as e:
             warnings.append(f"云端文档解析失败（{e}），回退图片模型逐页转写")
 
-    tmp_dir = store.kb_parse_dir(src.name) / "_pages"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="kb-pages-"))
     try:
         from .. import vlm
 
+        pages = scanned(result)
+        if len(pages) > _MAX_SCAN_PAGES:
+            warnings.append(
+                f"扫描页 {len(pages)} 页超出本地逐页转写预算（{_MAX_SCAN_PAGES}），"
+                f"仅转写前 {_MAX_SCAN_PAGES} 页——建议在设置中配置云端文档解析整本识别"
+            )
+            pages = pages[:_MAX_SCAN_PAGES]
         md = result.md
         converted = 0
-        for pno in scanned(result):
+        for pno in pages:
             png = tmp_dir / f"p{pno}.png"
             parse_pdf.render_page_png(src, pno, png)
             try:
@@ -207,7 +249,7 @@ def _fill_scanned_pages(src: Path, result, warnings: list[str]) -> object:
         )
         return result
     finally:
-        # 渲染页图是临时产物，转写完成即清
+        # 渲染页图是临时产物（系统临时目录，不进产物目录），转写完成即清
         import shutil
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -292,6 +334,16 @@ def _extract(item: dict, md_text: str) -> None:
         return
     if not suggested:
         db.kb_update_item(kid, extract_status="failed", error="元数据抽取返回无法解析")
+        return
+    if (db.kb_get_item(kid) or {}).get("review_status") == "confirmed":
+        # 已确认条目：建议列照常更新，但 doc_type 不回写——人工确认的类型
+        # 不被晚到的抽取覆盖（business_metadata 本就永不覆盖）
+        db.kb_update_item(
+            kid,
+            extract_status="done",
+            suggested_metadata=json.dumps(suggested, ensure_ascii=False),
+            error=None,
+        )
         return
     db.kb_update_item(
         kid,

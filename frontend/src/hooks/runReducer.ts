@@ -29,11 +29,17 @@ export interface RunState {
   error: string | null
   /** 错误分类（agent.error/run.state additive code）：cancelled=用户主动停止，中性呈现 */
   errorCode: string | null
-  /** 最近一次发送的文本：发送失败重试用（此时用户消息可能未落库，不能从消息列表取） */
-  lastSent: string
+  /** 最近一次普通用户指令：发送失败/任务失败时重试用。 */
+  lastInstruction: string
+  /** 本次 HITL respond 的回答：仅在续跑空窗期显示，纯审批不产生。 */
+  continuationAnswer: string
   /** HITL 暂停（run.interrupt / run.state 对账）：非空 = 有待用户裁决的动作，输入框切回答模式 */
   interrupt: { runId: string; requests: InterruptRequest[] } | null
-  // ---- 记账字段（非渲染用；收进 state 使事件管线可整体回放）----
+  /** 本 running 态是否为 HITL 续跑段（批准/回答后的 resumed agent.started）：
+   *  RunMessage 据此去掉回合头、紧贴暂停消息渲染（同一回合的视觉续接）。 */
+  continuation: boolean
+  /** 续跑类型：子代理审批续跑可在尚无实时 task 事件时显示启动中。 */
+  continuationKind: 'subagents' | 'answer' | null
   /** seq 去重：当前 run 已接受的最高序列号（换 run 时按 runId 区分，seq=1 重新起算） */
   lastSeq: { runId: string; seq: number } | null
   /** 已通过 SSE 收到终态的 run：HTTP 对账拿到的过期 running 状态不再复活它 */
@@ -55,8 +61,11 @@ export const INITIAL_STATE: RunState = {
   total: 0,
   error: null,
   errorCode: null,
-  lastSent: '',
+  lastInstruction: '',
+  continuationAnswer: '',
   interrupt: null,
+  continuation: false,
+  continuationKind: null,
   lastSeq: null,
   terminalRuns: new Set(),
   stepCounter: 0,
@@ -72,15 +81,28 @@ export type Effect =
 
 export type Action =
   | { type: 'sse'; event: string; data: AgentEventData; now: number }
-  /** run 开始（agent.started）与续跑乐观置 running（resume 202 与 agent.started 之间）共用 */
-  | { type: 'started'; runId: string; now: number }
+  /** run 开始（agent.started）与续跑乐观置 running（resume 202 与 agent.started 之间）共用；
+   *  continuation=true 标记 HITL 续跑段（run 曾经 interrupt），sticky 保留——SSE 的
+   *  agent.started 随后会以同 runId 再触发一次 started，不带标记会把续接态冲掉 */
+  | { type: 'started'; runId: string; now: number; continuation?: boolean; continuationKind?: 'subagents' | 'answer' }
   | { type: 'settle-completed' }
   | { type: 'settle-error'; error: string; code: string | null }
   | { type: 'settle-interrupt'; runId: string; requests: InterruptRequest[] }
-  | { type: 'remember-sent'; text: string }
+  | { type: 'remember-instruction'; text: string }
+  | { type: 'remember-answer'; text: string }
   | { type: 'send-failed'; error: string }
   | { type: 'stop-requested' }
   | { type: 'stop-failed' }
+  | {
+      type: 'snapshot'
+      runId: string
+      /** 快照对应的 run 状态：非 running（已终态/等待输入）的快照不应用（reducer 内守卫） */
+      status: 'running' | 'completed' | 'error' | 'waiting_input'
+      tools: ToolStep[]
+      todos: TodoItem[]
+      reasoningText: string
+      snapshotSeq?: number
+    }
   /** SSE 断线后的 HTTP 对账收敛（getLatestRun 确认已结束才触发） */
   | { type: 'reconcile-converge'; error: string | null }
 
@@ -93,7 +115,7 @@ export interface ReducerResult {
  * 记账字段随 INITIAL_STATE 复位（terminalRuns 也清：与「换会话重挂」语义一致）。 */
 function convergeRun(s: RunState, error: string | null, errorCode: string | null = null): RunState {
   if (!s.running) return s
-  return { ...INITIAL_STATE, lastSent: s.lastSent, error, errorCode }
+  return { ...INITIAL_STATE, lastInstruction: s.lastInstruction, error, errorCode }
 }
 
 function newStep(
@@ -187,25 +209,45 @@ function appendReasoning(steps: ToolStep[], agentId: string, text: string): Tool
   })
 }
 
+function revivePausedSteps(steps: ToolStep[]): ToolStep[] {
+  return steps.map((step) => ({
+    ...step,
+    ...(step.status === 'paused' ? { status: 'running' as const, endedAt: null } : {}),
+    children: step.children.length > 0 ? revivePausedSteps(step.children) : step.children,
+  }))
+}
+
 const result = (state: RunState, effects: Effect[] = []): ReducerResult => ({ state, effects })
 
 export function runReducer(s: RunState, action: Action): ReducerResult {
   switch (action.type) {
     case 'sse':
       return reduceSse(s, action)
-    case 'started':
-      // 乐观置 running（resume 202 到 agent.started 之间）与 agent.started 事件同款转移：
-      // 正文字段复位，记账字段保留（terminalRuns 跨 run 生命周期，lastSeq 按 runId 区分）
+    case 'started': {
+      const sameRun = s.runId === action.runId && s.runId !== null
+      const base = sameRun ? s : INITIAL_STATE
+      // 同一 run 的 HITL 续跑会再次发 agent.started；它是执行段的边界通知，
+      // 不是新 run，不能清掉暂停快照里的 task 卡、todos 或 reasoning。
       return result({
-        ...INITIAL_STATE,
+        ...base,
         running: true,
         runId: action.runId,
-        startedAt: action.now,
-        lastSent: s.lastSent,
-        lastSeq: s.lastSeq,
+        startedAt: sameRun ? (s.startedAt ?? action.now) : action.now,
+        lastInstruction: s.lastInstruction,
+        continuationAnswer: s.continuationAnswer,
         terminalRuns: s.terminalRuns,
+        lastSeq: s.lastSeq,
         stepCounter: s.stepCounter,
+        continuation: s.continuation || !!action.continuation,
+        continuationKind: action.continuationKind ?? base.continuationKind,
+        tools: action.continuation ? revivePausedSteps(base.tools) : base.tools,
+        error: null,
+        errorCode: null,
+        interrupt: null,
+        stopping: false,
+        streamText: '',
       })
+    }
     case 'settle-completed':
       // 等落库消息拉回后再撤掉流式气泡：避免「清空->闪空->再出现」（时序由 settle-after-messages 保证）
       return result({
@@ -215,7 +257,10 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         streamText: '',
         reasoningText: '',
         error: null,
+        continuationAnswer: '',
         interrupt: null,
+        continuation: false,
+        continuationKind: null,
       })
     case 'settle-error':
       // sidecar 已把中断 run 的半截回复落库（带「（任务中断）」标记）：拉回消息让 UI 与
@@ -228,7 +273,10 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         reasoningText: '',
         error: action.error,
         errorCode: action.code,
+        continuationAnswer: '',
         interrupt: null,
+        continuation: false,
+        continuationKind: null,
       })
     case 'settle-interrupt':
       return result({
@@ -237,10 +285,15 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         stopping: false,
         streamText: '',
         reasoningText: '',
+        continuationAnswer: '',
         interrupt: { runId: action.runId, requests: action.requests },
+        continuation: false,
+        continuationKind: null,
       })
-    case 'remember-sent':
-      return result({ ...s, lastSent: action.text })
+    case 'remember-instruction':
+      return result({ ...s, lastInstruction: action.text, continuationAnswer: '' })
+    case 'remember-answer':
+      return result({ ...s, continuationAnswer: action.text })
     case 'send-failed':
       return result({ ...s, error: action.error, errorCode: null })
     case 'stop-requested':
@@ -248,6 +301,30 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
     case 'stop-failed':
       // 网络层失败（请求未达 sidecar）：复位 stopping 解除按钮锁死，允许重试
       return result({ ...s, stopping: false })
+    case 'snapshot': {
+      // 快照守卫单点收口：非 running（终态/等待输入）快照不应用；已终态的 run 不被
+      // 旧快照复活；已切走的当前 run 不被覆盖。调用侧（restoreSnapshot）只是第一道闸。
+      if (action.status !== 'running') return result(s)
+      if (s.terminalRuns.has(action.runId)) return result(s)
+      if (s.runId && s.runId !== action.runId) return result(s)
+      // 快照 seq 取 max：runs.last_seq 运行中恒旧（只在暂停/终态回写），
+      // 晚到的快照直接采用会把 lastSeq 回退、触发一次多余的缺口告警
+      const snapSeq =
+        action.snapshotSeq != null
+          ? s.lastSeq && s.lastSeq.runId === action.runId
+            ? Math.max(s.lastSeq.seq, action.snapshotSeq)
+            : action.snapshotSeq
+          : null
+      return result({
+        ...s,
+        running: true,
+        runId: action.runId,
+        tools: s.continuation ? revivePausedSteps(action.tools) : action.tools,
+        todos: action.todos,
+        reasoningText: action.reasoningText,
+        ...(snapSeq != null ? { lastSeq: { runId: action.runId, seq: snapSeq } } : {}),
+      })
+    }
     case 'reconcile-converge':
       return result(convergeRun(s, action.error))
   }

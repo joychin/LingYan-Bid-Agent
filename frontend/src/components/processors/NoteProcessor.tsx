@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import type { ProcessorProps } from '@/artifacts/registry'
 import { getArtifactContent, listArtifacts, restoreArtifact, updateArtifactContent } from '@/api/client'
 import { useQueryClient } from '@tanstack/react-query'
-import { markdownComponents } from '@/components/ChatMessage'
-import { History, Loader2, Pencil, X } from 'lucide-react'
+import { markdownComponents } from '@/components/ai/MemoMarkdown'
+import { History, Pencil, X } from 'lucide-react'
+import { Loader } from '@/components/ai/Loader'
 import ReactMarkdown from 'react-markdown'
 import { mdRemarkPlugins } from '@/lib/markdown'
 
@@ -158,7 +159,7 @@ export function NoteProcessor({ artifact, content }: ProcessorProps) {
           <h3 className="truncate text-base font-semibold">{title || artifact.display_name}</h3>
         )}
         <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-          {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+          {saving && <Loader variant="circular" size="xs" tone="muted" />}
           {saving ? '保存中…' : editing ? '自动保存' : ''}
           {artifact.editable &&
             (editing ? (

@@ -216,6 +216,29 @@ def test_system_prompt_response_guidelines():
     assert "用户语言" in src, "主 prompt 缺少用户语言约束"
 
 
+def test_system_prompt_output_format():
+    """主 prompt 含排版/语气纪律（Markdown 环境声明、结构化、篇幅、禁 emoji/寒暄）。"""
+    import inspect
+
+    from app.agent import build_agent
+
+    src = inspect.getsource(build_agent)
+    for kw in ("Markdown 渲染", "列表或表格", "三五句话", "emoji", "寒暄"):
+        assert kw in src, f"主 prompt 缺少输出格式关键词：{kw}"
+
+
+def test_system_prompt_no_internal_codes():
+    """主 prompt 不含内部阶段代号（R1/R2），且含反虚构与反问纪律（闲聊层也能约束到）。"""
+    import inspect
+
+    from app.agent import build_agent
+
+    src = inspect.getsource(build_agent)
+    assert "R1" not in src, "主 prompt 含内部代号 R1（模型会复读给用户）"
+    for kw in ("不虚构", "概括层", "反问"):
+        assert kw in src, f"主 prompt 缺少用户语言关键词：{kw}"
+
+
 # ---- 瞬时 LLM 错误自动重试（2026-08-27 全量测试 T07 API 流断的修复）----
 
 
@@ -406,3 +429,113 @@ def test_cancel_before_failure_no_retry(monkeypatch):
     )
     assert error == agent_mod.events.CANCELLED_MESSAGE
     assert stub.calls == 1
+
+
+# ---- 网关思考回传 400 兜底（_NoThinkingRetryCompletions） ----
+
+
+def _reasoning_text_400() -> Exception:
+    from openai import BadRequestError
+
+    response = httpx.Response(
+        400,
+        request=httpx.Request("POST", "https://gw.example/v1/chat/completions"),
+        json={
+            "error": {
+                "code": "invalid_request_error",
+                "message": "The `reasoning_text` in the thinking mode must be passed back to the API.",
+                "type": "invalid_request_error",
+            }
+        },
+    )
+    return BadRequestError(
+        "Error code: 400 - The `reasoning_text` in the thinking mode must be passed back to the API.",
+        response=response,
+        body=None,
+    )
+
+
+def _other_400() -> Exception:
+    from openai import BadRequestError
+
+    response = httpx.Response(
+        400,
+        request=httpx.Request("POST", "https://gw.example/v1/chat/completions"),
+        json={"error": {"code": "invalid_request_error", "message": "quota exceeded", "type": "invalid_request_error"}},
+    )
+    return BadRequestError("Error code: 400 - quota exceeded", response=response, body=None)
+
+
+def test_gateway_thinking_fallback_wired():
+    """build_agent 把兜底层接在模型 client 上（沿用源码断言先例）。"""
+    import inspect
+
+    src = inspect.getsource(agent_mod.build_agent)
+    assert "_NoThinkingRetryCompletions(model.client)" in src
+
+
+def test_run_stream_heals_task_skeleton():
+    """run 启动自愈任务骨架目录（旧任务只有库行无磁盘目录，沿用源码断言先例）。"""
+    import inspect
+
+    src = inspect.getsource(agent_mod.run_stream)
+    assert "ensure_task_skeleton" in src, "run_stream 缺少任务目录自愈调用"
+
+
+class _RecordingCompletions:
+    """可编排行为的 chat.completions 替身，记录每次 create 的 kwargs。"""
+
+    def __init__(self, outcomes):
+        # outcomes: 按调用顺序弹出；Exception 则抛出，否则作为返回值
+        self._outcomes = list(outcomes)
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def test_no_thinking_retry_downgrades_once():
+    """撞上 reasoning_text 400：当次请求降级 effort=none 重试一次并返回结果。"""
+    ok = object()
+    inner = _RecordingCompletions([_reasoning_text_400(), ok])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner)
+    assert wrapper.create(model="m", messages=[], reasoning_effort="low") is ok
+    assert [c.get("reasoning_effort") for c in inner.calls] == ["low", "none"]
+
+
+def test_no_thinking_retry_no_effort_key_adds_none():
+    """payload 未带 reasoning_effort（默认思考开）时同样补 none 重试。"""
+    ok = object()
+    inner = _RecordingCompletions([_reasoning_text_400(), ok])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner)
+    assert wrapper.create(model="m", messages=[]) is ok
+    assert "reasoning_effort" not in inner.calls[0]
+    assert inner.calls[1]["reasoning_effort"] == "none"
+
+
+def test_no_thinking_retry_skips_when_already_none():
+    """effort 已是 none 仍 400：不再重试，原样上抛。"""
+    inner = _RecordingCompletions([_reasoning_text_400()])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner)
+    try:
+        wrapper.create(model="m", messages=[], reasoning_effort="none")
+        raise AssertionError("应上抛 BadRequestError")
+    except Exception as e:
+        assert "reasoning_text" in str(e)
+    assert len(inner.calls) == 1
+
+
+def test_no_thinking_retry_passes_other_400_through():
+    """其他 400（不同错误）不降级重试。"""
+    inner = _RecordingCompletions([_other_400()])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner)
+    try:
+        wrapper.create(model="m", messages=[], reasoning_effort="low")
+        raise AssertionError("应上抛 BadRequestError")
+    except Exception as e:
+        assert "quota" in str(e)
+    assert len(inner.calls) == 1

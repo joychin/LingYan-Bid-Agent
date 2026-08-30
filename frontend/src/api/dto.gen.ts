@@ -5,6 +5,15 @@
 /* Do not modify it by hand - just update the pydantic models and then re-run the script
 */
 
+/**
+ * GET /runs/active 条目：占用中（running/waiting_input）的 run——侧栏跨会话
+ * 「输出中」指示与任务级「等待确认」聚合的轮询数据源。
+ */
+export interface ActiveRun {
+  id: string;
+  conversation_id: string;
+  status: "running" | "waiting_input";
+}
 export interface Artifact {
   artifact_id: string;
   display_name: string;
@@ -126,6 +135,7 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   created_at: string;
+  run_id?: string | null;
   tools?:
     | {
         [k: string]: unknown;
@@ -164,6 +174,24 @@ export interface RunInfo {
   created_at: string;
   requests?: InterruptRequestPayload[] | null;
   last_seq?: number | null;
+}
+/**
+ * GET /runs/{rid}/snapshot：运行中过程快照（SSE 断线/页面重挂对账用）。
+ *
+ * tools 是 trace 步骤树（松散 dict，键序与前端 ToolStep 同构）；live 快照来自
+ * sidecar 进程内存，无 live 时回退 run_traces 落库快照（last_seq 为 None）。
+ * 只读对账，不产生消息、不改变 run 状态。
+ */
+export interface RunTraceSnapshot {
+  run_id: string;
+  conversation_id: string;
+  status: "running" | "completed" | "error" | "waiting_input";
+  last_seq?: number | null;
+  tools?: {
+    [k: string]: unknown;
+  }[];
+  todos?: TodoItemPayload[];
+  reasoning?: string;
 }
 export interface SendMessageResult {
   message_id: string;

@@ -95,6 +95,38 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    command 保存后重启 sidecar，凭证不进 HTTP）；通用页= 数据目录/日志路径 +
    「打开」（**reveal_in_folder 路径前缀从 workspace/ 扩到 data/**）+ 版本号
    （vite define `__APP_VERSION__`）。
+   **契约 additive 扩展（2026-08-29 HITL 单回合聚合）**：messages 表加 `run_id` 列
+   （迁移 13，nullable；POST /messages 用户消息/respond 回答/半截与最终 assistant
+   消息全部带 rid 写入），GET /messages 每条消息带出 `run_id`——前端据此把同一
+   run 的暂停段+续跑段消息聚合成单回合（一个头像头、续段正文对齐、审批卡贴附
+   回合）。配套 sidecar 行为修正：run_traces 同 run 续跑收尾**合并不覆盖**
+   （按 tool_call_id 去重、新段终态优先、旧段在前，message_id 新值优先/
+   error 无产出保留暂停消息挂载，reasoning 拼接、duration 累加）；暂停/中断
+   半截消息取 `_last_narration` 兜底时同步从 trace 步骤 text 清空（旁白不再
+   双写）；`finish_run` 回写终态 `last_seq`（此前只有 interrupt_run 写过）；
+   任务创建预建 files/out/drafts 骨架目录 + run 启动自愈（run_stream 解析出
+   task_id 即 ensure_task_skeleton，幂等补齐——旧版只建库行的任务、纯检索类
+   从未落盘的任务，模型第一步 ls 任务根目录不再 path_not_found）。
+   前端配套：暂停/中断标记（「（等待你的输入…）」「（任务中断）」）渲染层
+   剥离为状态徽章（正文不再带尾巴文本）；RunState 加 `continuation`（批准/
+   回答后续跑段，sticky 防 SSE agent.started 二次到达冲掉）——RunMessage 去
+   回合头紧贴暂停消息；主气泡状态行动态化（正在思考/正在执行·工具名/子代理
+   执行中·已完成 N 项）；trace 折叠头含 paused 步骤时显示「已暂停 · N 步」；
+   问答卡（ask_human 向导）头部改 tool_use 风格「已询问 N 个问题 · 等待你的
+   回答」（用户明令：HITL 提问当 tool_use 呈现、不像会话被打断；纯审批卡
+   维持确认框架）。**二轮（同日，路线 A 终态）**：HITL 痕迹全部收进过程区——
+   暂停/中断消息不再渲染正文气泡（正文作旁白行进过程卡、标记成卡内徽章）；
+   respond 回答消息不渲染对话气泡（识别=前一条 assistant 带标记或「已选：」
+   前缀，`lib/hitlMessage.ts` 供 MessageList 与重新执行重试共用，顺带修掉
+   纯文字回答被当指令重发的隐患）；已回答的 ask_human 步骤在 trace 里收进
+   「已询问 N 个问题」折叠组（问题+「你的回答：」摘要）；续跑流式气泡渲染
+   「你的回答：<lastSent>」一行防提交后空窗（decide() 路径补 remember-sent）。
+   落库与恢复机制零改动（回答仍是 user message，只是渲染层不占转录）。
+   **三轮（2026-08-30，单回合一张过程卡）**：暂停消息**无条件落库**（提问前零
+   旁白时只落裸标记「（等待你的输入…）」——此前不落库会导致回合内唯一 assistant
+   是最终回复、头像头错落到回合尾部，用户体感「进入另一个时空」）；前端组内
+   装配把带标记的暂停段整体吸收进后续最终段（旁白/标记上提为卡片内的旁白行与
+   徽章），全回合只渲染一张过程卡；retire_pause_marker/splitMarker 兼容裸标记。
    **多模型 profile 与输入框选模型（2026-08-29，替代上段的 llm/vlm 双角色形状；
    同日傍晚二改：配置与 Key 真值从 settings.json+钥匙串整体迁到 app.db——见铁则 2）**：
    GET /settings = `{models(含 key_configured), default_model, ocr, paths}`；PUT
@@ -407,6 +439,20 @@ kb_items+磁盘 md 重建（启动 `rebuild_kb_index`）；同 hash 上传 API �
   整类问题被消除，SSE 也能透传；需直连时用 `VITE_SIDECAR_URL`/`VITE_SIDECAR_TOKEN` 覆盖。
   `vite.config.ts` 固定 `port: 5173 + strictPort`，端口被占宁可启动失败也不回退（回退会让
    CORS/地址失配静默失败）。SSE 用 `@microsoft/fetch-event-source`。
+  - **SSE 全局单槽（2026-08-29）**：`api/sse.ts` 的 subscribeSSE 任意时刻只允许一条订阅
+    （新订阅先 abort 旧的，跨会话同理）。这是浏览器「每域名 6 条并发连接」预算的结构性
+    防线——SSE 是长连接，abort 经 Vite 代理后上游侧可能残留半开连接；并发多条会挤爆预算，
+    后续普通请求（messages 等）永久排队饿死，表现为「点开会话骨架屏永不消失」。
+    不要改回按会话多订阅并存。配套：`hooks/useMessages.ts` 用 retry:1 +
+    refetchOnWindowFocus（快速进入可见错误态 + 页面隐藏恢复自愈）；ChatView 对 messages
+    查询接 isError 渲染 ErrorCard+重试，empty 条件排除 isError（失败不得伪装成欢迎页空会话）。
+  - **流式渲染性能三件套（2026-08-30）**：聊天流式表面（RunMessage 正文/DeepThinking/
+    SubagentCard 思考/AssistantMessage 正文）一律走 `components/ai/MemoMarkdown`（按顶层
+    mdast 节点分块 + 块级 memo，解析器与 react-markdown 同源；新增流式 markdown 位置禁止
+    裸 ReactMarkdown，静态一次性内容如 processor/查看器不受限），流式文本进渲染前套
+    `hooks/useThrottledValue`（state 存精确值、只节流渲染层），贴底滚动走 rAF 合并。
+    memo 白名单制：`ChatMessage`/`RunTrace`/`SubagentCard`/`MessageList` 的比较器/引用
+    稳定性依赖 props 全部为值或稳定引用，**新增 prop 必须同步进比较器**（漏了 = UI 不更新）。
   - UI 全手写、**零 radix/cva**：`components/ui/` 是 shadcn 风格基础件
     （button/dialog/input/collapsible/hover-card），`collapsible.tsx` 支持透传 data-*。
     `components/ai/` 是从 prompt-kit 移植的 AI 组件（Loader/TextShimmer/PromptSuggestion/
@@ -428,6 +474,12 @@ kb_items+磁盘 md 重建（启动 `rebuild_kb_index`）；同 hash 上传 API �
 - **浏览器模式下改 sidecar Python 代码不热载**：Vite HMR 只覆盖前端；改完 Python 必须
   `./dev.sh stop` 后重启 browser 模式才跑新代码（前端访问的 8765 是旧进程时会表现为
   「接口 404 / 行为没变」）。
+- **浏览器模式的 Vite 只绑 IPv6 `[::1]`**：工具或浏览器连 `http://localhost:5173/` 超时
+  时改用 `http://[::1]:5173/`（macOS 上 localhost 可能解析到 127.0.0.1，那里没人监听）。
+- **uvicorn access log 在响应结束时才写**：SSE 活连接不写日志，日志里的 `GET /events 200`
+  表示该连接已关闭；「events → runs/latest → messages×2」三连 = 前端 SSE 断开后 onError
+  对账重连（页面不可见时 fetch-event-source 默认主动断开、恢复可见才重连，靠 run.state
+  对账收敛）。排查连接问题用 `lsof -nP -iTCP:8765 | grep -c ESTABLISHED` 数连接。
 - 网络镜像必配：pypi=清华（pyproject 内置）、npm=npmmirror（.npmrc）、cargo=rsproxy
   （`src-tauri/.cargo/config.toml`）、rustup=`RUSTUP_DIST_SERVER=https://rsproxy.cn`。
 - DeepAgents 锁 0.7.7（`deepagents==0.7.7`）；langgraph 由依赖解析（当前 1.0.5）。

@@ -106,6 +106,76 @@ describe('HITL 中断与续跑', () => {
     expect(resumed.state.interrupt).toBeNull()
   })
 
+  it('纯审批续跑保留暂停的 task 卡，并将其恢复为运行态', () => {
+    const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    const withTask = runReducer(started, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        tool: 'task',
+        args: { description: '检索中石化招标', subagent_type: 'general-purpose' },
+        tool_call_id: 'task_1',
+      },
+    }).state
+    const withTodos = runReducer(withTask, {
+      type: 'sse',
+      event: 'todo.updated',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        done: 0,
+        total: 1,
+        items: [{ content: '检索', status: 'in_progress' }],
+      },
+    }).state
+    const withReasoning = runReducer(withTodos, {
+      type: 'sse',
+      event: 'agent.reasoning',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', text: '先想一步' },
+    }).state
+    const paused = runReducer(withReasoning, {
+      type: 'settle-interrupt',
+      runId: 'r1',
+      requests: [{ tool: 'task', args: {}, description: '确认派发', allowed: ['approve', 'reject'] }],
+    }).state
+    expect(paused.tools[0].status).toBe('running')
+
+    // 模拟 sidecar 发来的暂停 trace：冻结步骤后再进入 waiting_input。
+    const frozen = { ...paused, tools: paused.tools.map((step) => ({ ...step, status: 'paused' as const })) }
+    const resumed = runReducer(frozen, { type: 'started', runId: 'r1', now: NOW, continuation: true }).state
+    expect(resumed.tools).toHaveLength(1)
+    expect(resumed.tools[0].tool).toBe('task')
+    expect(resumed.tools[0].status).toBe('running')
+    expect(resumed.continuation).toBe(true)
+    // 同 run started 幂等：todos 记账一并保留，不被 INITIAL_STATE 清空；
+    // reasoningText 是既有语义（settle-interrupt 清空流式态），tools 里的子代理
+    // reasoning 不受影响
+    expect(resumed.todos).toEqual([{ content: '检索', status: 'in_progress' }])
+    expect(resumed.reasoningText).toBe('')
+    expect(resumed.done).toBe(0)
+    expect(resumed.total).toBe(1)
+  })
+
+  it('普通指令与 HITL 回答分开记账：纯 approve 不产生回答文本', () => {
+    const sent = runReducer(INITIAL_STATE, { type: 'remember-instruction', text: '原始任务指令' }).state
+    expect(sent.lastInstruction).toBe('原始任务指令')
+    expect(sent.continuationAnswer).toBe('')
+
+    const approved = runReducer(sent, { type: 'started', runId: 'r1', now: NOW, continuation: true }).state
+    expect(approved.continuationAnswer).toBe('')
+
+    const answered = runReducer(approved, { type: 'remember-answer', text: '方案 A' }).state
+    expect(answered.continuationAnswer).toBe('方案 A')
+    const nextInstruction = runReducer(answered, { type: 'remember-instruction', text: '继续整理' }).state
+    expect(nextInstruction.lastInstruction).toBe('继续整理')
+    expect(nextInstruction.continuationAnswer).toBe('')
+  })
+
   it('续段 seq 续接：重放旧事件被丢弃，不重复计入正文', () => {
     // 模拟双连接窗口：完整跑完后又收到一条历史 seq=2 的重复 token
     const dup: FixtureEvent = {
@@ -115,6 +185,129 @@ describe('HITL 中断与续跑', () => {
     const base = replay(hitl.events, settleActionsFor(replay(hitl.events).effects))
     const r = runReducer(base.state, { type: 'sse', ...dup, now: NOW })
     expect(r.state.streamText).toBe(base.state.streamText) // 未受重复事件影响
+  })
+
+  it('continuation sticky：续跑乐观置位后，SSE agent.started 二次到达不冲掉；settle 复位', () => {
+    const first = replay(hitl.events.slice(0, 3))
+    const settles = settleActionsFor(first.effects)
+    // settle-interrupt 后 decide/respond 乐观 started(continuation) → 真 agent.started 到达
+    const resumed = replay(hitl.events.slice(0, 3), [
+      ...settles,
+      { type: 'started', runId: 'r1', now: NOW, continuation: true },
+      { type: 'sse', event: hitl.events[3].event, data: hitl.events[3].data, now: NOW },
+    ])
+    expect(resumed.state.continuation).toBe(true)
+    expect(resumed.state.running).toBe(true)
+
+    // 续段完成：settle-completed 复位（下一段不再是续跑）
+    const doneEffects = [
+      { kind: 'settle-after-messages', action: { type: 'settle-completed' } } as Effect,
+    ]
+    const after = runReducer(resumed.state, settleActionsFor(doneEffects)[0]).state
+    expect(after.running).toBe(false)
+    expect(after.continuation).toBe(false)
+
+    // 普通 run 的 started（无标记、state 里也无残留）不置 continuation
+    const fresh = runReducer(INITIAL_STATE, { type: 'started', runId: 'r2', now: NOW }).state
+    expect(fresh.continuation).toBe(false)
+  })
+})
+
+describe('运行快照对账', () => {
+  const taskStep = {
+    id: 's1',
+    tool: 'task',
+    args: { description: '检索中石化招标' },
+    status: 'running' as const,
+    summary: '',
+    toolCallId: 't1',
+    reasoning: '',
+    children: [],
+    startedAt: NOW,
+    endedAt: null,
+  }
+
+  it('断线重挂：快照恢复 running task 卡并推进 seq 游标', () => {
+    const restored = runReducer(INITIAL_STATE, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools: [taskStep],
+      todos: [],
+      reasoningText: '主代理思考',
+      snapshotSeq: 42,
+    }).state
+    expect(restored.running).toBe(true)
+    expect(restored.runId).toBe('r1')
+    expect(restored.tools).toHaveLength(1)
+    expect(restored.tools[0].status).toBe('running')
+    expect(restored.reasoningText).toBe('主代理思考')
+    expect(restored.lastSeq).toEqual({ runId: 'r1', seq: 42 })
+
+    // 快照 seq 之后的实时事件正常接受，之前的重复被丢弃
+    const after = runReducer(restored, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'fetch_url', args: { url: 'https://x' }, tool_call_id: 'c2', agent_id: 't1', seq: 43 },
+    }).state
+    expect(after.tools[0].children).toHaveLength(1)
+    // 快照 seq 晚于实时事件到达：lastSeq 取 max 不回退
+    const live = runReducer(restored, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'ls', args: { path: '/' }, tool_call_id: 'c9', seq: 50 },
+    }).state
+    const stale = runReducer(live, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools: [taskStep],
+      todos: [],
+      reasoningText: '',
+      snapshotSeq: 42,
+    }).state
+    expect(stale.lastSeq).toEqual({ runId: 'r1', seq: 50 })
+  })
+
+  it('非 running 快照不应用（终态/等待输入的旧快照不改状态）', () => {
+    const waiting = runReducer(INITIAL_STATE, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'waiting_input',
+      tools: [taskStep],
+      todos: [],
+      reasoningText: '',
+    }).state
+    expect(waiting.tools).toHaveLength(0)
+    expect(waiting.running).toBe(false)
+  })
+
+  it('已终态或已切走的 run 不被旧快照复活/覆盖', () => {
+    const terminal = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    const marked = { ...terminal, terminalRuns: new Set(['r1']) }
+    const revived = runReducer(marked, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools: [taskStep],
+      todos: [],
+      reasoningText: '',
+    }).state
+    expect(revived.tools).toHaveLength(0)
+
+    // 已切到 r2 的会话：r1 的迟到快照不覆盖当前 run
+    const switched = { ...INITIAL_STATE, runId: 'r2' }
+    const kept = runReducer(switched, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools: [taskStep],
+      todos: [],
+      reasoningText: '',
+    }).state
+    expect(kept.runId).toBe('r2')
   })
 })
 

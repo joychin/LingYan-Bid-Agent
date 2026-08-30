@@ -215,14 +215,48 @@
   color: var(--Color-text-secondary);
   white-space: nowrap;
 }
+/* 右缘槽位互换：操作按钮仅 hover/active 出现，日期同时让位（display 切换安全——
+   标题 flex-1 吸收宽度、无邻元素位移；日期真正贴最右缘而非给按钮预留空位） */
 .chat-item .item-action {
   flex: none;
-  opacity: 0;
-  transition: opacity 0.12s;
+  display: none;
 }
 .chat-item:hover .item-action,
 .chat-item.active .item-action {
-  opacity: 1;
+  display: inline-flex;
+}
+.chat-item.has-action:hover .m,
+.chat-item.has-action.active .m {
+  display: none;
+}
+/* 会话行左槽指示器：classic loader（输出中/HITL 等待）与未读圆点，
+   绝对定位在 24px 左内边距槽内——出现/消失不引起标题位移 */
+.ci-indicator {
+  position: absolute;
+  left: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+}
+.unread-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--Color-brand-primary);
+}
+/* 会话行右缘「等待确认」胶囊（HITL 等裁决，waiting_input）：浅绿底绿字，
+   位于相对时间与右侧 hover 按钮之间 */
+.wait-pill {
+  flex: none;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--Color-success);
+  background: color-mix(in srgb, var(--Color-success) 12%, var(--Color-bg-canvas));
 }
 .new-btn {
   margin: 4px 8px 12px;
@@ -703,6 +737,38 @@
   stroke-width: 2;
 }
 
+/* ---- 单回合聚合（2026-08-29）：同一 run 的暂停段/续跑段是连续动作 ---- */
+/* 组内段落紧贴（.chat 默认 16px 是回合间距）；续段正文与回合头正文对齐 */
+.turn-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.turn-group .msg.user {
+  margin-top: 8px; /* 组内用户回答（respond）与助手段落留呼吸 */
+}
+.msg-spacer {
+  width: 32px; /* 与 msg-avatar 同宽：续段正文列对齐回合头 */
+  flex: none;
+}
+/* 半截消息末尾的暂停/中断标记徽章（正文里剥离、时间线节点化呈现） */
+.turn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--Color-text-tertiary);
+  background: var(--Color-bg-subtle);
+  border-radius: 20px;
+  padding: 2px 8px;
+  margin-top: 6px;
+}
+/* 审批/问答卡挂进回合：与助手正文列对齐并贴住暂停消息（抵掉一部分 .chat gap） */
+.turn-attach {
+  margin-left: 44px; /* msg-avatar 32px + .msg gap 12px */
+  margin-top: -10px;
+}
+
 .bubble {
   background: transparent;
   border: none;
@@ -1096,8 +1162,9 @@
 }
 
 .composer .box:focus-within {
-  border-color: var(--Color-brand-primary);
-  box-shadow: 0 0 0 3px var(--Color-brand-primary-soft);
+  /* 焦点中性化（2026-08-30 去彩色）：大青色光环改墨色系，只加深边框+极淡光晕 */
+  border-color: var(--Color-text-tertiary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--Color-text-primary) 6%, transparent);
 }
 .composer textarea {
   width: 100%;
@@ -1228,7 +1295,7 @@
   height: 32px;
   border-radius: 8px;
   border: none;
-  background: var(--Color-brand-primary);
+  background: var(--Color-bg-inverse); /* 主操作墨色（2026-08-30 去彩色：青只留焦点/链接/小徽章） */
   color: var(--Color-text-on-color);
   cursor: pointer;
   display: grid;
@@ -1236,7 +1303,7 @@
   transition: 0.15s;
 }
 .send-btn:hover {
-  background: var(--Color-brand-primary-hover);
+  background: color-mix(in srgb, var(--Color-bg-inverse) 84%, var(--Color-bg-canvas));
 }
 .send-btn svg {
   width: 16px;
@@ -1348,7 +1415,7 @@
   width: 16px;
   height: 16px;
   flex: none;
-  stroke: #0d9488;
+  stroke: var(--Color-brand-primary); /* 品牌青（原 #0d9488 硬编码收敛进 token，暗色自动翻转） */
   stroke-width: 1.7;
   fill: none;
 }
@@ -1497,13 +1564,14 @@
   color: var(--Color-text-tertiary);
 }
 
-/* 文件类型色块：按 artifact.kind 派生（语义型色板）。
+/* 文件类型色块：按 artifact.kind 派生。
    已在面板 KIND_ICON 注册的 kind：tender.directory / doc.note。
-   未来预留位（未实施，加 kind 时同步这里 + KIND_ICON）：
-     tender.body      → 紫 #7c3aed + 'B'   投标正文
-     tender.analysis  → 橙 #f59e0b + 'A'   七节要点
-     tender.outline   → 黄 #eab308 + 'O'   大纲初稿
-     tender.flow      → 蓝 #2563eb + 'F'   流程图 */
+   2026-08-30 去彩色定调：点缀色只留品牌青一档，新增 kind 优先中性灰，
+   彩色仅在有功能语义（状态/文件格式）时用、且必须同档饱和度从 token 派生。
+     tender.body      → 中性灰 + 'B'   投标正文
+     tender.analysis  → 中性灰 + 'A'   七节要点
+     tender.outline   → 中性灰 + 'O'   大纲初稿
+     tender.flow      → 中性灰 + 'F'   流程图 */
 .ft-ico {
   display: inline-grid;
   place-items: center;
@@ -1518,10 +1586,10 @@
   flex: none;
 }
 .ft-ico--md {
-  background: #0d9488; /* teal · doc.note 笔记 */
+  background: var(--Color-brand-primary); /* 品牌青 · doc.note 笔记（原 #0d9488 收敛进品牌色相） */
 }
 .ft-ico--dir {
-  background: #10b981; /* emerald · tender.directory 目录 */
+  background: var(--Color-text-tertiary); /* 中性灰 · tender.directory 目录（原 emerald 除名） */
 }
 /* 卡片变体：聊天内 ArtifactCard 用，比文件树 18px 略大，与卡片 padding 比例合适 */
 .ft-ico--card {
@@ -2770,8 +2838,9 @@
  * Dark mode 手调覆盖（仅限无法用 color-mix/token 派生表达的少量点；
  * 其余表面全部靠 tokens.css 的 [data-theme="dark"] 变量翻转自动生效）
  * ============================================================ */
-[data-theme="dark"] .artifact .file-ico {
-  stroke: #2dd4bf; /* teal-400：暗底上 #0d9488 对比不足 */
+[data-theme="dark"] .ft-ico--md {
+  /* 暗色品牌青翻转成亮青底，白字对比不足，字改用深青（soft token 的暗色值） */
+  color: var(--Color-brand-primary-soft);
 }
 [data-theme="dark"] .ap-shell.wide {
   box-shadow: -24px 0 48px rgba(0, 0, 0, 0.55), -2px 0 0 rgba(0, 0, 0, 0.35);

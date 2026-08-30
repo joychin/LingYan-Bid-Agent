@@ -51,6 +51,20 @@ def test_response_guidelines_shared_file_exists():
     assert GUIDELINES.is_file(), "_shared/response-guidelines.md 不存在"
 
 
+def test_response_guidelines_typography_section():
+    """规范含排版章节（Markdown 环境声明 + 结构化 + 篇幅 + 禁 emoji/寒暄）。"""
+    text = GUIDELINES.read_text(encoding="utf-8")
+    for kw in ("## 排版", "Markdown 渲染", "结论先行", "emoji", "寒暄"):
+        assert kw in text, f"response-guidelines.md 缺少排版关键词：{kw}"
+
+
+def test_response_guidelines_no_fabrication_rule():
+    """规范含介绍不虚构硬规则（与主 prompt 反虚构句对应的完整版）。"""
+    text = GUIDELINES.read_text(encoding="utf-8")
+    for kw in ("不虚构", "概括层", "改名"):
+        assert kw in text, f"response-guidelines.md 缺少反虚构关键词：{kw}"
+
+
 @pytest.mark.parametrize("skill_dir", SKILLS, ids=lambda p: p.name)
 def test_skills_reference_response_guidelines(skill_dir: Path):
     """每个业务 skill 的 SKILL.md 都引用用户回复规范（先读规范再执行）。"""

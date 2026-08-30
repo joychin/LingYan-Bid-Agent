@@ -10,7 +10,7 @@ env 只作兜底读取（.env 开发习惯不变）。变更即时生效（agent
 import asyncio
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from .. import config as cfg
@@ -205,10 +205,19 @@ def _test_ocr_sync() -> str:
 
 @router.get("/settings/test")
 async def test_settings(
+    request: Request,
     role: str | None = Query(default=None, pattern="^(ocr)$"),
     model: str | None = None,
 ):
-    """轻量连通性测试：model=<profile id> 发最小 chat；role=ocr 用 AK/SK 换 token。"""
+    """轻量连通性测试：model=<profile id> 发最小 chat；role=ocr 用 AK/SK 换 token。
+
+    要求自定义头 X-Sidecar-Ping（前端恒带）：GET 是免预检的简单请求，无此防护时
+    任意网站可静默触发「用存储的 Key 向已配置 base_url 发出站请求」（本机开发模式
+    无 token，主要是调用费消耗）；自定义头使跨站触发必须过 CORS 预检、被 origin
+    白名单挡住。本机 localhost 页面在开发模式下本就有完整 API 访问权，不在此防护
+    范围内。"""
+    if (request.headers.get("x-sidecar-ping") or "") != "1":
+        raise HTTPException(status_code=403, detail="缺少 X-Sidecar-Ping 头")
     if model:
         result = await asyncio.to_thread(_test_model_sync, model)
         return {"ok": result == "ok", "model": model}

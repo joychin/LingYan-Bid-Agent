@@ -26,6 +26,7 @@ import json
 import logging
 import re
 import shutil
+import threading
 import time
 import uuid
 from collections.abc import Mapping
@@ -34,6 +35,11 @@ from pathlib import Path
 from .config import workspace_dir
 
 logger = logging.getLogger(__name__)
+
+# 内容写锁（不可见 plumbing，publish 先例的宿主）：API 端点跑在事件循环线程、
+# LLM 发布工具跑在 worker 线程，两者对同一包的「读行→写文件→写索引」真并行。
+# 共用这一把锁串行化落盘段，不做任何用户可见的互斥——覆盖策略仍遵循文件夹语义。
+write_lock = threading.Lock()
 
 _AID_RE = re.compile(r"^art_[0-9a-f]{12}$")
 
@@ -69,6 +75,20 @@ def archive_task_dir(task_id: str) -> Path:
     return workspace_dir() / "archive" / task_id
 
 
+def ensure_task_skeleton(task_id: str) -> None:
+    """预建 files/out/drafts 骨架目录（任务创建时 + 每次run启动自愈，双入口）。
+
+    其余目录仍按需创建（发布/上传各自 mkdir）；这三个是 agent 开工第一步最常探测的
+    （ls files/ 看资料、ls drafts/ 找草稿），按需创建语义下它们在首次使用前不存在，
+    模型的 ls 直接 path_not_found 吃红错（2026-08-29 实测：主/子代理第一步即错，
+    还会诱导子代理去翻别的任务目录找资料）。threads/ 不预建——按会话粒度按需建。
+    run 启动自愈覆盖骨架预建（2026-08-29）之前创建的旧任务：那些任务只有库行、
+    没有磁盘目录，纯检索/对话任务无按需建目录的时机，模型 ls 任务根目录必错。
+    """
+    for d in (task_files_dir(task_id), task_out_dir(task_id), task_drafts_dir(task_id)):
+        d.mkdir(parents=True, exist_ok=True)
+
+
 def new_artifact_id() -> str:
     return f"art_{uuid.uuid4().hex[:12]}"
 
@@ -79,7 +99,9 @@ def _aid_ok(aid: str) -> bool:
 
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    # 临时名带随机后缀：事件循环线程与 worker 线程可能写同一目标文件，
+    # 固定 .tmp 名会互相截断/抢占（第二次 replace 直接 FileNotFoundError）
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
 
@@ -114,15 +136,15 @@ def replace_current_content(aid: str, scope: Mapping, content_text: str) -> None
     _atomic_write(content_path(aid, scope), content_text)
 
 
-def archive_task(task_id: str) -> None:
-    """删任务软归档：过程稿（threads/）先硬删（文件夹语义），任务目录整体移入
-    workspace/archive/<task_id>/（正式稿/上传文件/工作台 out 全部可手工找回）。"""
+def archive_task(task_id: str) -> bool:
+    """删任务软归档：任务目录**整体先移入** workspace/archive/<task_id>/
+    （move 失败返回 False，调用方不得删库——目录原样保留，用户可重试或手工处理），
+    移动成功后再硬删归档内的 threads/（过程稿按文件夹语义不进归档）。
+    顺序不能反：先删 threads 再 move，move 失败时会话过程稿已不可恢复。
+    """
     src = task_dir(task_id)
-    threads = src / "threads"
-    if threads.is_dir():
-        shutil.rmtree(threads, ignore_errors=True)
     if not src.is_dir():
-        return
+        return True
     dst = archive_task_dir(task_id)
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -131,6 +153,11 @@ def archive_task(task_id: str) -> None:
         shutil.move(str(src), str(dst))
     except OSError:
         logger.warning("归档任务目录失败：%s", task_id, exc_info=True)
+        return False
+    threads = dst / "threads"
+    if threads.is_dir():
+        shutil.rmtree(threads, ignore_errors=True)
+    return True
 
 
 # ---------- 恢复点（后台安全网，非版本管理：覆盖"他人内容"前留底，保留最近 3 个） ----------
@@ -141,10 +168,15 @@ def restore_dir(aid: str, scope: Mapping) -> Path:
 
 
 def save_restore_point(aid: str, scope: Mapping, seq: int, content_text: str) -> None:
-    """覆盖前留底。触发点：发布覆盖当前内容 / 用户强制保留自己的版本 / 恢复操作本身。"""
+    """覆盖前留底。触发点：发布覆盖当前内容 / 用户强制保留自己的版本 / 恢复操作本身。
+
+    文件名带随机后缀防碰撞（同毫秒同 seq 的两次留底互相覆盖会丢恢复点），
+    走 _atomic_write 保证读者（latest_restore_point）不会读到截断内容。
+    """
     d = restore_dir(aid, scope)
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"rp_{int(time.time() * 1000):013d}_{seq:06d}.json").write_text(content_text, encoding="utf-8")
+    name = f"rp_{int(time.time() * 1000):013d}_{seq:06d}_{uuid.uuid4().hex[:8]}.json"
+    _atomic_write(d / name, content_text)
     points = sorted(d.glob("rp_*.json"))
     for old in points[:-3]:
         old.unlink(missing_ok=True)

@@ -25,8 +25,9 @@ import {
   type KbParseMeta,
 } from '@/api/client'
 import { fileExtIcon } from '@/artifacts/registry'
+import { Loader } from '@/components/ai/Loader'
 import { mdRemarkPlugins } from '@/lib/markdown'
-import { markdownComponents } from '@/components/ChatMessage'
+import { markdownComponents } from '@/components/ai/MemoMarkdown'
 import {
   useConfirmMetadata,
   useDeleteKbItem,
@@ -148,7 +149,7 @@ interface UploadState {
 }
 
 export function KnowledgeView() {
-  const { data } = useKbItems()
+  const { data, isLoading } = useKbItems()
   const items = data?.items ?? []
   const { data: typeInfo } = useKbTypes()
   const { toast } = useToast()
@@ -324,15 +325,23 @@ export function KnowledgeView() {
               </div>
             )
           })}
-          {groups.length === 0 && (
-            <div className="kb-empty">
-              {query.trim()
-                ? `没有匹配「${query.trim()}」的资料`
-                : filter === 'pending'
-                  ? '没有待确认的资料'
-                  : '暂无资料——点右上 + 或拖拽文件上传'}
-            </div>
-          )}
+          {groups.length === 0 &&
+            (isLoading ? (
+              <div className="kb-empty">
+                <span className="inline-flex items-center gap-1.5">
+                  <Loader variant="classic" size="sm" tone="muted" />
+                  加载中…
+                </span>
+              </div>
+            ) : (
+              <div className="kb-empty">
+                {query.trim()
+                  ? `没有匹配「${query.trim()}」的资料`
+                  : filter === 'pending'
+                    ? '没有待确认的资料'
+                    : '暂无资料——点右上 + 或拖拽文件上传'}
+              </div>
+            ))}
         </div>
       </aside>
 
@@ -482,7 +491,7 @@ function ItemDetail({
             <MarkdownPreview content={content.content} />
           ) : parsing || extracting ? (
             <div className="kb-main-empty">
-              <Loader2 className="mb-2 h-5 w-5 animate-spin" />
+              <Loader variant="classic" size="md" tone="muted" />
               <p>{parsing ? '正在解析…' : '正在读取…'}</p>
             </div>
           ) : (

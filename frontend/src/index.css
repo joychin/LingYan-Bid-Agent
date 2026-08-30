@@ -53,8 +53,10 @@ html.theme-switching *::after {
   --color-input: var(--Color-border-default);
   --color-ring: var(--Color-brand-primary);
   --color-success: var(--Color-success);
+  --color-success-soft: color-mix(in srgb, var(--Color-success) 12%, var(--Color-bg-canvas));
   --color-warning: var(--Color-warning);
   --color-error: var(--Color-danger);
+  --color-inverse: var(--Color-bg-inverse);
   --color-line: var(--Color-border-default);
   --color-line-2: var(--Color-border-strong);
   --color-ink: var(--Color-text-primary);

@@ -43,6 +43,12 @@ def _client():
     )
 
 
+# 单图大小上限：整图 read_bytes+base64 进内存（峰值 ≈ ×2.3），且主流视觉模型
+# 的 base64 载荷本身也放不下更大的图；超限抛 VlmUnavailable 走降级链（收原件+
+# 人工填表），KB 扫描页渲染的 PNG 远小于此
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
 @retry(
     retry=retry_if_exception_type(_TRANSIENT_ERRORS),
     stop=stop_after_attempt(2),
@@ -57,7 +63,14 @@ def vlm_read_image(image_path: Path, prompt: str) -> str:
     if not vlm_available():
         raise VlmUnavailable("未配置支持图片输入的模型")
     p = cfg.resolve_vision()
-    data = base64.b64encode(Path(image_path).read_bytes()).decode()
+    # 先 stat 后读：超限直接拒绝，不先把整图读进内存
+    size = Path(image_path).stat().st_size
+    if size > _MAX_IMAGE_BYTES:
+        raise VlmUnavailable(
+            f"图片超出识别上限（{size // (1024 * 1024)}MB > {_MAX_IMAGE_BYTES // (1024 * 1024)}MB），请压缩后重试"
+        )
+    raw = Path(image_path).read_bytes()
+    data = base64.b64encode(raw).decode()
     mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
     resp = _client().chat.completions.create(
         model=p.model,

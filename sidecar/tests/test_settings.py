@@ -2,6 +2,14 @@
 
 import json
 
+# 测试端点的自定义头（前端恒带；缺失 → 403，防任意网页免预检触发出站请求）
+_PING = {"X-Sidecar-Ping": "1"}
+
+
+def test_settings_test_requires_ping_header(client):
+    """GET 是免预检简单请求：无自定义头一律 403（跨站触发被 CORS 预检挡住）。"""
+    assert client.get("/api/settings/test?model=default").status_code == 403
+
 
 def test_get_settings_default_single_profile(client):
     data = client.get("/api/settings").json()
@@ -166,7 +174,7 @@ def test_settings_test_model(client):
         },
     )
     # 未配 key 的模型 → 400
-    r = client.get("/api/settings/test?model=m2")
+    r = client.get("/api/settings/test?model=m2", headers=_PING)
     assert r.status_code == 400
 
     # 配 key 后成功（mock OpenAI）
@@ -189,7 +197,7 @@ def test_settings_test_model(client):
     original = openai.OpenAI
     openai.OpenAI = lambda **kw: FakeClient()
     try:
-        r = client.get("/api/settings/test?model=m1")
+        r = client.get("/api/settings/test?model=m1", headers=_PING)
     finally:
         openai.OpenAI = original
     assert r.status_code == 200
@@ -197,8 +205,8 @@ def test_settings_test_model(client):
     assert calls["kwargs"]["model"] == "x-1"
 
     # 不存在的模型 → 404；两个参数都没有 → 422
-    assert client.get("/api/settings/test?model=nope").status_code == 404
-    assert client.get("/api/settings/test").status_code == 422
+    assert client.get("/api/settings/test?model=nope", headers=_PING).status_code == 404
+    assert client.get("/api/settings/test", headers=_PING).status_code == 422
 
 
 def test_settings_test_ocr_success(client, monkeypatch):
@@ -207,7 +215,7 @@ def test_settings_test_ocr_success(client, monkeypatch):
     monkeypatch.setenv("BAIDU_OCR_API_KEY", "ak")
     monkeypatch.setenv("BAIDU_OCR_SECRET_KEY", "sk")
     monkeypatch.setattr(baidu_ocr, "exchange_access_token", lambda force_refresh=False: "token-1")
-    r = client.get("/api/settings/test?role=ocr")
+    r = client.get("/api/settings/test?role=ocr", headers=_PING)
     assert r.status_code == 200
     assert r.json() == {"ok": True, "role": "ocr"}
 
@@ -222,7 +230,7 @@ def test_settings_test_ocr_failure(client, monkeypatch):
         raise baidu_ocr.BaiduOcrUnavailable("获取 access_token 失败：bad credentials")
 
     monkeypatch.setattr(baidu_ocr, "exchange_access_token", boom)
-    r = client.get("/api/settings/test?role=ocr")
+    r = client.get("/api/settings/test?role=ocr", headers=_PING)
     assert r.status_code == 502
     assert "bad credentials" in r.json()["detail"]
 

@@ -104,9 +104,13 @@ def test_legacy_db_migrates_and_preserves_rows(monkeypatch, tmp_path):
             ("conversations", "task_id"),
             ("artifact_index", "conversation_id"),
             ("artifact_index", "promotion_proposed"),
+            ("messages", "run_id"),
         ):
             cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
             assert column in cols, f"{table}.{column} 未迁移"
+
+        # 旧消息 run_id 为 NULL（无所属 run 语境，前端按独立消息渲染）
+        assert c.execute("SELECT run_id FROM messages WHERE id='m1'").fetchone()["run_id"] is None
 
         # 旧 run 行 thinking 默认空串（读取方兜底 low）
         assert c.execute("SELECT thinking FROM runs WHERE id='r1'").fetchone()["thinking"] == ""
@@ -127,5 +131,93 @@ def test_init_db_idempotent(monkeypatch, tmp_path):
     c = _conn()
     try:
         assert c.execute("PRAGMA user_version").fetchone()[0] == LATEST
+    finally:
+        c.close()
+
+
+# 已版本化到 v9 的库形状（迁移 1-9 已应用）：runs 四态 CHECK + interrupt/last_seq/
+# pause_msg_id、run_traces 带 duration_ms/reasoning、conversations 带 task_id、
+# artifact_index 带 conversation_id/promotion_proposed；还没有 thinking/model/
+# app_settings/messages.run_id
+_V9_SCHEMA = """
+CREATE TABLE tasks(
+  id TEXT PRIMARY KEY, title TEXT NOT NULL,
+  progress_note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE conversations(
+  id TEXT PRIMARY KEY, task_id TEXT, title TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE messages(
+  id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
+  role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+  content TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE runs(
+  id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('running','completed','error','waiting_input')),
+  error TEXT, created_at TEXT NOT NULL,
+  interrupt TEXT, last_seq INTEGER NOT NULL DEFAULT 0, pause_msg_id TEXT);
+CREATE TABLE artifact_index(
+  artifact_id TEXT PRIMARY KEY, task_id TEXT, conversation_id TEXT,
+  kind TEXT NOT NULL, schema_id TEXT NOT NULL, schema_version INTEGER NOT NULL,
+  cardinality TEXT NOT NULL, display_name TEXT NOT NULL, content_path TEXT NOT NULL,
+  content_seq INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL,
+  last_run_id TEXT, last_thread_id TEXT, emitted INTEGER NOT NULL DEFAULT 0,
+  promotion_proposed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE run_traces(
+  run_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, message_id TEXT,
+  tools TEXT NOT NULL, todos TEXT NOT NULL, created_at TEXT NOT NULL,
+  duration_ms INTEGER, reasoning TEXT NOT NULL DEFAULT '');
+"""
+
+
+def test_versioned_db_v9_migrates_incrementally(monkeypatch, tmp_path):
+    """已版本化库增量升级（v9 → 最新）：只跑 10-13，v9 已有的列与数据原样保留
+    （真实用户库都是从中间版本滚上来的，此前测试只覆盖 v0 旧库一跳到顶）。"""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    app_db_path().parent.mkdir(parents=True, exist_ok=True)
+    c = _conn()
+    c.executescript(_V9_SCHEMA)
+    c.executescript(
+        """
+        INSERT INTO tasks(id, title, progress_note, created_at) VALUES('t1', '任务九', '', '2026-01-01');
+        INSERT INTO conversations(id, task_id, title, created_at) VALUES('c1', 't1', '会话九', '2026-01-01');
+        INSERT INTO messages(id, conversation_id, role, content, created_at)
+          VALUES('m1', 'c1', 'user', '增量升级', '2026-01-01');
+        INSERT INTO runs(id, conversation_id, status, created_at, last_seq)
+          VALUES('r1', 'c1', 'waiting_input', '2026-01-01', 7);
+        INSERT INTO artifact_index(artifact_id, task_id, kind, schema_id, schema_version,
+          cardinality, display_name, content_path, content_seq, updated_at, emitted, promotion_proposed)
+          VALUES('a1', 't1', 'doc.note', 'note-md', 1, 'task-multi', '产物九', 'x', 3, '2026-01-01', 1, 1);
+        INSERT INTO run_traces(run_id, conversation_id, message_id, tools, todos, created_at, duration_ms, reasoning)
+          VALUES('r1', 'c1', 'm1', '[]', '[]', '2026-01-01', 1234, '思考流');
+        PRAGMA user_version = 9;
+        """
+    )
+    c.commit()
+    c.close()
+
+    db.init_db()
+    c = _conn()
+    try:
+        assert c.execute("PRAGMA user_version").fetchone()[0] == LATEST
+
+        # v9 已有数据原样保留（含运行态 last_seq / 内容版本 content_seq）
+        assert c.execute("SELECT title FROM tasks WHERE id='t1'").fetchone()["title"] == "任务九"
+        assert c.execute("SELECT last_seq FROM runs WHERE id='r1'").fetchone()["last_seq"] == 7
+        assert c.execute("SELECT status FROM runs WHERE id='r1'").fetchone()["status"] == "waiting_input"
+        assert c.execute("SELECT duration_ms FROM run_traces WHERE run_id='r1'").fetchone()["duration_ms"] == 1234
+        assert c.execute("SELECT reasoning FROM run_traces WHERE run_id='r1'").fetchone()["reasoning"] == "思考流"
+        assert c.execute("SELECT content_seq FROM artifact_index WHERE artifact_id='a1'").fetchone()["content_seq"] == 3
+
+        # 增量补列/补表就位
+        cols_runs = {r["name"] for r in c.execute("PRAGMA table_info(runs)").fetchall()}
+        assert {"thinking", "model"} <= cols_runs
+        cols_msg = {r["name"] for r in c.execute("PRAGMA table_info(messages)").fetchall()}
+        assert "run_id" in cols_msg
+        assert c.execute("SELECT run_id FROM messages WHERE id='m1'").fetchone()["run_id"] is None
+        tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "app_settings" in tables
+
+        # 升级后的行可被 db 层正常读取
+        row = db.get_run("r1")
+        assert row is not None and row["status"] == "waiting_input"
     finally:
         c.close()

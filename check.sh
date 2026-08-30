@@ -21,12 +21,14 @@ check_sidecar() {
   step uv run ruff check app tests
   step uv run pytest -q
   # 契约类型漂移防线：重新生成前端 TS 类型，与入库版本 diff（改了 pydantic 契约模型
-  # 忘了跑 scripts/gen_ts_types.py 在此挂掉）
-  if uv run python scripts/gen_ts_types.py >/dev/null 2>&1; then
-    if ! git diff --exit-code -- ../frontend/src/api/events.gen.ts ../frontend/src/api/dto.gen.ts >/dev/null; then
-      echo "\n==> 契约 TS 类型与 pydantic 模型不同步（sidecar/scripts/gen_ts_types.py 后提交）"
-      fail=1
-    fi
+  # 忘了跑 scripts/gen_ts_types.py 在此挂掉）。生成失败必须显式失败并打印报错——
+  # 静默跳过会让这条防线恰好在最需要它的环境（新 clone/缺依赖）失效。
+  if ! uv run python scripts/gen_ts_types.py; then
+    echo "\n==> 契约 TS 类型生成失败（缺 pydantic2ts/json2ts 依赖或生成器异常）"
+    fail=1
+  elif ! git diff --exit-code -- ../frontend/src/api/events.gen.ts ../frontend/src/api/dto.gen.ts >/dev/null; then
+    echo "\n==> 契约 TS 类型与 pydantic 模型不同步（sidecar/scripts/gen_ts_types.py 后提交）"
+    fail=1
   fi
   cd ..
 }
