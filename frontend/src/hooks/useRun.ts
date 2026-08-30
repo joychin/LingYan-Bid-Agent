@@ -79,6 +79,28 @@ export function useRun(convId: string | null) {
     [dispatch],
   )
 
+  /** 限频 best-effort 对账：查最新 run，确认已结束才收敛本地状态。
+   *  SSE onError（断线对账）与 cancel 的 404/409（run 已结束/收尾竞态窗口）共用——
+   *  后者不能只等 SSE 终态事件：SSE 半开/断开时终态永不到达，stopping 会把发送钮
+   *  永久锁在「正在停止…」。对账确认仍在跑则保持现状（waiting_input 由 run.state 恢复卡）。 */
+  const reconcile = useCallback(async () => {
+    if (!convId) return
+    if (Date.now() - lastReconcileRef.current < 2000) return
+    lastReconcileRef.current = Date.now()
+    try {
+      const { run } = await getLatestRun(convId)
+      if (run && (run.status === 'running' || run.status === 'waiting_input')) {
+        if (!stateRef.current.tools.length) restoreSnapshot(run.id)
+        return
+      }
+      const err = run && run.status === 'error' ? (run.error ?? '任务已中断') : null
+      dispatch({ type: 'reconcile-converge', error: err })
+      void queryClient.invalidateQueries({ queryKey: ['messages', convId] })
+    } catch {
+      /* sidecar 暂不可达：保持现状，等重连或健康探活恢复 */
+    }
+  }, [convId, queryClient, dispatch, restoreSnapshot])
+
   useEffect(() => {
     if (!convId) return
     // 换会话重挂：状态与记账全部复位（terminalRuns 属于会话生命周期）
@@ -104,28 +126,13 @@ export function useRun(convId: string | null) {
         // 连接失败 ≠ 任务失败：不能把 running 置 false--重连后没有 agent.started 补发，
         // 流式 UI 会永久丢失且用户可再发消息（后端 409）。fetch-event-source 会自动重连，
         // 恢复由连接建立时的 run.state 对账事件完成；sidecar 存活状态由 SidecarBanner 呈现。
-        // 这里只做限频的 best-effort 对账：查最新 run，确认已结束才收敛（sidecar 重启等场景）。
-        if (Date.now() - lastReconcileRef.current < 2000) return
-        lastReconcileRef.current = Date.now()
-        getLatestRun(convId)
-          .then(({ run }) => {
-            if (run && (run.status === 'running' || run.status === 'waiting_input')) {
-              if (!stateRef.current.tools.length) restoreSnapshot(run.id)
-              // 任务仍在执行或等待用户输入：保持现状等事件（waiting_input 由 run.state 对账恢复卡）
-              return
-            }
-            const err = run && run.status === 'error' ? (run.error ?? '任务已中断') : null
-            dispatch({ type: 'reconcile-converge', error: err })
-            void queryClient.invalidateQueries({ queryKey: ['messages', convId] })
-          })
-          .catch(() => {
-            /* sidecar 暂不可达：保持现状，等重连或健康探活恢复 */
-          })
+        // 这里只做限频的 best-effort 对账（sidecar 重启等场景）。
+        void reconcile()
       },
     })
     return () => ctrl.abort()
     // reconnectSeq 递增（sidecar 恢复/换端口）时重挂流
-  }, [convId, queryClient, reconnectSeq, dispatch, restoreSnapshot])
+  }, [convId, queryClient, reconnectSeq, dispatch, restoreSnapshot, reconcile])
 
   const send = useCallback(
     async (text: string, thinking: ThinkingLevel = 'low', model?: string) => {
@@ -221,14 +228,20 @@ export function useRun(convId: string | null) {
     try {
       await cancelRun(cur.runId)
     } catch (e) {
-      // 404/409 = run 已结束（竞态窗口）：随后的终态事件/对账会自行收敛，无需提示
       const status = (e as Error & { status?: number }).status
-      if (status === 404 || status === 409) return
+      if (status === 404 || status === 409) {
+        // 404/409 = run 已结束或正在收尾的竞态窗口：主动对账收敛，不能只依赖 SSE
+        // 终态（半开/断开时没有终态事件，stopping 会把发送钮永久锁在「正在停止…」）。
+        // 绕过限频（用户刚点过停止，此刻的对账不该被吞）；对账确认仍在跑则保持 stopping。
+        lastReconcileRef.current = 0
+        void reconcile()
+        return
+      }
       // 网络层失败（请求未达 sidecar）：复位 stopping 解除按钮锁死，允许重试；
       // run 若仍在跑，随后的终态事件/对账照常收敛
       dispatch({ type: 'stop-failed' })
     }
-  }, [dispatch])
+  }, [dispatch, reconcile])
 
   return { ...state, send, decide, cancel }
 }

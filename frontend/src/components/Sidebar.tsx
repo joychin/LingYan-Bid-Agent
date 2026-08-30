@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   BookOpen,
@@ -112,19 +112,26 @@ export function Sidebar({
   const activeRuns = useActiveRuns()
   const unreadConvs = useUnreadConvs()
   // conv → 占用中 run 状态（running/waiting_input）：会话行 loader 与任务级胶囊的聚合源
-  const activeRunByConv = new Map((activeRuns.data ?? []).map((r) => [r.conversation_id, r.status]))
+  const activeRunByConv = useMemo(
+    () => new Map((activeRuns.data ?? []).map((r) => [r.conversation_id, r.status] as const)),
+    [activeRuns.data],
+  )
   const prevActiveRef = useRef<Map<string, 'running' | 'waiting_input'> | null>(null)
 
   // 轮询 diff → 未读：run 从占用集消失且当时不在该会话内 → 记未读；进入会话即已读。
   // 首次拉取只建基线不产生未读（应用关闭期间完成的 run 不补历史）。
   useEffect(() => {
+    // 首载失败帧（data undefined）：不建基线也不参与差分——请求失败 ≠ 占用集清空，
+    // 不能把失败当成「全部结束」来标未读（refetch 失败帧 react-query 会保留上次 data，
+    // 只有从未成功过的首载才会 undefined）
+    if (activeRuns.data === undefined) return
     const prev = prevActiveRef.current
     prevActiveRef.current = activeRunByConv
     if (prev === null) return
     for (const cid of prev.keys()) {
       if (!activeRunByConv.has(cid) && cid !== selectedId) markUnread(cid)
     }
-  }, [activeRunByConv, selectedId])
+  }, [activeRunByConv, activeRuns.data, selectedId])
   useEffect(() => {
     if (selectedId) markRead(selectedId)
   }, [selectedId])

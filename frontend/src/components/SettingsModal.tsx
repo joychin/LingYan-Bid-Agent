@@ -889,9 +889,18 @@ function ModelDialog({
     try {
       await putModels(list.map(toModelBody), dflt)
       if (key.trim()) {
-        await putModelKey(pid, key.trim())
-        setKey('')
-        setKeySaved(true)
+        try {
+          await putModelKey(pid, key.trim())
+          setKey('')
+          setKeySaved(true)
+        } catch (e) {
+          // 半成功：模型列表已在服务器生效——照常提交本地并失效缓存保持两边一致，
+          // 文案明确半成功；重按保存只重试 Key（putModels 幂等重放，无重复副作用）
+          onCommit(list, dflt)
+          void queryClient.invalidateQueries({ queryKey: ['settings'] })
+          const msg = e instanceof Error ? e.message : String(e)
+          return `模型配置已保存，但 API Key 保存失败：${msg}`
+        }
       }
       onCommit(list, dflt)
       void queryClient.invalidateQueries({ queryKey: ['settings'] })

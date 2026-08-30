@@ -1,4 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { getSettings } from '@/api/client'
 import { ArrowDown, CirclePause } from 'lucide-react'
 import { UploadDropzone } from '@/components/UploadDropzone'
 import { ChatMessage, DeepThinking } from '@/components/ChatMessage'
@@ -150,6 +152,31 @@ export function ChatView({
     },
     [convId],
   )
+  // 模型配置（与 InputComposer/SettingsModal 共享 ['settings'] 缓存）：粘性 id 失效自愈用
+  const { data: settings } = useQuery({
+    queryKey: ['settings'],
+    queryFn: getSettings,
+    staleTime: 5 * 60_000,
+    retry: false,
+  })
+  // 粘性模型 id 失效自愈：模型被删除/另一窗口改动后，本地存档的 id 已不存在——后端
+  // 会静默回落 default，但胶囊显示与实际执行模型脱节。校验失败回落 default 并清粘性
+  // 键；settings 未加载（undefined 窗口）跳过，加载后自然补校。
+  useEffect(() => {
+    if (!settings || !model) return
+    if (settings.models.some((m) => m.id === model)) return
+    setModel(undefined)
+    try {
+      localStorage.removeItem(LS_MODEL_LAST)
+      const map = loadModelMap()
+      if (convId && map[convId]) {
+        delete map[convId]
+        localStorage.setItem(LS_MODEL_BY_CONV, JSON.stringify(map))
+      }
+    } catch {
+      /* localStorage 不可用不致命 */
+    }
+  }, [settings, model, convId])
   // HITL 逐项草稿（含问快照：单问=向导 N=1 特例，统一卡内作答）。按 runId 判定
   // 新中断才重置：SSE 重连对账（run.state waiting_input）会 new 一个同 runId 的
   // interrupt 对象，按对象引用重置会把用户已答内容清空
