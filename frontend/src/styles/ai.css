@@ -64,11 +64,20 @@
   50% { opacity: 1; }
 }
 
-/* TextShimmer：渐变位移文字（bg-clip-text + shimmer 动画）。 */
+/* TextShimmer：渐变位移文字（bg-clip-text + shimmer 动画）。
+   --shimmer-base 按模式取灰阶（不是新色值，只是 token 映射）：浅色底用 tertiary——
+   官方 muted-foreground 是「比正文浅一档」的灰，此前错映射到偏深的 secondary，
+   深色高亮带扫过时对比不足，动画肉眼不可见（2026-08-30 用户反馈）；
+   暗色高亮带是亮色，底保持 secondary 与官方 dark（#a1a1a1 底）等价。 */
 .text-shimmer {
+  --shimmer-base: var(--Color-text-tertiary);
   background-size: 200% auto;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  animation: shimmer 4s linear infinite;
+  animation: shimmer 2.5s linear infinite;
+}
+
+[data-theme='dark'] .text-shimmer {
+  --shimmer-base: var(--Color-text-secondary);
 }

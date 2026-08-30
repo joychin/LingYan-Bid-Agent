@@ -53,9 +53,14 @@ export function useRun(convId: string | null) {
         .then((snapshot) => {
           const current = stateRef.current
           // 调用侧守卫（reducer 内还有同口径第二道闸）：已切到别的 run 不应用；
-          // 已收到实时事件（tools 非空）不覆盖。runId 为 null 允许--断线重挂时
+          // 已收到实时事件（tools 非空）不覆盖。running 恢复执行卡，waiting_input
+          // 恢复冻结卡（等待期刷新/重连）。runId 为 null 允许--断线重挂时
           // run.state 可能还没到，快照本身带权威 runId。
-          if (snapshot.status !== 'running' || (current.runId && current.runId !== runId)) return
+          if (
+            (snapshot.status !== 'running' && snapshot.status !== 'waiting_input') ||
+            (current.runId && current.runId !== runId)
+          )
+            return
           if (current.tools.length > 0) return
           dispatch({
             type: 'snapshot',
@@ -84,9 +89,14 @@ export function useRun(convId: string | null) {
       onEvent: (event, data) => {
         if (data.conversation_id !== convId) return
         dispatch({ type: 'sse', event, data, now: Date.now() })
-        // 断线/重挂对账：run.state=running 且本地过程树为空时拉一次运行快照，
-        // 恢复后端已经在跑的 task 卡（SSE 不补发历史 tool.called）。
-        if (event === 'run.state' && data.status === 'running' && !stateRef.current.tools.length) {
+        // 断线/重挂对账：run.state=running（恢复执行卡）或 waiting_input（恢复冻结卡，
+        // 等待期刷新后活卡不靠转录里的暂停消息拼装）且本地过程树为空时拉一次运行快照
+        // （SSE 不补发历史 tool.called）。
+        if (
+          event === 'run.state' &&
+          (data.status === 'running' || data.status === 'waiting_input') &&
+          !stateRef.current.tools.length
+        ) {
           restoreSnapshot(data.run_id)
         }
       },
@@ -100,7 +110,7 @@ export function useRun(convId: string | null) {
         getLatestRun(convId)
           .then(({ run }) => {
             if (run && (run.status === 'running' || run.status === 'waiting_input')) {
-              if (run.status === 'running' && !stateRef.current.tools.length) restoreSnapshot(run.id)
+              if (!stateRef.current.tools.length) restoreSnapshot(run.id)
               // 任务仍在执行或等待用户输入：保持现状等事件（waiting_input 由 run.state 对账恢复卡）
               return
             }

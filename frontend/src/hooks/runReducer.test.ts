@@ -143,22 +143,71 @@ describe('HITL 中断与续跑', () => {
       runId: 'r1',
       requests: [{ tool: 'task', args: {}, description: '确认派发', allowed: ['approve', 'reject'] }],
     }).state
-    expect(paused.tools[0].status).toBe('running')
+    // 活卡原地冻结：running 步骤转 paused（卡片呈现「等待确认/已暂停」，不转圈）
+    expect(paused.tools[0].status).toBe('paused')
+    // 冻结不清空：思考流保留（续跑追加），todos 记账保留
+    expect(paused.reasoningText).toBe('先想一步')
+    expect(paused.todos).toEqual([{ content: '检索', status: 'in_progress' }])
 
-    // 模拟 sidecar 发来的暂停 trace：冻结步骤后再进入 waiting_input。
-    const frozen = { ...paused, tools: paused.tools.map((step) => ({ ...step, status: 'paused' as const })) }
-    const resumed = runReducer(frozen, { type: 'started', runId: 'r1', now: NOW, continuation: true }).state
+    const resumed = runReducer(paused, { type: 'started', runId: 'r1', now: NOW, continuation: true }).state
     expect(resumed.tools).toHaveLength(1)
     expect(resumed.tools[0].tool).toBe('task')
     expect(resumed.tools[0].status).toBe('running')
     expect(resumed.continuation).toBe(true)
-    // 同 run started 幂等：todos 记账一并保留，不被 INITIAL_STATE 清空；
-    // reasoningText 是既有语义（settle-interrupt 清空流式态），tools 里的子代理
-    // reasoning 不受影响
-    expect(resumed.todos).toEqual([{ content: '检索', status: 'in_progress' }])
-    expect(resumed.reasoningText).toBe('')
+    // 同 run started 幂等：暂停冻结的内容全部跨续跑保留
+    expect(resumed.reasoningText).toBe('先想一步')
     expect(resumed.done).toBe(0)
     expect(resumed.total).toBe(1)
+  })
+
+  it('settle-interrupt 原地冻结：未封口正文转暂停旁白，running 步骤（含子级）转 paused', () => {
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'agent.token',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', text: '先派帮手。' },
+    }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', args: {}, tool_call_id: 't1' },
+    }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'fetch_url', args: {}, tool_call_id: 'c2', agent_id: 't1' },
+    }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'agent.token',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', text: '有个问题要问你' },
+    }).state
+    const paused = runReducer(s, {
+      type: 'settle-interrupt',
+      runId: 'r1',
+      requests: [{ tool: 'ask_human', args: {}, description: '问一句', allowed: ['respond'] }],
+    }).state
+    // 未封口正文不消失：streamText 移入 pauseNarration（活卡冻结期间渲染为旁白行）
+    expect(paused.streamText).toBe('')
+    expect(paused.pauseNarration).toBe('有个问题要问你')
+    // 树保留：封段旁白仍在步骤上，running 步骤（含子代理 children）冻结为 paused
+    expect(paused.tools[0].status).toBe('paused')
+    expect(paused.tools[0].text).toBe('先派帮手。')
+    expect(paused.tools[0].children[0].status).toBe('paused')
+
+    // 续跑段 409 双窗口兜底（SSE started 先到、乐观 revive 未发生）：冻结步骤
+    // 收到 tool.result 照常回填终态（服务端它确实在跑）
+    const healed = runReducer(paused, {
+      type: 'sse',
+      event: 'tool.result',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', tool_call_id: 't1', summary: '完成' },
+    }).state
+    expect(healed.tools[0].status).toBe('done')
   })
 
   it('普通指令与 HITL 回答分开记账：纯 approve 不产生回答文本', () => {
@@ -185,6 +234,53 @@ describe('HITL 中断与续跑', () => {
     const base = replay(hitl.events, settleActionsFor(replay(hitl.events).effects))
     const r = runReducer(base.state, { type: 'sse', ...dup, now: NOW })
     expect(r.state.streamText).toBe(base.state.streamText) // 未受重复事件影响
+  })
+
+  it('run.state waiting_input 对账：活卡原地冻结（断线跨过 run.interrupt 的客户端）', () => {
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'ls', args: {}, tool_call_id: 'c1' },
+    }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'agent.token',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', text: '有个问题要问你' },
+    }).state
+    const r = runReducer(s, {
+      type: 'sse',
+      event: 'run.state',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        status: 'waiting_input',
+        requests: [{ tool: 'ask_human', args: {}, description: '问一句', allowed: ['respond'] }],
+      },
+    })
+    expect(r.state.running).toBe(false)
+    expect(r.state.interrupt).toMatchObject({ runId: 'r1' })
+    expect(r.state.pauseNarration).toBe('有个问题要问你')
+    expect(r.state.tools[0].status).toBe('paused')
+    expect(r.effects).toContainEqual({ kind: 'invalidate-messages' })
+
+    // 等待期 SSE 重连的重复对账：不抹掉已冻结的旁白、不重复冻结出问题
+    const again = runReducer(r.state, {
+      type: 'sse',
+      event: 'run.state',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        status: 'waiting_input',
+        requests: [{ tool: 'ask_human', args: {}, description: '问一句', allowed: ['respond'] }],
+      },
+    }).state
+    expect(again.pauseNarration).toBe('有个问题要问你')
+    expect(again.tools[0].status).toBe('paused')
   })
 
   it('continuation sticky：续跑乐观置位后，SSE agent.started 二次到达不冲掉；settle 复位', () => {
@@ -271,8 +367,22 @@ describe('运行快照对账', () => {
     expect(stale.lastSeq).toEqual({ runId: 'r1', seq: 50 })
   })
 
-  it('非 running 快照不应用（终态/等待输入的旧快照不改状态）', () => {
-    const waiting = runReducer(INITIAL_STATE, {
+  it('waiting_input 快照：恢复冻结树与思考但不置 running（等待期刷新/重连重建活卡）', () => {
+    const restored = runReducer(INITIAL_STATE, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'waiting_input',
+      tools: [{ ...taskStep, status: 'paused' as const }],
+      todos: [],
+      reasoningText: '暂停前的思考',
+    }).state
+    expect(restored.running).toBe(false)
+    expect(restored.runId).toBe('r1')
+    expect(restored.tools[0].status).toBe('paused')
+    expect(restored.reasoningText).toBe('暂停前的思考')
+
+    // 防御性冻结：等待态快照混入 running 步骤也转 paused（不转圈）
+    const defensive = runReducer(INITIAL_STATE, {
       type: 'snapshot',
       runId: 'r1',
       status: 'waiting_input',
@@ -280,8 +390,8 @@ describe('运行快照对账', () => {
       todos: [],
       reasoningText: '',
     }).state
-    expect(waiting.tools).toHaveLength(0)
-    expect(waiting.running).toBe(false)
+    expect(defensive.running).toBe(false)
+    expect(defensive.tools[0].status).toBe('paused')
   })
 
   it('已终态或已切走的 run 不被旧快照复活/覆盖', () => {

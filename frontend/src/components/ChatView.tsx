@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowDown } from 'lucide-react'
+import { ArrowDown, CirclePause } from 'lucide-react'
 import { UploadDropzone } from '@/components/UploadDropzone'
 import { ChatMessage, DeepThinking } from '@/components/ChatMessage'
 import { MemoMarkdown, markdownComponents } from '@/components/ai/MemoMarkdown'
@@ -14,7 +14,7 @@ import {
   type StepDraft,
 } from '@/components/ai/InterruptCard'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai/Reasoning'
-import { RunTrace } from '@/components/ai/RunTrace'
+import { RunTrace, NarrationLine } from '@/components/ai/RunTrace'
 import { TextShimmer } from '@/components/ai/TextShimmer'
 import { toolDisplayName } from '@/components/ai/toolDisplay'
 import { Message as WMessage } from '@/components/workspace/Message'
@@ -32,7 +32,7 @@ import { useCreateTask, useTasks } from '@/hooks/useTasks'
 import { useFileUpload } from '@/context/FileUpload'
 import { useToast } from '@/context/Toast'
 import { formatDay } from '@/lib/utils'
-import { isRespondAnswer, lastInstructionText, splitMarker } from '@/lib/hitlMessage'
+import { isLivePauseMessage, isRespondAnswer, lastInstructionText, splitMarker } from '@/lib/hitlMessage'
 import type { Artifact, Message, ThinkingLevel } from '@/api/client'
 
 /** 思考档位的本地记忆（App.tsx 的 LS_* 先例：tender-agent.<名字>） */
@@ -79,6 +79,7 @@ export function ChatView({
   } = useMessages(convId)
   const {
     running,
+    runId,
     startedAt,
     stopping,
     streamText,
@@ -91,6 +92,7 @@ export function ChatView({
     errorCode,
     lastInstruction,
     continuationAnswer,
+    pauseNarration,
     interrupt,
     continuation,
     continuationKind,
@@ -98,6 +100,10 @@ export function ChatView({
     decide,
     cancel,
   } = useRun(convId)
+  // 活卡存续的 run（执行中累积 / 等待输入冻结 / 续跑接续）：该 run 的暂停/中断半截
+  // 消息不渲染独立卡（一张活卡贯穿 run 生命周期）；终态后为空，消息回到转录被
+  // 最终/中断消息吸收
+  const liveRunId = running ? runId : (interrupt?.runId ?? null)
   // 停止/出错卡的「重新执行」文本：优先内存态 lastInstruction（发送失败重试——消息可能未落库），
   // 刷新后回退到消息列表里最后一条真实指令——终态 run 的用户消息必已落库；HITL 回答
   // 消息（含无「已选：」前缀的纯文字回答）由 isRespondAnswer 识别并跳过（重发会变成
@@ -151,12 +157,12 @@ export function ChatView({
   const [stepDrafts, setStepDrafts] = useState<StepDraft[]>([])
   const lastInterruptRunRef = useRef<string | null>(null)
   useEffect(() => {
-    const runId = interrupt?.runId ?? null
-    if (interrupt && runId !== lastInterruptRunRef.current) {
+    const interruptRunId = interrupt?.runId ?? null
+    if (interrupt && interruptRunId !== lastInterruptRunRef.current) {
       setStepIndex(0)
       setStepDrafts(interrupt.requests.map(() => ({ picked: [], text: '' })))
     }
-    lastInterruptRunRef.current = runId
+    lastInterruptRunRef.current = interruptRunId
   }, [interrupt])
 
   // 上传归属任务（§16 任务级文件区）：选中会话→其所属任务；草稿页→选择器挑的任务
@@ -395,10 +401,16 @@ export function ChatView({
                   onPrompt={fillPrompt}
                 />
               )}
-              <MessageList messages={messages} convArtifacts={convArtifacts} onOpenArtifact={onOpenArtifact} />
-              {running && (
+              <MessageList
+                messages={messages}
+                convArtifacts={convArtifacts}
+                onOpenArtifact={onOpenArtifact}
+                hiddenPauseRunId={liveRunId}
+              />
+              {(running || interrupt) && (
                 <RunMessage
                   running={running}
+                  paused={!!interrupt && !running}
                   startedAt={startedAt}
                   tools={tools}
                   todos={todos}
@@ -406,6 +418,7 @@ export function ChatView({
                   total={total}
                   text={streamText}
                   reasoningText={reasoningText}
+                  pauseNarration={pauseNarration}
                   continuation={continuation}
                   continuationKind={continuationKind}
                   continuationAnswer={continuationAnswer}
@@ -515,12 +528,16 @@ function activeStatusLabel(tools: RunState['tools'], startingSubagents = false):
   return startingSubagents ? '子代理启动中…' : '正在思考…'
 }
 
-/** 运行中的助手消息：头像 + 状态 + 执行过程（Reasoning 折叠）+ 任务清单时间线（Steps）+ 流式正文。
- *  continuation=HITL 续跑段：不渲染回合头、以占位与暂停消息对齐（同一回合的视觉续接）；
- *  continuationAnswer 是刚提交的问答回答--转录里不再有回答气泡，续跑期间在此显示一行防「提交后
- *  答案消失」的空窗，最终消息到达后随本占位组件一起退场。 */
+/** 运行中的助手消息（活卡）：头像 + 状态 + 执行过程（Reasoning 折叠）+ 任务清单时间线（Steps）+ 流式正文。
+ *  一张活卡贯穿 run 生命周期：running 累积 → ask_human 原地冻结（paused=true：胶囊转
+ *  「等待你的输入」、折叠头转「已暂停 · N 步」、正文/思考/工具树全保留，pauseNarration
+ *  是暂停时未封口的正文旁白行）→ 裁决后同一实例解冻续跑（React 不卸载，手动展开的
+ *  折叠态全程保持）→ 完成时与落库最终消息同帧原子替换（settle-after-messages 时序）。
+ *  continuationAnswer 是刚提交的问答回答--转录里不再有回答气泡，续跑期间在此显示一行
+ *  防「提交后答案消失」的空窗，最终消息到达后随本占位组件一起退场。 */
 function RunMessage({
   running,
+  paused,
   startedAt,
   tools,
   todos,
@@ -528,11 +545,14 @@ function RunMessage({
   total,
   text,
   reasoningText,
+  pauseNarration,
   continuation,
   continuationKind,
   continuationAnswer,
 }: {
   running: boolean
+  /** ask_human 等待裁决：活卡冻结呈现（不转圈、不计时，动作入口是下方提问卡） */
+  paused: boolean
   startedAt: number | null
   tools: RunState['tools']
   todos: RunState['todos']
@@ -540,6 +560,8 @@ function RunMessage({
   total: number
   text: string
   reasoningText: string
+  /** 暂停时未封口的正文（settle-interrupt 移入）：冻结/续跑期间渲染为过程区顶部旁白行 */
+  pauseNarration: string
   continuation: boolean
   continuationKind: RunState['continuationKind']
   continuationAnswer: string
@@ -554,41 +576,58 @@ function RunMessage({
   return (
     <WMessage
       role="assistant"
-      name={continuation ? undefined : 'Tender Agent'}
-      avatar={
-        continuation ? <div className="msg-spacer" aria-hidden /> : <div className="msg-avatar">T</div>
-      }
+      name="Tender Agent"
+      avatar={<div className="msg-avatar">T</div>}
       status={
-        <>
-          <Loader variant="dots" size="sm" /> {continuation ? '继续执行' : '执行中'}
-          {startedAt && <Duration startedAt={startedAt} className="ml-1" />}
-        </>
+        paused ? (
+          <span className="inline-flex items-center gap-1.5">
+            <CirclePause className="size-3.5" /> 等待你的输入
+          </span>
+        ) : (
+          <>
+            <Loader variant="dots" size="sm" /> {continuation ? '继续执行' : '执行中'}
+            {startedAt && <Duration startedAt={startedAt} className="ml-1" />}
+          </>
+        )
       }
     >
       {continuation && continuationAnswer && (
         <div className="turn-chip mb-1.5">你的回答：{continuationAnswer.replace(/^已选：/, '')}</div>
       )}
-      {(reasoningText || tools.length > 0 || todos.length > 0 || (continuation && hasSubagents)) && (
+      {(reasoningText ||
+        tools.length > 0 ||
+        todos.length > 0 ||
+        pauseNarration.trim() ||
+        (continuation && hasSubagents)) && (
         <Reasoning isStreaming={running} className="mb-1.5">
           <ReasoningTrigger className="text-sm text-muted-foreground">
-            {running ? <TextShimmer>执行过程</TextShimmer> : '执行过程'}
+            {paused ? (
+              `已暂停${tools.length ? ` · ${tools.length} 步` : ''}`
+            ) : running ? (
+              <TextShimmer>执行过程</TextShimmer>
+            ) : (
+              '执行过程'
+            )}
           </ReasoningTrigger>
           <ReasoningContent contentClassName="mt-2 space-y-2">
+            {pauseNarration.trim() && <NarrationLine text={pauseNarration} />}
             {shownReasoning && <DeepThinking text={shownReasoning} isStreaming={running} autoFollow />}
             <RunTrace tools={tools} todos={todos} done={done} total={total} />
           </ReasoningContent>
         </Reasoning>
       )}
-      <div className="bubble">
-        {shownText ? (
-          <>
-            <MemoMarkdown text={shownText} components={markdownComponents} />
-            <span className="caret-blink ml-0.5 inline-block h-[1.15em] w-0.5 translate-y-[0.2em] bg-primary" />
-          </>
-        ) : (
-          <ThinkingBar text={label} />
-        )}
-      </div>
+      {!paused && (
+        <div className="bubble">
+          {shownText ? (
+            <>
+              <MemoMarkdown text={shownText} components={markdownComponents} />
+              <span className="caret-blink ml-0.5 inline-block h-[1.15em] w-0.5 translate-y-[0.2em] bg-primary" />
+            </>
+          ) : (
+            <ThinkingBar text={label} />
+          )}
+        </div>
+      )}
     </WMessage>
   )
 }
@@ -597,22 +636,28 @@ function RunMessage({
  *  HITL 暂停段+续跑段是同一动作的连续，不是两条独立消息）；run_id 为空的
  *  旧消息各自独立。日期分隔条只出现在组与组之间。
  *  HITL respond 回答消息不渲染气泡（痕迹收进过程卡的问答组，见 hitlMessage）。
+ *  活卡存续期间（hiddenPauseRunId 非空）该 run 的暂停/中断半截消息整体不渲染——
+ *  一张活卡贯穿 run 生命周期，终态后回到转录被最终/中断消息吸收。
  *  memo：流式 token 期间 props 引用稳定 → 整个列表（含分组装配）跳过重渲染，
  *  每 token 只剩 RunMessage 一个热路径组件。 */
 const MessageList = memo(function MessageList({
   messages,
   convArtifacts,
   onOpenArtifact,
+  hiddenPauseRunId,
 }: {
   messages: Message[]
   convArtifacts: Artifact[]
   onOpenArtifact: (id: string) => void
+  /** 活卡存续的 run id（running 或等待输入）；null = 无活卡（终态），不隐藏任何消息 */
+  hiddenPauseRunId?: string | null
 }) {
   type Item = { kind: 'solo'; m: Message } | { kind: 'group'; runId: string; items: Message[] }
   const items: Item[] = []
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i]
     if (isRespondAnswer(messages, i)) continue // 回答不占转录（答案在过程卡问答组里）
+    if (isLivePauseMessage(m, hiddenPauseRunId)) continue // 活卡期间暂停消息不渲染独立卡
     const rid = m.run_id ?? null
     const last = items[items.length - 1]
     if (rid && last?.kind === 'group' && last.runId === rid) {

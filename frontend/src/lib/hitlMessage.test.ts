@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Message } from '@/api/client'
-import { isRespondAnswer, lastInstructionText, splitMarker } from './hitlMessage'
+import { isLivePauseMessage, isRespondAnswer, lastInstructionText, splitMarker } from './hitlMessage'
 
 function msg(role: Message['role'], content: string, run_id?: string): Message {
   return {
@@ -106,5 +106,25 @@ describe('lastInstructionText', () => {
       msg('user', '技术册先行'),
     ]
     expect(lastInstructionText(msgs)).toBe('')
+  })
+})
+
+describe('isLivePauseMessage', () => {
+  it('活卡存续 run 的暂停/中断半截消息隐藏', () => {
+    expect(isLivePauseMessage(msg('assistant', '问题\n\n（等待你的输入…）', 'r1'), 'r1')).toBe(true)
+    expect(isLivePauseMessage(msg('assistant', '半截\n\n（任务中断）', 'r1'), 'r1')).toBe(true)
+  })
+
+  it('非该 run / 非标记 / 非 assistant 的消息不隐藏', () => {
+    expect(isLivePauseMessage(msg('assistant', '问题\n\n（等待你的输入…）', 'r1'), 'r2')).toBe(false)
+    expect(isLivePauseMessage(msg('assistant', '普通最终回复', 'r1'), 'r1')).toBe(false)
+    expect(isLivePauseMessage(msg('user', '（等待你的输入…）', 'r1'), 'r1')).toBe(false)
+  })
+
+  it('无活卡（终态）或 run_id 缺失（迁移前旧数据）不隐藏', () => {
+    const pause = msg('assistant', '问题\n\n（等待你的输入…）', 'r1')
+    expect(isLivePauseMessage(pause, null)).toBe(false)
+    expect(isLivePauseMessage(pause, undefined)).toBe(false)
+    expect(isLivePauseMessage(msg('assistant', '问题\n\n（等待你的输入…）'), 'r1')).toBe(false)
   })
 })

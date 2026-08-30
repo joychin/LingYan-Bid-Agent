@@ -763,10 +763,12 @@
   padding: 2px 8px;
   margin-top: 6px;
 }
-/* 审批/问答卡挂进回合：与助手正文列对齐并贴住暂停消息（抵掉一部分 .chat gap） */
+/* 审批/问答卡挂进回合：与助手正文列对齐、贴住活卡冻结态的过程区（一张活卡贯穿
+   暂停/续跑后，提问卡唯一挂点是活卡下方；活卡暂停时无正文气泡，Reasoning 自带
+   mb-1.5，这里只补一丝呼吸——旧结构的 -10px 负 margin 连同暂停消息卡一起废弃） */
 .turn-attach {
   margin-left: 44px; /* msg-avatar 32px + .msg gap 12px */
-  margin-top: -10px;
+  margin-top: 2px;
 }
 
 .bubble {

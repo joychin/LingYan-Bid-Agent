@@ -68,3 +68,14 @@ export function lastInstructionText(messages: Message[]): string {
   }
   return ''
 }
+
+/**
+ * 活卡存续期间应隐藏的暂停/中断半截消息：该 run 的活卡（RunMessage）正承载全过程
+ * （运行中累积 / 等待中冻结 / 续跑接续），落库的暂停消息不渲染独立卡——否则同一批
+ * 步骤出现两份、状态互相矛盾。终态后 liveRunId 为空，消息回到转录、被最终/中断
+ * 消息吸收（MessageList 的 hasLaterAssistant 装配）。run_id 缺失（迁移前旧数据）
+ * 不匹配 → 不隐藏，行为退回双卡现状。
+ */
+export function isLivePauseMessage(m: Message, liveRunId: string | null | undefined): boolean {
+  return !!liveRunId && m.role === 'assistant' && m.run_id === liveRunId && isPauseMarked(m.content)
+}

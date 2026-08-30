@@ -127,6 +127,20 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    是最终回复、头像头错落到回合尾部，用户体感「进入另一个时空」）；前端组内
    装配把带标记的暂停段整体吸收进后续最终段（旁白/标记上提为卡片内的旁白行与
    徽章），全回合只渲染一张过程卡；retire_pause_marker/splitMarker 兼容裸标记。
+   **四轮（2026-08-30，一张活卡贯穿 run 生命周期）**：活卡（RunMessage）渲染条件
+   扩为 `running || interrupt`——ask_human 暂停时**原地冻结不换卡**：settle-interrupt
+   不再清空（running 步骤经 `freezeRunningSteps` 冻结为 paused、reasoningText 保留、
+   未封口 streamText 移入新状态字段 `pauseNarration` 渲染为过程区顶部旁白行），
+   胶囊转「等待你的输入」、折叠头转「已暂停 · N 步」、正文气泡隐藏（动作入口=
+   下方 `.turn-attach` 提问卡）；批准/回答后同一 React 实例解冻续跑（手动展开的
+   折叠态全程保持）。暂停消息在活卡存续期间经 `isLivePauseMessage`（hitlMessage）
+   从转录隐藏（hiddenPauseRunId=running?runId:interrupt.runId，数据驱动、旧库
+   run_id 缺失自动退回双卡），终态后回到转录被最终/中断消息吸收。配套：
+   `snapshot` action 接受 waiting_input（等待期刷新/重连也重建冻结活卡，不置
+   running，restoreSnapshot 守卫同步放宽）；fillStep 对 paused 步骤也回填（409
+   双窗口下 SSE started 先到、乐观 revive 未发生时续跑段 tool.result 仍能落终态）；
+   RunMessage 回合头像头恒显示（continuation 的无头逻辑随双卡一起删除）；
+   `.turn-attach` margin-top -10px（贴暂停消息卡尾部隐藏操作条的旧标定）改 2px。
    **多模型 profile 与输入框选模型（2026-08-29，替代上段的 llm/vlm 双角色形状；
    同日傍晚二改：配置与 Key 真值从 settings.json+钥匙串整体迁到 app.db——见铁则 2）**：
    GET /settings = `{models(含 key_configured), default_model, ocr, paths}`；PUT

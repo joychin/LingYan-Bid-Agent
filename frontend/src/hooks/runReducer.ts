@@ -33,6 +33,9 @@ export interface RunState {
   lastInstruction: string
   /** 本次 HITL respond 的回答：仅在续跑空窗期显示，纯审批不产生。 */
   continuationAnswer: string
+  /** 暂停时未封口的正文（settle-interrupt 从 streamText 移入）：活卡冻结期间渲染为
+   *  过程区顶部旁白行——正文/思考/工具树在暂停全程不消失（一张活卡贯穿暂停与续跑）。 */
+  pauseNarration: string
   /** HITL 暂停（run.interrupt / run.state 对账）：非空 = 有待用户裁决的动作，输入框切回答模式 */
   interrupt: { runId: string; requests: InterruptRequest[] } | null
   /** 本 running 态是否为 HITL 续跑段（批准/回答后的 resumed agent.started）：
@@ -63,6 +66,7 @@ export const INITIAL_STATE: RunState = {
   errorCode: null,
   lastInstruction: '',
   continuationAnswer: '',
+  pauseNarration: '',
   interrupt: null,
   continuation: false,
   continuationKind: null,
@@ -154,7 +158,9 @@ function attachStep(steps: ToolStep[], step: ToolStep, agentId?: string | null):
   return [...steps, step]
 }
 
-/** 不可变回填：按 tool_call_id（缺省退化按工具名）找 running 步骤写终态。 */
+/** 不可变回填：按 tool_call_id（缺省退化按工具名）找执行中步骤写终态。
+ *  paused 也匹配：续跑段 409 双窗口（SSE started 先到、乐观 revive 未发生）下，
+ *  冻结步骤收到 tool.result 时服务端它确实在跑——照常回填终态。 */
 function fillStep(
   steps: ToolStep[],
   data: { tool?: string; tool_call_id?: string | null; summary?: string; error?: string },
@@ -162,7 +168,7 @@ function fillStep(
 ): ToolStep[] {
   for (let i = steps.length - 1; i >= 0; i--) {
     const s = steps[i]
-    if (s.status === 'running') {
+    if (s.status === 'running' || s.status === 'paused') {
       const tcid = data.tool_call_id ?? null
       const match = tcid ? s.toolCallId === tcid : s.tool === data.tool
       if (match) {
@@ -217,6 +223,16 @@ function revivePausedSteps(steps: ToolStep[]): ToolStep[] {
   }))
 }
 
+/** 树里仍在 running 的步骤冻结为 paused（HITL 暂停快照，镜像 sidecar _freeze_paused_steps）：
+ *  被门禁拦下的调用不会有 tool.result，不冻结会在活卡上永远转圈。 */
+function freezeRunningSteps(steps: ToolStep[]): ToolStep[] {
+  return steps.map((step) => ({
+    ...step,
+    ...(step.status === 'running' ? { status: 'paused' as const } : {}),
+    children: step.children.length > 0 ? freezeRunningSteps(step.children) : step.children,
+  }))
+}
+
 const result = (state: RunState, effects: Effect[] = []): ReducerResult => ({ state, effects })
 
 export function runReducer(s: RunState, action: Action): ReducerResult {
@@ -258,6 +274,7 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         reasoningText: '',
         error: null,
         continuationAnswer: '',
+        pauseNarration: '',
         interrupt: null,
         continuation: false,
         continuationKind: null,
@@ -274,17 +291,23 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         error: action.error,
         errorCode: action.code,
         continuationAnswer: '',
+        pauseNarration: '',
         interrupt: null,
         continuation: false,
         continuationKind: null,
       })
     case 'settle-interrupt':
+      // 活卡原地冻结（一张活卡贯穿暂停与续跑）：工具树保留（running 步骤冻结为 paused，
+      // 被门禁拦下的调用不会有 tool.result）、思考流保留（续跑段自然追加）、未封口正文
+      // 移入 pauseNarration 渲染为旁白行——都不清空不换卡。暂停消息由 sidecar 落库、
+      // 活卡存续期间前端不渲染独立卡，终态时被最终/中断消息吸收（MessageList 装配）。
       return result({
         ...s,
         running: false,
         stopping: false,
         streamText: '',
-        reasoningText: '',
+        pauseNarration: s.streamText,
+        tools: freezeRunningSteps(s.tools),
         continuationAnswer: '',
         interrupt: { runId: action.runId, requests: action.requests },
         continuation: false,
@@ -302,9 +325,10 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
       // 网络层失败（请求未达 sidecar）：复位 stopping 解除按钮锁死，允许重试
       return result({ ...s, stopping: false })
     case 'snapshot': {
-      // 快照守卫单点收口：非 running（终态/等待输入）快照不应用；已终态的 run 不被
-      // 旧快照复活；已切走的当前 run 不被覆盖。调用侧（restoreSnapshot）只是第一道闸。
-      if (action.status !== 'running') return result(s)
+      // 快照守卫单点收口：终态快照不应用；已终态的 run 不被旧快照复活；已切走的当前
+      // run 不被覆盖。waiting_input 快照恢复冻结树与思考（等待期刷新/重连重建活卡）
+      // 但不置 running；调用侧（restoreSnapshot）只是第一道闸。
+      if (action.status === 'completed' || action.status === 'error') return result(s)
       if (s.terminalRuns.has(action.runId)) return result(s)
       if (s.runId && s.runId !== action.runId) return result(s)
       // 快照 seq 取 max：runs.last_seq 运行中恒旧（只在暂停/终态回写），
@@ -317,9 +341,14 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
           : null
       return result({
         ...s,
-        running: true,
+        running: action.status === 'running' ? true : s.running,
         runId: action.runId,
-        tools: s.continuation ? revivePausedSteps(action.tools) : action.tools,
+        tools: s.continuation
+          ? revivePausedSteps(action.tools)
+          : action.status === 'waiting_input'
+            ? // 防御性冻结：等待态快照按契约已是 paused 终态树，混入 running 也不转圈
+              freezeRunningSteps(action.tools)
+            : action.tools,
         todos: action.todos,
         reasoningText: action.reasoningText,
         ...(snapSeq != null ? { lastSeq: { runId: action.runId, seq: snapSeq } } : {}),
@@ -403,8 +432,10 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
         })
       }
       if (data.status === 'waiting_input') {
-        // HITL 对账：恢复审批/问答卡。半截回复已由 sidecar 落库，
-        // 拉回消息并清掉流式气泡，避免与落库消息双显
+        // HITL 对账：恢复审批/问答卡并按活卡语义原地冻结（同 settle-interrupt——
+        // 断线恰好跨过 run.interrupt 的客户端，工具树/思考/未封口正文同样不清空；
+        // pauseNarration 保留既有值，重复对账不抹掉已冻结的旁白）。
+        // 半截回复已由 sidecar 落库，拉回消息（活卡存续期间暂停消息不渲染）
         if (s.terminalRuns.has(data.run_id)) return result(s)
         return result(
           {
@@ -412,7 +443,8 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
             running: false,
             stopping: false,
             streamText: '',
-            reasoningText: '',
+            pauseNarration: s.pauseNarration || s.streamText,
+            tools: freezeRunningSteps(s.tools),
             interrupt: { runId: data.run_id, requests: data.requests ?? [] },
           },
           [{ kind: 'invalidate-messages' }],

@@ -327,7 +327,7 @@ export function TextShimmerLoader({
     <div
       className={cn('text-shimmer font-medium', textSize, className)}
       style={{
-        backgroundImage: 'linear-gradient(to right, var(--Color-text-secondary) 40%, var(--Color-text-primary) 60%, var(--Color-text-secondary) 80%)',
+        backgroundImage: 'linear-gradient(to right, var(--shimmer-base, var(--Color-text-tertiary)) 40%, var(--Color-text-primary) 60%, var(--shimmer-base, var(--Color-text-tertiary)) 80%)',
       }}
     >
       {text}
