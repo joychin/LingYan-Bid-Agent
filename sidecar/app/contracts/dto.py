@@ -36,9 +36,17 @@ class Conversation(_ContractModel):
     created_at: str
 
 
+class RunFilePayload(_ContractModel):
+    """本轮文件（run_files 起止 diff）：path 相对 <task>/work/（WorkbenchFile.path
+    同约定，前端 chip 直接透传工作台查看器）；op = created（本轮新建）/modified。"""
+
+    path: str
+    op: Literal["created", "modified"]
+
+
 class Message(_ContractModel):
     """GET /messages 的 assistant 消息；tools/todos 是 run_traces 快照（嵌套树，松散 dict，
-    键序与前端 ToolStep 同构——前端用客户端类型标注，见 client.ts）。"""
+    键序与前端 ToolStep 同构--前端用客户端类型标注，见 client.ts）。"""
 
     id: str
     conversation_id: str
@@ -52,6 +60,9 @@ class Message(_ContractModel):
     todos: list[TodoItemPayload] | None = None
     durationMs: int | None = None
     reasoning: str | None = None
+    # 本轮 work/ 变更（additive，SSE 零改动--completed 后前端重取消息获得）；
+    # 旧 run 无探测，恒 []
+    files: list[RunFilePayload] | None = None
 
 
 class SendMessageResult(_ContractModel):
@@ -102,6 +113,8 @@ class ModelProfile(_ContractModel):
     base_url: str
     model: str
     image_support: bool
+    # 上下文窗口（token；null=未知/自动，仅压缩触发档位用）
+    context_window: int | None = None
     key_configured: bool
 
 
@@ -161,10 +174,9 @@ class Artifact(_ContractModel):
     source: ArtifactSource
     content_seq: int
     restore_available: bool
-    scope: Literal["task", "conversation"]
+    state: Literal["draft", "confirmed"]
     task_id: str | None = None
     conversation_id: str | None = None
-    promotion_proposed: bool
     path: str
 
 

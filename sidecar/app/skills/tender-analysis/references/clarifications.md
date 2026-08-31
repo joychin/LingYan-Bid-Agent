@@ -1,6 +1,6 @@
 # 节：待澄清汇总（clarifications）
 
-把七节登记的待澄清项汇总为 `out/analysis/clarifications.md`。**只标注、不阻塞**——
+把七节登记的待澄清项汇总为 `work/analysis/clarifications.md`。**只标注、不阻塞**——
 不主动 ask_human 打断用户；未裁决项在下游可见（tender-outline 给相关节点挂 ⚠、
 tender-body 在正文内联「【待澄清：…】」）。
 

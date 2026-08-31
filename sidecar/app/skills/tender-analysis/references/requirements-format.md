@@ -1,7 +1,7 @@
 # 节：格式要求（requirements-format）
 
 只抽取招标文件对**响应文件组成与格式的硬性要求**，以及响应文件的整体结构骨架。
-输出 `out/analysis/requirements-format.md`。本节是 tender-outline 规划目录的主要骨架输入，
+输出 `work/analysis/requirements-format.md`。本节是 tender-outline 规划目录的主要骨架输入，
 **三节标题与表格格式是 assemble_tender 的机器输入，必须严格照抄**。
 
 ## 输出格式（严格）

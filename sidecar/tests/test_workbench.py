@@ -10,7 +10,7 @@ from tests.util import create_task
 
 
 def _seed_out(task_id: str, rel: str, text: str) -> None:
-    p = artifact_store.task_out_dir(task_id) / rel
+    p = artifact_store.work_dir(task_id) / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
 
@@ -100,7 +100,7 @@ def test_write_stamps_revised_and_conflict(client):
     )
     assert r.status_code == 200
     d = client.get("/api/workbench/content", params={"task_id": tid, "path": "outline/fragments/技术标.md"}).json()
-    assert d["content"].splitlines()[0].startswith("<!-- 工作台 | 修订=用户")
+    assert d["content"].splitlines()[0].startswith("<!-- 工作文件 | 修订=用户")
     assert d["content"].splitlines()[1] == "- 封面"
 
 
@@ -152,12 +152,12 @@ def test_save_as_note(client):
     )
     assert r.status_code == 201, r.text
     aid = r.json()["artifact_id"]
-    assert r.json()["display_name"].startswith("工作台快照 · disqualification")
+    assert r.json()["display_name"].startswith("工作文件快照 · disqualification")
 
     # 落在会话作用域（过程稿）、kind=doc.note、可读
     rows = client.get("/api/artifacts", params={"conversation_id": conv["id"]}).json()["artifacts"]
     row = next(a for a in rows if a["artifact_id"] == aid)
-    assert row["kind"] == "doc.note" and row["display_name"].startswith("工作台快照")
+    assert row["kind"] == "doc.note" and row["display_name"].startswith("工作文件快照")
 
     # 自定义 title
     r2 = client.post(

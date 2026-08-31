@@ -1,10 +1,11 @@
-"""LLM 面向的发布工具：把任务 drafts/ 下的结构化草稿发布为会话「过程稿」Artifact。
+"""LLM 面向的发布工具：把任务 _meta/staging/ 下的结构化草稿发布为产物。
 
-授权与校验全部在 publish 管线（服务端硬约束）；本工具只做草稿读取与
-containment（必须落在当前任务的 drafts/ 内，防文档内容注入诱导读取敏感文件）。
+授权与校验全部在 publish 管线（服务端硬约束）；本工具只做草稿读取、containment
+（必须落在当前任务的 _meta/staging/ 内，防文档内容注入诱导读取敏感文件）与
+移动消费（发布后草稿从暂存区移除，不留残骸）。
 
-P4 语义：LLM 只能写会话过程稿（正式稿的每次写入都由用户点头——转正走
-用户点击）；propose_promotion 只是把「建议转正」标记挂到过程稿上，等用户确认。
+2026-08-31 重构语义：产物归任务、发布产出草稿（state=draft）；用户确认为正式成果
+走「确认」动作（界面点击 /confirm），LLM 不参与确认——LLM 只能发布草稿。
 未注册契约一律收拢为通用笔记 doc.note（任务记忆不因类型未登记而中断）。
 """
 
@@ -22,17 +23,17 @@ NOTE_CONTRACT = contracts.get_contract("doc.note/note-md@1")
 
 
 def _resolve_draft(p: str) -> Path:
-    """草稿路径 containment：解析（含符号链接）后必须落在当前任务的 drafts/ 内。
+    """草稿路径 containment：解析（含符号链接）后必须落在当前任务的 _meta/staging/ 内。
 
-    相对路径按 workspace 根解析（模型给完整任务前缀路径，如 <任务目录>/drafts/x.json）；
-    按根找不到时回退任务 drafts/ 下按文件名找（模型可能只给 drafts/x.json 或 x.json）。
+    相对路径按 workspace 根解析（模型给完整任务前缀路径，如 <任务目录>/_meta/staging/x.json）；
+    按根找不到时回退任务 staging/ 下按文件名找（模型可能只给文件名或漏前缀）。
     """
     ctx = runctx.current_run()
     task_id = ctx.task_id if ctx else None
     if not task_id:
-        raise ValueError("缺少任务上下文：草稿目录在当前任务的 drafts/ 下，请在任务会话中发布")
+        raise ValueError("缺少任务上下文：草稿目录在当前任务的 _meta/staging/ 下，请在任务会话中发布")
     root = workspace_dir().resolve()
-    allowed = artifact_store.task_drafts_dir(task_id).resolve()
+    allowed = artifact_store.staging_dir(task_id).resolve()
     cand = Path(p).expanduser()
     if not cand.is_absolute():
         cand = root / cand
@@ -40,7 +41,7 @@ def _resolve_draft(p: str) -> Path:
     if not resolved.is_relative_to(root):
         raise ValueError(f"草稿路径越界：只允许 {allowed.relative_to(root)}/ 目录，收到 {p}")
     if not resolved.is_relative_to(allowed):
-        # 模型可能只给裸文件名或漏任务前缀：收拢到任务 drafts/ 下按文件名找
+        # 模型可能只给裸文件名或漏任务前缀：收拢到任务 staging/ 下按文件名找
         alt = (allowed / Path(p).name).resolve()
         if not alt.is_relative_to(allowed):
             raise ValueError(f"草稿路径越界：只允许 {allowed.relative_to(root)}/ 目录，收到 {p}")
@@ -65,23 +66,21 @@ def _as_note_content(content: object, display_name: str | None) -> object:
 
 
 @tool
-def publish_artifact(
-    contract: str, draft_path: str, display_name: str = "", propose_promotion: bool = False
-) -> str:
-    """把当前任务 drafts/ 下的 JSON 草稿发布为 Artifact（保存到当前会话的过程稿，用户可见可打开）。
+def publish_artifact(contract: str, draft_path: str, display_name: str = "") -> str:
+    """把当前任务 _meta/staging/ 下的 JSON 草稿发布为产物（保存为当前任务的草稿，用户可见可打开）。
 
     使用方法：
-    1. 先用文件工具把符合契约的 JSON 写到当前任务的 drafts/ 目录（任务目录见任务上下文，
-       如 <任务目录>/drafts/toc.json）；
-    2. 再调用本工具登记发布。发布前会做契约与内容结构校验，失败会返回原因。
+    1. 先用文件工具把符合契约的 JSON 写到当前任务的 _meta/staging/ 目录（任务目录见任务
+       上下文，如 <任务目录>/_meta/staging/toc.json）；
+    2. 再调用本工具登记发布（发布后草稿被移动消费）。发布前会做契约与内容结构校验，
+       失败会返回原因。
 
     contract 为平台契约标识，当前可用：
     - tender.directory/tender-response-docs@1  投标目录
     - doc.note/note-md@1  通用笔记（title + body_md）
     其他未注册类型一律以 doc.note 笔记形态保存（body_md 为 markdown 正文）。
 
-    propose_promotion=True 表示建议把该成果转正到任务正式稿（用户确认后才生效）；
-    标准交付物（如投标目录）完成后应置 True。
+    发布的是草稿；想让成果成为正式成果，需用户在界面确认（确认后才不会被重跑覆盖）。
     """
     try:
         path = _resolve_draft(draft_path)
@@ -115,7 +114,7 @@ def publish_artifact(
 
     ctx = runctx.current_run()
     try:
-        manifest = publish.publish_artifact(
+        meta = publish.publish_artifact(
             contract,
             content,
             display_name=display_name or None,
@@ -124,15 +123,21 @@ def publish_artifact(
                 "thread_id": ctx.conversation_id if ctx else None,
                 "run_id": ctx.run_id if ctx else None,
             },
+            task_id=ctx.task_id if ctx else None,
             conversation_id=ctx.conversation_id if ctx else None,
-            propose_promotion=propose_promotion,
         )
     except Exception as e:
         # PublishError/ValidationError 之外还有落盘 OSError 等：全捕返错误字符串
         # （对齐 parse_document/assemble_tender 先例——工具异常会打崩整个 run）
         return f"[发布失败] {e}"
 
-    suffix = "，已标记「建议转正」（等待用户在界面确认）" if propose_promotion else "，已保存为当前版本。"
+    # 移动消费：发布成功后草稿从暂存区移除，防「两个产物」以 JSON 残骸形态复活
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    suffix = "，已保存为当前草稿（确认后成为正式成果）。"
     if note_fallback:
         suffix = "（未注册类型，已按通用笔记保存）" + suffix
-    return f"[发布成功] {manifest['display_name']}（{manifest['artifact_id']}）{suffix}"
+    return f"[发布成功] {meta['display_name']}（{meta['artifact_id']}）{suffix}"

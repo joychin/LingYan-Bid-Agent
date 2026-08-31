@@ -1,18 +1,17 @@
 """会话与消息端点（PRD §5.4 契约）。
 
-P4：会话必须归属任务（POST 必填 task_id）；删会话级联删该会话的
-「过程稿」目录（<task_id>/threads/<cid>/，文件夹语义——正式稿属任务，不受会话删除影响）。
+P4：会话必须归属任务（POST 必填 task_id）。2026-08-31 重构：文件归任务、会话=执行
+上下文——删会话只删转录 + checkpoint，不动任务文件树（产物/过程文件/来源全部保留）。
 """
 
 import asyncio
 import json
-import shutil
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .. import agent, artifact_store, db, titler
+from .. import agent, db, titler
 from .. import config as cfg
 from ..agent import delete_thread_memory, run_stream
 
@@ -65,10 +64,7 @@ async def delete_conversation(cid: str):
         raise HTTPException(status_code=404, detail="会话不存在")
     if db.active_run_exists(cid):
         raise HTTPException(status_code=409, detail="该会话有进行中的任务，无法删除")
-    # 会话「过程稿」目录随会话删除（文件夹语义）；任务「正式稿」不受影响；
-    # 索引行随 db.delete_conversation 连带清理
-    if conv.get("task_id"):
-        shutil.rmtree(artifact_store.thread_dir(conv["task_id"], cid), ignore_errors=True)
+    # 文件归任务：删会话不动任务文件树（产物/过程文件/来源保留），只清转录 + checkpoint
     db.delete_conversation(cid)
     delete_thread_memory(cid)  # 「删会话 = 删上下文」：连带清 agent.db 里该 thread 的 checkpoint
     return {"ok": True}
@@ -88,6 +84,8 @@ async def get_messages(cid: str):
             m["todos"] = t["todos"]
             m["durationMs"] = t.get("durationMs")
             m["reasoning"] = t.get("reasoning", "")
+            # 本轮文件（run_files 起止 diff）：work/ 下新建/修改的 .md 过程文件
+            m["files"] = t.get("files") or []
     return {"messages": messages}
 
 

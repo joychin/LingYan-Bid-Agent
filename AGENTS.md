@@ -81,6 +81,25 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    `tender-agent.thinking-level` 记忆、默认低，ChatView 持有态——无会话首发的
    initialSend 路径也要带上）。思考内容显示链路（agent.reasoning 事件 /
    run_traces.reasoning / DeepThinking 组件）零改动。
+   **思考流按步封段（2026-08-31，SSE 契约零改动）**：主 agent 的 reasoning 不再
+   整段累积——与旁白封段同一条规则，`tool.called` 到达即把未封口思考封进该步骤的
+   `reasoning` 字段并清零（同轮连发多调用只有首个带；`task` 步骤同样封，子代理
+   思考经 agent_id 追加在同字段后段、时序自然正确），run 结束最后未封口段=最终
+   回复前的思考、照旧落 `run_traces.reasoning`。sidecar 落库点=agent.py
+   tool_called 分支（agent.py:669 附近）；**`_merge_trace_trees` swap 改字段级
+   兜底**（新副本 text/reasoning 为空且旧段非空时保留旧值——HITL 审批续跑重发
+   tool.called 的新副本封段字段必为空，否则会抹掉暂停前封下的旁白/思考）；前端
+   runReducer tool.called 同步封 `step.reasoning`。渲染：RunTrace 新增
+   `StepThinking` 折叠行（Brain 图标「思考」，默认收起点开 max-h-72 看全文，
+   在 NarrationLine 之上；AskedQuestions 组内同样渲染），SubagentCard 的
+   StepReasoning 标签改「思考过程」；活卡 RunMessage 与历史 ChatMessage 的
+   DeepThinking 都从 RunTrace 上方移到**下方**（语义=当前/最终未封口段；旧 trace
+   快照整段 blob 照旧显示仅换位置）。动因=时序流水：此前全部思考堆在一个持续
+   膨胀的顶部思考块，思考与工具调用的时间关系不可见；效果=思考→工具→结果→思考
+   的可见流水。HITL interrupt 在模型节点内触发、先于 tool.called，暂停前思考留在
+   未封口段（run 级 reasoning/活卡 reasoningText 承接），不丢。测试
+   parity：test_agent.py（封段/batch/merge 兜底）+ runReducer.test.ts（封段/
+   未封口段），test_contract.py 旁白 parity 断言不变。
    **契约 additive 扩展（2026-08-28 设置重构与文档解析）**：GET /settings 响应加
    `llm.image_support`、顶层 `ocr.configured`（百度 AK/SK 两 env 齐）与
    `paths.{data_dir,log_file}`；PUT 接受 `llm.image_support`（只存 settings.json、
@@ -180,51 +199,108 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    确定性管线（解析不走 LLM，角色只覆盖解析后的轻任务）。
    **关不掉 bug 教训**：ModalShell 无 open 概念，SettingsModal 必须 `if (!open) return null`
    ——双栏重构时丢过一次（设置窗常驻、关闭回调全生效但 UI 永不卸载）。
+   **契约 additive 扩展（2026-08-31 上下文窗口与超限自愈）**：`ModelProfile` 加可选
+   `context_window`（token，None=未知；config.py dataclass 字段 + api/settings.py
+   ModelBody `gt=0` /PUT/GET 三处 + contracts/dto.py，dto.gen.ts 已再生）。UI=模型
+   编辑弹窗底部「高级选项」折叠区（默认收起、条件渲染而非 Collapsible——后者的
+   动画包装层自带 overflow-hidden 会裁剪内部下拉面板）选预设档
+   自动/32K~2M；厂商预设带建议值（**展开时才预填草稿、点保存才落库**，用户没做过
+   的选择不落库；deepseek 系不填）。用途：build_agent 把窗口**合并**进 model.profile
+   （`{**(model.profile or {}), "max_input_tokens": N}`——保留 langchain_deepseek
+   注册表自动解析的能力键只覆盖窗口；注册表认识的模型如 deepseek-v4-flash 自带 1M
+   不配置也已是比例档）→ deepagents SummarizationMiddleware（create_deep_agent 默认
+   装配；state 非改写式、逐出历史落盘 `workspace/conversation_history/` 可 read_file
+   回看）检测到 profile 即按窗口 85% 比例触发压缩。配套两件：①
+   `_NoThinkingRetryCompletions` 加超限 400 归一化——各厂商措辞统一 re-raise 成
+   langchain_core `ContextOverflowError`（实测网关原文 "This model's maximum context
+   length is 1048576 tokens…"，langchain_openai 自带翻译不含此措辞），deepagents
+   捕获后当场压缩重试，会话不再有超限永久报废路径；未命中措辞的其余 400 记 warning
+   日志。②`_GLOBAL_DIR_NAMES` 加 `conversation_history`（逐出历史落盘处，防幽灵任务）。
+   check.sh 契约漂移守卫比对的是 git 索引：再生 dto.gen.ts 后须 `git add` 才算同步。
+   **契约 additive 扩展（2026-08-31 本轮文件）**：GET /messages 的 assistant 消息加
+   `files`（`[{path, op}]`，`RunFilePayload` 契约模型；SSE **零改动**——completed 后
+   前端先重取消息再拆活卡，files 经消息接口到达）。数据来源=`app/run_files.py`：
+   run_stream 起点（task_id 解析 + 骨架自愈之后）对 `<task>/work/` 做快照，终态前
+   diff 得「本轮新建/修改」清单（纯机械、无锁、不依赖工具登记；文件系统唯一真值）。
+   收录范围与工作台面板同口径：work/ 下 `.md`、跳隐藏文件与 `work/artifacts/`
+   子树（产物包由产物卡展示，用户拍板；json 机器文件不可点开不收）。持久化=
+   `run_traces` 新列 `files`（迁移 15，PRAGMA 探测 ALTER 同 reasoning 先例），
+   与 tools/todos 同一挂载点（同 run 最终/中断消息才带）；HITL 续跑分段=
+   每段起止各一次 diff、`merge_files` 合并进同一行（created 优先于 modified）。
+   前端 `RunFiles.tsx` chips（正文气泡下方，「本轮文件」标签+文件图标+新建/修改
+   徽标，新建=语义绿 tint color-mix 派生；默认 5 枚+「+N 个」展开）点击经
+   App `openWorkbenchFile`（清产物预览态+面板收起则展开）打开工作台面板编辑；
+   prop 链 ChatView→MessageList→ChatMessage（memo 比较器已同步）→AssistantMessage。
+   已知限制（有意接受）：同任务并发 run 写入可能被归到另一 run（无锁铁则）；
+   mtime/size 判修改=同内容重写也显示修改（parse_document 同 hash 幂等已避免
+   最常见情形）；旧 run 无 files 恒 `[]`；waiting_input 暂停段的部分文件活卡
+   期间不可见、续跑终态后随最终消息显示（与 tools 同挂载语义）。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。
 
 ## 任务层与 Artifact 系统（P1–P4 + §16 任务分组目录已实施）
 
-- **业务模型（P4 定稿 + §16 布局，详见 artifact-system-design.md §15/§16）**：任务 =
-  一次投标 = workspace 下一个真实项目文件夹（`workspace/<task_id>/{formal,threads/<conv_id>,files,out,drafts}`，
-  目录名只用不可变 id）；会话必须归属任务；产物分两层——任务「正式稿」（formal/）/
-  会话「过程稿」（threads/<conv_id>/），manifest 的 task_id 恒为所属任务、conversation_id
-  区分两层，**包磁盘位置 = (artifact_id, manifest) 的纯函数**（store 层路径函数全部
-  `(aid, scope)` 签名）；共享上下文 = 任务名 + 进度便签 + 产物清单 + **任务工作目录**
-  （每次模型调用经 `_TaskContextMiddleware` 现算注入，模型路径带 `<task_id>/` 前缀），
-  聊天记忆按会话隔离。
-- **转正**：AI 发布只写过程稿、可挂 `propose_promotion` 建议标记；正式稿的每次写入
-  都由用户点击 `POST /artifacts/{id}/promote`（复制不移动，task-single 覆盖留恢复点、
-  记 derived_from，manifest 的 derived_from 只在首次发布写入）。LLM 工具永远无法直写正式稿。
+- **业务模型（2026-08-31 重构定稿：产物归任务 + 草稿/已确认两态；取代旧 P4/§16
+  「正式稿/过程稿」双层模型）**：任务 = 一次投标 = workspace 下一个真实项目文件夹
+  （`workspace/<task_id>/{sources, work, _meta}`，目录名只用不可变 id）——`sources/`
+  只读来源（上传原件，AI 物理写不进）；`work/` 工作树（parse/analysis/outline/body
+  过程文件 + `artifacts/<aid>/` 登记产物包）；`_meta/` 产物级谱系/暂存（UI 永不展示）。
+  会话必须归属任务；产物不再分会话/任务两层——**包磁盘位置 = (artifact_id, task_id)
+  的纯函数**，会话只是 provenance（last_run_id/last_thread_id）；产物状态两态存包内
+  meta.json + `db.artifact_index.state`（draft/confirmed，迁移 14）。共享上下文 =
+  任务名 + 进度便签 + 产物清单 + **任务工作目录**（每次模型调用经
+  `_TaskContextMiddleware` 现算注入，模型路径带 `<task_id>/` 前缀），聊天记忆按会话
+  隔离。仓库 workspace 根有 out/drafts/artifacts/ 等重构前遗留目录（无代码引用，
+  历史化石无害）。
+- **确认（旧「转正」，2026-08-31 改盖戳语义：不复制不搬家）**：AI 发布的产物恒为
+  draft；「确认为正式成果」由用户点击 `POST /api/artifacts/{aid}/confirm`（原地写
+  meta.json.state + 索引、留恢复点，`/unconfirm` 可撤销——面板已确认行的 hover
+  动作即撤销入口，直接执行无弹窗；两端点均不发 SSE——不在 run 内无
+  seq 宿主，前端 confirm 成功后自行刷新产物列表）。LLM 永远无法把产物置为
+  confirmed（发布工具恒写 draft；work/artifacts/ 包目录对 LLM 文件工具只读，
+  fs_guard——`_meta/` 也拒写，**唯 `<task>/_meta/staging/` 豁免**：两步发布流的
+  模型草稿区，publish_artifact 指示模型把契约 JSON 写到那里）。同重构顺带
+  **reshape**：`artifact.created` 载荷的 scope/promotion_proposed 两键一次性替换
+  为 `state`（draft/confirmed）——非 additive，前端 events.gen.ts 同批再生。
+  发布覆盖已确认产物时**先降级 meta 再写内容**（崩溃窗口 fail-safe=草稿+旧内容）。
 - **未登记类型**一律收拢为通用笔记 `doc.note/note-md@1`（发布工具强制文档形态
   title+body_md），客户端 NoteProcessor 打开编辑；类型系统保持平台封闭注册。
-- **全局作用域已移除（§16.4）**：publish 必须恰传 task_id/conversation_id 之一；
-  read_artifact 读序两级（正式稿→本会话过程稿）；db 无 NULL/NULL 分支；前端 scope 类型无 global。
-- **删除语义**：删会话 = rmtree `threads/<conv_id>/` + 索引行（db 级联清理）+ 记忆清理；
-  删任务 = 先 rmtree `threads/`（过程稿硬删）再整任务目录 mv 到 `workspace/archive/<task_id>/`
-  （正式稿+上传文件+out/ 工作台随归档可手工找回）+ 全部会话记忆清理；409 活跃 run 守卫不变。
-- **任务级文件区（§16.2）**：上传落 `<task>/files/`（`POST/GET/DELETE /api/files` 均必填
+- **发布与读取（2026-08-31 单一真源）**：publish 归属=task_id 必填（只给
+  conversation_id 时反查所属任务，会话仅 provenance）；read_artifact 不再有
+  「正式稿→过程稿」两级读序——同契约在任务内唯一，读到的就是唯一当前内容
+  （已确认或草稿），用户手改后的成果经它回流为后续 AI 输入（闭环点）。
+- **删除语义（文件归任务后简化）**：删会话 = 只清转录 + 索引（db 级联）+ agent.db
+  checkpoint（`delete_thread_memory`），**不动任务文件树**（产物/过程文件/来源全保留）；
+  删任务 = 整任务目录 mv 到 `workspace/archive/<task_id>/`（文件归任务、归档不删
+  子目录，可手工找回）+ 全部会话记忆清理；409 活跃 run 守卫不变。
+- **任务级来源文件区**：上传落 `<task>/sources/`（`POST/GET/DELETE /api/files` 均必填
   `task_id`），跨任务同名文件互不影响；前端上传上下文带当前任务，无任务时禁用并提示先选任务。
 - **sidecar 模块**：`app/contracts/`（平台契约目录，契约真值只在 sidecar，客户端只做映射）；
-  `app/artifact_store.py`（任务分组路径派生 formal_dir/thread_dir/task_files_dir/task_out_dir/
-  task_drafts_dir + 包存储 + archive_task 整目录归档；manifest 权威、`db.artifact_index`
-  可重建索引（结构化扫描各任务目录）、恢复点留 3 个）；
-  `app/publish.py`（**唯一登记入口**：作用域恰传其一（会话反查所属任务恒写 task_id）→
-  契约存在→授权（stub：已注册契约全允许，模板待第二场景）→schema 校验→原子落盘）；
-  `app/api/tasks.py`（任务 CRUD；POST 默认连带第一个会话，`with_conversation=false` 供
-  输入区选择器就地新建）；`app/tools/publish.py`（LLM `publish_artifact`，草稿限当前任务
-  `drafts/`，未知契约收拢 doc.note）；`app/tools/read.py`（`read_artifact` 读序两级；
-  task-multi 用 artifact_id 指定）；`app/tools/task_progress.py`（进度便签）；
-  `app/runctx.py`（contextvars 传 cid/rid/task_id/thinking 思考档位）。
-  `out/` 是**任务级**技能工作台（`<task>/out/`：parse→analysis→outline→body 的中间产物），
-  跨任务互不串台；目录按需创建，启动不预建。
+  `app/artifact_store.py`（路径派生 sources_dir/work_dir/work_artifacts_dir/meta_dir/
+  staging_dir + 包存储（tmp+rename 原子替换）+ archive_task 整目录归档；meta.json 权威、
+  `db.artifact_index` 可重建索引、恢复点留 3 个）；
+  `app/publish.py`（**唯一登记入口**：契约存在→授权（stub：已注册契约全允许，模板待
+  第二场景）→schema 校验→原子落盘）；`app/api/tasks.py`（任务 CRUD；POST 默认连带
+  第一个会话，`with_conversation=false` 供输入区选择器就地新建）；`app/api/workbench.py`
+  （work/ 过程文件 API：列出/读取/编辑**只放行 .md**（json/隐藏文件不进列表，「面板
+  不是调试器」）、parse/ 只读（证据锚点手改=篡改原文）、base_hash 409 探测（拉取最新/
+  保留我的）、写前 .bak 恢复点（单一上一版、互换可再撤销）、「修订=用户」头标记、
+  存为笔记）；`app/tools/publish.py`（LLM `publish_artifact`，草稿限当前任务
+  `_meta/staging/`（containment 防注入），未知契约收拢 doc.note）；
+  `app/tools/read.py`（`read_artifact`：同契约任务内唯一当前内容）；
+  `app/tools/task_progress.py`（进度便签）；`app/runctx.py`（contextvars 传
+  cid/rid/task_id/thinking 思考档位）；`app/run_files.py`（「本轮文件」起止快照 diff，
+  见铁律 3 的 additive 记录）。
+  `work/` 是**任务级**技能工作台（`<task>/work/`：parse→analysis→outline→body 的中间
+  产物；2026-08-31 由 out/ 更名），跨任务互不串台；过程子目录按需创建，启动不预建
+  （仅任务创建 + run 启动自愈补 sources/work 骨架，`ensure_task_skeleton` 幂等）。
 - **投标流水线 Phase 1（2026-08-25，入口段 2026-08-26 重构）**：旧 tender-toc skill
   及其工具已移除，新体系 =
-  skill `document-parse`（**文件→markdown 独立技能**，流水线入口：ls 任务 files/ 枚举候选
+  skill `document-parse`（**文件→markdown 独立技能**，流水线入口：ls 任务 sources/ 枚举候选
   （.docx/.pdf/.txt/.md 均可解析）→ 同名双格式去重 ask → 来源集合确认（单文件默认主文件
   确认+补传窗口/多文件选主文件/新增只问角色，沿用不重问）→ 写来源确认单
-  `out/parse/sources.json`（main/supplements[+role]/excluded——任务级共享状态，
+  `work/parse/sources.json`（main/supplements[+role]/excluded——任务级共享状态，
   跨会话交接+重入沿用依据；**变化检测锚点=parse_document 幂等返回**：跳过=未变、
   重入时重新解析=确认后重传过，交确认门裁决——**不用时间戳**，模型写的时间戳
   不可信（confirmed_at 零点占位先例，字段已删））→ **并行 parse_document**
@@ -235,7 +311,7 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   全部[解析跳过]时不弹门；**数字全部取自 parse_document 返回文案**（跳过同样带全量
   概况），不读 meta.json；档位与出处署名联动））+
   skill `tender-analysis`（七节要点提取，第 0 步=前置检查：sources.json 就绪+产物齐备+新鲜；
-  purpose 下沉 references/ 文件级、单项可重跑；导航硬纪律=先读 out/parse/<文件名>/
+  purpose 下沉 references/ 文件级、单项可重跑；导航硬纪律=先读 work/parse/<文件名>/
   <文件名>.outline.json 按行号取区段、补充文件同纪律，禁止整读全文；**出处引用键**：
   必带行号区间「章节名（L412-L430，第23页）」，章节名在作者声明/自报档
   （docx-native/pdf-toc/pdf-link-toc/pdf-printed-toc）与编号档（docx-numbered/pdf-numbered，
@@ -249,7 +325,7 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   实测证伪：政采 PDF 章标题字号常与正文相同、封面全是巨字，17 份语料 3/3 全灭）；
   **PDF 页眉页脚剔除**（跨页重复条带+纯页码）+ 每页 `<!-- p:N -->` 页码锚点；txt/md
   透传（gb18030 兜底）；meta 含 pages/top_level(前12)/tables；同 hash 幂等、扫描件兜底、
-  workspace containment、裸文件名回退任务 files/）+
+  workspace containment、裸文件名回退任务 sources/）+
   **云端文档解析（2026-08-28）**：`app/baidu_ocr.py`（百度云 PaddleOCR-VL，平移老系统
   document_helpler 的 token manager + 异步任务协议：AK/SK 换 access_token（30 天缓存）
   → base64 提交 → 5s 轮询 → 下载结果拼 md；凭证 BAIDU_OCR_API_KEY/SECRET_KEY 只认 env）。
@@ -259,8 +335,8 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   并提示设置入口；出处署名同 pdf-plain（OCR 标题不可回原文验证）。知识库侧转写优先级
   同步改为 baidu > VLM > 降级（KB 上传白名单加 .doc，无 baidu 时降级仅存档）。任务文件
   上传**白名单放开**（files API 不再按扩展名拒绝，类型是否可解析由解析层报人话）+
-  工具 `assemble_tender`（读 out/analysis 三张机器输入表构建 MAND/TPL/REQ/SCORE 登记表
-  （**行序=编号，产物头部 HTML 注释行会被 registry 跳过**）+ out/outline 目录中间态
+  工具 `assemble_tender`（读 work/analysis 三张机器输入表构建 MAND/TPL/REQ/SCORE 登记表
+  （**行序=编号，产物头部 HTML 注释行会被 registry 跳过**）+ work/outline 目录中间态
   →lineage_check→发布 `tender.directory` 过程稿+建议转正）。
   后续 Phase：tender-body / tender-flow skill（规划见 docs 讨论，
   机器输入格式契约在 assemble_tender.py 模块 docstring）；大文件专项优化留在
@@ -274,7 +350,7 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   `tender-outline-writer` 子代理每册一个（同一消息全部 task 调用，一次审批卡批量放行；
   子代理不继承任务上下文注入也不自动载 skill——派发 description 自带任务目录前缀/
   scope/fragment 路径，方法论让它 read_file skills/tender-outline/references/*.md；
-  每册产物落 `out/outline/fragments/<册名>.md`，返回后主线程按册序合并覆盖写
+  每册产物落 `work/outline/fragments/<册名>.md`，返回后主线程按册序合并覆盖写
   tender-response-docs.md + 规则 8 跨册去重互查；单册重做=重派该册重合并）。
   树格式红线（`- ` 开头/无编号/2 空格缩进/独立附件平级）是
   assemble 的解析协议。`tests/test_skills.py` 对全部 skill 做 frontmatter+references
@@ -283,7 +359,10 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   `components/processors/`（DirectoryProcessor 目录树编辑 / NoteProcessor 通用笔记）；
   `components/ArtifactOpenHost.tsx`（通用容器，未命中契约明确报不支持，**无 JSON 兜底预览**）；
   `components/TaskPicker.tsx`（新会话必选所属任务）；侧栏任务文件夹树（hover 新会话/重命名/删除）；
-  产物面板两层 tab（正式稿/过程稿）+ 过程稿行内「转正」+ 任务进度便签编辑；
+  产物面板 v4（任务归属 + 草稿/已确认两态 + 业务流任务树：目录产物已确认置顶 +
+  行内「确认」盖戳（不复制可撤销）+ 工作表/fragments 与产物同夹并排靠图标徽章区分；
+  `work/` 过程文件经 `WorkbenchViewer` 查看/编辑——409 探测/.bak 恢复/修订标记/
+  行数漂移确认）+ 任务进度便签编辑；
   `context/FileUpload.tsx` 带任务 scope（taskScope/setTaskScope，ChatView 按会话/选择器写入），
   文件 chips 只显示当前任务的文件、无任务禁传。
 - **并发/冲突**：无租约无互斥——任务内 run 随便并发；发布即覆盖（覆盖前自动留恢复点，
@@ -292,8 +371,8 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   NoteProcessor 不轮询，靠保存 409 兜底同一裁决）。
 - **新契约接入**按设计文档 §13 五步打包：契约定义→SKILL.md 指导→客户端 Processor→
   模板集合→全链路验收；禁止半接入（客户端启动对账会 console.warn）。
-- **P4/§16 已知限制**：任务模板未引入（授权 stub 全允许）；跨会话正式稿变更无实时推送；
-  task-multi 多次转正会产生多份副本。
+- **已知限制**：任务模板未引入（授权 stub 全允许）；产物确认/编辑不发 SSE（不在
+  run 内无 seq 宿主），前端操作后自行刷新产物列表。
 
 ## HITL（human-in-the-loop，2026-08-25）
 
@@ -498,4 +577,7 @@ kb_items+磁盘 md 重建（启动 `rebuild_kb_index`）；同 hash 上传 API �
   （`src-tauri/.cargo/config.toml`）、rustup=`RUSTUP_DIST_SERVER=https://rsproxy.cn`。
 - DeepAgents 锁 0.7.7（`deepagents==0.7.7`）；langgraph 由依赖解析（当前 1.0.5）。
 - uvicorn 不要开 `--reload`（Tauri 进程树管理会乱）。
-- 解析支持 `.docx`（python-docx）与 `.pdf`（PyMuPDF 原生提取，无 soffice 依赖）；`.doc` 不支持（上传与解析均明确拒绝，提示另存为 .docx）。
+- 解析支持 `.docx`（python-docx）与 `.pdf`（PyMuPDF 原生提取，无 soffice 依赖）；
+  扫描 PDF（文本层过薄）与 `.doc`/图片在**已配置百度云文档解析**时路由云端整本 OCR
+  （`app/baidu_ocr.py`，conversion=`paddleocr-vl`），未配置明确拒绝并提示设置入口
+  （`.doc` 另可 Word 另存 `.docx` 后上传）。

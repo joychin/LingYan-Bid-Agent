@@ -1,7 +1,7 @@
 # 节：资格要求（requirements-qualification）
 
 只抽取参与主体的**资格准入门槛**、为证明该门槛**必须提交的材料**，以及原文明确的
-**资格不通过后果**。输出 `out/analysis/requirements-qualification.md`。
+**资格不通过后果**。输出 `work/analysis/requirements-qualification.md`。
 
 ## 判定边界
 

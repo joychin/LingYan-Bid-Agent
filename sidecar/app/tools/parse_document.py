@@ -1,7 +1,7 @@
 """确定性文档解析工具（LLM 工具层薄壳）：.docx/.pdf/.txt/.md → Markdown + 带行号区间的标题大纲。
 
 转换核心在 app/parse/（注册表，知识库入库管线共用）；本文件只保留工具层职责：
-任务上下文校验、workspace 路径 containment、hash 幂等、产物落盘（任务 out/parse/）、
+任务上下文校验、workspace 路径 containment、hash 幂等、产物落盘（任务 work/parse/）、
 概况文案、以及云端文档解析路由（见下）。
 
 云端文档解析（百度云 PaddleOCR-VL，已配置才触发）：扫描 PDF（文本层过薄）与 .doc /
@@ -33,7 +33,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from .. import baidu_ocr, runctx
-from ..artifact_store import task_files_dir, task_out_dir
+from ..artifact_store import sources_dir, work_dir
 from ..config import workspace_dir
 from ..parse import convert as parse_convert
 from ..parse import count_nodes, outline_with_lines, sha256_file, write_atomic
@@ -49,8 +49,8 @@ _CLOUD_ONLY_EXTS = {".doc"}  # 本地注册表不收、云端文档解析专属�
 def _resolve_ws_path(p: str) -> Path:
     """路径 containment：解析（含符号链接）后必须落在 workspace 内。
 
-    相对路径按 workspace 根解析；根下找不到时回退当前任务的 files/ 按文件名找
-    （模型常直接说裸文件名，上传文件住在 <task>/files/）。
+    相对路径按 workspace 根解析；根下找不到时回退当前任务的 sources/ 按文件名找
+    （模型常直接说裸文件名，上传文件住在 <task>/sources/）。
     """
     root = workspace_dir().resolve()
     cand = Path(p).expanduser()
@@ -62,7 +62,7 @@ def _resolve_ws_path(p: str) -> Path:
     if not resolved.exists() and not Path(p).is_absolute():
         ctx = runctx.current_run()
         if ctx and ctx.task_id:
-            alt = (task_files_dir(ctx.task_id) / Path(p).name).resolve()
+            alt = (sources_dir(ctx.task_id) / Path(p).name).resolve()
             if alt.is_relative_to(root):
                 resolved = alt
     return resolved
@@ -98,7 +98,7 @@ def parse_document(path: str) -> str:
     """把文档（.docx/.pdf/.txt/.md，图片/.doc 需配置文档解析）转换为 Markdown，
     并生成带行号区间的标题大纲与元信息。
 
-    产物写入当前任务工作台的 out/parse/<文件名>/ 下三个文件（文件名=含扩展名的完整
+    产物写入当前任务工作树的 work/parse/<文件名>/ 下三个文件（文件名=含扩展名的完整
     文件名——任务内同名即同文件，docx/pdf 同名不同扩展的产物互不覆盖）：
     - <文件名>.md：全文 Markdown（标题层级/表格 pipe 化；PDF 每页带 <!-- p:N --> 页码锚点）
     - <文件名>.outline.json：标题树，每个节点带 start_line/end_line 行号区间
@@ -120,14 +120,14 @@ def parse_document(path: str) -> str:
         ctx = runctx.current_run()
         task_id = ctx.task_id if ctx else None
         if not task_id:
-            return "[解析失败] 缺少任务上下文：解析产物归属当前任务的 out/ 目录，请在任务会话中执行"
+            return "[解析失败] 缺少任务上下文：解析产物归属当前任务的 work/ 目录，请在任务会话中执行"
         src = _resolve_ws_path(path)
         if not src.is_file():
             return f"[解析失败] 文件不存在：{path}"
         digest = sha256_file(src)
         # 目录与产物文件名都用完整文件名（含扩展名）：同名不同扩展（docx/pdf 双格式）
         # 的解析产物各有各的目录，不互相覆盖
-        out_dir = task_out_dir(task_id) / "parse" / src.name
+        out_dir = work_dir(task_id) / "parse" / src.name
         md_path = out_dir / f"{src.name}.md"
         outline_path = out_dir / f"{src.name}.outline.json"
         meta_path = out_dir / f"{src.name}.meta.json"

@@ -4,13 +4,13 @@ tasks / conversations / messages / runs / artifact_index。与 DeepAgents 的
 checkpointer（data/agent.db）分离，避免锁竞争。所有写操作在各自连接上执行，
 连接默认 autocommit（isolation_level=None）。
 
-任务层（P4）：会话归属任务（conversations.task_id）；Artifact 分两层——
-任务「正式稿」（artifact_index.task_id 非空）与会话「过程稿」
-（artifact_index.conversation_id 非空）。
+任务层（2026-08-31 两态重构）：会话归属任务（conversations.task_id）；产物归任务
+单一真源——包内 meta.json 存 draft/confirmed 两态，conversation_id 仅 provenance
+（记录产出会话），不再有正式稿/过程稿双层。
 
 artifact_index 是类型化 Artifact 的可重建索引 + 运行态（content_seq/emitted）；
-权威身份在每个 Artifact 包的 manifest.json（见 artifact_store.py），本表丢失后
-可由 manifest 重建（rebuild_artifact_index）。
+权威身份在每个 Artifact 包的 meta.json（见 artifact_store.py），本表丢失后
+可由 meta 重建（rebuild_artifact_index）。
 """
 
 import json
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS artifact_index(
   content_seq INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL,
   last_run_id TEXT, last_thread_id TEXT,
-  promotion_proposed INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'draft',
   emitted INTEGER NOT NULL DEFAULT 0);
 -- run 执行过程快照（工具步骤树 + todos + 主 agent 思考流）：run 结束落一份，
 -- message_id 关联 assistant 消息（error 中断的 run 无 message_id），
@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS run_traces(
   todos TEXT NOT NULL,
   duration_ms INTEGER,
   reasoning TEXT NOT NULL DEFAULT '',
+  files TEXT NOT NULL DEFAULT '[]',
   created_at TEXT NOT NULL);
 -- 知识库条目（一个上传文件一条；suggested=LLM 抽取建议、business=确认后真值，
 -- 两列之隔即审核边界——确认动作把 suggested 拷入 business，LLM 永不覆盖 business）
@@ -224,7 +225,7 @@ def list_task_conversation_ids(tid: str) -> list[str]:
 
 
 def delete_task(tid: str) -> None:
-    """删任务行及其全部会话数据与产物索引行（过程稿行也带所属 task_id，一并清理）。
+    """删任务行及其全部会话数据与产物索引行（产物行带所属 task_id，随任务一并清理）。
     磁盘上任务目录的归档由调用方（API 层）先处理。六条 DELETE 在单事务内：
     连接是 autocommit（isolation_level=None），逐条提交时进程中止会留半级联孤儿行
     （kb_delete_item 同款 BEGIN IMMEDIATE 先例）。"""
@@ -318,9 +319,10 @@ def set_title_if_default(cid: str, title: str) -> bool:
 
 
 def delete_conversation(cid: str) -> None:
-    """删除会话及其消息/run 记录与「过程稿」索引行（磁盘上 threads/<cid>/ 目录
-    由调用方 API 层先清理）。表之间无外键约束（PRAGMA foreign_keys=ON 对未声明
-    FKs 不生效），手动清理子表；单事务防进程中止留半级联孤儿行。
+    """删除会话及其消息/run 记录。文件归任务（2026-08-31）：产物索引行保留
+    （conversation_id 仅是 provenance），磁盘产物也不随会话删除。
+    表之间无外键约束（PRAGMA foreign_keys=ON 对未声明 FKs 不生效），手动清理子表；
+    单事务防进程中止留半级联孤儿行。
     """
     conn = _conn()
     try:
@@ -329,7 +331,6 @@ def delete_conversation(cid: str) -> None:
             conn.execute("DELETE FROM messages WHERE conversation_id=?", (cid,))
             conn.execute("DELETE FROM runs WHERE conversation_id=?", (cid,))
             conn.execute("DELETE FROM run_traces WHERE conversation_id=?", (cid,))
-            conn.execute("DELETE FROM artifact_index WHERE conversation_id=?", (cid,))
             conn.execute("DELETE FROM conversations WHERE id=?", (cid,))
             conn.execute("COMMIT")
         except Exception:
@@ -347,13 +348,15 @@ def save_run_trace(
     todos: list,
     duration_ms: int | None = None,
     reasoning: str = "",
+    files: list | None = None,
 ) -> None:
-    """run 结束时落执行过程快照（幂等：同 run 重写）。reasoning = 主 agent 思考流整段。"""
+    """run 结束时落执行过程快照（幂等：同 run 重写）。reasoning = 主 agent 思考流整段。
+    files = 本轮 work/ 变更清单（[{path, op}]，run_files 起止 diff，None 存空）。"""
     conn = _conn()
     try:
         conn.execute(
-            "INSERT OR REPLACE INTO run_traces(run_id, conversation_id, message_id, tools, todos, duration_ms, reasoning, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO run_traces(run_id, conversation_id, message_id, tools, todos, duration_ms, reasoning, files, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 run_id,
                 cid,
@@ -362,6 +365,7 @@ def save_run_trace(
                 json.dumps(todos, ensure_ascii=False),
                 duration_ms,
                 reasoning,
+                json.dumps(files or [], ensure_ascii=False),
                 _now(),
             ),
         )
@@ -374,7 +378,7 @@ def get_run_trace(run_id: str) -> dict | None:
     conn = _conn()
     try:
         row = conn.execute(
-            "SELECT run_id, message_id, tools, todos, duration_ms, reasoning FROM run_traces WHERE run_id=?",
+            "SELECT run_id, message_id, tools, todos, duration_ms, reasoning, files FROM run_traces WHERE run_id=?",
             (run_id,),
         ).fetchone()
     finally:
@@ -388,6 +392,7 @@ def get_run_trace(run_id: str) -> dict | None:
             "todos": json.loads(row["todos"] or "[]"),
             "durationMs": row["duration_ms"],
             "reasoning": row["reasoning"] or "",
+            "files": json.loads(row["files"] or "[]"),
         }
     except ValueError:
         return None
@@ -401,7 +406,7 @@ def get_traces_for_messages(message_ids: list[str]) -> dict[str, dict]:
     conn = _conn()
     try:
         rows = conn.execute(
-            f"SELECT message_id, tools, todos, duration_ms, reasoning FROM run_traces WHERE message_id IN ({ph})",
+            f"SELECT message_id, tools, todos, duration_ms, reasoning, files FROM run_traces WHERE message_id IN ({ph})",
             message_ids,
         ).fetchall()
     finally:
@@ -414,6 +419,7 @@ def get_traces_for_messages(message_ids: list[str]) -> dict[str, dict]:
                 "todos": json.loads(r["todos"]),
                 "durationMs": r["duration_ms"],
                 "reasoning": r["reasoning"] or "",
+                "files": json.loads(r["files"] or "[]"),
             }
         except ValueError:
             continue  # 防御：快照损坏不阻断消息列表
@@ -718,7 +724,7 @@ def load_recent_history(cid: str, limit: int = 20) -> list[dict]:
 _INDEX_COLS = (
     "artifact_id, task_id, conversation_id, kind, schema_id, schema_version, cardinality, "
     "display_name, content_path, content_seq, updated_at, last_run_id, last_thread_id, "
-    "promotion_proposed, emitted"
+    "state, emitted"
 )
 
 
@@ -733,7 +739,7 @@ def upsert_artifact_index(rec: dict) -> None:
                 rec["schema_id"], rec["schema_version"], rec["cardinality"], rec["display_name"],
                 rec["content_path"], rec.get("content_seq", 1), rec["updated_at"],
                 rec.get("last_run_id"), rec.get("last_thread_id"),
-                1 if rec.get("promotion_proposed") else 0,
+                rec.get("state", "draft"),
                 rec.get("emitted", 0),
             ),
         )
@@ -748,17 +754,17 @@ def find_artifact_index(
     task_id: str | None = None,
     conversation_id: str | None = None,
 ) -> dict | None:
-    """按作用域找同契约现有 Artifact（task-single upsert 用）。
+    """按归属找同契约现有产物（task-single upsert 用）。
 
-    作用域：conversation_id 非空 = 会话过程稿；否则 task_id 非空 = 任务正式稿
-    （过程稿行也带所属 task_id，正式稿查询必须排除它们）；皆空不支持（§16 移除全局作用域）。
+    文件归任务：同契约在任务内唯一（task-single），conversation_id 仅作来源筛选
+    （可选），不再作为作用域判别——process 稿与正式稿已合并为单一产物。
     """
-    if conversation_id is not None:
-        where, args = "conversation_id=?", [conversation_id]
-    elif task_id is not None:
-        where, args = "task_id=? AND conversation_id IS NULL", [task_id]
-    else:
+    if task_id is None:
         return None
+    where, args = "task_id=?", [task_id]
+    if conversation_id is not None:
+        where += " AND conversation_id=?"
+        args.append(conversation_id)
     conn = _conn()
     try:
         row = conn.execute(
@@ -774,15 +780,15 @@ def find_artifact_index(
 def list_artifact_index(
     task_id: str | None = None, conversation_id: str | None = None
 ) -> list[dict]:
-    """产物索引列表，可按任务（正式稿）或会话（过程稿）过滤；无参 = 全部。
-
-    task 过滤只返回正式稿行（过程稿行带所属 task_id，须用 conversation_id 查）。
+    """产物索引列表。任务过滤返回任务全部产物（不再按 conversation_id IS NULL 区分）；
+    会话过滤（可选）按 provenance 筛出该会话产出的产物；无参 = 全部。
     """
     where, args = "", []
+    if task_id is not None:
+        where, args = "WHERE task_id=?", [task_id]
     if conversation_id is not None:
-        where, args = "WHERE conversation_id=?", [conversation_id]
-    elif task_id is not None:
-        where, args = "WHERE task_id=? AND conversation_id IS NULL", [task_id]
+        where += (" AND " if where else "WHERE ") + "conversation_id=?"
+        args.append(conversation_id)
     conn = _conn()
     try:
         rows = conn.execute(
@@ -802,11 +808,12 @@ def delete_artifact_index(aid: str) -> None:
         conn.close()
 
 
-def set_promotion_proposed(aid: str, proposed: bool) -> None:
+def set_artifact_state(aid: str, state: str) -> None:
+    """置产物状态（draft/confirmed）。确认盖戳与覆盖降级共用此入口。"""
     conn = _conn()
     try:
         conn.execute(
-            "UPDATE artifact_index SET promotion_proposed=? WHERE artifact_id=?", (1 if proposed else 0, aid)
+            "UPDATE artifact_index SET state=? WHERE artifact_id=?", (state, aid)
         )
     finally:
         conn.close()
@@ -845,12 +852,12 @@ def mark_emitted(aid: str) -> None:
 
 
 def rebuild_artifact_index(manifests: list[dict], content_path_of) -> int:
-    """用磁盘 manifest 全量重建索引（manifest 权威、索引可重建）。
+    """用磁盘 meta.json 全量重建索引（meta 权威、索引可重建）。
 
-    启动时调用：清空后重扫。运行态自然复位（content_seq=1、promotion_proposed=0、
-    emitted=1——启动时无消费者，残留 emitted=0 只会让 run 边界空转，直接置 1）。
-    content_path_of: manifest -> content_path 的求值函数（注入避免依赖 store；
-    包位置按 manifest 的 scope 派生）。
+    启动时调用：清空后重扫。运行态复位（content_seq=1、emitted=1——启动时无消费者，
+    残留 emitted=0 只会让 run 边界空转，直接置 1）；**state 是持久用户意图**（确认/
+    降级状态），从 meta.json 读取保留，不随重建复位。
+    content_path_of: meta -> content_path 的求值函数（注入避免依赖 store）。
     返回重建行数。
     """
     rows = []
@@ -862,7 +869,8 @@ def rebuild_artifact_index(manifests: list[dict], content_path_of) -> int:
                 schema.get("id", ""), schema.get("version", 1),
                 m.get("cardinality", "task-single"), m.get("display_name", ""),
                 content_path_of(m), 1,
-                m.get("created_at", _now()), None, None, 0, 1,
+                m.get("created_at", _now()), None, None,
+                m.get("state", "draft"), 1,
             )
         )
     conn = _conn()

@@ -45,13 +45,14 @@ const settleActionsFor = (effects: Effect[]): Action[] =>
   effects.flatMap((e) => (e.kind === 'settle-after-messages' ? [e.action] : []))
 
 describe('正常 run', () => {
-  it('旁白封段：tool.called 把之前正文封为 step.text 并清空 streamText', () => {
+  it('旁白/思考封段：tool.called 把之前正文封为 step.text、思考封为 step.reasoning 并清空', () => {
     const { state, effects } = replay(normal.events)
     expect(state.tools).toHaveLength(1)
     expect(state.tools[0].text).toBe('我先查一下资料。') // 旁白挂到工具步骤
+    expect(state.tools[0].reasoning).toBe('想想') // 思考流挂到工具步骤（时序流水）
     expect(state.tools[0].status).toBe('done')
     expect(state.streamText).toBe('完成了：X。') // 最后未封口段 = 最终回复
-    expect(state.reasoningText).toBe('想想')
+    expect(state.reasoningText).toBe('') // 未封口思考已全部封段
     expect(state.todos).toHaveLength(2)
     expect(state.running).toBe(true) // completed 的收敛在 settle（消息拉回后）
     expect(effects).toContainEqual({ kind: 'invalidate', queryKey: ['artifacts'] })
@@ -63,6 +64,30 @@ describe('正常 run', () => {
     expect(state.streamText).toBe('')
     expect(state.reasoningText).toBe('')
     expect(state.error).toBeNull()
+  })
+
+  it('最终回复前的思考留在未封口段：底部思考块只显示当前段', () => {
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'agent.reasoning',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', text: '第一段思考', agent_id: null },
+    }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'ls', args: {}, tool_call_id: 't1', agent_id: null },
+    }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'agent.reasoning',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', text: '最终回复前的思考', agent_id: null },
+    }).state
+    expect(s.tools[0].reasoning).toBe('第一段思考')
+    expect(s.reasoningText).toBe('最终回复前的思考')
   })
 })
 

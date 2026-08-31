@@ -29,7 +29,7 @@ def test_generated_ts_files_cover_all_models():
     from app.contracts import dto as dto_module
 
     dto_gen = (root / "frontend/src/api/dto.gen.ts").read_text(encoding="utf-8")
-    for name in ("Task", "Conversation", "Message", "RunInfo", "Artifact", "ArtifactContract", "KbItem", "KbParseMeta", "Settings"):
+    for name in ("Task", "Conversation", "Message", "RunInfo", "Artifact", "ArtifactContract", "KbItem", "KbParseMeta", "Settings", "RunFilePayload"):
         assert f"interface {name}" in dto_gen, f"dto.gen.ts 缺 {name}（重新生成）"
         assert hasattr(dto_module, name)
 
@@ -110,27 +110,23 @@ def test_run_boundary_payload_builders_match_contract():
 
 
 def test_artifact_created_payload_matches_contract():
-    """artifact.created 载荷（run 边界与转正端点共用 events.artifact_created_payload）。"""
+    """artifact.created 载荷（run 边界与确认端点共用 events.artifact_created_payload）。"""
     row = {
         "artifact_id": "art_000000000001",
         "display_name": "投标目录",
         "kind": "tender.directory",
         "schema_id": "tender-response-docs",
         "schema_version": 1,
-        # §16 真实形状：过程稿索引行也恒带所属 task_id（publish 经会话反查），
-        # 以 conversation_id 区分两层（同 api/artifacts._to_api 口径）
         "task_id": "t_1",
         "conversation_id": "c_1",
-        "promotion_proposed": 1,
+        "state": "draft",
     }
     data = events_module.artifact_created_payload(row, "r_1", "c_1", 7)
     ArtifactCreated.model_validate(data)
-    assert data["scope"] == "conversation"
+    assert data["state"] == "draft"
     assert data["task_id"] == "t_1"
-    assert data["promotion_proposed"] is True
 
-    formal = {**row, "task_id": "t_1", "conversation_id": None, "promotion_proposed": 0}
-    data2 = events_module.artifact_created_payload(formal, "r_1", "c_1", 8)
+    confirmed = {**row, "state": "confirmed"}
+    data2 = events_module.artifact_created_payload(confirmed, "r_1", "c_1", 8)
     ArtifactCreated.model_validate(data2)
-    assert data2["scope"] == "task"
-    assert data2["promotion_proposed"] is False
+    assert data2["state"] == "confirmed"

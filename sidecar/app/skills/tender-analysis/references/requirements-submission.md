@@ -1,6 +1,6 @@
 # 节：递交要求（requirements-submission）
 
-只抽取影响**递交有效性**的明确规则。输出 `out/analysis/requirements-submission.md`。
+只抽取影响**递交有效性**的明确规则。输出 `work/analysis/requirements-submission.md`。
 
 ## 提取范围
 

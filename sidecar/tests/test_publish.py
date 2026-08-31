@@ -25,29 +25,32 @@ def _content(name="技术部分"):
 
 
 def _pub(env, content, **kw):
-    """以本会话过程稿作用域发布（§16：发布必须指定作用域）。"""
-    return publish.publish_artifact(KEY, content, conversation_id=env["conv"]["id"], **kw)
+    """以任务归属发布（2026-08-31：文件归任务，conversation_id 仅 provenance）。"""
+    return publish.publish_artifact(
+        KEY, content, task_id=env["task"]["id"], conversation_id=env["conv"]["id"], **kw
+    )
 
 
 def test_publish_creates_package_and_index(env):
     m = _pub(env, _content(), source={"skill": "demo-skill", "thread_id": env["conv"]["id"], "run_id": "r_1"})
     aid = m["artifact_id"]
 
-    # manifest：稳定身份字段齐备；task_id 恒为所属任务（§16 包位置派生依据）
+    # meta：稳定身份字段齐备；task_id 恒为所属任务；state 默认草稿
     assert m["kind"] == "tender.directory"
     assert m["schema"] == {"id": "tender-response-docs", "version": 1}
     assert m["cardinality"] == "task-single"
     assert m["display_name"] == "投标目录"  # 未传 display_name → 契约默认名
     assert m["task_id"] == env["task"]["id"]
     assert m["conversation_id"] == env["conv"]["id"]
-    assert artifact_store.read_manifest(aid, m) == m
+    assert m["state"] == "draft"
+    assert artifact_store.read_meta(aid, m) == m
 
-    # content：纯业务内容，JSON 可解析且与提交一致；包落在 threads/<cid>/ 下
+    # content：纯业务内容，JSON 可解析且与提交一致；包落在 work/artifacts/ 下
     content = json.loads(artifact_store.read_content(aid, m))
     assert content["response_documents"][0]["name"] == "技术部分"
-    assert artifact_store.artifact_dir(aid, m) == artifact_store.thread_dir(
-        env["task"]["id"], env["conv"]["id"]
-    ) / aid
+    assert artifact_store.artifact_dir(aid, m) == (
+        artifact_store.work_artifacts_dir(env["task"]["id"]) / aid
+    )
 
     # 索引：emitted=0（待 run 边界发事件），task_id 同样恒写
     row = db.get_artifact_index(aid)
@@ -55,14 +58,15 @@ def test_publish_creates_package_and_index(env):
     assert row["task_id"] == env["task"]["id"]
     assert row["content_seq"] == 1
     assert row["emitted"] == 0
+    assert row["state"] == "draft"
     assert db.pending_emit("r_1") == [row]
 
 
-def test_publish_requires_scope(env):
-    """§16 移除全局作用域：不指定作用域直接拒绝。"""
-    with pytest.raises(publish.PublishError, match="作用域"):
+def test_publish_requires_task(env):
+    """文件归任务：不指定 task 且无 conversation 反查 → 拒绝。"""
+    with pytest.raises(publish.PublishError, match="所属任务"):
         publish.publish_artifact(KEY, _content())
-    with pytest.raises(publish.PublishError, match="不存在或未归属任务"):
+    with pytest.raises(publish.PublishError, match="所属任务"):
         publish.publish_artifact(KEY, _content(), conversation_id="c_nope00000000")
     with pytest.raises(publish.PublishError, match="任务.*不存在"):
         publish.publish_artifact(KEY, _content(), task_id="t_nope00000000")
@@ -70,7 +74,7 @@ def test_publish_requires_scope(env):
 
 def test_publish_rejects_unknown_contract(env):
     with pytest.raises(publish.PublishError, match="未注册"):
-        publish.publish_artifact("no.such/contract@1", _content(), conversation_id=env["conv"]["id"])
+        publish.publish_artifact("no.such/contract@1", _content(), task_id=env["task"]["id"])
 
 
 def test_publish_rejects_schema_violation(env):
@@ -82,12 +86,12 @@ def test_task_single_upsert_reuses_artifact(env):
     m1 = _pub(env, _content("旧版"), source={"skill": "t", "run_id": "r_1"})
     m2 = _pub(env, _content("新版"), source={"skill": "t", "run_id": "r_2"})
 
-    # 复用 artifact_id 与 manifest（稳定身份），内容替换
+    # 复用 artifact_id 与 meta（稳定身份），内容替换
     assert m2["artifact_id"] == m1["artifact_id"]
     content = json.loads(artifact_store.read_content(m1["artifact_id"], m1))
     assert content["response_documents"][0]["name"] == "新版"
-    # manifest 不因重发布改写（created_at 不变）
-    assert artifact_store.read_manifest(m1["artifact_id"], m1)["created_at"] == m1["created_at"]
+    # meta 的 created_at 不因重发布改写
+    assert artifact_store.read_meta(m1["artifact_id"], m1)["created_at"] == m1["created_at"]
 
     # 索引：seq 递增、emitted 复位、last_run 更新
     row = db.get_artifact_index(m1["artifact_id"])
@@ -100,11 +104,20 @@ def test_task_single_upsert_reuses_artifact(env):
     assert len(db.pending_emit("r_2")) == 1
 
 
-def test_rebuild_index_from_manifests(env):
+def test_list_from_disk_skips_conversation_history(env):
+    """deepagents 压缩逐出历史的落盘目录（workspace/conversation_history/，压缩触发后
+    才出现）不是任务——结构化扫描必须跳过，否则索引里出现幽灵任务。"""
+    history = artifact_store.workspace_dir() / "conversation_history"
+    history.mkdir(parents=True, exist_ok=True)
+    (history / "sess-1.md").write_text("# evicted history", encoding="utf-8")
+    assert artifact_store.list_from_disk() == []
+
+
+def test_rebuild_index_from_metas(env):
     m = _pub(env, _content(), source={"skill": "t", "run_id": "r_1"})
     db.mark_emitted(m["artifact_id"])
 
-    # manifest 权威：索引清空后可重建（包位置按 manifest scope 派生），幂等
+    # meta 权威：索引清空后可重建（包位置按 meta scope 派生），幂等
     to_path = lambda md: str(artifact_store.content_path(md["artifact_id"], md))  # noqa: E731
     rebuilt = db.rebuild_artifact_index(artifact_store.list_from_disk(), to_path)
     assert rebuilt == 1
@@ -112,6 +125,7 @@ def test_rebuild_index_from_manifests(env):
     assert row is not None
     assert row["task_id"] == env["task"]["id"]
     assert row["emitted"] == 1  # 启动重建后无待发事件
+    assert row["state"] == "draft"  # state 从 meta 保留
     assert db.rebuild_artifact_index(artifact_store.list_from_disk(), to_path) == 1
 
 
@@ -131,7 +145,7 @@ def test_republish_keeps_restore_point(env):
 
 
 def test_republish_after_package_deleted_creates_new(env):
-    """僵尸索引行：包被删后重发布应新建完整包，而不是写进无 manifest 的目录。"""
+    """僵尸索引行：包被删后重发布应新建完整包，而不是写进无 meta 的目录。"""
     import shutil
 
     m1 = _pub(env, _content())
@@ -139,7 +153,7 @@ def test_republish_after_package_deleted_creates_new(env):
 
     m2 = _pub(env, _content("重建"))
     assert m2["artifact_id"] != m1["artifact_id"]
-    assert artifact_store.read_manifest(m2["artifact_id"], m2) == m2
+    assert artifact_store.read_meta(m2["artifact_id"], m2) == m2
     content = json.loads(artifact_store.read_content(m2["artifact_id"], m2))
     assert content["response_documents"][0]["name"] == "重建"
 
@@ -149,6 +163,27 @@ def test_republish_after_package_deleted_creates_new(env):
     ready = [r for r in rows if artifact_store.package_ready(r["artifact_id"], r)]
     assert len(ready) == 1
     assert ready[0]["artifact_id"] == m2["artifact_id"]
+
+
+def test_republish_confirmed_downgrades_to_draft(env):
+    """信任边界：AI 重跑覆盖已确认产物 → 自动降级回草稿（用户须重新确认）。"""
+    m = _pub(env, _content("初稿"))
+    aid = m["artifact_id"]
+    # 确认盖戳
+    meta = artifact_store.read_meta(aid, m)
+    meta["state"] = "confirmed"
+    meta["confirmed_at"] = "2026-08-31T00:00:00+00:00"
+    artifact_store.write_meta(meta)
+    db.set_artifact_state(aid, "confirmed")
+    assert db.get_artifact_index(aid)["state"] == "confirmed"
+
+    # AI 重跑覆盖（同契约 task-single upsert）
+    m2 = _pub(env, _content("重跑版"))
+    assert m2["artifact_id"] == aid
+    assert m2["state"] == "draft"  # 降级
+    assert artifact_store.read_meta(aid, m2)["state"] == "draft"
+    assert artifact_store.read_meta(aid, m2)["confirmed_at"] is None
+    assert db.get_artifact_index(aid)["state"] == "draft"
 
 
 def test_resolved_content_path_containment(env):

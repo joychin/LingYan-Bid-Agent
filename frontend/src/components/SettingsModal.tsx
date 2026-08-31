@@ -139,6 +139,8 @@ interface LocalModel {
   baseUrl: string
   model: string
   imageSupport: boolean
+  /** 上下文窗口（token）；null=未设置（自动）。高级选项里显式保存才生效 */
+  contextWindow: number | null
   keySaved: boolean
 }
 
@@ -151,8 +153,21 @@ interface VendorPreset {
   baseUrl: string
   mono: string
   color: string
-  models: { name: string; imageSupport: boolean }[]
+  models: { name: string; imageSupport: boolean; contextWindow?: number }[]
 }
+
+/** 上下文窗口预设档（值=token 数；null=自动/未知）。「自动」= 不干预压缩触发档位：
+ *  langchain 注册表认识模型名（deepseek 系等）走窗口 85% 比例档，不认识的走保守固定线+超限自愈 */
+const CONTEXT_WINDOW_OPTIONS: { value: number | null; label: string }[] = [
+  { value: null, label: '自动（默认）' },
+  { value: 32000, label: '32K' },
+  { value: 64000, label: '64K' },
+  { value: 128000, label: '128K' },
+  { value: 256000, label: '256K' },
+  { value: 512000, label: '512K' },
+  { value: 1000000, label: '1M' },
+  { value: 2000000, label: '2M' },
+]
 
 const VENDOR_PRESETS: VendorPreset[] = [
   {
@@ -176,9 +191,9 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'K',
     color: '#16191E',
     models: [
-      { name: 'kimi-k3', imageSupport: true },
-      { name: 'kimi-k2-thinking', imageSupport: false },
-      { name: 'kimi-k2.7-code', imageSupport: false },
+      { name: 'kimi-k3', imageSupport: true, contextWindow: 256000 },
+      { name: 'kimi-k2-thinking', imageSupport: false, contextWindow: 256000 },
+      { name: 'kimi-k2.7-code', imageSupport: false, contextWindow: 256000 },
     ],
   },
   {
@@ -189,9 +204,9 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'A',
     color: '#FF6A00',
     models: [
-      { name: 'qwen3-max', imageSupport: false },
-      { name: 'qwen-plus', imageSupport: false },
-      { name: 'qwen3-vl-plus', imageSupport: true },
+      { name: 'qwen3-max', imageSupport: false, contextWindow: 256000 },
+      { name: 'qwen-plus', imageSupport: false, contextWindow: 128000 },
+      { name: 'qwen3-vl-plus', imageSupport: true, contextWindow: 128000 },
     ],
   },
   {
@@ -202,9 +217,9 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'Z',
     color: '#3859FF',
     models: [
-      { name: 'glm-5.1', imageSupport: false },
-      { name: 'glm-5', imageSupport: false },
-      { name: 'glm-4.6v', imageSupport: true },
+      { name: 'glm-5.1', imageSupport: false, contextWindow: 256000 },
+      { name: 'glm-5', imageSupport: false, contextWindow: 256000 },
+      { name: 'glm-4.6v', imageSupport: true, contextWindow: 128000 },
     ],
   },
   {
@@ -215,8 +230,8 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'V',
     color: '#1664FF',
     models: [
-      { name: 'doubao-seed-1.6', imageSupport: true },
-      { name: 'doubao-seed-1.6-flash', imageSupport: true },
+      { name: 'doubao-seed-1.6', imageSupport: true, contextWindow: 256000 },
+      { name: 'doubao-seed-1.6-flash', imageSupport: true, contextWindow: 256000 },
     ],
   },
   {
@@ -267,6 +282,7 @@ const toModelBody = (m: LocalModel): ModelBody => ({
   base_url: m.baseUrl,
   model: m.model,
   image_support: m.imageSupport,
+  ...(m.contextWindow != null ? { context_window: m.contextWindow } : {}),
 })
 
 /** 显示名自动派生：厂商=preset 短名（同厂商第二个起追加模型名）；自定义=模型名 */
@@ -369,6 +385,7 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
           baseUrl: m.base_url,
           model: m.model,
           imageSupport: m.image_support,
+          contextWindow: m.context_window ?? null,
           keySaved: m.key_configured,
         })),
       )
@@ -797,6 +814,68 @@ function ModelNameSelect({
   )
 }
 
+/** 上下文窗口下拉（克隆 ModelNameSelect 模式：data-dropdown-open 让位弹窗 Escape、
+ *  top-full 面板；卡片无 overflow-hidden 是面板不被裁剪的前提，勿加） */
+function ContextWindowSelect({ value, onChange }: { value: number | null; onChange: (v: number | null) => void }) {
+  const [open, setOpen] = useState(false)
+  const current = CONTEXT_WINDOW_OPTIONS.find((o) => o.value === value) ?? CONTEXT_WINDOW_OPTIONS[0]
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t && !t.closest('[data-context-window-select]')) setOpen(false)
+    }
+    document.addEventListener('pointerdown', onDoc)
+    return () => document.removeEventListener('pointerdown', onDoc)
+  }, [open])
+
+  return (
+    <div
+      className="relative"
+      data-context-window-select
+      data-dropdown-open={open || undefined}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape' && open) {
+          e.stopPropagation() // 只关下拉，不关弹窗（closed 时放行给上层）
+          setOpen(false)
+        }
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex h-9 w-full items-center gap-2 rounded-lg border border-line bg-card px-3 text-sm transition-colors hover:bg-secondary/50"
+      >
+        <span className="min-w-0 flex-1 truncate text-left">{current.label}</span>
+        <ChevronDown className={cn('h-4 w-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')} />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 right-0 top-full z-20 mt-1.5 max-h-64 overflow-y-auto rounded-xl border border-line bg-card py-1 shadow-md">
+          {CONTEXT_WINDOW_OPTIONS.map((o) => (
+            <button
+              key={o.label}
+              type="button"
+              onClick={() => {
+                onChange(o.value)
+                setOpen(false)
+              }}
+              className={cn(
+                'flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm',
+                o.value === value ? 'bg-accent-soft' : 'hover:bg-secondary',
+              )}
+            >
+              <span className="min-w-0 flex-1 truncate">{o.label}</span>
+              {o.value === value && <Check className="h-4 w-4 shrink-0 text-primary" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ModelDialog({
   initial,
   isNew,
@@ -829,6 +908,8 @@ function ModelDialog({
   const [imageSupport, setImageSupport] = useState(
     initial?.imageSupport ?? (VENDOR_PRESETS[0].models[0]?.imageSupport ?? false),
   )
+  const [contextWindow, setContextWindow] = useState<number | null>(initial?.contextWindow ?? null)
+  const [advOpen, setAdvOpen] = useState(false)
   const [key, setKey] = useState('')
   const [keySaved, setKeySaved] = useState(initial?.keySaved ?? false)
   const [showKey, setShowKey] = useState(false)
@@ -869,6 +950,16 @@ function ModelDialog({
     setError(null)
   }
 
+  /** 展开高级选项那一刻预填厂商建议窗口值（仅草稿层，点保存才落库；已手动选过不跟随）。
+   *  不在切模型/切厂商时跟随，保持「用户看到的选择即他所做的选择」。 */
+  const changeAdvOpen = (open: boolean) => {
+    setAdvOpen(open)
+    if (open && contextWindow == null) {
+      const entry = preset.models.find((m) => m.name === model.trim())
+      if (entry?.contextWindow) setContextWindow(entry.contextWindow)
+    }
+  }
+
   /** 保存模型配置（+ 可选的新 Key）。返回错误文案，null=成功（不关弹窗，由调用方决定） */
   const persist = async (): Promise<string | null> => {
     const draft: LocalModel = {
@@ -877,6 +968,7 @@ function ModelDialog({
       baseUrl: baseUrl.trim(),
       model: model.trim(),
       imageSupport,
+      contextWindow,
       keySaved: keySaved || !!key.trim(),
     }
     if (!draft.model) return '请填写模型名称'
@@ -1038,6 +1130,30 @@ function ModelDialog({
           >
             <Switch checked={imageSupport} onChange={setImageSupport} label="图片输入" />
           </SettingRow>
+
+          {/* 高级选项折叠区：条件渲染而非 Collapsible——后者的动画包装层自带
+              overflow-hidden，会把内部下拉面板裁掉（浮层禁溢出铁则） */}
+          <div className="border-t border-line pt-4">
+            <button
+              type="button"
+              onClick={() => changeAdvOpen(!advOpen)}
+              aria-expanded={advOpen}
+              className="flex w-full cursor-pointer items-center gap-1.5 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+            >
+              高级选项
+              <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', advOpen && 'rotate-180')} />
+            </button>
+            {advOpen && (
+              <div className="pt-4">
+                <Field label="上下文窗口">
+                  <ContextWindowSelect value={contextWindow} onChange={setContextWindow} />
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    模型单次能读入的最大 token 量，影响长会话自动压缩的触发时机。不清楚请保持「自动」；选大了会过早压缩上下文，选小了会依赖超限自动恢复。
+                  </p>
+                </Field>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center gap-2 border-t border-line px-5 py-3.5">

@@ -75,7 +75,7 @@ def test_artifact_dto(client):
 
 
 def test_message_dto(client):
-    """assistant 消息 + run_traces 回填（tools/todos/durationMs/reasoning）过 Message 模型。"""
+    """assistant 消息 + run_traces 回填（tools/todos/durationMs/reasoning/files）过 Message 模型。"""
     _, conv = _task_conv()
     run = db.create_run(conv["id"])
     msg = db.append_assistant_message(conv["id"], "完成")
@@ -89,6 +89,7 @@ def test_message_dto(client):
         [{"content": "t", "status": "pending"}],
         1234,
         "思考整段",
+        files=[{"path": "analysis/structure.md", "op": "created"}],
     )
     msgs = client.get(f"/api/conversations/{conv['id']}/messages").json()["messages"]
     target = next(m for m in msgs if m["id"] == msg["id"])
@@ -96,6 +97,8 @@ def test_message_dto(client):
     assert parsed.durationMs == 1234
     assert parsed.reasoning == "思考整段"
     assert parsed.tools and parsed.tools[0]["text"] == "旁白"
+    assert parsed.files and parsed.files[0].path == "analysis/structure.md"
+    assert parsed.files[0].op == "created"
 
 
 def test_runinfo_dto(client):

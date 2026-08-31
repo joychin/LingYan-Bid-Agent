@@ -75,7 +75,9 @@ class TodoUpdated(BaseModel):
 
 
 class ArtifactCreated(BaseModel):
-    """run 边界与转正端点共用（events.artifact_created_payload）；run_id 转正时可为 None。"""
+    """run 边界产物事件（events.artifact_created_payload；run_id 恒非空——确认端点
+    不发 SSE，不在 run 内无 seq 宿主）。2026-08-31 重构时 scope/promotion_proposed
+    两键一次性替换为 state（reshape 非 additive，前端 events.gen.ts 同批再生）。"""
 
     run_id: str | None = None
     conversation_id: str
@@ -84,9 +86,8 @@ class ArtifactCreated(BaseModel):
     kind: str
     schema_id: str
     schema_version: int
-    scope: Literal["task", "conversation"]
+    state: Literal["draft", "confirmed"]
     task_id: str | None = None
-    promotion_proposed: bool
     seq: int
 
 

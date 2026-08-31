@@ -27,10 +27,9 @@ export interface Artifact {
   source: ArtifactSource;
   content_seq: number;
   restore_available: boolean;
-  scope: "task" | "conversation";
+  state: "draft" | "confirmed";
   task_id?: string | null;
   conversation_id?: string | null;
-  promotion_proposed: boolean;
   path: string;
 }
 export interface ArtifactSource {
@@ -127,7 +126,7 @@ export interface KbParseMeta {
 }
 /**
  * GET /messages 的 assistant 消息；tools/todos 是 run_traces 快照（嵌套树，松散 dict，
- * 键序与前端 ToolStep 同构——前端用客户端类型标注，见 client.ts）。
+ * 键序与前端 ToolStep 同构--前端用客户端类型标注，见 client.ts）。
  */
 export interface Message {
   id: string;
@@ -144,10 +143,19 @@ export interface Message {
   todos?: TodoItemPayload[] | null;
   durationMs?: number | null;
   reasoning?: string | null;
+  files?: RunFilePayload[] | null;
 }
 export interface TodoItemPayload {
   content: string;
   status: "pending" | "in_progress" | "completed";
+}
+/**
+ * 本轮文件（run_files 起止 diff）：path 相对 <task>/work/（WorkbenchFile.path
+ * 同约定，前端 chip 直接透传工作台查看器）；op = created（本轮新建）/modified。
+ */
+export interface RunFilePayload {
+  path: string;
+  op: "created" | "modified";
 }
 /**
  * 一个已配置的模型接入（多 profile：任意供应商任意个；key 只回布尔）。
@@ -158,6 +166,7 @@ export interface ModelProfile {
   base_url: string;
   model: string;
   image_support: boolean;
+  context_window?: number | null;
   key_configured: boolean;
 }
 /**

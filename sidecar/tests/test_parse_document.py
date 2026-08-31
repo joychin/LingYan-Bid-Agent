@@ -13,7 +13,7 @@ from tests.util import init_env
 
 @pytest.fixture
 def ws(tmp_path, monkeypatch):
-    """§16：解析产物落当前任务 out/，夹具内预置 run 上下文（任务+会话）。"""
+    """解析产物落当前任务 work/，夹具内预置 run 上下文（任务+会话）。"""
     from app import runctx
 
     task, conv = init_env(tmp_path, monkeypatch)
@@ -25,11 +25,11 @@ def ws(tmp_path, monkeypatch):
 
 
 def _out_parse(ws):
-    """当前任务的 out/parse/ 根（§16：产物在 <task>/out/ 下）。"""
+    """当前任务的 work/parse/ 根（产物在 <task>/work/ 下）。"""
     from app import db
 
     tid = db.list_tasks()[0]["id"]
-    return ws / tid / "out" / "parse"
+    return ws / tid / "work" / "parse"
 
 
 def _make_docx(path, with_table=True):
@@ -170,7 +170,7 @@ def test_scanned_pdf_routes_to_cloud_when_configured(ws, monkeypatch):
 
 
 def test_requires_task_context(ws):
-    """§16：解析产物归属任务 out/，无任务上下文直接失败。"""
+    """解析产物归属任务 work/，无任务上下文直接失败。"""
     from app import runctx
 
     runctx.clear_run()
@@ -229,7 +229,7 @@ def test_bare_name_resolves_from_task_files(ws):
     from app import artifact_store, db
 
     tid = db.list_tasks()[0]["id"]
-    fdir = artifact_store.task_files_dir(tid)
+    fdir = artifact_store.sources_dir(tid)
     fdir.mkdir(parents=True, exist_ok=True)
     _make_docx(fdir / "招标文件.docx")
     r = parse_document.invoke({"path": "招标文件.docx"})  # 根下无此文件

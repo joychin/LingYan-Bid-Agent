@@ -101,9 +101,11 @@ def test_legacy_db_migrates_and_preserves_rows(monkeypatch, tmp_path):
             ("runs", "thinking"),
             ("run_traces", "duration_ms"),
             ("run_traces", "reasoning"),
+            ("run_traces", "files"),
             ("conversations", "task_id"),
             ("artifact_index", "conversation_id"),
             ("artifact_index", "promotion_proposed"),
+            ("artifact_index", "state"),
             ("messages", "run_id"),
         ):
             cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -169,7 +171,7 @@ CREATE TABLE run_traces(
 
 
 def test_versioned_db_v9_migrates_incrementally(monkeypatch, tmp_path):
-    """已版本化库增量升级（v9 → 最新）：只跑 10-13，v9 已有的列与数据原样保留
+    """已版本化库增量升级（v9 → 最新）：只跑 10-15，v9 已有的列与数据原样保留
     （真实用户库都是从中间版本滚上来的，此前测试只覆盖 v0 旧库一跳到顶）。"""
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     app_db_path().parent.mkdir(parents=True, exist_ok=True)
@@ -205,6 +207,8 @@ def test_versioned_db_v9_migrates_incrementally(monkeypatch, tmp_path):
         assert c.execute("SELECT status FROM runs WHERE id='r1'").fetchone()["status"] == "waiting_input"
         assert c.execute("SELECT duration_ms FROM run_traces WHERE run_id='r1'").fetchone()["duration_ms"] == 1234
         assert c.execute("SELECT reasoning FROM run_traces WHERE run_id='r1'").fetchone()["reasoning"] == "思考流"
+        # 迁移 15：files 列就位，旧 trace 行回读默认空清单
+        assert c.execute("SELECT files FROM run_traces WHERE run_id='r1'").fetchone()["files"] == "[]"
         assert c.execute("SELECT content_seq FROM artifact_index WHERE artifact_id='a1'").fetchone()["content_seq"] == 3
 
         # 增量补列/补表就位
@@ -213,6 +217,10 @@ def test_versioned_db_v9_migrates_incrementally(monkeypatch, tmp_path):
         cols_msg = {r["name"] for r in c.execute("PRAGMA table_info(messages)").fetchall()}
         assert "run_id" in cols_msg
         assert c.execute("SELECT run_id FROM messages WHERE id='m1'").fetchone()["run_id"] is None
+        # 迁移 14：state 列就位，旧行（conversation_id NULL）推断为 confirmed
+        cols_art = {r["name"] for r in c.execute("PRAGMA table_info(artifact_index)").fetchall()}
+        assert "state" in cols_art
+        assert c.execute("SELECT state FROM artifact_index WHERE artifact_id='a1'").fetchone()["state"] == "confirmed"
         tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         assert "app_settings" in tables
 

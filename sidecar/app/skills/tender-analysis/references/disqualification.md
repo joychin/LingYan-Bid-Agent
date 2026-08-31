@@ -1,7 +1,7 @@
 # 节：废标条款（disqualification）——全系统唯一强制全扫节
 
 提取原文明确的**无效、否决、拒收、不予受理、资格不通过触发条件**。输出
-`out/analysis/disqualification.md`。
+`work/analysis/disqualification.md`。
 
 ## 本节特殊纪律：全扫
 

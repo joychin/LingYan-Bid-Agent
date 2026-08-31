@@ -80,6 +80,35 @@ def test_put_models_roundtrip(client):
     assert not cfg.settings_path().exists() or "m1" not in cfg.settings_path().read_text(encoding="utf-8")
 
 
+def test_put_models_context_window_roundtrip_and_validation(client):
+    """context_window 可选字段：合法值 roundtrip（GET 带出、缺省 null）、非法值 422。"""
+    r = client.put(
+        "/api/settings/models",
+        json={
+            "models": [
+                {"id": "m1", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-v4-flash"},
+                {"id": "m2", "base_url": "https://x.example/v1", "model": "custom-x", "context_window": 128000},
+            ],
+            "default_model": "m1",
+        },
+    )
+    assert r.status_code == 200
+    data = client.get("/api/settings").json()
+    by_id = {m["id"]: m for m in data["models"]}
+    assert by_id["m1"]["context_window"] is None
+    assert by_id["m2"]["context_window"] == 128000
+
+    for bad in (0, -128, 1.5):
+        r = client.put(
+            "/api/settings/models",
+            json={
+                "models": [{"id": "m1", "base_url": "https://x.example/v1", "model": "m", "context_window": bad}],
+                "default_model": "m1",
+            },
+        )
+        assert r.status_code == 422, f"context_window={bad!r} 应 422"
+
+
 def test_put_models_validations(client):
     base = {"models": [{"id": "m1", "base_url": "https://x.example/v1", "model": "m"}], "default_model": "m1"}
     # 空 id

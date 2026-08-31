@@ -101,7 +101,7 @@ def env(tmp_path, monkeypatch):
     from app import runctx
 
     task, conv = init_env(tmp_path, monkeypatch)
-    out = artifact_store.task_out_dir(task["id"])
+    out = artifact_store.work_dir(task["id"])
     (out / "analysis").mkdir(parents=True, exist_ok=True)
     (out / "outline").mkdir(parents=True, exist_ok=True)
     (out / "analysis" / "requirements-format.md").write_text(FMT_MD, encoding="utf-8")
@@ -138,8 +138,11 @@ def test_assemble_and_publish(env):
     assert "响应文件 1 个" in r
     assert "REQ=2" in r
     assert "悬空" not in r
+    assert "已按最深承载折叠 1 处" in r
+    # 未归位警示带披露处置指令：模型须在最终回复向用户点名（不得只字不提）
+    assert "未被任何目录节点引用" in r and "最终回复" in r
 
-    # 发布产物落盘且契约内容正确（会话过程稿，§16 恒写所属任务）
+    # 发布产物落盘且契约内容正确（文件归任务，恒写所属任务）
     arts = artifact_store.list_from_disk()
     m = [a for a in arts if a["kind"] == "tender.directory"][0]
     from app import db
@@ -147,7 +150,7 @@ def test_assemble_and_publish(env):
     assert m["task_id"] == env["task"]["id"]
     assert m["conversation_id"] == env["conv"]["id"]
     idx = db.get_artifact_index(m["artifact_id"])
-    assert idx["promotion_proposed"] == 1  # SQLite 布尔
+    assert idx["state"] == "draft"  # 发布产出草稿，用户确认后才 confirmed
     assert m["source"]["skill"] == "tender-outline"
     content = json.loads(artifact_store.read_content(m["artifact_id"], m))
     doc = content["response_documents"][0]
@@ -158,15 +161,55 @@ def test_assemble_and_publish(env):
 
     top = doc["directory"][0]
     assert top["目录名称"] == "技术方案（附件N）"
-    assert top["来源位置"] == ["MAND-01", "REQ-01"]
+    assert top["来源位置"] == ["MAND-01"]  # REQ-01 与子节点重复，折叠到最深承载
     assert top["交付形态"] == "正文编写"
     assert top["children"][0]["目录名称"] == "需求理解"
+    assert top["children"][0]["来源位置"] == ["REQ-01"]
 
     # JSON 副本落在任务 out/outline/
     js = json.loads(
         (env["out"] / "outline" / "tender-response-docs.json").read_text(encoding="utf-8")
     )
     assert js["lineage_check"]["unused_ids"] == ["SCORE-01", "SCORE-02", "TPL-01"]
+
+
+def _node(name: str, ids: list[str], children: list[dict] | None = None) -> dict:
+    return {"目录名称": name, "children": children or [], "来源位置": list(ids)}
+
+
+def test_fold_lineage():
+    """唯一承载折叠：post-order deepest-wins 四边界 + 幂等不改入参。"""
+    from app.tools.assemble_tender import _fold_lineage
+
+    # 三层链 A→B→C 同 ID 只留最深 C；A 保留独有 MAND-01
+    tree = [
+        _node("A", ["MAND-01", "REQ-01"], [_node("B", ["REQ-01"], [_node("C", ["REQ-01"])])])
+    ]
+    folded, n = _fold_lineage(tree)
+    assert n == 2
+    a = folded[0]
+    assert a["来源位置"] == ["MAND-01"]
+    assert a["来源"] == ["招标文件规定"]
+    assert a["children"][0]["来源位置"] == []
+    assert a["children"][0]["children"][0]["来源位置"] == ["REQ-01"]
+    # 不改入参 + 幂等（折叠结果再跑一遍零移除）
+    assert tree[0]["来源位置"] == ["MAND-01", "REQ-01"]
+    again, n2 = _fold_lineage(folded)
+    assert n2 == 0
+    assert again[0]["来源位置"] == ["MAND-01"]
+
+    # 兄弟同深全保留（真实需求），仅父层让位
+    tree2 = [_node("A", ["REQ-01"], [_node("B1", ["REQ-01"]), _node("B2", ["REQ-01"])])]
+    folded2, n3 = _fold_lineage(tree2)
+    assert n3 == 1
+    assert folded2[0]["children"][0]["来源位置"] == ["REQ-01"]
+    assert folded2[0]["children"][1]["来源位置"] == ["REQ-01"]
+
+    # 仅浅层无更深携带 → 保留不误删
+    tree3 = [_node("A", ["REQ-01"], [_node("B", ["REQ-02"])])]
+    folded3, n4 = _fold_lineage(tree3)
+    assert n4 == 0
+    assert folded3[0]["来源位置"] == ["REQ-01"]
 
 
 def test_dangling_ids_reported_but_published(env):

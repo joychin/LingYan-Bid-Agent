@@ -111,6 +111,35 @@ def test_hitl_custom_description_passthrough():
     assert req["description"] == "确认方案"
 
 
+def test_tool_args_html_entities_unescaped():
+    """模型偶发把参数里的换行写成 &#10; 字面量 → 展示层 args 统一反转义。
+
+    SSE tool.called、run.interrupt 问答卡、run_traces 快照三端共用 _tool_args，
+    单点反转义全部生效；html.unescape 单遍解码保证 &amp;#10; 只解到 &#10;
+    字面量、不会二次展开。
+    """
+    assert events._tool_args({"question": "确认开始？&#10;&#10;为什么问"}) == {
+        "question": "确认开始？\n\n为什么问"
+    }
+    assert events._tool_args('{"question": "Q&#10;说明"}') == {"question": "Q\n说明"}
+    assert events._tool_args({"nested": {"a": ["&amp;"]}}) == {"nested": {"a": ["&"]}}
+    assert events._tool_args({"q": "&amp;#10;"}) == {"q": "&#10;"}
+
+    msg = AIMessage(
+        content="",
+        tool_calls=[{"name": "ask_human", "args": {"question": "确认开始？&#10;&#10;为什么问"}, "id": "t9"}],
+    )
+    out = list(events.iter_stream(iter([("updates", {"model": {"messages": [msg]}})])))
+    [called] = [d for k, d in out if k == "tool_called"]
+    assert called["args"]["question"] == "确认开始？\n\n为什么问"
+
+    out = list(
+        events.iter_stream(iter([("updates", {"__interrupt__": (_make_interrupt("确认开始？&#10;&#10;为什么问"),)})]))
+    )
+    [interrupt] = [d for k, d in out if k == "interrupt"]
+    assert interrupt["requests"][0]["args"]["question"] == "确认开始？\n\n为什么问"
+
+
 # ---------- run_stream：中断边界 ----------
 
 

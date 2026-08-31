@@ -763,6 +763,71 @@
   padding: 2px 8px;
   margin-top: 6px;
 }
+/* 「本轮文件」chips（run 终态后随最终回复展示，见 RunFiles.tsx）：行首标签 +
+   胶囊换行排布；chip 内 ft-ico 缩到 16px 与 24px 行高配平 */
+.run-files {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.run-files-label {
+  font-size: 12px;
+  color: var(--Color-text-tertiary);
+  line-height: 26px;
+  flex: none;
+}
+.run-files-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.run-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px 0 5px;
+  border-radius: 6px;
+  border: 1px solid var(--Color-border-default);
+  background: var(--Color-bg-subtle);
+  font-size: 12px;
+  color: var(--Color-text-secondary);
+  max-width: 260px;
+  transition: border-color 120ms ease;
+}
+.run-file-chip:hover {
+  border-color: var(--Color-border-strong);
+  color: var(--Color-text-primary);
+}
+.run-file-chip .ft-ico {
+  width: 16px;
+  height: 16px;
+  font-size: 9px;
+  border-radius: 3px;
+}
+.run-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-file-op {
+  flex: none;
+  font-size: 10px;
+  color: var(--Color-text-tertiary);
+}
+.run-file-op--created {
+  /* 新建 = 语义绿 tint 现场派生（不硬编码浅色）；修改维持中性 */
+  color: var(--Color-success);
+  background: color-mix(in srgb, var(--Color-success) 12%, var(--Color-bg-canvas));
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.run-file-more {
+  color: var(--Color-text-tertiary);
+}
 /* 审批/问答卡挂进回合：与助手正文列对齐、贴住活卡冻结态的过程区（一张活卡贯穿
    暂停/续跑后，提问卡唯一挂点是活卡下方；活卡暂停时无正文气泡，Reasoning 自带
    mb-1.5，这里只补一丝呼吸——旧结构的 -10px 负 margin 连同暂停消息卡一起废弃） */
@@ -1994,6 +2059,15 @@
 .ap-row.compact {
   min-height: 25px;
   padding-left: 4px;
+}
+/* 只读行（输入文件等无处理器可打开的）：不给可点暗示 */
+.ap-row.readonly {
+  cursor: default;
+}
+/* 本会话产出的产物（provenance 高亮，2026-08-31 补实现）：名称着品牌 tint——
+   纯高亮不占状态位，不与 hover/active 的背景态打架；暗色随变量翻转 */
+.ap-row.from-conv .ap-row-name {
+  color: color-mix(in srgb, var(--Color-brand-primary) 72%, var(--Color-text-primary));
 }
 .ap-row-name {
   flex: 1;

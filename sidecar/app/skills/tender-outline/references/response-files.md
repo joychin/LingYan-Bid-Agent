@@ -1,13 +1,13 @@
 # R1：响应文件分解
 
 识别本次投标需要提交哪些**响应文件**（独立的投标分册/分标/单独递交的逻辑文件实体），
-写出 `out/outline/tender-response-docs.md` 骨架。
+写出 `work/outline/tender-response-docs.md` 骨架。
 
 ## 输入
 
-- `out/analysis/requirements-format.md` 的「一、投标文件结构要求」（封装/分册/装订要求、
+- `work/analysis/requirements-format.md` 的「一、投标文件结构要求」（封装/分册/装订要求、
   结构大纲）——划分的主要依据；
-- `out/analysis/structure.md`（标段划分：分标段投标时通常每标段一套响应文件）。
+- `work/analysis/structure.md`（标段划分：分标段投标时通常每标段一套响应文件）。
 
 ## 常见划分模式
 

@@ -1,7 +1,7 @@
 # 节：商务技术要求（requirements-business）
 
 只抽取投标人必须响应的**商务、技术、服务、交付实质要求**。输出
-`out/analysis/requirements-business.md`。
+`work/analysis/requirements-business.md`。
 
 ## 提取范围
 

@@ -1,15 +1,15 @@
 """确定性组装工具：把目录中间产物组装为投标目录 Artifact（tender.directory）。
 
 registry 构建 / 目录树与标注解析 / lineage 核对回收自 tender-toc skill 的
-parse_toc.py（build 路径）；输入位置改为技能产物布局（out/analysis + out/outline），
-产物经 publish 管线发布为会话过程稿并自动建议转正（HTML 渲染暂不带）。
+parse_toc.py（build 路径）；输入位置为技能产物布局（work/analysis + work/outline），
+产物经 publish 管线发布为草稿（用户确认为正式成果走确认动作）。
 
 机器输入的格式契约（tender-analysis / tender-outline 的产物必须遵守）：
-- out/analysis/requirements-format.md：`## 二、必须有的章节` 与 `## 三、模板` 两张表
+- work/analysis/requirements-format.md：`## 二、必须有的章节` 与 `## 三、模板` 两张表
   （MAND/TPL registry，行序=编号）
-- out/analysis/requirements-business.md：`| 需求 | 出处 |` 表（REQ registry，行序=编号）
-- out/analysis/evaluation.md：`| 评分项 | 分值 | 评分要点 | 出处 |` 表（SCORE registry）
-- out/outline/tender-response-docs.md：`# 响应文件：X` + scope + `## 目录` /
+- work/analysis/requirements-business.md：`| 需求 | 出处 |` 表（REQ registry，行序=编号）
+- work/analysis/evaluation.md：`| 评分项 | 分值 | 评分要点 | 出处 |` 表（SCORE registry）
+- work/outline/tender-response-docs.md：`# 响应文件：X` + scope + `## 目录` /
   `## 来源标注` / `## 目录说明`（可选顶部 `## 项目信息`）
 各 analysis 文件在登记表之后的可选段（待澄清登记/coverage 声明/评标办法概述）
 不参与行序编号；目录段中不符合列表格式的行会被静默跳过（探测警告见返回文案）。
@@ -24,7 +24,7 @@ from langchain_core.tools import tool
 from pydantic import ValidationError
 
 from .. import publish, runctx
-from ..artifact_store import task_out_dir
+from ..artifact_store import work_dir
 from ..config import workspace_dir
 
 CONTRACT_KEY = "tender.directory/tender-response-docs@1"
@@ -285,6 +285,41 @@ def _attach_lineage(
         _attach_lineage(node["children"], lineage_map, dir_notes, consumed)
 
 
+def _fold_lineage(tree: list[dict]) -> tuple[list[dict], int]:
+    """唯一承载折叠：同一条来源 ID 在祖先-后代链上只留最深节点（post-order，deepest-wins）。
+
+    目录是正文生成的写作计划、按节点血缘分配任务，父子重复挂载=同一要求两级各写
+    一遍（重复成文）。确定性结构规范化（与 _md_to_tree 重赋 level 同类）：
+    三层链只留最深、兄弟同深全保留（真实需求）、仅浅层无更深保留；只动
+    来源位置/来源，不碰目录说明的自辩字段。浅拷贝节点、不改入参（幂等）。
+
+    Returns: (折叠后的新树, 移除总数)
+    """
+    removed_total = 0
+
+    def _fold(nodes: list[dict]) -> tuple[list[dict], set[str]]:
+        nonlocal removed_total
+        out: list[dict] = []
+        carried: set[str] = set()
+        for node in nodes:
+            children, child_carried = _fold(node.get("children") or [])
+            own = set(node.get("来源位置") or [])
+            overlap = own & child_carried
+            if overlap:
+                removed_total += len(overlap)
+            kept = sorted(own - overlap)
+            new_node = dict(node)
+            new_node["children"] = children
+            new_node["来源位置"] = kept
+            new_node["来源"] = sorted({_source_type(i) for i in kept})
+            out.append(new_node)
+            carried |= child_carried | set(kept)
+        return out, carried
+
+    folded, _ = _fold(tree)
+    return folded, removed_total
+
+
 def _extract_section(body: str, name: str) -> str:
     out, in_block = [], False
     for line in body.splitlines():
@@ -392,10 +427,10 @@ def _iter_nodes(tree: list[dict]):
 # ---------------------------------------------------------------------------
 @tool
 def assemble_tender() -> str:
-    """组装投标目录并发布为 Artifact（tender.directory 会话过程稿，自动建议转正）。
+    """组装投标目录并发布为 Artifact（tender.directory 草稿，用户确认为正式成果）。
 
-    读取当前任务 out/analysis/（requirements-format / requirements-business /
-    evaluation 构建来源登记表 MAND/TPL/REQ/SCORE）与 out/outline/tender-response-docs.md
+    读取当前任务 work/analysis/（requirements-format / requirements-business /
+    evaluation 构建来源登记表 MAND/TPL/REQ/SCORE）与 work/outline/tender-response-docs.md
     （响应文件 + 目录树 + 来源标注 + 目录说明），做 lineage 完整性核对
     （unused/dangling）后发布。悬空 ID 会发布但给出警告，应修复后重新组装。
     """
@@ -403,13 +438,13 @@ def assemble_tender() -> str:
         ctx = runctx.current_run()
         task_id = ctx.task_id if ctx else None
         if not task_id:
-            return "[组装失败] 缺少任务上下文：组装输入与 JSON 副本都在当前任务的 out/ 目录下"
-        out_root = task_out_dir(task_id)
+            return "[组装失败] 缺少任务上下文：组装输入与 JSON 副本都在当前任务的 work/ 目录下"
+        out_root = work_dir(task_id)
         inputs = {
-            "out/analysis/requirements-format.md": out_root / "analysis" / "requirements-format.md",
-            "out/analysis/requirements-business.md": out_root / "analysis" / "requirements-business.md",
-            "out/analysis/evaluation.md": out_root / "analysis" / "evaluation.md",
-            "out/outline/tender-response-docs.md": out_root / "outline" / "tender-response-docs.md",
+            "work/analysis/requirements-format.md": out_root / "analysis" / "requirements-format.md",
+            "work/analysis/requirements-business.md": out_root / "analysis" / "requirements-business.md",
+            "work/analysis/evaluation.md": out_root / "analysis" / "evaluation.md",
+            "work/outline/tender-response-docs.md": out_root / "outline" / "tender-response-docs.md",
         }
         missing = [k for k, p in inputs.items() if not p.is_file()]
         if missing:
@@ -418,10 +453,10 @@ def assemble_tender() -> str:
                 + "\n  请先由 tender-analysis / tender-outline 技能产出这些文件再组装。"
             )
 
-        fmt_md = inputs["out/analysis/requirements-format.md"].read_text(encoding="utf-8")
-        biz_md = inputs["out/analysis/requirements-business.md"].read_text(encoding="utf-8")
-        eval_md = inputs["out/analysis/evaluation.md"].read_text(encoding="utf-8")
-        outline_md = inputs["out/outline/tender-response-docs.md"].read_text(encoding="utf-8")
+        fmt_md = inputs["work/analysis/requirements-format.md"].read_text(encoding="utf-8")
+        biz_md = inputs["work/analysis/requirements-business.md"].read_text(encoding="utf-8")
+        eval_md = inputs["work/analysis/evaluation.md"].read_text(encoding="utf-8")
+        outline_md = inputs["work/outline/tender-response-docs.md"].read_text(encoding="utf-8")
 
         mand_reg, tpl_reg = _build_mand_tpl_registry(fmt_md)
         req_reg = _build_req_registry(biz_md)
@@ -434,6 +469,13 @@ def assemble_tender() -> str:
         docs = _parse_response_docs(outline_md, outline_warnings)
         meta = _parse_meta(outline_md)
 
+        # 唯一承载折叠：父子链重复挂载的来源 ID 收敛到最深节点（正文按节点血缘
+        # 分配写作任务，重复挂载=重复成文）；只规范发布内容，源文件不动
+        fold_count = 0
+        for d in docs:
+            d["directory"], n = _fold_lineage(d["directory"])
+            fold_count += n
+
         referenced: set[str] = set()
         for d in docs:
             for n in _iter_nodes(d["directory"]):
@@ -443,7 +485,7 @@ def assemble_tender() -> str:
 
         warnings: list[str] = list(outline_warnings)
         if not docs or all(not d["directory"] for d in docs):
-            warnings.append("未解析出任何响应文件目录，请检查 out/outline/tender-response-docs.md 格式")
+            warnings.append("未解析出任何响应文件目录，请检查 work/outline/tender-response-docs.md 格式")
         content: dict = {
             "response_documents": docs,
             "registry": registry,
@@ -467,8 +509,8 @@ def assemble_tender() -> str:
                 "thread_id": ctx.conversation_id if ctx else None,
                 "run_id": ctx.run_id if ctx else None,
             },
+            task_id=task_id,
             conversation_id=ctx.conversation_id if ctx else None,
-            propose_promotion=True,
         )
 
         parts = [
@@ -476,11 +518,15 @@ def assemble_tender() -> str:
             f"响应文件 {len(docs)} 个 / 目录节点 {total} 个 / "
             f"来源登记 MAND={len(mand_reg)} TPL={len(tpl_reg)} REQ={len(req_reg)} SCORE={len(score_reg)}",
         ]
+        if fold_count:
+            parts.append(
+                f"已按最深承载折叠 {fold_count} 处父子重复血缘（父级无需重复标注子级已答要求）"
+            )
         parts.extend(f"⚠️ {w}" for w in warnings)
         parts.extend(
             [
                 f"JSON 副本：{out_root.relative_to(workspace_dir())}/outline/tender-response-docs.json",
-                "已标记「建议转正」——请提醒用户在界面确认转正，目录才会进入任务正式稿。",
+                "已发布为草稿——请提醒用户在界面确认为正式成果。",
             ]
         )
         if dangling_ids:
@@ -489,7 +535,11 @@ def assemble_tender() -> str:
                 "建议修正后重新组装发布"
             )
         if unused_ids:
-            parts.append(f"⚠️ 未被任何目录节点引用的来源ID（允许，但可复查是否遗漏归位）：{unused_ids}")
+            parts.append(
+                f"⚠️ 未被任何目录节点引用的来源ID：{unused_ids}；逐条处置——能归位的修订"
+                "目录后重新组装，确属无需对应章节的（如扣分项、后续轮次才出现的最终报价）"
+                "必须在最终回复向用户点名列出并各给一句处置建议，不得只字不提"
+            )
         return "\n".join(parts)
     except (publish.PublishError, ValidationError) as e:
         return f"[组装失败] 发布校验未通过：{e}"

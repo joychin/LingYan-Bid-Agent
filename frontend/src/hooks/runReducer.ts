@@ -392,11 +392,13 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
       const step = newStep(`${now}-${s.stepCounter}`, data, now)
       s = { ...s, stepCounter: s.stepCounter + 1 }
       if (!data.agent_id) {
-        // 主 agent 调用：把之前流出的正文封为旁白挂到本步骤（与 sidecar 同一条
-        // 封段规则，SSE 契约零改动）；正文气泡只剩最终回复（最后未封口段）。
-        // 子代理调用不封段（其正文 token 本就不透传，streamText 恒为空）
+        // 主 agent 调用：把之前流出的正文封为旁白、思考流封为本步骤 reasoning 挂到
+        // 本步骤（与 sidecar 同一条封段规则，SSE 契约零改动）；正文气泡只剩最终回复
+        // （最后未封口段），思考块只剩当前未封口段。子代理调用不封段（其正文 token
+        // 本就不透传，streamText 恒为空；reasoning 走 agent_id 归属追加）
         step.text = s.streamText
-        return result({ ...s, tools: attachStep(s.tools, step, data.agent_id), streamText: '' })
+        step.reasoning = s.reasoningText
+        return result({ ...s, tools: attachStep(s.tools, step, data.agent_id), streamText: '', reasoningText: '' })
       }
       return result({ ...s, tools: attachStep(s.tools, step, data.agent_id) })
     }

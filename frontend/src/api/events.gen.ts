@@ -40,7 +40,9 @@ export interface AgentToken {
   seq: number;
 }
 /**
- * run 边界与转正端点共用（events.artifact_created_payload）；run_id 转正时可为 None。
+ * run 边界产物事件（events.artifact_created_payload；run_id 恒非空——确认端点
+ * 不发 SSE，不在 run 内无 seq 宿主）。2026-08-31 重构时 scope/promotion_proposed
+ * 两键一次性替换为 state（reshape 非 additive，前端 events.gen.ts 同批再生）。
  */
 export interface ArtifactCreated {
   run_id?: string | null;
@@ -50,9 +52,8 @@ export interface ArtifactCreated {
   kind: string;
   schema_id: string;
   schema_version: number;
-  scope: "task" | "conversation";
+  state: "draft" | "confirmed";
   task_id?: string | null;
-  promotion_proposed: boolean;
   seq: number;
 }
 /**

@@ -11,18 +11,18 @@ description: 生成投标文件目录（章节规划）时使用。用户要求�
 ## 概述
 
 先读 `skills/_shared/response-guidelines.md`（用户回复规范）。缺节/新文件的降级影响、
-三道清理的跳过原因必须向用户声明；发布的是草稿，提醒转正时措辞必须是
-「建议你确认为正式成果」，不得宣称已进入正式稿。向用户转述流程时用实际名称与
+三道清理的跳过原因必须向用户声明；发布的是草稿，提醒确认时措辞必须是
+「建议你确认为正式成果」，不得宣称已确认。向用户转述流程时用实际名称与
 顺序（响应文件分解、目录初稿、查漏补缺、评分对齐、走查定稿、组装发布），
 不说 R1/R2 等内部代号，不把三道清理改名或新造说法（如「查冗」）。
 
-一进一出：输入 `out/analysis/` 要点产物，输出 `out/outline/tender-response-docs.md`
-（目录中间态；多册并发时各册先落 `out/outline/fragments/<册名>.md` 再合并），经
-`assemble_tender` 组装发布为 `tender.directory` 过程稿 + 建议转正。
+一进一出：输入 `work/analysis/` 要点产物，输出 `work/outline/tender-response-docs.md`
+（目录中间态；多册并发时各册先落 `work/outline/fragments/<册名>.md` 再合并），经
+`assemble_tender` 组装发布为 `tender.directory` 草稿（提醒用户确认）。
 
-**路径约定（任务分组目录）**：本技能所有 `out/…` 路径都在**当前任务目录**下——任务目录
+**路径约定（任务分组目录）**：本技能所有 `work/…` 路径都在**当前任务目录**下——任务目录
 前缀（形如 `t_ab12…/`）见任务上下文的「任务工作目录」行，读写文件的路径必须带该前缀
-（如 `<任务目录>/out/analysis/structure.md`）。
+（如 `<任务目录>/work/analysis/structure.md`）。
 
 流程：R1 响应文件分解（有确认点）→ R2 目录初稿 + 三道清理（查漏→评分对齐→走查；
 单册由主线程就地做，多册并发派发 `tender-outline-writer` 子代理每册一个）→
@@ -32,22 +32,22 @@ description: 生成投标文件目录（章节规划）时使用。用户要求�
 
 ### 第 0 步：前置检查
 
-- `out/analysis/` 存在吗？不存在 → 引导先跑 tender-analysis。
+- `work/analysis/` 存在吗？不存在 → 引导先跑 tender-analysis。
 - **缺节允许跑，但必须声明影响**（写进产物 `## 项目信息` 段，并向用户说明）：
   缺 requirements-format → 无骨架输入，目录质量明显下降，建议先补该节；
   缺 requirements-business → 跳过查漏补缺；缺 evaluation → 跳过评分对齐。
-- 要点产物头部列出的来源文件（主文件/补充），其 `out/parse/<文件名>/<文件名>.meta.json` 的
+- 要点产物头部列出的来源文件（主文件/补充），其 `work/parse/<文件名>/<文件名>.meta.json` 的
   `generated_at` 晚于产物头部生成时间 → 招标文件在分析后被更新过，提示用户
   「建议先重跑分析」，由用户裁决，不自行混跑。
-- **文件对账**：`ls <任务目录>/files/` 与 `out/parse/sources.json` 比对——发现未纳入
+- **文件对账**：`ls <任务目录>/sources/` 与 `work/parse/sources.json` 比对——发现未纳入
   来源集合的新文件 → 提示用户「有未分析的新文件，建议先补跑 document-parse 与
   tender-analysis 再生成目录」，由用户裁决，不自行混入。
 
 ### 第 1 步：R1 响应文件分解（references/response-files.md）
 
-读 `out/analysis/structure.md`（标段/文件关系）与 `out/analysis/requirements-format.md`
+读 `work/analysis/structure.md`（标段/文件关系）与 `work/analysis/requirements-format.md`
 （结构大纲/封装分册要求），识别本次投标要交的**逻辑响应文件集合**，写出
-`out/outline/tender-response-docs.md` 骨架：顶部可选 `## 项目信息`（从 structure.md 取
+`work/outline/tender-response-docs.md` 骨架：顶部可选 `## 项目信息`（从 structure.md 取
 项目名称/编号等）+ 每个响应文件一个 `# 响应文件：X` 标题 + scope 段落。
 
 **确认点（本技能最重要的一次裁量）**：响应文件划分影响下游全部工作。两问测试：
@@ -56,7 +56,7 @@ description: 生成投标文件目录（章节规划）时使用。用户要求�
 问选哪种拆分方案，换行后说明「拆分决定下游目录结构与各册分工，选错会大面积重做」；
 候选拆分方案列成 options（「；」分隔，依据更充分的方案尾加「（推荐）」）让用户选，
 用户可在补充里直接给改法；方案唯一且证据充分时
-径直继续（后续目录转正还会兜底）。
+径直继续（后续目录确认还会兜底）。
 
 ### 第 2 步：R2 目录初稿（references/generate.md + references/annotation.md）
 
@@ -77,13 +77,13 @@ analysis 产物里已有的 MAND/TPL/REQ/SCORE 编号，**不要自己发明编�
 - 任务目录前缀（形如 `t_ab12…/`，读写路径都要带）；
 - 响应文件名 + 该册 scope 全文（从骨架原样复制，边界必须写清楚——子代理之间
   互不知晓，跨册协调全靠 scope 划分）；
-- fragment 输出路径：`<任务目录>/out/outline/fragments/<册名>.md`（文件名由你派发时
+- fragment 输出路径：`<任务目录>/work/outline/fragments/<册名>.md`（文件名由你派发时
   指定并保持稳定，是本技能的多册中间态）；
-- out/analysis 输入文件清单（含 requirements-format / requirements-business /
+- work/analysis 输入文件清单（含 requirements-format / requirements-business /
   evaluation 的完整路径），并注明清理适用性：无 REQ 条目 → 该册跳过查漏补缺；
   无 SCORE 条目 → 该册跳过评分对齐；
 - **来源文件名清单**（主文件 + 各补充文件的完整文件名，含扩展名——走查回原文
-  核实时构造 `out/parse/<文件名>/<文件名>.outline.json` 路径的依据，可从
+  核实时构造 `work/parse/<文件名>/<文件名>.outline.json` 路径的依据，可从
   sources.json 或 analysis 产物头部取）。
 
 子代理在 fragment 里完成「R2 三段 + 三道清理」（规则同第 3 步表格的 references），
@@ -108,7 +108,7 @@ analysis 产物里已有的 MAND/TPL/REQ/SCORE 编号，**不要自己发明编�
 全部子代理返回后：
 
 1. 逐个 read_file 各 fragment，按第 1 步骨架的册序拼接——顶部 `## 项目信息`（如有）
-   + 各册整段——**覆盖写** `out/outline/tender-response-docs.md`；
+   + 各册整段——**覆盖写** `work/outline/tender-response-docs.md`；
 2. 跨册去重互查（generate.md 规则 8 的合并版）：同一实质内容只保留一个目录节点；
    确属多册必须同时出现的（如资格册与技术册都要交的身份证明类材料），在各自 scope
    注明边界；发现问题就地修订后重新覆盖写；
@@ -121,8 +121,11 @@ analysis 产物里已有的 MAND/TPL/REQ/SCORE 编号，**不要自己发明编�
 - `悬空来源ID` → 按提示修正（多为编号拼写或清单行序漂移）后**重新组装**；
 - `不符合列表格式的行` / `未挂到任何目录节点` 警告 → 目录树有行被跳过或标注
   标题与树对不上（丢节点），按提示修正后**重新组装**；
-- `[组装发布成功]` → `update_task_progress` 更新进度，提醒用户**确认转正**
-  （转正后目录进入任务正式稿，tender-body 才能开工）。
+- `未被任何目录节点引用的来源ID` → 逐条判断：能归位的修订目录**重新组装**；
+  确属无需对应章节的（如扣分项、后续轮次才出现的最终报价表）**必须在最终回复
+  点名列出**并各给一句处置建议，不得只字不提；
+- `[组装发布成功]` → `update_task_progress` 更新进度，提醒用户**确认为正式成果**
+  （确认后目录成为正式成果，tender-body 才能开工）。
 
 ## 树格式红线（assemble 的解析协议）
 
@@ -149,7 +152,7 @@ analysis 产物里已有的 MAND/TPL/REQ/SCORE 编号，**不要自己发明编�
 ## 注意事项
 
 - 需要回招标原文核实时（如走查删「无需装订」条目前），同样遵守导航纪律：
-  **优先读主文件**的 `out/parse/<文件名>/<文件名>.outline.json` 按行号取区段，禁止整读全文。
-- 待澄清项：`out/analysis/clarifications.md` 里影响目录的未裁决项，在相关节点的
+  **优先读主文件**的 `work/parse/<文件名>/<文件名>.outline.json` 按行号取区段，禁止整读全文。
+- 待澄清项：`work/analysis/clarifications.md` 里影响目录的未裁决项，在相关节点的
   `## 目录说明` 概述里加「⚠待澄清：…」标记；不阻塞流程。
 - 全流程产物严禁用代码块包裹。

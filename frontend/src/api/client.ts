@@ -257,6 +257,8 @@ export interface ModelBody {
   base_url?: string
   model?: string
   image_support?: boolean
+  /** 上下文窗口（token；不传=未知/自动，仅压缩触发档位用） */
+  context_window?: number
 }
 
 /** 后台任务角色（空串=跟随缺省：抽取回默认模型，视觉走自动解析）。 */
@@ -330,7 +332,7 @@ export function deleteFile(name: string, taskId: string): Promise<{ ok: boolean 
   })
 }
 
-/** 列产物：可按任务（正式稿）或会话（过程稿）过滤，无参 = 全部。 */
+/** 列产物：可按任务（全部）或会话（provenance 来源）过滤，无参 = 全部。 */
 export function listArtifacts(scope?: { task_id?: string; conversation_id?: string }): Promise<{
   artifacts: Artifact[]
 }> {
@@ -341,13 +343,19 @@ export function listArtifacts(scope?: { task_id?: string; conversation_id?: stri
   return request(`/artifacts${qs ? `?${qs}` : ''}`)
 }
 
-/** 过程稿转正到任务正式稿（用户点头的那一下）：复制不移动，正式稿覆盖留恢复点。
- *  带用户确认时所见的内容版本号——后端不符返回 409（内容已被更新，请查看最新版后再转正）。 */
-export function promoteArtifact(id: string, sourceContentSeq?: number): Promise<{ ok: boolean; artifact: Artifact }> {
-  return request(`/artifacts/${id}/promote`, {
+/** 确认盖戳（草稿 → 已确认）：原地、可撤销。
+ *  带用户确认时所见的内容版本号——后端不符返回 409（内容已被更新，请查看最新版后再确认）。
+ *  artifact 并发删除竞态（删任务）下为 null——动作本身已成功。 */
+export function confirmArtifact(id: string, sourceContentSeq?: number): Promise<{ ok: boolean; artifact: Artifact | null }> {
+  return request(`/artifacts/${id}/confirm`, {
     method: 'POST',
     body: JSON.stringify({ source_content_seq: sourceContentSeq ?? null }),
   })
+}
+
+/** 撤销确认（已确认 → 草稿）。 */
+export function unconfirmArtifact(id: string): Promise<{ ok: boolean; artifact: Artifact | null }> {
+  return request(`/artifacts/${id}/unconfirm`, { method: 'POST', body: '{}' })
 }
 
 export function listContracts(): Promise<{ contracts: ArtifactContract[] }> {
@@ -492,10 +500,10 @@ export async function fetchKbItemRaw(id: string): Promise<string> {
   return URL.createObjectURL(blob)
 }
 
-// ---- 任务工作台（out/）：任务级共享的过程产物（parse/analysis/outline 的 md）----
+// ---- 任务工作台（work/）：任务级共享的过程产物（parse/analysis/outline 的 md）----
 
 export interface WorkbenchFile {
-  path: string // 相对 out/ 的 posix 路径，如 "analysis/disqualification.md"
+  path: string // 相对 work/ 的 posix 路径，如 "analysis/disqualification.md"
   mtime: string
   size: number
   /** 首行头部注释含「修订=用户」：人工改过，模型重跑前会提示 */

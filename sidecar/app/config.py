@@ -38,6 +38,10 @@ class ModelProfile:
     base_url: str
     model: str
     image_support: bool = False
+    # 上下文窗口（token，设置→模型→高级选项；None=未知）。进 agent 的 model.profile
+    # 供 SummarizationMiddleware 按窗口比例触发压缩；langchain_deepseek 注册表自带的
+    # 模型（deepseek 系）无需配置即已有窗口值，此处主要用于第三方/网关自定义模型名。
+    context_window: int | None = None
 
 
 def _builtin_default_profile() -> ModelProfile:
@@ -194,9 +198,17 @@ def model_profiles() -> list[ModelProfile]:
                 base_url=str(item.get("base_url") or ""),
                 model=str(item.get("model") or ""),
                 image_support=bool(item.get("image_support")),
+                context_window=_clean_context_window(item.get("context_window")),
             )
         )
     return _apply_env_override(out) if out else [_builtin_default_profile()]
+
+
+def _clean_context_window(value: object) -> int | None:
+    """存档里的 context_window 只认正整数，其余（bool/浮点/负数/乱值）一律视为未知。"""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 def _apply_env_override(profiles: list[ModelProfile]) -> list[ModelProfile]:

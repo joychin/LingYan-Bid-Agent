@@ -5,6 +5,7 @@ import { MessageAction, MessageActions, useCopyToClipboard } from '@/components/
 import { MemoMarkdown, markdownComponents } from '@/components/ai/MemoMarkdown'
 import { NarrationLine } from '@/components/ai/RunTrace'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai/Reasoning'
+import { RunFiles } from '@/components/ai/RunFiles'
 import { RunTrace } from '@/components/ai/RunTrace'
 import { TextShimmer } from '@/components/ai/TextShimmer'
 import { Message as WMessage } from '@/components/workspace/Message'
@@ -130,17 +131,22 @@ export function AssistantMessage({
   tools,
   todos,
   reasoning,
+  files,
   attach,
   pauseNarration,
   pauseMarker,
+  onOpenWorkbench,
 }: {
   content: string
   tools?: Message['tools']
   todos?: Message['todos']
   reasoning?: string | null
+  files?: Message['files']
   attach?: boolean
   pauseNarration?: string
   pauseMarker?: PauseMarker
+  /** 「本轮文件」chip -> 工作台面板编辑 */
+  onOpenWorkbench?: (path: string) => void
 }) {
   const done = tools?.filter((t) => t.status !== 'running').length ?? 0
   const { body, marker } = splitMarker(content)
@@ -164,10 +170,12 @@ export function AssistantMessage({
           <ReasoningContent contentClassName="mt-2 space-y-2">
             {isMarked && body.trim() && <NarrationLine text={body} />}
             {pauseNarration?.trim() && <NarrationLine text={pauseNarration} />}
-            {reasoning?.trim() && <DeepThinking text={reasoning} />}
             {tools && tools.length > 0 && (
               <RunTrace tools={tools} todos={todos ?? []} done={done} total={tools.length} />
             )}
+            {/* 历史思考块：新数据=最终回复前的未封口段（逐段思考已沉入步骤行），
+                旧 trace 快照=整段累积（位置移到步骤区之后，内容不丢） */}
+            {reasoning?.trim() && <DeepThinking text={reasoning} />}
             {chipMarker && <div className="turn-chip">{MARKER_CHIP[chipMarker]}</div>}
           </ReasoningContent>
         </Reasoning>
@@ -177,6 +185,7 @@ export function AssistantMessage({
           <MemoMarkdown text={body} components={markdownComponents} />
         </div>
       )}
+      <RunFiles files={files} onOpen={onOpenWorkbench} />
       {content.trim() && (
         <HoverActions>
           <CopyAction content={body} align="start" />
@@ -192,11 +201,13 @@ export const ChatMessage = memo(
     attach = false,
     pauseNarration,
     pauseMarker,
+    onOpenWorkbench,
   }: {
     message: Message
     attach?: boolean
     pauseNarration?: string
     pauseMarker?: PauseMarker
+    onOpenWorkbench?: (path: string) => void
   }) {
     return message.role === 'user' ? (
       <UserBubble content={message.content} />
@@ -206,18 +217,21 @@ export const ChatMessage = memo(
         tools={message.tools}
         todos={message.todos}
         reasoning={message.reasoning}
+        files={message.files}
         attach={attach}
         pauseNarration={pauseNarration}
         pauseMarker={pauseMarker}
+        onOpenWorkbench={onOpenWorkbench}
       />
     )
   },
   // 白名单比较器：流式 token 期间 messages 引用稳定（react-query structural sharing）
-  // → 历史消息全部跳过重渲染（含各自的 ReactMarkdown 重解析）。新增 prop 必须同步进
+  // -> 历史消息全部跳过重渲染（含各自的 ReactMarkdown 重解析）。新增 prop 必须同步进
   // 比较器，否则新属性不更新 UI。
   (prev, next) =>
     prev.message === next.message &&
     prev.attach === next.attach &&
     prev.pauseNarration === next.pauseNarration &&
-    prev.pauseMarker === next.pauseMarker,
+    prev.pauseMarker === next.pauseMarker &&
+    prev.onOpenWorkbench === next.onOpenWorkbench,
 )

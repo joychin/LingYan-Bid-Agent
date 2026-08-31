@@ -1,4 +1,4 @@
-"""P4 任务层：任务 CRUD、双作用域发布、doc.note 收拢、转正、进度便签、任务上下文注入。"""
+"""P4 任务层：任务 CRUD、任务归属发布、doc.note 收拢、确认、进度便签、任务上下文注入。"""
 
 import json
 
@@ -70,19 +70,15 @@ def test_conversation_requires_task(client):
 
 
 def test_task_creation_prebuilds_skeleton_dirs(client):
-    """新建任务预建 files/out/drafts：agent 开工第一步的 ls 不再 path_not_found。"""
+    """新建任务预建 sources/work：agent 开工第一步的 ls 不再 path_not_found。"""
     body = create_task(client, "骨架目录任务")
     tid = body["task"]["id"]
-    assert artifact_store.task_files_dir(tid).is_dir()
-    assert artifact_store.task_out_dir(tid).is_dir()
-    assert artifact_store.task_drafts_dir(tid).is_dir()
-    # threads/ 仍按需创建（按会话粒度）
-    assert not (artifact_store.task_dir(tid) / "threads").exists()
+    assert artifact_store.sources_dir(tid).is_dir()
+    assert artifact_store.work_dir(tid).is_dir()
 
 
 def test_skeleton_self_heal_for_legacy_task(client):
-    """骨架预建（2026-08-29）之前创建的旧任务只有库行、没有磁盘目录——run 启动自愈
-    （run_stream 的 ensure_task_skeleton）补齐后，模型 ls 任务根目录不再 path_not_found。"""
+    """骨架预建之前的旧任务只有库行、没有磁盘目录——run 启动自愈补齐后不再 path_not_found。"""
     import shutil
 
     body = create_task(client, "自愈任务")
@@ -91,50 +87,44 @@ def test_skeleton_self_heal_for_legacy_task(client):
     assert not artifact_store.task_dir(tid).exists()
     # run 启动时的同一入口（幂等 mkdir parents）
     artifact_store.ensure_task_skeleton(tid)
-    assert artifact_store.task_files_dir(tid).is_dir()
-    assert artifact_store.task_out_dir(tid).is_dir()
-    assert artifact_store.task_drafts_dir(tid).is_dir()
+    assert artifact_store.sources_dir(tid).is_dir()
+    assert artifact_store.work_dir(tid).is_dir()
 
 
-# ---------- 双作用域发布与过滤 ----------
+# ---------- 任务归属发布与过滤 ----------
 
 
-def test_scoped_publish_and_filtering(env):
+def test_task_scoped_publish_and_filtering(env):
     task, conv = _task_env(env)
     m = publish.publish_artifact(
         DIR_KEY, _dir_content(), source={"skill": "t", "thread_id": conv["id"], "run_id": "r1"},
-        conversation_id=conv["id"], propose_promotion=True,
+        task_id=task["id"], conversation_id=conv["id"],
     )
-    # §16：conversation 作用域的 task_id 恒为所属任务（包位置派生依据）
+    # 文件归任务：task_id 恒为所属任务；conversation_id 是 provenance
     assert m["conversation_id"] == conv["id"]
     assert m["task_id"] == task["id"]
 
     row = db.get_artifact_index(m["artifact_id"])
     assert row["conversation_id"] == conv["id"]
     assert row["task_id"] == task["id"]
-    assert row["promotion_proposed"] == 1
+    assert row["state"] == "draft"
 
-    # 过滤：会话作用域可见；任务（正式稿）过滤不含过程稿行
+    # 过滤：任务归属可见全部；按会话（provenance）过滤亦命中
+    assert len(db.list_artifact_index(task_id=task["id"])) == 1
     assert len(db.list_artifact_index(conversation_id=conv["id"])) == 1
-    assert db.list_artifact_index(task_id=task["id"]) == []
 
 
-def test_conversation_scope_task_single_is_per_conversation(env):
-    """task-single 在会话作用域内按会话唯一：两个会话各有一份自己的过程稿。"""
+def test_task_single_is_unique_per_task(env):
+    """task-single 在任务内唯一：两个会话发布同契约 → 同一份产物（后写覆盖）。"""
     task = db.create_task("t")
     c1, c2 = db.create_conversation(task["id"], "a"), db.create_conversation(task["id"], "b")
-    m1 = publish.publish_artifact(DIR_KEY, _dir_content("A"), conversation_id=c1["id"])
-    m2 = publish.publish_artifact(DIR_KEY, _dir_content("B"), conversation_id=c2["id"])
-    assert m1["artifact_id"] != m2["artifact_id"]
+    m1 = publish.publish_artifact(DIR_KEY, _dir_content("A"), task_id=task["id"], conversation_id=c1["id"])
+    m2 = publish.publish_artifact(DIR_KEY, _dir_content("B"), task_id=task["id"], conversation_id=c2["id"])
+    assert m1["artifact_id"] == m2["artifact_id"]
 
     # 同会话重发布 → 覆盖同 id
-    m1b = publish.publish_artifact(DIR_KEY, _dir_content("A2"), conversation_id=c1["id"])
+    m1b = publish.publish_artifact(DIR_KEY, _dir_content("A2"), task_id=task["id"], conversation_id=c1["id"])
     assert m1b["artifact_id"] == m1["artifact_id"]
-
-
-def test_scope_mutex(env):
-    with pytest.raises(publish.PublishError, match="互斥"):
-        publish.publish_artifact(DIR_KEY, _dir_content(), task_id="t_1", conversation_id="c_1")
 
 
 # ---------- doc.note 收拢 ----------
@@ -151,7 +141,7 @@ def test_publish_tool_funnels_unknown_contract_to_note(env):
     task, conv = _task_env(env)
     runctx.set_run(conv["id"], "r9", task["id"])
     try:
-        draft = artifact_store.task_drafts_dir(task["id"]) / "analysis.json"
+        draft = artifact_store.staging_dir(task["id"]) / "analysis.json"
         draft.parent.mkdir(parents=True, exist_ok=True)
         draft.write_text(
             json.dumps({"title": "废标项分析", "body_md": "- 投标保证金 3%"}, ensure_ascii=False),
@@ -159,22 +149,23 @@ def test_publish_tool_funnels_unknown_contract_to_note(env):
         )
         out = publish_tool.invoke(
             {"contract": "tender.disqualify/analysis@1", "draft_path": str(draft),
-             "display_name": "废标项分析", "propose_promotion": True}
+             "display_name": "废标项分析"}
         )
         assert out.startswith("[发布成功]")
         assert "未注册类型，已按通用笔记保存" in out
-        assert "建议转正" in out
 
-        rows = db.list_artifact_index(conversation_id=conv["id"])
+        rows = db.list_artifact_index(task_id=task["id"])
         assert len(rows) == 1 and rows[0]["kind"] == "doc.note"
-        assert rows[0]["promotion_proposed"] == 1
+        assert rows[0]["state"] == "draft"
+        # 暂存草稿被移动消费，不留残骸
+        assert not draft.exists()
     finally:
         runctx.clear_run()
 
 
 def test_publish_tool_rejects_non_document_unknown_contract(env):
     task, conv = _task_env(env)
-    draft = artifact_store.task_drafts_dir(task["id"]) / "bad.json"
+    draft = artifact_store.staging_dir(task["id"]) / "bad.json"
     draft.parent.mkdir(parents=True, exist_ok=True)
     draft.write_text(json.dumps({"foo": 1}), encoding="utf-8")
     runctx.set_run(conv["id"], "r9", task["id"])
@@ -186,21 +177,22 @@ def test_publish_tool_rejects_non_document_unknown_contract(env):
     assert "笔记" in out
 
 
-# ---------- read 作用域 ----------
+# ---------- read 语义 ----------
 
 
-def test_read_prefers_formal_then_draft(env):
+def test_read_returns_single_current(env):
     task, conv = _task_env(env)
     runctx.set_run(conv["id"], "r1", task["id"])
     try:
-        # 只有过程稿：读过程稿
-        publish.publish_artifact(DIR_KEY, _dir_content("草稿"), conversation_id=conv["id"])
-        assert "草稿" in read_tool.invoke({"contract": DIR_KEY})
-
-        # 出现正式稿：优先读正式稿
-        publish.publish_artifact(DIR_KEY, _dir_content("正式"), task_id=task["id"])
+        publish.publish_artifact(DIR_KEY, _dir_content("草稿"), task_id=task["id"])
         out = read_tool.invoke({"contract": DIR_KEY})
-        assert "正式" in out and "[来源：任务正式稿]" in out
+        assert "草稿" in out and "[来源：草稿]" in out
+
+        # 确认后仍读同一份（单一真源），来源标「已确认」
+        row = db.find_artifact_index("tender.directory", "tender-response-docs", 1, task_id=task["id"])
+        db.set_artifact_state(row["artifact_id"], "confirmed")
+        out = read_tool.invoke({"contract": DIR_KEY})
+        assert "草稿" in out and "[来源：已确认]" in out
     finally:
         runctx.clear_run()
 
@@ -209,128 +201,92 @@ def test_read_multi_note_requires_artifact_id(env):
     task, conv = _task_env(env)
     runctx.set_run(conv["id"], "r1", task["id"])
     try:
-        publish.publish_artifact(NOTE_KEY, {"title": "a", "body_md": "甲"}, conversation_id=conv["id"])
+        publish.publish_artifact(NOTE_KEY, {"title": "a", "body_md": "甲"}, task_id=task["id"])
         out = read_tool.invoke({"contract": NOTE_KEY})
         assert out.startswith("[无成果]") or "甲" in out  # 单份直接给内容
 
-        publish.publish_artifact(NOTE_KEY, {"title": "b", "body_md": "乙"}, conversation_id=conv["id"])
+        publish.publish_artifact(NOTE_KEY, {"title": "b", "body_md": "乙"}, task_id=task["id"])
         out = read_tool.invoke({"contract": NOTE_KEY})
         assert out.startswith("[多份成果]")
 
-        rows = db.list_artifact_index(conversation_id=conv["id"])
+        rows = db.list_artifact_index(task_id=task["id"])
         out = read_tool.invoke({"contract": NOTE_KEY, "artifact_id": rows[0]["artifact_id"]})
         assert ("甲" in out) or ("乙" in out)
     finally:
         runctx.clear_run()
 
 
-# ---------- 转正 ----------
+# ---------- 确认 ----------
 
 
-def test_promote_copies_draft_to_formal(env):
+def test_confirm_stamps_in_place(env):
+    """确认 = 原地盖戳（不复制不搬家）：同一 artifact_id，state 草稿→已确认。"""
     task, conv = _task_env(env)
     m = publish.publish_artifact(
-        DIR_KEY, _dir_content("初稿"), conversation_id=conv["id"], propose_promotion=True
+        DIR_KEY, _dir_content("初稿"), task_id=task["id"], conversation_id=conv["id"]
     )
     aid = m["artifact_id"]
 
-    # 转正 = 发布到任务作用域的复制件（首次：新 manifest 记 derived_from 谱系）
-    promoted = publish.publish_artifact(
-        DIR_KEY, _dir_content("初稿"), display_name="投标目录",
-        source={"skill": "promote", "thread_id": conv["id"]},
-        task_id=task["id"], derived_from=aid,
-    )
-    assert promoted["derived_from"] == aid
-    assert promoted["task_id"] == task["id"]
-    assert promoted["conversation_id"] is None
-    assert json.loads(
-        artifact_store.read_content(promoted["artifact_id"], promoted)
-    )["response_documents"][0]["name"] == "初稿"
-    # 正式稿包落在 formal/ 下（§16）
-    assert artifact_store.artifact_dir(promoted["artifact_id"], promoted) == (
-        artifact_store.formal_dir(task["id"]) / promoted["artifact_id"]
-    )
+    meta = artifact_store.read_meta(aid, m)
+    meta["state"] = "confirmed"
+    meta["confirmed_at"] = "2026-08-31T00:00:00+00:00"
+    artifact_store.write_meta(meta)
+    db.set_artifact_state(aid, "confirmed")
 
-    # 过程稿原件仍在，且内容未动
-    assert artifact_store.package_ready(aid, m)
-    assert json.loads(artifact_store.read_content(aid, m))["response_documents"][0]["name"] == "初稿"
-
-    # 第二次转正（task-single 覆盖）：复用稳定 id，旧正式稿留恢复点
-    first_formal_aid = promoted["artifact_id"]
-    again = publish.publish_artifact(
-        DIR_KEY, _dir_content("二稿"), task_id=task["id"], derived_from=aid,
-    )
-    assert again["artifact_id"] == first_formal_aid
-    rp = artifact_store.latest_restore_point(first_formal_aid, promoted)
-    assert json.loads(rp.read_text(encoding="utf-8"))["response_documents"][0]["name"] == "初稿"
+    row = db.get_artifact_index(aid)
+    assert row["state"] == "confirmed"
+    # 仍是同一份产物、同一份内容（没有 formal 副本）
+    assert db.list_artifact_index(task_id=task["id"]) == [row]
+    assert json.loads(artifact_store.read_content(aid, row))["response_documents"][0]["name"] == "初稿"
 
 
-def test_promote_endpoint_flow(client):
+def test_confirm_endpoint_flow(client):
     conv = create_conversation(client)
     tid, cid = conv["task_id"], conv["id"]
     m = publish.publish_artifact(
-        DIR_KEY, _dir_content("待转正"), conversation_id=cid, propose_promotion=True
+        DIR_KEY, _dir_content("待确认"), task_id=tid, conversation_id=cid
     )
-    r = client.post(f"/api/artifacts/{m['artifact_id']}/promote")
+    r = client.post(f"/api/artifacts/{m['artifact_id']}/confirm")
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
-    formal = body["artifact"]
-    assert formal["scope"] == "task"
-    assert formal["task_id"] == tid
-    assert formal["promotion_proposed"] is False
+    assert body["artifact"]["state"] == "confirmed"
+    assert body["artifact"]["task_id"] == tid
 
-    # 来源过程稿：仍在、建议标记已清
-    row = db.get_artifact_index(m["artifact_id"])
-    assert row["conversation_id"] == cid
-    assert row["promotion_proposed"] == 0
+    # 列表过滤：任务归属返回该产物，state=confirmed
+    arts = client.get("/api/artifacts", params={"task_id": tid}).json()["artifacts"]
+    assert arts[0]["artifact_id"] == m["artifact_id"]
+    assert arts[0]["state"] == "confirmed"
 
-    # 列表过滤
-    assert client.get("/api/artifacts", params={"task_id": tid}).json()["artifacts"][0]["artifact_id"] == formal["artifact_id"]
-    drafts = client.get("/api/artifacts", params={"conversation_id": cid}).json()["artifacts"]
-    assert [a["artifact_id"] for a in drafts] == [m["artifact_id"]]
+    # 撤销确认
+    r = client.post(f"/api/artifacts/{m['artifact_id']}/unconfirm")
+    assert r.status_code == 200
+    assert r.json()["artifact"]["state"] == "draft"
 
-    # 非过程稿转正 422
-    assert client.post(f"/api/artifacts/{formal['artifact_id']}/promote").status_code == 422
+    # 不存在产物确认 404
+    assert client.post("/api/artifacts/art_0000000000ff/confirm").status_code == 404
 
 
-def test_promote_version_binding(client):
-    """promote 版本绑定：source_content_seq 不符 409（用户确认的是他看到的那份内容），
-    一致则成功且新正式稿 manifest 记 derived_from_seq。"""
+def test_confirm_version_binding(client):
+    """confirm 版本绑定：source_content_seq 不符 409（用户确认的是他看到的那份内容）。"""
     conv = create_conversation(client)
     tid, cid = conv["task_id"], conv["id"]
-    m = publish.publish_artifact(DIR_KEY, _dir_content("v1"), conversation_id=cid)
+    m = publish.publish_artifact(DIR_KEY, _dir_content("v1"), task_id=tid, conversation_id=cid)
     aid = m["artifact_id"]
     seq1 = db.get_artifact_index(aid)["content_seq"]
 
     # 旧版本号 → 409（内容在用户查看后被更新过）
-    r = client.post(f"/api/artifacts/{aid}/promote", json={"source_content_seq": seq1 + 5})
+    r = client.post(f"/api/artifacts/{aid}/confirm", json={"source_content_seq": seq1 + 5})
     assert r.status_code == 409
     assert "已被更新" in r.json()["detail"]
-    # 409 后未产生正式稿
-    assert client.get("/api/artifacts", params={"task_id": tid}).json()["artifacts"] == []
+    # 409 后仍未确认
+    assert db.get_artifact_index(aid)["state"] == "draft"
 
-    # 同会话重发布覆盖过程稿（seq+1）后，旧 seq 依然 409
-    publish.publish_artifact(DIR_KEY, _dir_content("v2"), conversation_id=cid)
-    assert client.post(
-        f"/api/artifacts/{aid}/promote", json={"source_content_seq": seq1}
-    ).status_code == 409
-
-    # 当前版本号一致 → 成功，manifest 记 derived_from_seq = 转正时的来源版本
+    # 当前版本号一致 → 成功
     cur_seq = db.get_artifact_index(aid)["content_seq"]
-    r = client.post(f"/api/artifacts/{aid}/promote", json={"source_content_seq": cur_seq})
+    r = client.post(f"/api/artifacts/{aid}/confirm", json={"source_content_seq": cur_seq})
     assert r.status_code == 200
-    formal_row = db.get_artifact_index(r.json()["artifact"]["artifact_id"])
-    manifest = artifact_store.read_manifest(formal_row["artifact_id"], formal_row)
-    assert manifest["derived_from"] == aid
-    assert manifest["derived_from_seq"] == cur_seq
-
-    # 转正后再改过程稿：已转正内容不受影响（复制品语义）
-    publish.publish_artifact(DIR_KEY, _dir_content("v3"), conversation_id=cid)
-    formal = client.get("/api/artifacts", params={"task_id": tid}).json()["artifacts"][0]
-    assert json.loads(
-        artifact_store.read_content(formal["artifact_id"], formal)
-    )["response_documents"][0]["name"] == "v2"
+    assert db.get_artifact_index(aid)["state"] == "confirmed"
 
 
 # ---------- 进度便签工具 ----------
@@ -353,34 +309,33 @@ def test_update_task_progress_tool(env):
 # ---------- 任务上下文注入块 ----------
 
 
-def test_task_context_block_lists_both_layers(env):
+def test_task_context_block_lists_artifacts_with_state(env):
     from app.agent import _task_context_block
 
     task, conv = _task_env(env)
     db.update_task_progress(task["id"], "- 废标项 已完成")
     publish.publish_artifact(DIR_KEY, _dir_content(), task_id=task["id"])
     publish.publish_artifact(
-        NOTE_KEY, {"title": "草稿笔记", "body_md": "x"}, display_name="草稿笔记", conversation_id=conv["id"]
+        NOTE_KEY, {"title": "草稿笔记", "body_md": "x"}, display_name="草稿笔记", task_id=task["id"]
     )
 
     block = _task_context_block(task["id"], conv["id"])
     assert task["title"] in block
-    assert "任务工作目录" in block and task["id"] in block  # §16 路径前缀注入
+    assert "任务工作目录" in block and task["id"] in block  # 路径前缀注入
     assert "废标项 已完成" in block
-    assert "任务正式稿" in block and "投标目录" in block
-    assert "本会话过程稿" in block and "草稿笔记" in block
+    assert "任务产物" in block and "投标目录" in block
+    assert "草稿笔记" in block
 
     assert _task_context_block("t_nope", conv["id"]) == ""
 
 
 def test_delete_task_archival_failure_keeps_task(client, monkeypatch):
-    """归档（mv）失败必须中止且不删库：任务/索引/磁盘目录原样保留，用户可重试——
-    否则任务在产品内消失而目录残留原位，正式稿只能手工找回。"""
+    """归档（mv）失败必须中止且不删库：任务/索引/磁盘目录原样保留，用户可重试。"""
     from tests.util import upload_file
 
     conv = create_conversation(client, title="会话B")
     tid, cid = conv["task_id"], conv["id"]
-    m_formal = publish.publish_artifact(DIR_KEY, _dir_content(), task_id=tid)
+    m = publish.publish_artifact(DIR_KEY, _dir_content(), task_id=tid)
     upload_file(client, tid, "招标文件.docx", b"doc")
 
     real_move = artifact_store.shutil.move
@@ -399,7 +354,7 @@ def test_delete_task_archival_failure_keeps_task(client, monkeypatch):
     # 现场完整保留
     assert db.get_task(tid) is not None
     assert db.get_conversation(cid) is not None
-    assert db.get_artifact_index(m_formal["artifact_id"]) is not None
+    assert db.get_artifact_index(m["artifact_id"]) is not None
     assert artifact_store.task_dir(tid).is_dir()
     assert artifact_store.archive_task_dir(tid).exists() is False
 
@@ -411,30 +366,43 @@ def test_delete_task_archival_failure_keeps_task(client, monkeypatch):
     assert artifact_store.task_dir(tid).exists() is False
 
 
-# ---------- 删任务归档 ----------
+# ---------- 删任务归档 / 删会话保留文件 ----------
 
 
-def test_delete_task_archives_formal_and_removes_conversations(client):
+def test_delete_task_archives_whole_dir(client):
     from tests.util import upload_file
 
     conv = create_conversation(client, title="会话A")
     tid, cid = conv["task_id"], conv["id"]
-    m_formal = publish.publish_artifact(DIR_KEY, _dir_content(), task_id=tid)
-    m_draft = publish.publish_artifact(NOTE_KEY, {"title": "n", "body_md": "b"}, conversation_id=cid)
+    m = publish.publish_artifact(DIR_KEY, _dir_content(), task_id=tid)
+    note = publish.publish_artifact(NOTE_KEY, {"title": "n", "body_md": "b"}, task_id=tid, conversation_id=cid)
     upload_file(client, tid, "招标文件.docx", b"doc")
 
     assert client.delete(f"/api/tasks/{tid}").status_code == 200
     # 会话没了
     assert db.get_conversation(cid) is None
     assert db.get_task(tid) is None
-    # §16 整目录软归档：正式稿/上传文件都在 archive/<task_id>/ 下，可手工找回
-    assert db.get_artifact_index(m_formal["artifact_id"]) is None
+    # 整目录软归档：产物/来源都在 archive/<task_id>/ 下，可手工找回
+    assert db.get_artifact_index(m["artifact_id"]) is None
     archived = artifact_store.archive_task_dir(tid)
-    assert (archived / "formal" / m_formal["artifact_id"] / "manifest.json").is_file()
-    assert (archived / "files" / "招标文件.docx").is_file()
-    assert not artifact_store.package_ready(m_formal["artifact_id"], m_formal)
+    assert (archived / "work" / "artifacts" / m["artifact_id"] / "meta.json").is_file()
+    assert (archived / "sources" / "招标文件.docx").is_file()
+    assert not artifact_store.package_ready(m["artifact_id"], m)
     assert not artifact_store.task_dir(tid).exists()  # 原位目录已整体移走
-    # 过程稿硬删（threads/ 先清，不进归档）
-    assert "threads" not in [p.name for p in archived.iterdir()]
-    assert not artifact_store.package_ready(m_draft["artifact_id"], m_draft)
-    assert db.get_artifact_index(m_draft["artifact_id"]) is None
+    # 文件归任务：产物统一在 work/artifacts/ 下，随归档保留
+    assert (archived / "work" / "artifacts" / note["artifact_id"] / "meta.json").is_file()
+    assert db.get_artifact_index(note["artifact_id"]) is None
+
+
+def test_delete_conversation_keeps_task_files(client):
+    """文件归任务：删会话只删转录，任务文件树（产物）保留。"""
+    conv = create_conversation(client, title="要删的会话")
+    tid, cid = conv["task_id"], conv["id"]
+    m = publish.publish_artifact(DIR_KEY, _dir_content(), task_id=tid, conversation_id=cid)
+
+    assert client.delete(f"/api/conversations/{cid}").status_code == 200
+    assert db.get_conversation(cid) is None
+    # 产物保留（文件归任务）
+    row = db.get_artifact_index(m["artifact_id"])
+    assert row is not None
+    assert artifact_store.package_ready(m["artifact_id"], row)

@@ -1,6 +1,6 @@
 # 清理①：查漏补缺（STEP3，原则从老流水线逐字保留）
 
-基于 `out/analysis/requirements-business.md` 的 **REQ 需求清单**，对当前目录做查漏补缺：
+基于 `work/analysis/requirements-business.md` 的 **REQ 需求清单**，对当前目录做查漏补缺：
 检查目录是否遗漏了需求清单里明确提出的、必须响应的内容，把缺失的章节补上。
 
 **跳过条件**：requirements-business.md 无 REQ 条目（此时向用户声明后跳过本道）。

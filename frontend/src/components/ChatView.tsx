@@ -60,12 +60,15 @@ function loadModelMap(): Record<string, string> {
 export function ChatView({
   convId,
   onOpenArtifact,
+  onOpenWorkbench,
   initialSend,
   onRequestCreate,
   onOpenSettings,
 }: {
   convId: string | null
   onOpenArtifact: (id: string) => void
+  /** 「本轮文件」chip -> 打开工作台面板编辑该文件（path 相对 <task>/work/） */
+  onOpenWorkbench: (path: string) => void
   initialSend: string | null
   /** 首发消息：无会话时由 App 在所选任务下建会话并转发文本（P4：会话必须归属任务） */
   onRequestCreate: (text: string, taskId: string) => void
@@ -432,6 +435,7 @@ export function ChatView({
                 messages={messages}
                 convArtifacts={convArtifacts}
                 onOpenArtifact={onOpenArtifact}
+                onOpenWorkbench={onOpenWorkbench}
                 hiddenPauseRunId={liveRunId}
               />
               {(running || interrupt) && (
@@ -638,8 +642,10 @@ function RunMessage({
           </ReasoningTrigger>
           <ReasoningContent contentClassName="mt-2 space-y-2">
             {pauseNarration.trim() && <NarrationLine text={pauseNarration} />}
-            {shownReasoning && <DeepThinking text={shownReasoning} isStreaming={running} autoFollow />}
             <RunTrace tools={tools} todos={todos} done={done} total={total} />
+            {/* 思考块 = 当前未封口段（历史思考已按 tool.called 封段沉入步骤行），
+                放步骤区之后保持时序：先看到已发生的工具流水，再看到正在增长的思考 */}
+            {shownReasoning && <DeepThinking text={shownReasoning} isStreaming={running} autoFollow />}
           </ReasoningContent>
         </Reasoning>
       )}
@@ -671,11 +677,14 @@ const MessageList = memo(function MessageList({
   messages,
   convArtifacts,
   onOpenArtifact,
+  onOpenWorkbench,
   hiddenPauseRunId,
 }: {
   messages: Message[]
   convArtifacts: Artifact[]
   onOpenArtifact: (id: string) => void
+  /** 「本轮文件」chip -> 工作台面板（引用须稳定：浅比较 memo） */
+  onOpenWorkbench: (path: string) => void
   /** 活卡存续的 run id（running 或等待输入）；null = 无活卡（终态），不隐藏任何消息 */
   hiddenPauseRunId?: string | null
 }) {
@@ -712,7 +721,7 @@ const MessageList = memo(function MessageList({
   for (const item of items) {
     if (item.kind === 'solo') {
       pushDay(item.m)
-      nodes.push(<ChatMessage key={item.m.id} message={item.m} />)
+      nodes.push(<ChatMessage key={item.m.id} message={item.m} onOpenWorkbench={onOpenWorkbench} />)
       continue
     }
     pushDay(item.items[0])
@@ -751,6 +760,7 @@ const MessageList = memo(function MessageList({
               attach={attach}
               pauseNarration={lifted?.narration.join('\n\n')}
               pauseMarker={lifted?.marker}
+              onOpenWorkbench={onOpenWorkbench}
             />
           )
         })}

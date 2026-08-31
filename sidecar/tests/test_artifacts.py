@@ -21,10 +21,10 @@ def _task_conv():
 
 
 def _pub(content, conv=None, **kw):
-    """发布到会话过程稿；不传 conv 时新建任务+会话（覆盖语义需要同一 conv）。"""
+    """发布到任务；不传 conv 时新建任务+会话（覆盖语义需要同一任务）。"""
     if conv is None:
         _, conv = _task_conv()
-    return publish.publish_artifact(KEY, content, conversation_id=conv["id"], **kw)
+    return publish.publish_artifact(KEY, content, task_id=conv["task_id"], conversation_id=conv["id"], **kw)
 
 
 def test_contracts_endpoint(client):
@@ -44,7 +44,7 @@ def test_contracts_endpoint(client):
 def test_artifacts_list_and_content(client):
     task, conv = _task_conv()
     m = publish.publish_artifact(
-        KEY, _content(), conversation_id=conv["id"],
+        KEY, _content(), task_id=task["id"], conversation_id=conv["id"],
         source={"skill": "demo-skill", "thread_id": conv["id"], "run_id": "r_1"},
     )
     aid = m["artifact_id"]
@@ -61,10 +61,10 @@ def test_artifacts_list_and_content(client):
     assert a["schema_version"] == 1
     assert a["editable"] is True
     assert a["source"] == {"thread_id": conv["id"], "run_id": "r_1"}
-    assert a["scope"] == "conversation"
-    # §16：过程稿包路径在 <task>/threads/<conv>/ 下
+    assert a["state"] == "draft"
+    # 文件归任务：包路径在 <task>/work/artifacts/ 下
     assert a["path"].endswith(
-        f"{task['id']}/threads/{conv['id']}/{aid}/current/content.json"
+        f"{task['id']}/work/artifacts/{aid}/content.json"
     )
 
     r = client.get(f"/api/artifacts/{aid}/content")

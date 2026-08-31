@@ -17,7 +17,6 @@ import { ProcessArtifact, TodoList, Spinner, ArtPulse } from '@/components/works
 import { Composer } from '@/components/workspace/Composer'
 import { ProductPanel } from '@/components/workspace/ProductPanel'
 import type { ArtifactRow } from '@/components/workspace/ProductPanel'
-import { ArtifactPanelNext, ArtifactPanelNextEmpty } from '@/components/workspace/ArtifactPanelNext'
 
 const QUICK_NAV: QuickNavItem[] = [
   { id: 'new', icon: <Plus />, label: '新建任务' },
@@ -54,9 +53,8 @@ const PRODUCT_ARTIFACTS: ArtifactRow[] = [
 
 export function PreviewPage() {
   const [sideCollapsed, setSideCollapsed] = useState(false)
-  // 预览页两个右面板各自演示开合：v2 面板受控折叠；v3 原型用卸载模拟收起
+  // 预览页右面板演示开合：v2 面板受控折叠
   const [productCollapsed, setProductCollapsed] = useState(false)
-  const [panelCollapsed, setPanelCollapsed] = useState(false)
 
   return (
     <div className="preview-page">
@@ -112,111 +110,6 @@ export function PreviewPage() {
             collapsed={productCollapsed}
             onToggle={() => setProductCollapsed((v) => !v)}
           />
-        </div>
-      </div>
-
-      {/* ---- 产物面板 v3 · 原型（2026-08-29 修订方案阶段 1） ---- */}
-      <div>
-        <div className="preview-title">产物面板 v3 · 原型</div>
-        <div className="preview-sub">
-          作用域分组列表（正式成果 / 本会话产物 / 任务工作台）· 行 = 主动作 + 状态标 ·
-          点产物行展开右侧工作区（替代居中模态）；转正走小模态确认。假数据 · 零 API。
-        </div>
-      </div>
-      <div className="shell">
-        <div className="app">
-          <Sidebar
-            quickNav={QUICK_NAV}
-            sections={SECTIONS}
-            selectedId="c1"
-            userName="陈卓"
-            collapsed={sideCollapsed}
-            onCollapse={() => setSideCollapsed((v) => !v)}
-            onNew={() => {}}
-          />
-          <main className="main">
-            <div className="chat-head">
-              {sideCollapsed && (
-                <button type="button" className="head-toggle" title="展开侧栏" onClick={() => setSideCollapsed(false)}>
-                  <PanelLeftOpen />
-                </button>
-              )}
-              <div className="chat-head-inner">
-                <span className="chat-head-task">XXX 标书</span>
-                <span className="chat-head-sep">/</span>
-                <span className="chat-head-title">生成投标目录</span>
-              </div>
-              {panelCollapsed && (
-                <button
-                  type="button"
-                  className="head-toggle"
-                  title="展开产物面板"
-                  onClick={() => setPanelCollapsed(false)}
-                >
-                  <PanelRightOpen />
-                </button>
-              )}
-            </div>
-            <div className="chat-scroll">
-              <div className="chat">{shellChat}</div>
-            </div>
-            <Composer />
-          </main>
-          {!panelCollapsed && <ArtifactPanelNext />}
-        </div>
-      </div>
-
-      {/* ---- 产物面板 v3 · 空态版 ---- */}
-      <div>
-        <div className="preview-title">产物面板 v3 · 空态</div>
-        <div className="preview-sub">空态 = 引导文案（何时会出现什么），不再是「暂无」黑话。</div>
-      </div>
-      <div className="shell" style={{ height: 420 }}>
-        <div className="app" style={{ gridTemplateColumns: 'auto 1fr', gridTemplateAreas: '"side main"' }}>
-          <Sidebar
-            quickNav={QUICK_NAV}
-            sections={SECTIONS}
-            selectedId="c1"
-            userName="陈卓"
-            collapsed={sideCollapsed}
-            onCollapse={() => setSideCollapsed((v) => !v)}
-            onNew={() => {}}
-          />
-          <main className="main">
-            <div className="chat-head">
-              {sideCollapsed && (
-                <button type="button" className="head-toggle" title="展开侧栏" onClick={() => setSideCollapsed(false)}>
-                  <PanelLeftOpen />
-                </button>
-              )}
-              <div className="chat-head-inner">
-                <span className="chat-head-task">新任务</span>
-                <span className="chat-head-sep">/</span>
-                <span className="chat-head-title">新对话</span>
-              </div>
-              {panelCollapsed && (
-                <button
-                  type="button"
-                  className="head-toggle"
-                  title="展开产物面板"
-                  onClick={() => setPanelCollapsed(false)}
-                >
-                  <PanelRightOpen />
-                </button>
-              )}
-            </div>
-            <div className="chat-scroll">
-              <div className="chat">
-                <Message role="user">这是个新任务，还没有任何产物。</Message>
-                <Message role="assistant" name="Hy3" status={<>已完成</>}>
-                  <div className="bubble">
-                    上传招标文件开始解析后，解析、分析产物会进入「任务工作台」；我生成的成果会先出现在「本会话产物」，经你确认后进入「任务正式成果」。
-                  </div>
-                </Message>
-              </div>
-            </div>
-          </main>
-          {!panelCollapsed && <ArtifactPanelNextEmpty />}
         </div>
       </div>
 

@@ -144,6 +144,52 @@ def test_run_traces_reasoning_column_migration(tmp_path, monkeypatch):
     assert old == ("",)
 
 
+def test_run_trace_files_roundtrip(db_env):
+    """run_traces.files：「本轮文件」diff 清单落库/回读（消息挂载与合并的数据源）。"""
+    tid = db.create_task("t")["id"]
+    cid = db.create_conversation(tid, "会话")["id"]
+    msg = db.append_assistant_message(cid, "回复正文")
+    files = [{"path": "analysis/structure.md", "op": "created"}, {"path": "outline/tender-response-docs.md", "op": "modified"}]
+    db.save_run_trace("r1", cid, msg["id"], [], [], 1200, files=files)
+    traces = db.get_traces_for_messages([msg["id"]])
+    assert traces[msg["id"]]["files"] == files
+    # 未传 files 的旧调用路径（默认值）落空清单，回读不抛
+    db.save_run_trace("r2", cid, None, [], [])
+    assert db.get_run_trace("r2")["files"] == []
+
+
+def test_run_traces_files_column_migration(tmp_path, monkeypatch):
+    """老库（files 列不存在）经编号迁移 15 补列，旧数据回读 files=[]。"""
+    import sqlite3
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    from app.config import app_db_path
+
+    app_db_path().parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(app_db_path()))
+    # 直接造「没有 files 列」的旧库（user_version=0）
+    conn.execute(
+        "CREATE TABLE run_traces(run_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,"
+        " message_id TEXT, tools TEXT NOT NULL, todos TEXT NOT NULL, duration_ms INTEGER,"
+        " reasoning TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO run_traces(run_id, conversation_id, message_id, tools, todos, duration_ms, reasoning, created_at)"
+        " VALUES ('r_old','c_old',NULL,'[]','[]',100,'','2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+    db.init_db()  # 启动迁移：补 files 列
+    conn = sqlite3.connect(str(app_db_path()))
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(run_traces)").fetchall()}
+    old = conn.execute("SELECT files FROM run_traces WHERE run_id='r_old'").fetchone()
+    conn.close()
+    assert "files" in cols
+    assert old == ("[]",)
+    # 旧行经读取函数回读为空清单（缺省容错）
+    assert db.get_run_trace("r_old")["files"] == []
+
+
 def test_set_title_if_default_respects_manual_rename(db_env):
     tid = db.create_task("t")["id"]
     cid = db.create_conversation(tid)["id"]
@@ -203,13 +249,13 @@ def test_delete_conversation_running_returns_409(client):
     assert client.get(f"/api/conversations/{cid}/messages").status_code == 200
 
 
-def test_delete_conversation_scoped_artifacts(client):
-    """删会话级联删其「过程稿」目录与索引行；任务「正式稿」不受影响。"""
+def test_delete_conversation_keeps_artifacts(client):
+    """文件归任务：删会话不动任务文件树——产物（含该会话发布的）全部保留。"""
     from app import artifact_store
 
     task = create_conversation(client)
     tid, cid = task["task_id"], task["id"]
-    draft_scope = {"task_id": tid, "conversation_id": cid}
+    scope = {"task_id": tid, "conversation_id": cid}
     m_draft = artifact_store.new_artifact_id()
     artifact_store.create_package(
         {"artifact_id": m_draft, "task_id": tid, "conversation_id": cid, "kind": "k", "schema": {}},
@@ -220,38 +266,36 @@ def test_delete_conversation_scoped_artifacts(client):
             "artifact_id": m_draft, "task_id": tid, "conversation_id": cid,
             "kind": "doc.note", "schema_id": "note-md", "schema_version": 1,
             "cardinality": "task-multi", "display_name": "笔记",
-            "content_path": str(artifact_store.content_path(m_draft, draft_scope)),
+            "content_path": str(artifact_store.content_path(m_draft, scope)),
             "content_seq": 1, "updated_at": "2026-08-25T00:00:00+00:00",
         }
     )
-    m_formal = artifact_store.new_artifact_id()
-    formal_scope = {"task_id": tid, "conversation_id": None}
+    m_confirmed = artifact_store.new_artifact_id()
+    confirmed_scope = {"task_id": tid}
     artifact_store.create_package(
-        {"artifact_id": m_formal, "task_id": tid, "conversation_id": None, "kind": "k", "schema": {}},
+        {"artifact_id": m_confirmed, "task_id": tid, "kind": "k", "schema": {}},
         "{}",
     )
     db.upsert_artifact_index(
         {
-            "artifact_id": m_formal, "task_id": tid, "conversation_id": None,
+            "artifact_id": m_confirmed, "task_id": tid,
             "kind": "tender.directory", "schema_id": "tender-response-docs", "schema_version": 1,
-            "cardinality": "task-single", "display_name": "投标目录",
-            "content_path": str(artifact_store.content_path(m_formal, formal_scope)),
+            "cardinality": "task-single", "display_name": "投标目录", "state": "confirmed",
+            "content_path": str(artifact_store.content_path(m_confirmed, confirmed_scope)),
             "content_seq": 1, "updated_at": "2026-08-25T00:00:00+00:00",
         }
     )
 
     assert client.delete(f"/api/conversations/{cid}").status_code == 200
-    # 过程稿目录与索引已删（§16：threads/<cid>/ 整目录）
-    assert db.get_artifact_index(m_draft) is None
-    assert not artifact_store.package_ready(m_draft, draft_scope)
-    assert not artifact_store.thread_dir(tid, cid).exists()
-    # 正式稿保留
-    assert db.get_artifact_index(m_formal)["artifact_id"] == m_formal
-    assert artifact_store.package_ready(m_formal, formal_scope)
+    # 产物保留（文件归任务），只清转录
+    assert db.get_artifact_index(m_draft)["artifact_id"] == m_draft
+    assert artifact_store.package_ready(m_draft, scope)
+    assert db.get_artifact_index(m_confirmed)["artifact_id"] == m_confirmed
+    assert artifact_store.package_ready(m_confirmed, confirmed_scope)
 
 
 def test_scope_columns_migration(tmp_path, monkeypatch):
-    """旧库（无新列）经 init_db 探测补齐 conversations.task_id 与 artifact_index 作用域列。"""
+    """旧库（无新列）经 init_db 探测补齐 conversations.task_id 与 artifact_index 的 state 列。"""
     import sqlite3
 
     legacy_dir = tmp_path / "legacy"  # 独立目录：不复用 db_env 已建好的新库
@@ -273,4 +317,4 @@ def test_scope_columns_migration(tmp_path, monkeypatch):
     cols_a = {r[1] for r in probe.execute("PRAGMA table_info(artifact_index)")}
     probe.close()
     assert "task_id" in cols_c
-    assert {"conversation_id", "promotion_proposed"} <= cols_a
+    assert "state" in cols_a

@@ -1,9 +1,10 @@
 import { memo, useState } from 'react'
 import type { TodoItem, ToolStep } from '@/api/sse'
-import { ChevronDown, MessageCircleQuestion } from 'lucide-react'
+import { Brain, ChevronDown, MessageCircleQuestion } from 'lucide-react'
 import { Steps, StepsContent, StepsItem, StepsTrigger } from '@/components/ai/Steps'
 import { SubagentCard } from '@/components/ai/SubagentCard'
 import { TextShimmer } from '@/components/ai/TextShimmer'
+import { MemoMarkdown } from '@/components/ai/MemoMarkdown'
 import { stepArgLabel, toolDisplayName, toolIcon } from '@/components/ai/toolDisplay'
 import { useAutoCollapse } from '@/hooks/useAutoCollapse'
 import { humanizeError } from '@/lib/errorText'
@@ -15,6 +16,31 @@ import {
 } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
 import ReactMarkdown from 'react-markdown'
+
+/** 步骤思考折叠行：该工具调用前模型的一段思考（tool.called 封段写入 step.reasoning，
+ *  与旁白封段同一条规则）。默认收起、点开看全文（定高滚动）——思考是辅助材料，
+ *  流水结构（思考→工具→结果→思考）靠行序呈现。旧 trace 快照无此键，防御性跳过。
+ *  memo：静态内容，流式期间父级重渲染不重解析 markdown。 */
+export const StepThinking = memo(function StepThinking({ text }: { text?: string }) {
+  const [open, setOpen] = useState(false)
+  if (!text) return null
+  return (
+    <Collapsible className="group" open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger className="flex w-full cursor-pointer items-center gap-1.5 py-0.5 text-left text-[13px] text-muted-foreground/80 transition-colors hover:text-foreground">
+        <Brain className="size-3.5 shrink-0" aria-hidden />
+        <span className="whitespace-nowrap">思考</span>
+        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground/40 transition-transform group-data-[state=open]:rotate-180" />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="overflow-hidden">
+        <div className="border-line border-l-2 py-0.5 pl-3 pr-2">
+          <div className="max-h-72 overflow-y-auto pr-1 text-[13px] leading-relaxed text-muted-foreground">
+            <MemoMarkdown text={text} />
+          </div>
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  )
+})
 
 /** 步骤前旁白行：该工具调用前模型输出的一句过程说明（tool.called 封段写入 step.text）。
  *  旧 trace 快照无此键，防御性跳过。正文样式（深色正文号，同参考产品的流内叙述段），
@@ -45,6 +71,7 @@ function ToolStepRow({ step }: { step: ToolStep }) {
           : '成功'
   return (
     <Collapsible className="group" open={open} onOpenChange={setOpen}>
+      <StepThinking text={step.reasoning} />
       <NarrationLine text={step.text} />
       <CollapsibleTrigger className="flex w-full cursor-pointer items-center gap-1.5 py-0.5 text-left text-[13px] text-muted-foreground transition-colors hover:text-foreground">
         <Icon className="size-3.5 shrink-0" aria-hidden />
@@ -99,6 +126,7 @@ function AskedQuestions({ steps }: { steps: ToolStep[] }) {
         <div className="border-line space-y-2 border-l-2 py-0.5 pl-3 pr-2">
           {steps.map((s) => (
             <div key={s.id ?? s.toolCallId}>
+              <StepThinking text={s.reasoning} />
               <NarrationLine text={s.text} />
               <div className="text-[13px] leading-relaxed text-foreground">
                 <ReactMarkdown remarkPlugins={mdRemarkPlugins}>

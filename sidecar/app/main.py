@@ -79,9 +79,9 @@ def _sync_skills() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     cfg.data_dir().mkdir(parents=True, exist_ok=True)
-    # §16 任务分组目录：任务子目录（formal/threads/files/out/drafts）按需创建，启动不预建
+    # §16 任务分组目录：任务子目录（sources/work/_meta）按需创建，启动不预建
     db.init_db()
-    # manifest 是权威、索引可重建：启动时全量重扫（运行态自然复位，emitted 置 1）
+    # meta.json 是权威、索引可重建：启动时全量重扫（运行态复位，emitted 置 1；state 保留）
     from . import artifact_store
 
     rebuilt = db.rebuild_artifact_index(
@@ -89,7 +89,7 @@ async def lifespan(_app: FastAPI):
         lambda m: str(artifact_store.content_path(m["artifact_id"], m)),
     )
     if rebuilt:
-        logger.info("artifact 索引已从 manifest 重建：%d 个", rebuilt)
+        logger.info("artifact 索引已从 meta 重建：%d 个", rebuilt)
     recovered = db.recover_stale_runs()
     if recovered:
         logger.warning("启动时标记 %d 条崩溃残留的 running run 为 error", recovered)

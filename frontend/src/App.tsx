@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { Sidebar } from '@/components/Sidebar'
 import { ChatView } from '@/components/ChatView'
@@ -27,7 +27,7 @@ export default function App() {
   const [activeView, setActiveView] = useState<'chat' | 'kb'>('chat')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [previewId, setPreviewId] = useState<string | null>(null)
-  // 工作台文件（out/ 的 md 过程产物）查看器当前打开的相对路径
+  // 工作台文件（work/ 的 md 过程产物）查看器当前打开的相对路径
   const [workbenchPath, setWorkbenchPath] = useState<string | null>(null)
   const [pendingSend, setPendingSend] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(LS_SIDEBAR) === '1')
@@ -62,6 +62,22 @@ export default function App() {
       localStorage.setItem(LS_ARTIFACTS, v ? '0' : '1')
       return !v
     })
+
+  // 「本轮文件」chip 的打开动作：打开工作台文件查看器（清掉产物预览态，二者共用
+  // 面板工作区）；面板收起时顺带展开（transient，不写 localStorage 偏好）。
+  // useCallback 保引用稳定：MessageList/ChatMessage 是 memo 组件，回调换引用会破白名单
+  const openWorkbenchFile = useCallback((path: string) => {
+    setPreviewId(null)
+    setWorkbenchPath(path)
+    setArtifactsCollapsed(false)
+  }, [])
+  // 与上面对称的单槽语义：打开产物时清掉工作台文件态，否则 workbenchPath 优先渲染、
+  // 产物点击看似无响应（面板渲染是 workbenchPath ? WorkbenchViewer : ArtifactOpenHost）
+  const openArtifact = useCallback((id: string) => {
+    setWorkbenchPath(null)
+    setPreviewId(id)
+    setArtifactsCollapsed(false)
+  }, [])
 
   // 契约对账：sidecar 契约目录 vs 客户端 Processor 覆盖（缺失告警，防半接入状态）
   useEffect(() => {
@@ -125,7 +141,8 @@ export default function App() {
             <ChatView
               key={viewConvId ?? 'root'}
               convId={viewConvId}
-              onOpenArtifact={setPreviewId}
+              onOpenArtifact={openArtifact}
+              onOpenWorkbench={openWorkbenchFile}
               initialSend={pendingSend}
               onRequestCreate={handleRequestCreate}
               onOpenSettings={() => setSettingsOpen(true)}
@@ -144,7 +161,7 @@ export default function App() {
           collapsed={artifactsCollapsed}
           previewId={previewId}
           workbenchPath={workbenchPath}
-          onOpen={setPreviewId}
+          onOpen={openArtifact}
           onOpenWorkbench={setWorkbenchPath}
           onClearPreview={() => {
             setPreviewId(null)

@@ -25,6 +25,32 @@ def test_profiles_new_shape_db(tmp_path, monkeypatch):
     assert config.default_model_id() == "m2"
 
 
+def test_profiles_context_window_roundtrip(tmp_path, monkeypatch):
+    """context_window 进出 db：正整数保留、缺省未知；存档被污染成非法值
+    （bool/负数/字符串）时读侧一律清洗为 None（bool 是 int 子类，重点防）。"""
+    _init(tmp_path, monkeypatch)
+    config.save_models(
+        [
+            config.ModelProfile(id="m1", name="A", base_url="https://a/v1", model="a-1", context_window=256000),
+            config.ModelProfile(id="m2", name="B", base_url="https://b/v1", model="b-1"),
+        ],
+        "m1",
+    )
+    ps = config.model_profiles()
+    assert ps[0].context_window == 256000
+    assert ps[1].context_window is None
+
+    config._kv_set(
+        config._KV_PROFILES,
+        [
+            {"id": "m1", "name": "A", "base_url": "https://a/v1", "model": "a-1", "context_window": True},
+            {"id": "m2", "name": "B", "base_url": "https://b/v1", "model": "b-1", "context_window": -5},
+            {"id": "m3", "name": "C", "base_url": "https://c/v1", "model": "c-1", "context_window": "128000"},
+        ],
+    )
+    assert [p.context_window for p in config.model_profiles()] == [None, None, None]
+
+
 def test_default_model_fallbacks(tmp_path, monkeypatch):
     # default_model 不在列表 → 回落 id=default，再回落第一条
     _init(tmp_path, monkeypatch)

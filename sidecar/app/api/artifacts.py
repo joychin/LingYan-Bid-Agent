@@ -1,11 +1,12 @@
-"""类型化 Artifact 端点（artifact-system-design.md §6/§7）。
+"""类型化 Artifact 端点（artifact-system-design.md §6/§7，2026-08-31 重构）。
 
 - GET  /api/contracts                     平台契约目录元数据（客户端启动对账用）
-- GET  /api/artifacts                     索引列表（?task_id= 正式稿 / ?conversation_id= 过程稿）
+- GET  /api/artifacts                     索引列表（?task_id= 任务全部 / ?conversation_id= 按来源筛选）
 - GET  /api/artifacts/{aid}/content       当前内容（application/json）
 - PUT  /api/artifacts/{aid}/content       编辑保存（content_seq 探测 + force 用户裁决覆盖）
 - POST  /api/artifacts/{aid}/restore      恢复上一版（恢复点安全网）
-- POST  /api/artifacts/{aid}/promote      过程稿转正到任务正式稿（用户点头的那一下）
+- POST  /api/artifacts/{aid}/confirm      确认盖戳（草稿 → 已确认，原地，可撤销）
+- POST  /api/artifacts/{aid}/unconfirm    撤销确认（已确认 → 草稿）
 
 并发策略遵循文件夹语义：发布即覆盖（覆盖前留恢复点），无编辑租约；
 编辑器轮询探测外部更新，冲突由用户在客户端二选一裁决。
@@ -18,7 +19,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from .. import artifact_store, contracts, db, publish
+from .. import artifact_store, contracts, db
 
 router = APIRouter()
 
@@ -34,9 +35,9 @@ class ContentUpdate(BaseModel):
     force: bool = False
 
 
-class PromoteRequest(BaseModel):
-    # 用户确认转正时所见的内容版本号：不符返回 409（内容在你查看后已被更新），
-    # 防「看到的是 v3、点下按钮复制走的却是 v5」。None = 旧客户端跳过校验。
+class ConfirmRequest(BaseModel):
+    # 用户确认时所见的内容版本号：不符返回 409（内容在你查看后已被更新），
+    # 防「看到的是 v3、点下确认盖的却是 v5 的戳」。None = 旧客户端跳过校验。
     source_content_seq: int | None = None
 
 
@@ -76,11 +77,10 @@ def _to_api(row: dict) -> dict:
         "content_seq": row["content_seq"],
         "restore_available": artifact_store.has_restore_point(row["artifact_id"], row),
         "source": {"thread_id": row["last_thread_id"], "run_id": row["last_run_id"]},
-        # 作用域（§16）：conversation=会话过程稿；task=任务正式稿（过程稿行也带 task_id，以 conversation_id 区分）
-        "scope": "conversation" if row.get("conversation_id") else "task",
+        # 产物状态（草稿 / 已确认）；conversation_id 是 provenance（发布会话），非作用域
+        "state": row.get("state", "draft"),
         "task_id": task_id,
         "conversation_id": conversation_id,
-        "promotion_proposed": bool(row.get("promotion_proposed")),
         # 工作区内绝对路径，供 Tauri reveal_in_folder 使用
         "path": str(artifact_store.content_path(row["artifact_id"], row)),
     }
@@ -198,60 +198,61 @@ async def restore_artifact(aid: str):
     return {"ok": True, "content_seq": new_seq, "updated_at": updated_at}
 
 
-@router.post("/artifacts/{aid}/promote")
-async def promote_artifact(aid: str, body: PromoteRequest = PromoteRequest()):
-    """过程稿转正：复制到所属任务的正式稿（用户点头的那一下）。
+@router.post("/artifacts/{aid}/confirm")
+async def confirm_artifact(aid: str, body: ConfirmRequest = ConfirmRequest()):
+    """确认盖戳：草稿 → 已确认（原地，不复制、不搬家）。可经 /unconfirm 撤销。
 
     - source_content_seq 版本绑定：不符返回 409——用户确认的是他看到的那一份内容，
-      不是「点击当下的 current」（同会话后续 run 可能已重新发布覆盖过程稿）
-    - 过程稿原件保留（转正=复制）；task-single 正式稿已有同类 → 覆盖 + 恢复点
-    - 新正式稿记 derived_from + derived_from_seq（最薄谱系）；来源过程稿清除「建议转正」标记
-    - 不发 SSE（不在 run 内，seq 契约无宿主）——前端 promote 成功后自行刷新产物列表
+      不是「点击当下的 current」（同会话后续 run 可能已重新发布覆盖）
+    - 盖戳写 meta.json + 索引 state，保留恢复点让用户可撤销
+    - 不发 SSE（不在 run 内，seq 契约无宿主）——前端 confirm 成功后自行刷新产物列表
     """
     row = db.get_artifact_index(aid)
     if not row:
         raise HTTPException(status_code=404, detail="产物不存在")
     if not artifact_store.package_ready(aid, row):
         raise HTTPException(status_code=410, detail="产物包已不存在")
-    cid = row.get("conversation_id")
-    if not cid:
-        raise HTTPException(status_code=422, detail="该产物不是会话过程稿，无需转正")
-    if body.source_content_seq is not None and body.source_content_seq != row["content_seq"]:
-        raise HTTPException(
-            status_code=409,
-            detail=f"产物内容在你查看后已被更新（当前版本号 {row['content_seq']}），请查看最新版后再转正",
-        )
-    conv = db.get_conversation(cid)
-    task_id = (conv or {}).get("task_id")
-    if not task_id:
-        raise HTTPException(status_code=422, detail="产物所属会话没有关联任务，无法转正")
+    with artifact_store.write_lock:
+        row = db.get_artifact_index(aid)
+        if row is None:
+            raise HTTPException(status_code=404, detail="产物不存在")
+        # 版本绑定在锁内重读后再比：外层的预检只挡常见情况，进锁后与最新 seq 比对，
+        # 防「用户查看 v3、锁外预检通过、AI 重发布 bump 到 v5 后仍给 v5 盖章」的窗口
+        if body.source_content_seq is not None and body.source_content_seq != row["content_seq"]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"产物内容在你查看后已被更新（当前版本号 {row['content_seq']}），请查看最新版后再确认",
+            )
+        meta = artifact_store.read_meta(aid, row)
+        if meta is None:
+            raise HTTPException(status_code=410, detail="产物包已不存在")
+        meta["state"] = "confirmed"
+        meta["confirmed_at"] = _now()
+        artifact_store.write_meta(meta)
+        db.set_artifact_state(aid, "confirmed")
+    # 锁释放后行可能被并发删除（如删任务）：动作已成功，artifact 置 None 而非 500
+    row = db.get_artifact_index(aid)
+    return {"ok": True, "artifact": _to_api(row) if row else None}
 
-    raw = artifact_store.read_content_resolved(aid, row)
-    if raw is None:
-        raise HTTPException(status_code=410, detail="产物内容读取失败")
-    try:
-        content = json.loads(raw)
-    except ValueError:
-        raise HTTPException(status_code=410, detail="产物内容已损坏（非合法 JSON）")
 
-    contract_key = f"{row['kind']}/{row['schema_id']}@{row['schema_version']}"
-    try:
-        manifest = publish.publish_artifact(
-            contract_key,
-            content,
-            display_name=row["display_name"],
-            source={"skill": "promote", "thread_id": cid, "run_id": None},
-            task_id=task_id,
-            derived_from=aid,
-            derived_from_seq=row["content_seq"],
-        )
-    except publish.PublishError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-
-    new_aid = manifest["artifact_id"]
-    db.mark_emitted(new_aid)  # 不经 run 边界事件，账本直接落已发
-    if row.get("promotion_proposed"):
-        db.set_promotion_proposed(aid, False)
-        row = db.get_artifact_index(aid) or row
-    new_row = db.get_artifact_index(new_aid)
-    return {"ok": True, "artifact": _to_api(new_row) if new_row else {"artifact_id": new_aid}}
+@router.post("/artifacts/{aid}/unconfirm")
+async def unconfirm_artifact(aid: str):
+    """撤销确认：已确认 → 草稿（确认的反向动作，恢复为可被 AI 覆盖的工作稿）。"""
+    row = db.get_artifact_index(aid)
+    if not row:
+        raise HTTPException(status_code=404, detail="产物不存在")
+    if not artifact_store.package_ready(aid, row):
+        raise HTTPException(status_code=410, detail="产物包已不存在")
+    with artifact_store.write_lock:
+        row = db.get_artifact_index(aid)
+        if row is None:
+            raise HTTPException(status_code=404, detail="产物不存在")
+        meta = artifact_store.read_meta(aid, row)
+        if meta is None:
+            raise HTTPException(status_code=410, detail="产物包已不存在")
+        meta["state"] = "draft"
+        meta["confirmed_at"] = None
+        artifact_store.write_meta(meta)
+        db.set_artifact_state(aid, "draft")
+    row = db.get_artifact_index(aid)
+    return {"ok": True, "artifact": _to_api(row) if row else None}

@@ -146,9 +146,10 @@ def test_narration_only_first_call_in_batch():
     assert trace["tools"][1]["text"] == ""
 
 
-def test_main_reasoning_accumulated_into_trace():
-    """主 agent 思考流（DeepSeek reasoning_content）整段累积进 trace["reasoning"]：
-    跨工具轮不封段（与旁白 text 不同），run 结束随 run_traces 落库供历史「深度思考」渲染；
+def test_main_reasoning_sealed_per_step():
+    """主 agent 思考流（DeepSeek reasoning_content）按轮封段：tool.called 到达即把
+    未封口思考挂到该步骤 reasoning 字段并清零（与旁白 text 同一条封段规则）；
+    最后未封口段 = 最终回复前的思考，随 trace["reasoning"] 落库；
     SSE agent.reasoning 事件照常逐块发布（流式契约不变）。"""
     items = [
         ("messages", AIMessageChunk(content="", additional_kwargs={"reasoning_content": "先看评分"})),
@@ -164,12 +165,43 @@ def test_main_reasoning_accumulated_into_trace():
     assert error is None
     assert interrupt is None
     assert text == "最终回复"
-    # 跨轮整段拼接（reasoning 不按 tool.called 封段）
-    assert trace["reasoning"] == "先看评分办法…第二轮思考"
+    # 第一段思考封进步骤 reasoning；最后未封口段落 trace["reasoning"]
+    assert trace["tools"][0]["reasoning"] == "先看评分办法…"
+    assert trace["reasoning"] == "第二轮思考"
     # SSE 逐块发布不受影响，主代理事件的 agent_id 恒为 None
     reason_events = [d for e, d in published if e == "agent.reasoning"]
     assert "".join(d["text"] for d in reason_events) == "先看评分办法…第二轮思考"
     assert all(d["agent_id"] is None for d in reason_events)
+
+
+def test_main_reasoning_only_first_call_in_batch():
+    """同一轮连发多个工具调用：思考只封第一个步骤，后续步骤 reasoning 为空串
+    （与旁白 text 的 batch 规则同构）。"""
+    items = [
+        ("messages", AIMessageChunk(content="", additional_kwargs={"reasoning_content": "并行前思考"})),
+        (
+            "updates",
+            {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[
+                                {"name": "read", "args": {}, "id": "b1"},
+                                {"name": "read", "args": {}, "id": "b2"},
+                            ],
+                        )
+                    ]
+                }
+            },
+        ),
+    ]
+    _text, error, trace, _interrupt = _run_agent_stream(
+        _StubAgent(items), "c1", "r1", None, lambda e, d: None, "hi", None
+    )
+    assert error is None
+    assert trace["tools"][0]["reasoning"] == "并行前思考"
+    assert trace["tools"][1]["reasoning"] == ""
 
 
 def test_task_context_block_injects_clock(tmp_path, monkeypatch):
@@ -237,6 +269,17 @@ def test_system_prompt_no_internal_codes():
     assert "R1" not in src, "主 prompt 含内部代号 R1（模型会复读给用户）"
     for kw in ("不虚构", "概括层", "反问"):
         assert kw in src, f"主 prompt 缺少用户语言关键词：{kw}"
+
+
+def test_system_prompt_todo_final_state():
+    """主 prompt 含任务清单收尾回写终态纪律（半程清单不留给用户）。"""
+    import inspect
+
+    from app.agent import build_agent
+
+    src = inspect.getsource(build_agent)
+    for kw in ("write_todos", "真实终态", "收尾汇报前"):
+        assert kw in src, f"主 prompt 缺少任务清单纪律关键词：{kw}"
 
 
 # ---- 瞬时 LLM 错误自动重试（2026-08-27 全量测试 T07 API 流断的修复）----
@@ -482,6 +525,81 @@ def test_run_stream_heals_task_skeleton():
     assert "ensure_task_skeleton" in src, "run_stream 缺少任务目录自愈调用"
 
 
+def test_run_stream_records_work_files(tmp_path, monkeypatch):
+    """「本轮文件」全链路：run 起止 work/ 快照 diff 落 run_traces.files，最终消息
+    经 GET /messages 挂载（created/modified 判定真实走 run_stream 的接线）。"""
+    import asyncio
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    from app import artifact_store, db
+
+    db.init_db()
+    tid = db.create_task("任务")["id"]
+    cid = db.create_conversation(tid, "会话")["id"]
+    rid = db.create_run(cid)["id"]
+    # run 前既有文件（跑中被改）
+    keep = artifact_store.work_dir(tid) / "analysis"
+    keep.mkdir(parents=True, exist_ok=True)
+    (keep / "keep.md").write_text("旧内容", encoding="utf-8")
+
+    def _stream(*_args, **_kwargs):
+        # worker 线程执行期间的真实写入：新建一个 + 修改既有
+        (keep / "structure.md").write_text("新建", encoding="utf-8")
+        (keep / "keep.md").write_text("新内容-变长", encoding="utf-8")
+        return iter([("messages", AIMessageChunk(content="完成"))])
+
+    class _Agent:
+        stream = staticmethod(_stream)
+
+    async def _fake_get_agent(*_a, **_k):
+        return _Agent()
+
+    monkeypatch.setattr(agent_mod, "get_agent", _fake_get_agent)
+    asyncio.run(agent_mod.run_stream(cid, rid, user_text="hi"))
+
+    assert db.get_run(rid)["status"] == "completed"
+    trace = db.get_run_trace(rid)
+    assert {f["path"]: f["op"] for f in trace["files"]} == {
+        "analysis/structure.md": "created",
+        "analysis/keep.md": "modified",
+    }
+    # 最终消息挂载点：trace 行 message_id 指向 assistant 终态消息
+    assert trace["message_id"] == db.list_messages(cid)[-1]["id"]
+
+
+def test_run_stream_snapshot_failure_does_not_kill_run(tmp_path, monkeypatch):
+    """起点快照异常只损失「本轮文件」数据（files 空），run 照常完成——探测绝不能
+    打死 run（与终态 diff 的异常纪律镜像，2026-08-31 review 修复）。"""
+    import asyncio
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    from app import db
+    from app import run_files as run_files_mod
+
+    db.init_db()
+    tid = db.create_task("任务")["id"]
+    cid = db.create_conversation(tid, "会话")["id"]
+    rid = db.create_run(cid)["id"]
+
+    def _boom(*_a, **_k):
+        raise OSError("stat race")
+
+    monkeypatch.setattr(run_files_mod, "snapshot_work_files", _boom)
+
+    class _Agent:
+        def stream(self, *_a, **_k):
+            return iter([("messages", AIMessageChunk(content="完成"))])
+
+    async def _fake_get_agent(*_a, **_k):
+        return _Agent()
+
+    monkeypatch.setattr(agent_mod, "get_agent", _fake_get_agent)
+    asyncio.run(agent_mod.run_stream(cid, rid, user_text="hi"))
+
+    assert db.get_run(rid)["status"] == "completed"
+    assert db.get_run_trace(rid)["files"] == []
+
+
 class _RecordingCompletions:
     """可编排行为的 chat.completions 替身，记录每次 create 的 kwargs。"""
 
@@ -539,3 +657,93 @@ def test_no_thinking_retry_passes_other_400_through():
     except Exception as e:
         assert "quota" in str(e)
     assert len(inner.calls) == 1
+
+
+def _overflow_400(message: str) -> Exception:
+    from openai import BadRequestError
+
+    response = httpx.Response(
+        400,
+        request=httpx.Request("POST", "https://gw.example/v1/chat/completions"),
+        json={"error": {"code": "context_length_exceeded", "message": message}},
+    )
+    return BadRequestError(f"Error code: 400 - {message}", response=response, body=None)
+
+
+def test_overflow_400_normalized_to_context_overflow():
+    """各厂商超限措辞的 400 统一归一化为 ContextOverflowError（deepagents
+    SummarizationMiddleware 捕获后当场压缩重试的入口），不重试、原消息保留。"""
+    import pytest
+    from langchain_core.exceptions import ContextOverflowError
+
+    wordings = [
+        # DeepSeek 官方/网关实测原文（2026-08-31 超长 payload 探针捕获；langchain_openai
+        # 自带翻译不含此措辞，归一化是唯一入口）
+        "This model's maximum context length is 1048576 tokens. However, you requested "
+        "1920085 tokens (1920084 in the messages, 1 in the completion). Please reduce the "
+        "length of the messages or completion.",
+        # Anthropic
+        "prompt is too long: 210000 tokens > 200000 maximum",
+        # Bedrock / 网关
+        "Input tokens exceed the configured limit of 131072",
+        # OpenAI 新版措辞
+        "input length and `max_tokens` exceed context limit",
+        # code 字段措辞
+        "error: context_length_exceeded",
+    ]
+    for w in wordings:
+        inner = _RecordingCompletions([_overflow_400(w)])
+        wrapper = agent_mod._NoThinkingRetryCompletions(inner)
+        with pytest.raises(ContextOverflowError) as ei:
+            wrapper.create(model="m", messages=[])
+        assert w in str(ei.value)  # 原始报错消息保留，供日志与前端排查
+        assert len(inner.calls) == 1
+
+
+def test_context_window_merged_into_model_profile():
+    """用户配置的窗口合并进 model.profile：保留注册表自动解析的能力键，只覆盖
+    窗口（deepagents SummarizationMiddleware 据此按 85% 窗口比例触发压缩）。"""
+    import inspect
+
+    src = inspect.getsource(agent_mod.build_agent)
+    assert "max_input_tokens" in src, "build_agent 缺少 context_window → model.profile 合并"
+
+    m = agent_mod._RunAwareChatDeepSeek(
+        api_key="sk-test", base_url="https://example.invalid/v1", model="deepseek-v4-flash"
+    )
+    auto = dict(m.profile or {})
+    assert auto.get("max_input_tokens") == 1000000, "langchain_deepseek 注册表应自带 deepseek-v4-flash 档案"
+    m.profile = {**(m.profile or {}), "max_input_tokens": 128000}
+    assert m.profile["max_input_tokens"] == 128000
+    for k, v in auto.items():
+        if k != "max_input_tokens":
+            assert m.profile[k] == v, f"注册表能力键 {k} 不应被窗口覆盖抹掉"
+
+
+def test_merge_trace_trees_fills_empty_text_reasoning():
+    """HITL 续跑合并：重发的 tool.called 新副本 text/reasoning 必为空串（封段在新段
+    开场即发生），就地替换时不能把暂停前封下的旁白/思考抹掉——新副本为空且回退旧值，
+    新副本非空（如子代理 children reasoning）时以新值优先。"""
+    from app.agent import _merge_trace_trees
+
+    old = [
+        {
+            "id": "t1", "tool": "task", "status": "paused", "text": "派发前旁白",
+            "reasoning": "派发前思考", "children": [],
+        }
+    ]
+    new = [
+        {
+            "id": "t1", "tool": "task", "status": "done", "text": "",
+            "reasoning": "", "children": [{"id": "s1", "reasoning": "子代理思考"}],
+        }
+    ]
+    merged = _merge_trace_trees(old, new)
+    assert merged[0]["status"] == "done"
+    assert merged[0]["text"] == "派发前旁白"
+    assert merged[0]["reasoning"] == "派发前思考"
+    assert merged[0]["children"][0]["reasoning"] == "子代理思考"
+    # 新段真有产出时不被旧值覆盖
+    new2 = [{"id": "t1", "tool": "task", "status": "done", "text": "", "reasoning": "续段思考", "children": []}]
+    merged2 = _merge_trace_trees(old, new2)
+    assert merged2[0]["reasoning"] == "续段思考"

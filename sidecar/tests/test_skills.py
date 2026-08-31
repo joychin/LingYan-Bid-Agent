@@ -72,3 +72,14 @@ def test_skills_reference_response_guidelines(skill_dir: Path):
     assert "_shared/response-guidelines.md" in text, (
         f"{skill_dir.name} 未引用 _shared/response-guidelines.md"
     )
+
+
+def test_tender_outline_unused_ids_disclosure():
+    """tender-outline 第 5 步含未归位来源ID 的处置分支：归位或最终回复点名披露。
+
+    组装器返回「未被任何目录节点引用的来源ID」时模型曾只字不提（评分项/模板
+    遗漏归位用户无从知晓），此分支是披露义务的 skill 层锚点。
+    """
+    text = (skills_source_dir() / "tender-outline" / "SKILL.md").read_text(encoding="utf-8")
+    for kw in ("未被任何目录节点引用", "重新组装", "最终回复"):
+        assert kw in text, f"tender-outline/SKILL.md 缺少未归位披露分支关键词：{kw}"

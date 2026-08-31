@@ -9,6 +9,7 @@ agent_id=所属 task 的 tool_call_id 归属下发；子代理正文 token 不�
 conversation.renamed（自动命名推送，无 seq）。
 """
 
+import html
 import json
 from typing import Iterator
 
@@ -41,16 +42,14 @@ CANCELLED_MESSAGE = "任务已停止"
 
 
 def artifact_created_payload(row: dict, rid: str | None, cid: str, seq: int) -> dict:
-    """artifact.created 的 data 载荷（run 边界与转正端点共用，字段保持同构）。
+    """artifact.created 的 data 载荷（run 边界产物事件；确认端点不发 SSE——不在
+    run 内无 seq 宿主）。
 
-    P4 additive：scope（task=正式稿 / conversation=过程稿）、task_id、
-    promotion_proposed（AI 建议转正标记，前端据此高亮「建议转正」）。
+    2026-08-31 重构 reshape（非 additive）：scope/promotion_proposed 两键一次性
+    替换为 state（draft/confirmed），前端 events.gen.ts 同批再生；task_id 恒为
+    所属任务；conversation_id 即事件宿主会话（run 边界产物必属该会话）。
     """
     task_id = row.get("task_id")
-    conversation_id = row.get("conversation_id")
-    # 过程稿索引行也恒带 task_id（publish 经会话反查），以 conversation_id 区分两层——
-    # 与 api/artifacts._to_api 同一口径
-    scope = "conversation" if conversation_id else "task"
     return {
         "run_id": rid,
         "conversation_id": cid,
@@ -59,9 +58,8 @@ def artifact_created_payload(row: dict, rid: str | None, cid: str, seq: int) -> 
         "kind": row["kind"],
         "schema_id": row["schema_id"],
         "schema_version": row["schema_version"],
-        "scope": scope,
+        "state": row.get("state", "draft"),
         "task_id": task_id,
-        "promotion_proposed": bool(row.get("promotion_proposed")),
         "seq": seq,
     }
 
@@ -142,15 +140,32 @@ def _chunk_reasoning(msg: AIMessageChunk) -> str:
     return "".join(parts)
 
 
+def _deep_unescape(value):
+    """递归反转义 HTML 实体（仅展示层）。
+
+    个别模型会把参数里的换行写成 `&#10;` 字面量，前端按纯文本渲染出垃圾字符。
+    html.unescape 是单遍解码，`&amp;#10;` 只解到 `&#10;` 字面量、不会二次展开；
+    这里只作用于下发 UI 的 args 副本，工具实际执行与模型记忆（checkpoint）仍用
+    模型原始输出。
+    """
+    if isinstance(value, str):
+        return html.unescape(value)
+    if isinstance(value, dict):
+        return {k: _deep_unescape(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_deep_unescape(v) for v in value]
+    return value
+
+
 def _tool_args(args) -> dict:
     if isinstance(args, dict):
-        return args
+        return _deep_unescape(args)
     if isinstance(args, str):
         try:
-            return json.loads(args)
+            return _deep_unescape(json.loads(args))
         except Exception:
-            return {"raw": args}
-    return {"raw": str(args)}
+            return {"raw": _deep_unescape(args)}
+    return {"raw": _deep_unescape(str(args))}
 
 
 def _summary(content, limit: int = 4000) -> str:

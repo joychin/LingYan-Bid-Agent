@@ -7,7 +7,7 @@ from tests.util import create_task, upload_file
 def test_upload_list_delete(client):
     task = create_task(client)
     tid = task["task"]["id"]
-    files_dir = artifact_store.task_files_dir(tid)
+    files_dir = artifact_store.sources_dir(tid)
 
     # 上传（落任务 files/，不再落 workspace 根）
     body = upload_file(client, tid, "招标文件.docx", b"hello")
@@ -54,8 +54,8 @@ def test_same_name_files_isolated_between_tasks(client):
     upload_file(client, ta["id"], "招标文件.docx", b"from-task-a")
     upload_file(client, tb["id"], "招标文件.docx", b"from-task-b")
 
-    assert (artifact_store.task_files_dir(ta["id"]) / "招标文件.docx").read_bytes() == b"from-task-a"
-    assert (artifact_store.task_files_dir(tb["id"]) / "招标文件.docx").read_bytes() == b"from-task-b"
+    assert (artifact_store.sources_dir(ta["id"]) / "招标文件.docx").read_bytes() == b"from-task-a"
+    assert (artifact_store.sources_dir(tb["id"]) / "招标文件.docx").read_bytes() == b"from-task-b"
 
     names_a = [f["name"] for f in client.get("/api/files", params={"task_id": ta["id"]}).json()["files"]]
     assert names_a == ["招标文件.docx"]
@@ -105,7 +105,7 @@ def test_upload_cleans_path_name(client):
     )
     assert r.status_code == 201
     assert r.json()["name"] == "evil.docx"
-    assert (artifact_store.task_files_dir(tid) / "evil.docx").exists()
+    assert (artifact_store.sources_dir(tid) / "evil.docx").exists()
 
 
 def test_upload_rejects_too_large(client, monkeypatch):
@@ -129,7 +129,7 @@ def test_oversize_overwrite_keeps_original(client, monkeypatch):
     monkeypatch.setattr(files_mod, "MAX_SIZE_BYTES", 6)
     task = create_task(client)
     tid = task["task"]["id"]
-    files_dir = artifact_store.task_files_dir(tid)
+    files_dir = artifact_store.sources_dir(tid)
     files_dir.mkdir(parents=True, exist_ok=True)
     (files_dir / "keep.docx").write_bytes(b"original-content")
 

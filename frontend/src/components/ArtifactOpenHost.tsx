@@ -24,7 +24,7 @@ export function ArtifactOpenHost({ artifactId }: { artifactId: string | null }) 
   if (!artifactId || !artifact) return null
 
   const processor = resolveProcessor(artifact)
-  const formal = artifact.scope === 'task'
+  const confirmed = artifact.state === 'confirmed'
 
   const handleReveal = async () => {
     try {
@@ -39,8 +39,8 @@ export function ArtifactOpenHost({ artifactId }: { artifactId: string | null }) 
       <div className="ap-ws-head">
         <FileText className="ap-ws-docico" />
         <span className="ap-ws-title">{artifact.display_name}</span>
-        <span className={cn('ap-scope-badge', !formal && 'conv')}>
-          {formal ? '任务正式成果 · 本任务共享' : '本会话产物'}
+        <span className={cn('ap-scope-badge', !confirmed && 'conv')}>
+          {confirmed ? '正式成果' : '草稿'}
         </span>
         <span className="ap-ws-contract" title={artifactKey(artifact)}>
           {contractLabel(artifact.kind)} · {formatRelativeTime(artifact.updated_at)}

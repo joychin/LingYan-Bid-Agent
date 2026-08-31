@@ -1,7 +1,7 @@
 # 节：评分标准（evaluation）
 
 忠实提取评审方法、评分项、分值、评分要点、证明材料、加减分项与冲突。输出
-`out/analysis/evaluation.md`。
+`work/analysis/evaluation.md`。
 
 ## 提取范围
 

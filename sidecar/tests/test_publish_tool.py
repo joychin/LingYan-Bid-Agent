@@ -1,4 +1,4 @@
-"""LLM 发布工具：任务 drafts/ 草稿 containment、runctx 来源、合法草稿发布。"""
+"""LLM 发布工具：任务 _meta/staging/ 草稿 containment、runctx 来源、合法草稿发布。"""
 
 import json
 
@@ -14,12 +14,12 @@ KEY = "tender.directory/tender-response-docs@1"
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     task, conv = init_env(tmp_path, monkeypatch)
-    artifact_store.task_drafts_dir(task["id"]).mkdir(parents=True, exist_ok=True)
+    artifact_store.staging_dir(task["id"]).mkdir(parents=True, exist_ok=True)
     return {"root": tmp_path, "task": task, "conv": conv}
 
 
 def _drafts_root(env):
-    return artifact_store.task_drafts_dir(env["task"]["id"])
+    return artifact_store.staging_dir(env["task"]["id"])
 
 
 def _draft(env, name="toc.json", obj=None):
@@ -44,16 +44,16 @@ def test_publish_tool_happy_path_records_runctx(env):
     assert row["last_thread_id"] == env["conv"]["id"]
     assert row["last_run_id"] == "r_abc"
     assert row["task_id"] == env["task"]["id"]
-    manifest = artifact_store.read_manifest(row["artifact_id"], row)
+    manifest = artifact_store.read_meta(row["artifact_id"], row)
     assert manifest["source"] == {"skill": "direct", "thread_id": env["conv"]["id"], "run_id": "r_abc"}
 
 
 def test_publish_tool_accepts_task_prefixed_draft_path(env):
-    """模型按任务目录前缀给路径（如 <task>/drafts/x.json）与裸文件名都能解析。"""
+    """模型按任务目录前缀给路径（如 <task>/_meta/staging/x.json）与裸文件名都能解析。"""
     _draft(env, name="toc2.json")
     runctx.set_run(env["conv"]["id"], "r_abc", env["task"]["id"])
     try:
-        prefixed = f"{env['task']['id']}/drafts/toc2.json"
+        prefixed = f"{env['task']['id']}/_meta/staging/toc2.json"
         assert publish_tool.invoke({"contract": KEY, "draft_path": prefixed}).startswith("[发布成功]")
     finally:
         runctx.clear_run()
@@ -98,3 +98,24 @@ def test_publish_tool_requires_task_context(env):
     assert out.startswith("[发布失败]")
     assert "任务上下文" in out
     assert db.list_artifact_index() == []
+
+
+def test_publish_tool_via_guarded_backend_writes_staging(env):
+    """回归网（2026-08-31 review blocker）：草稿必须能经 GuardedBackend 写入
+    _meta/staging/——fs_guard 曾把 _meta 段级拦死，而本工具指示模型把草稿写到
+    那里，通用发布链路在真实 run 里不可用（旧测试用 pathlib 直写绕过了守卫，
+    故全绿漏网）。"""
+    from app import config as cfg
+    from app.fs_guard import GuardedBackend
+
+    be = GuardedBackend(root_dir=str(cfg.workspace_dir()))
+    r = be.write(
+        f"{env['task']['id']}/_meta/staging/guarded.json",
+        json.dumps({"response_documents": [{"name": "整册"}]}, ensure_ascii=False),
+    )
+    assert not r.error, f"守卫误拦发布草稿区：{r.error}"
+    runctx.set_run(env["conv"]["id"], "r_guard", env["task"]["id"])
+    try:
+        assert publish_tool.invoke({"contract": KEY, "draft_path": "guarded.json"}).startswith("[发布成功]")
+    finally:
+        runctx.clear_run()

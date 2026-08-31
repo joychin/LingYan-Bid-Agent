@@ -1,11 +1,11 @@
-"""任务端点（P4 任务层，§16 任务分组目录）。
+"""任务端点（P4 任务层，§16 任务分组目录，2026-08-31 重构）。
 
-任务 = 一次投标 = workspace 下一个真实的项目文件夹（<task_id>/{formal,threads,files,out}）：
+任务 = 一次投标 = workspace 下一个真实的项目文件夹（<task_id>/{sources,work,_meta}）：
 - POST 创建后自动建第一个会话一并返回（用户建完任务即刻可聊）
 - PATCH 可改任务名与进度便签（进度便签是任务白板，LLM 也经
   update_task_progress 工具更新，同一份真值）
 - DELETE 级联：全部会话（含对话记忆）+ 任务目录整体软归档
-  （threads/ 过程稿先硬删，其余 mv 到 workspace/archive/<task_id>/，可手工找回）
+  （整目录 mv 到 workspace/archive/<task_id>/，可手工找回；文件归任务，归档不删子目录）
 """
 
 from fastapi import APIRouter, HTTPException
@@ -40,7 +40,7 @@ async def create_task(body: NewTaskBody):
     if not title:
         raise HTTPException(status_code=422, detail="任务名不能为空")
     task = db.create_task(title)
-    # 预建 files/out/drafts 骨架：agent 开工第一步的 ls 不再 path_not_found
+    # 预建 sources/work 骨架：agent 开工第一步的 ls 不再 path_not_found
     artifact_store.ensure_task_skeleton(task["id"])
     conversation = db.create_conversation(task["id"]) if body.with_conversation else None
     return {"task": task, "conversation": conversation}
@@ -68,7 +68,7 @@ async def delete_task(tid: str):
     for cid in cids:
         if db.active_run_exists(cid):
             raise HTTPException(status_code=409, detail=f"会话 {cid} 有进行中的任务，无法删除任务")
-    # 磁盘先行：任务目录整体归档（先 mv 到 archive/，成功后归档内 threads/ 硬删）。
+    # 磁盘先行：任务目录整体归档（mv 到 archive/，文件归任务、整目录保留）。
     # 归档失败（磁盘不可写/目标冲突）必须中止且不删库：否则任务与索引行消失、
     # 磁盘目录残留原位，用户在产品内再也找不回——保留现场让用户裁决。
     if not artifact_store.archive_task(tid):

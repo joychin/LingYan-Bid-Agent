@@ -78,7 +78,7 @@ function StepReasoning({ text, isStreaming }: { text: string; isStreaming: boole
   return (
     <Reasoning isStreaming={isStreaming}>
       <ReasoningTrigger className="text-xs text-muted-foreground">
-        {isStreaming ? <TextShimmer>子代理思考过程</TextShimmer> : '子代理思考过程'}
+        {isStreaming ? <TextShimmer>思考过程</TextShimmer> : '思考过程'}
       </ReasoningTrigger>
       <ReasoningContent contentClassName="mt-1 text-[12px] leading-relaxed">
         <MemoMarkdown text={shown} />

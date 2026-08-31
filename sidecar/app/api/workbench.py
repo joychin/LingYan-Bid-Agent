@@ -1,7 +1,7 @@
-"""任务工作台 API（artifact-system-design.md §16 的 out/ 技能工作台）：
-列出 / 读取 / 编辑 out/ 下的 markdown 过程产物 + 存为笔记。
+"""任务工作树 API（2026-08-31 重构：out/ → work/）：
+列出 / 读取 / 编辑 work/ 下的 markdown 过程产物 + 存为笔记。
 
-工作台不是 Artifact（不进索引、无事件）：它是任务级共享、随流水线重跑覆盖的
+过程文件不是产物（不进索引、无事件）：它是任务级共享、随流水线重跑覆盖的
 活中间态（parse→analysis→outline 的产物）。编辑走「探测 + 用户裁决 + 恢复点
 兜底」——base_hash 乐观探测（409 → 前端拉取最新/保留我的）、写前留 .bak
 （单一上一版，恢复=互换可再撤销）、成功后盖「修订=用户」头标记（模型重跑前
@@ -34,11 +34,11 @@ def _require_task(task_id: str) -> None:
 
 
 def _resolve(task_id: str, path: str) -> Path:
-    """把相对路径收进 <task>/out/（resolve 防 ../ 越界）；只放行 .md。"""
-    root = artifact_store.task_out_dir(task_id).resolve()
+    """把相对路径收进 <task>/work/（resolve 防 ../ 越界）；只放行 .md。"""
+    root = artifact_store.work_dir(task_id).resolve()
     target = (root / path).resolve()
     if not target.is_relative_to(root) or target.suffix != ".md" or target.name.startswith("."):
-        raise HTTPException(status_code=404, detail="工作台文件不存在")
+        raise HTTPException(status_code=404, detail="工作文件不存在")
     return target
 
 
@@ -64,7 +64,7 @@ def _stamp_revised(text: str) -> str:
         head = _REVISED_FIELD_RE.sub("", lines[0])
         lines[0] = head.rstrip()[:-2].rstrip() + field + " -->"
         return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-    return f"<!-- 工作台{field} -->\n" + text
+    return f"<!-- 工作文件{field} -->\n" + text
 
 
 def _save_backup(target: Path) -> None:
@@ -91,9 +91,9 @@ def _entry(p: Path, root: Path) -> dict:
 
 @router.get("/workbench")
 async def list_workbench(task_id: str):
-    """列出 out/ 全部 markdown（json/隐藏文件排除），扁平相对路径清单。"""
+    """列出 work/ 全部 markdown（json/隐藏文件排除），扁平相对路径清单。"""
     _require_task(task_id)
-    root = artifact_store.task_out_dir(task_id)
+    root = artifact_store.work_dir(task_id)
     entries: list[dict] = []
     if root.is_dir():
         for p in sorted(root.rglob("*.md")):
@@ -107,7 +107,7 @@ async def read_content(task_id: str, path: str):
     _require_task(task_id)
     target = _resolve(task_id, path)
     if not target.is_file():
-        raise HTTPException(status_code=404, detail="工作台文件不存在")
+        raise HTTPException(status_code=404, detail="工作文件不存在")
     text = target.read_text(encoding="utf-8")
     return {
         "content": text,
@@ -131,7 +131,7 @@ async def write_content(body: WorkbenchWrite):
     _require_task(body.task_id)
     target = _resolve(body.task_id, body.path)
     if not target.is_file():
-        raise HTTPException(status_code=404, detail="工作台文件不存在")
+        raise HTTPException(status_code=404, detail="工作文件不存在")
     if body.path.startswith("parse/"):
         raise HTTPException(status_code=403, detail="解析产物只读（引用行号的证据基准，修改请重新上传解析）")
     current = target.read_text(encoding="utf-8")
@@ -171,23 +171,24 @@ class WorkbenchNote(BaseModel):
 
 @router.post("/workbench/note", status_code=201)
 async def save_as_note(body: WorkbenchNote):
-    """存为笔记：把工作台文件内容作为快照发布为 doc.note 过程稿（走既有
-    publish 管线；task-multi 每次新建不覆盖），后续转正走既有按钮。"""
+    """存为笔记：把工作文件内容作为快照发布为 doc.note 产物（走既有
+    publish 管线；task-multi 每次新建不覆盖）。"""
     conv = db.get_conversation(body.conversation_id)
     if not conv:
         raise HTTPException(status_code=404, detail="会话不存在")
     target = _resolve(conv["task_id"], body.path)
     if not target.is_file():
-        raise HTTPException(status_code=404, detail="工作台文件不存在")
+        raise HTTPException(status_code=404, detail="工作文件不存在")
     text = target.read_text(encoding="utf-8")
     name = Path(body.path).stem
-    title = body.title or f"工作台快照 · {name}"
+    title = body.title or f"工作文件快照 · {name}"
     try:
         manifest = publish.publish_artifact(
             "doc.note/note-md@1",
             {"title": title, "body_md": text},
             display_name=title,
             source={"skill": "workbench"},
+            task_id=conv["task_id"],
             conversation_id=body.conversation_id,
         )
     except PublishError as e:

@@ -11,7 +11,7 @@
 
 import sqlite3
 
-LATEST = 13
+LATEST = 15
 
 
 def _add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -84,7 +84,30 @@ MIGRATIONS: list[tuple[int, object]] = [
         13,
         lambda c: _add_column(c, "messages", "run_id", "ALTER TABLE messages ADD COLUMN run_id TEXT"),
     ),
+    (
+        14,
+        lambda c: _migrate_artifact_state(c),
+    ),
+    (
+        15,
+        lambda c: _add_column(
+            c, "run_traces", "files",
+            "ALTER TABLE run_traces ADD COLUMN files TEXT NOT NULL DEFAULT '[]'",
+        ),
+    ),
 ]
+
+
+def _migrate_artifact_state(conn: sqlite3.Connection) -> None:
+    """产物模型重构（2026-08-31）：promotion_proposed 语义替换为 state（draft/confirmed）。
+
+    - 加 state 列（默认 draft）；promotion_proposed 列保留为死列（SQLite DROP COLUMN 需
+      3.35+，且历史迁移只 ADD 的约定下不主动删）。
+    - 推断旧行状态：conversation_id IS NULL = 原「任务正式稿」→ confirmed；非空 = 原
+      「会话过程稿」→ draft。开发期无真实数据则等价于清空重建，语义无损。
+    """
+    _add_column(conn, "artifact_index", "state", "ALTER TABLE artifact_index ADD COLUMN state TEXT NOT NULL DEFAULT 'draft'")
+    conn.execute("UPDATE artifact_index SET state='confirmed' WHERE conversation_id IS NULL")
 
 
 def apply(conn: sqlite3.Connection, current: int) -> None:

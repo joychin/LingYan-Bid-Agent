@@ -1,6 +1,6 @@
 # 节：结构事实（structure）
 
-只负责识别项目结构事实，输出 `out/analysis/structure.md`。
+只负责识别项目结构事实，输出 `work/analysis/structure.md`。
 
 ## 提取范围
 

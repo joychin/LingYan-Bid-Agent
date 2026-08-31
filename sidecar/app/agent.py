@@ -21,14 +21,14 @@ from datetime import datetime, timezone
 import httpx
 from deepagents import create_deep_agent
 from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
-from langchain_core.exceptions import ModelConnectionError, ModelRateLimitError, ModelTimeoutError
+from langchain_core.exceptions import ContextOverflowError, ModelConnectionError, ModelRateLimitError, ModelTimeoutError
 from langchain_core.messages import SystemMessage
 from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from openai import BadRequestError
 
-from . import artifact_store, db, events, runctx
+from . import artifact_store, db, events, run_files, runctx
 from . import config as cfg
 from .bus import publish
 from .fs_guard import GuardedBackend
@@ -85,13 +85,13 @@ SUBAGENTS: list[dict] = [
         "system_prompt": (
             "你是投标目录编写子代理，只负责一个响应文件的目录初稿与清理。"
             "任务描述会给出：任务目录前缀（读写路径都必须带该前缀）、响应文件名、scope、"
-            "fragment 输出路径、out/analysis 各输入文件的完整路径、来源文件名清单"
-            "（主文件+补充文件名——回原文核实时据此构造 out/parse/<文件名>/ 路径）。\n"
+            "fragment 输出路径、work/analysis 各输入文件的完整路径、来源文件名清单"
+            "（主文件+补充文件名——回原文核实时据此构造 work/parse/<文件名>/ 路径）。\n"
             "开工前先依次 read_file：skills/tender-outline/references/generate.md、"
             "annotation.md、revise-gapfill.md、revise-scoring.md、revise-walkthrough.md，"
             "严格按其规则执行：R2 补全三段（## 目录 / ## 来源标注 / ## 目录说明）"
             "→ 三道清理（输入缺失的道跳过并在摘要里声明）。回招标原文核实时同样遵守"
-            "导航纪律：读 out/parse/<文件名>/<文件名>.outline.json 按行号取区段，禁止整读全文。\n"
+            "导航纪律：读 work/parse/<文件名>/<文件名>.outline.json 按行号取区段，禁止整读全文。\n"
             "产物写到指定的 fragment 路径：单个 `# 响应文件：<名>` 标题 + scope 段 + 三段，"
             "遵守树格式红线（- 开头 / 无编号 / 每级 2 空格缩进 / 独立附件平级 / 不用代码块），"
             "全文严禁用代码块包裹。\n"
@@ -146,27 +146,28 @@ class _SubagentTagMiddleware(AgentMiddleware):
 
 def _artifact_listing(rows: list[dict]) -> list[str]:
     return [
-        f"- {r['display_name']}（{r['kind']}/{r['schema_id']}@{r['schema_version']}，{r['artifact_id']}）"
+        f"- {r['display_name']}（{r['kind']}/{r['schema_id']}@{r['schema_version']}，{r['artifact_id']}，"
+        f"{'已确认' if r.get('state') == 'confirmed' else '草稿'}）"
         for r in rows
         if artifact_store.package_ready(r["artifact_id"], r)
     ]
 
 
 def _task_context_block(task_id: str, conversation_id: str) -> str:
-    """拼装任务上下文注入块：任务名 + 进度便签 + 两层产物清单（仅名称与 id）。
+    """拼装任务上下文注入块：任务名 + 进度便签 + 单一产物清单（名称 + 状态）。
 
     共享的是文件夹和结论，不是聊天记录（设计文档 §8.2）：模型要具体内容时
-    经 read_artifact 按需读取。每次模型调用现算——run 中途发布/转正的成果
+    经 read_artifact 按需读取。每次模型调用现算——run 中途发布/确认的成果
     下一次调用即可见。
     """
     task = db.get_task(task_id)
     if not task:
         return ""
     lines = [
-        f"## 当前任务：{task['title']}（本会话属于该任务，产物分两层）",
-        # §16 任务分组目录：模型引用文件/产物的路径前缀（files/ 上传区、out/ 工作台、drafts/ 草稿区）
-        f"任务工作目录：`{task_id}/`（用户上传的文件在其 files/ 下，解析与分析产物在 out/ 下，"
-        "发布草稿写 drafts/；引用这些路径时带上该前缀）",
+        f"## 当前任务：{task['title']}（本会话属于该任务，产物归任务、分草稿/已确认两态）",
+        # §16 任务分组目录：模型引用文件/产物的路径前缀（sources/ 来源、work/ 工作树）
+        f"任务工作目录：`{task_id}/`（用户上传的文件在其 sources/ 下，解析与分析过程文件在 "
+        "work/ 下，发布草稿写 _meta/staging/；引用这些路径时带上该前缀）",
         # 模型不知道当前时间，写产物头部等时间戳时会编造（如零点占位）——每次调用现给
         f"当前时间：{datetime.now(timezone.utc).isoformat(timespec='seconds')}"
         "（写时间戳时用它，不要自己估）",
@@ -177,12 +178,9 @@ def _task_context_block(task_id: str, conversation_id: str) -> str:
     kb_line = _kb_summary_line()
     if kb_line:
         lines.append(kb_line)
-    formal = _artifact_listing(db.list_artifact_index(task_id=task_id))
-    if formal:
-        lines.append("### 任务正式稿（用户确认过的权威成果）\n" + "\n".join(formal))
-    drafts = _artifact_listing(db.list_artifact_index(conversation_id=conversation_id))
-    if drafts:
-        lines.append("### 本会话过程稿（草稿层）\n" + "\n".join(drafts))
+    artifacts = _artifact_listing(db.list_artifact_index(task_id=task_id))
+    if artifacts:
+        lines.append("### 任务产物（草稿/已确认）\n" + "\n".join(artifacts))
     return "\n".join(lines)
 
 
@@ -258,7 +256,7 @@ class _RunAwareChatDeepSeek(ChatDeepSeek):
 
 
 class _NoThinkingRetryCompletions:
-    """网关「思考回传」400 兜底。
+    """网关「思考回传」400 兜底 + 超限 400 归一化。
 
     网关（ingress.lfans.cn）2026-08-29 起对思考模式 + 历史含 tool_calls 的冷回放
     （HITL resume 重放 checkpoint 是唯一命中场景；热会话有服务端状态不校验）
@@ -270,7 +268,23 @@ class _NoThinkingRetryCompletions:
     都经 client.create(**payload)，撞上该 400 时对当次请求关思考重试一次——只降
     这一跳的思考，下个请求恢复原档位；其余 400 原样上抛。同步路径专用（agent
     全链路 sync stream，async client 未用）。
+
+    超限归一化：各供应商「输入超出上下文窗口」的 400 措辞不一（langchain_openai
+    只翻译 context_length_exceeded 等少数几种，其他厂商/网关措辞未必命中），这里
+    统一 re-raise 成 langchain_core 的 ContextOverflowError——deepagents 的
+    SummarizationMiddleware 捕获它后当场压缩历史并重试，会话不会因超限永久报废。
+    未命中标记词的其余 400 记 warning 日志（截断消息），供将来发现新措辞扩表。
     """
+
+    # 小写化后子串匹配；覆盖 openai 官方（新旧两种报错措辞）/Anthropic/常见网关
+    _OVERFLOW_MARKERS = (
+        "context_length_exceeded",
+        "maximum context length",
+        "prompt is too long",
+        "input tokens exceed",
+        "contextwindowexceedederror",
+        "input length and `max_tokens`",
+    )
 
     def __init__(self, inner):
         self._inner = inner
@@ -279,7 +293,13 @@ class _NoThinkingRetryCompletions:
         try:
             return self._inner.create(**kwargs)
         except BadRequestError as e:
-            if "reasoning_text" not in str(e) or kwargs.get("reasoning_effort") == "none":
+            msg = str(e)
+            msg_lower = msg.lower()
+            if any(m in msg_lower for m in self._OVERFLOW_MARKERS):
+                logger.warning("上下文超限 400（%.200s），归一化为 ContextOverflowError 走压缩自愈", msg)
+                raise ContextOverflowError(msg) from e
+            if "reasoning_text" not in msg or kwargs.get("reasoning_effort") == "none":
+                logger.warning("模型 400（%.400s）", msg)
                 raise
             logger.warning(
                 "网关思考回传校验 400（reasoning_text），本请求降级 reasoning_effort=none 重试"
@@ -316,14 +336,21 @@ def build_agent(profile: cfg.ModelProfile | None = None):
         model=p.model,
         timeout=180,
     )
+    # 用户显式配置的上下文窗口（设置 → 模型 → 高级选项）覆盖进 langchain 的 model
+    # profile——deepagents SummarizationMiddleware 检测到 max_input_tokens 后自动按
+    # 窗口比例（85% 触发/保留 10%）触发压缩。与注册表自动解析的档案**合并**而非整体
+    # 替换：已知模型（deepseek 系）保留 image_inputs/tool_calling 等能力键，未知模型
+    # 则从零建一份。deepseek 系不配也已是比例档（注册表自带 1M 窗口）。
+    if p.context_window:
+        model.profile = {**(model.profile or {}), "max_input_tokens": p.context_window}
     # 网关思考回传 400 兜底（_NoThinkingRetryCompletions）：client 是 init 时缓存的
     # SDK 资源实例字段，直接换成交包装层
     model.client = _NoThinkingRetryCompletions(model.client)
 
     agent = create_deep_agent(
         model=model,
-        # 写保护后端：通用文件工具对产物包/归档/技能目录只读（fs_guard，
-        # P0.3）——读完全放开，out/ 与 drafts/ 正常可写
+        # 写保护后端：通用文件工具对来源/产物包/谱系暂存/归档/技能目录只读（fs_guard）
+        # ——读完全放开，work/ 下过程文件（parse/analysis/outline/body）正常可写
         backend=GuardedBackend(root_dir=str(cfg.workspace_dir())),
         tools=TOOLS,
         subagents=SUBAGENTS,
@@ -331,35 +358,38 @@ def build_agent(profile: cfg.ModelProfile | None = None):
         # 子代理归属插桩；todos 工具；任务上下文按 run 注入
         middleware=[_SubagentTagMiddleware(), TodoListMiddleware(), _TaskContextMiddleware()],
         system_prompt=(
-            "你是标书助理，在一个投标任务下的会话里工作。任务产物分两层："
-            "任务「正式稿」（用户确认过的权威成果）与本会话「过程稿」（草稿层）。"
-            "你的发布一律进入本会话过程稿；希望成果进入正式稿时置 propose_promotion"
-            "（建议转正），用户确认后才生效——不要假装已写入正式稿。"
+            "你是标书助理，在一个投标任务下的会话里工作。产物归任务，分两态："
+            "「草稿」（AI 发布的默认状态）与「已确认」（用户确认过的成果）。"
+            "你发布的一律是草稿；想让成果成为正式成果由用户在界面确认，"
+            "不要假装已确认。覆盖一个已确认产物时它会降回草稿，需用户重新确认。"
             "方法论在 skills 目录中，按各技能的 SKILL.md 执行："
             "解析招标文件（文件→Markdown、确认来源集合）用 document-parse 技能"
             "（确认主文件与补充角色→parse_document→解析概况经用户确认）；"
             "分析招标文件、提取要点用 tender-analysis 技能（前提是 document-parse 已完成，"
             "读 outline 按行号取区段，禁止整读全文）；"
             "要点齐后生成投标目录用 tender-outline 技能（首个确认点：确认响应文件怎么拆分→初稿→三道清理→"
-            "assemble_tender 组装发布并提醒转正；多响应文件时并发派发"
+            "assemble_tender 组装发布草稿并提醒用户确认；多响应文件时并发派发"
             " tender-outline-writer 子代理每册一个，主线程只派发与汇总）。"
             "向用户介绍能力、流程或产物时只说你确定的内容，不虚构具体章节名、"
             "步骤名、字段名；没读技能文件前说到概括层（如「按招标文件结构提取"
             "七个方面的要点」）。"
-            "用户上传的文件在当前任务工作目录的 files/ 下（任务目录前缀见任务上下文，"
-            "如 <任务目录>/files/招标文件.docx）。"
-            "引用结构化成果（如投标目录）时用 read_artifact 按契约读取当前内容（正式稿优先），"
+            "用户上传的文件在当前任务工作目录的 sources/ 下（任务目录前缀见任务上下文，"
+            "如 <任务目录>/sources/招标文件.docx）。"
+            "引用结构化成果（如投标目录）时用 read_artifact 按契约读取当前内容（已确认优先），"
                 "不要猜文件路径；中途想保存的未登记内容以 doc.note 笔记保存。"
                 "完成阶段性工作后用 update_task_progress 更新任务进度便签（保持简短）。"
                 "输出纪律：调用工具的那一轮，正文只写一句以内的当前动作说明"
                 "（如「读取评分办法」），面向用户说清要做什么，不复述工具用法、"
                 "输出格式等内部规则，也不展开计划、不罗列备选方案；"
                 "完整的进展与结论只在最终回复（不再调用工具的那一轮）给出。"
+                "任务清单（write_todos）是给用户的进度承诺：收尾汇报前把清单回写为"
+                "真实终态——已完成项标 completed，确未做的如实保留 pending 并在最终"
+                "回复说明原因；不要把半程状态的清单留给用户。"
                 "派发子代理（task）时，description 第一行只写短名本身——不超过 16 字、"
                 "概括该子代理的任务（如「检索中石化 dify 相关招标」），不要以「你是……」"
                 "之类的角色自述开头，并发派发时各卡短名要能相互区分；详细任务说明从"
                 "第二行开始。"
-                "面向用户的回复用用户语言：内部路径（files/、out/、任务目录前缀）与"
+                "面向用户的回复用用户语言：内部路径（sources/、work/、任务目录前缀）与"
                 "实现名词（工具名、文件名如 sources.json、子代理、run）不进回复，"
                 "它们是你操作用的知识、不是用户的操作入口；汇报进度与状态按业务阶段"
                 "说（文件是否上传、解析/要点提取/目录的进展），不要用目录状态与技能"
@@ -598,9 +628,10 @@ def _run_agent_stream(
     # 正文按轮次分段：cur_text_parts 是当前未封口段；主 agent 的 tool_called 到达即
     # 封口为旁白（挂该步骤 text），run 结束时最后未封口段 = 最终回复。
     cur_text_parts: list[str] = []
-    # 主 agent 思考流整段累积（DeepSeek reasoning_content）：不按步封段（跨多轮、
-    # 与工具步骤归属不清晰），run 结束随 trace 落 run_traces.reasoning——历史会话
-    # 的「深度思考」折叠区数据源。子代理 reasoning 另走 task_step["reasoning"]。
+    # 主 agent 思考流按轮分段：reasoning 先于它催生的 tool_called 到达，tool_called
+    # 到达即封口挂该步骤 reasoning（与旁白封段同一条规则；同轮连发多调用只有首个带），
+    # run 结束时最后未封口段 = 最终回复前的思考，随 trace 落 run_traces.reasoning。
+    # 子代理 reasoning 另走 task_step["reasoning"]。
     cur_reasoning: list[str] = []
     error = None
     top_steps: list[dict] = []
@@ -661,10 +692,13 @@ def _run_agent_stream(
                         )
                         step = _new_trace_step(payload)
                         if not payload.get("agent_id"):
-                            # 主 agent 调用：把之前流出的正文封为旁白挂到本步骤（同轮连发的
-                            # 后续调用 text 为空串）；子代理调用不封段（其正文 token 不透传）
+                            # 主 agent 调用：把之前流出的正文封为旁白、思考流封为本步
+                            # 骤的 reasoning（同轮连发的后续调用两者均为空串）；子代理
+                            # 调用不封段（其正文 token 不透传，reasoning 走 agent_id 归属）
                             step["text"] = "".join(cur_text_parts)
                             cur_text_parts.clear()
+                            step["reasoning"] = "".join(cur_reasoning)
+                            cur_reasoning.clear()
                         _attach_step(top_steps, step, payload.get("agent_id"))
                         set_live_trace(
                             rid,
@@ -819,17 +853,26 @@ def _merge_trace_trees(old: list[dict], new: list[dict]) -> list[dict]:
 
     被门禁拦下的调用在续跑段重发时携带同一 tool_call_id（langgraph 复用原 AIMessage），
     新副本是终态（含子代理 children），替换旧树里的 paused 冻结副本；新段增量按序
-    追加。保证同一 run 跨暂停/续跑只有一棵连续的执行过程树。
+    追加。替换时新副本的 text/reasoning 为空则回退旧值——重发的 tool.called 在新段
+    开场即到、其封段字段必为空串，暂停前封下的旁白/思考不能因此丢失。保证同一 run
+    跨暂停/续跑只有一棵连续的执行过程树。
     """
     old_ids = {s.get("id") for s in _iter_trace_steps(old) if s.get("id")}
     repl = {s["id"]: s for s in _iter_trace_steps(new) if s.get("id") in old_ids}
+
+    def with_fallback(new_step: dict, old_step: dict) -> dict:
+        merged = new_step
+        for field in ("text", "reasoning"):
+            if not merged.get(field) and old_step.get(field):
+                merged = {**merged, field: old_step[field]}
+        return merged
 
     def swap(steps: list[dict]) -> list[dict]:
         out = []
         for s in steps:
             sid = s.get("id")
             if sid in repl:
-                out.append(repl[sid])
+                out.append(with_fallback(repl[sid], s))
                 continue
             children = s.get("children") or []
             out.append({**s, "children": swap(children)} if children else s)
@@ -840,24 +883,37 @@ def _merge_trace_trees(old: list[dict], new: list[dict]) -> list[dict]:
     return merged
 
 
-def _save_merged_trace(rid: str, cid: str, message_id: str | None, trace: dict, duration_ms: int) -> None:
-    """落 trace 前与既有行合并（同 run 暂停→续跑不再整行覆盖丢暂停段）。
+def _save_merged_trace(
+    rid: str,
+    cid: str,
+    message_id: str | None,
+    trace: dict,
+    duration_ms: int | None,
+    files: list | None = None,
+) -> None:
+    """落 trace 前与既有行合并（同 run 暂停->续跑不再整行覆盖丢暂停段）。
 
     message_id 新值优先；新段无产出（error 半截 message_id=None）时保留旧值，
     暂停消息继续挂全程 trace。reasoning 拼接、duration 累加（分段计时之和≈全程）。
+    files 是本段 work/ 变更 diff：None（无任务/探测失败）保留旧值，否则与旧段
+    合并（任一分段新建过即 created，见 run_files.merge_files）。
     """
     existing = db.get_run_trace(rid)
     if existing is None:
-        db.save_run_trace(rid, cid, message_id, trace["tools"], trace["todos"], duration_ms, trace.get("reasoning", ""))
+        db.save_run_trace(
+            rid, cid, message_id, trace["tools"], trace["todos"], duration_ms,
+            trace.get("reasoning", ""), files=files,
+        )
         return
     merged_tools = _merge_trace_trees(existing.get("tools") or [], trace["tools"])
     old_reasoning = existing.get("reasoning") or ""
     new_reasoning = trace.get("reasoning", "")
     reasoning = f"{old_reasoning}\n{new_reasoning}" if old_reasoning and new_reasoning else (old_reasoning or new_reasoning)
     merged_duration = (existing.get("durationMs") or 0) + (duration_ms or 0)
+    merged_files = run_files.merge_files(existing.get("files"), files)
     db.save_run_trace(
         rid, cid, message_id or existing.get("message_id"), merged_tools,
-        trace["todos"], merged_duration, reasoning,
+        trace["todos"], merged_duration, reasoning, files=merged_files,
     )
 
 
@@ -950,6 +1006,10 @@ async def run_stream(
     trace: dict = {"tools": [], "todos": []}
     interrupt: dict | None = None
     segment_saved = False
+    # 「本轮文件」探测：run 起点 work/ 快照 + 各段终态 diff（含续跑分段，合并进同一
+    # run_traces 行）。None=无任务/探测失败，落库语义为「保留旧值」
+    start_files: dict | None = None
+    segment_files: list | None = None
     try:
         # per-run 事件序列号（契约 additive 扩展）：所有流事件 data 带 seq（1 起单调递增），
         # 客户端据此去重（双连接重影防线）与检测缺口。ping/run.state（对账）不带。
@@ -981,6 +1041,13 @@ async def run_stream(
             # 纯检索/对话任务也没有按需建目录的时机——run 启动兜底补齐，模型第一步
             # ls <task_id>/ 不再 path_not_found（mkdir exist_ok，幂等无锁）
             artifact_store.ensure_task_skeleton(task_id)
+        # 快照在骨架自愈之后、worker 启动之前：起止之间的 work/ 变更即「本轮文件」。
+        # 与终态 diff 同一条纪律：探测失败只损失本轮文件数据，绝不打死 run
+        try:
+            start_files = run_files.snapshot_work_files(task_id)
+        except Exception:
+            logger.exception("本轮文件起点快照失败（cid=%s rid=%s）", cid, rid)
+            start_files = None
         text, error, trace, interrupt = await asyncio.to_thread(
             _run_agent_stream, agent, cid, rid, task_id, _publish, user_text, resume_decisions, cancel_event, thinking
         )
@@ -999,6 +1066,15 @@ async def run_stream(
             )
             db.mark_emitted(row["artifact_id"])
 
+        # 本段 work/ 变更 diff（completed/error/waiting_input 三分支共用；含 HITL
+        # 续跑分段=每段起止各一次，分段结果进 _save_merged_trace 合并）。探测本身
+        # 绝不打断收尾：失败按「无新数据」处理（None=保留旧值）
+        try:
+            segment_files = run_files.diff_work_files(task_id, start_files)
+        except Exception:
+            logger.exception("本轮文件 diff 失败（cid=%s rid=%s）", cid, rid)
+            segment_files = None
+
         if error:
             # 半截回复快照：优先最终回复段，空则用最后一段旁白兜底（并从 trace 步骤去重）
             snapshot_text, tools_snapshot = _pause_snapshot(text, trace["tools"])
@@ -1011,7 +1087,7 @@ async def run_stream(
                 # 否则对话最后一句永远宣称在等输入、与已终止的 run 矛盾
                 db.retire_pause_marker((db.get_run(rid) or {}).get("pause_msg_id"))
             # 中断 run 的执行过程也落 trace（与暂停段合并；message_id 空则保留暂停消息挂载）
-            _save_merged_trace(rid, cid, None, {**trace, "tools": tools_snapshot}, duration_ms)
+            _save_merged_trace(rid, cid, None, {**trace, "tools": tools_snapshot}, duration_ms, files=segment_files)
             segment_saved = True
             # 先落库后发事件（与 completed 分支一致）：客户端收到终态事件即可立即对账
             seq = next_seq()
@@ -1045,6 +1121,7 @@ async def run_stream(
                 rid, cid, msg_id,
                 {**trace, "tools": _freeze_paused_steps(tools_snapshot)},
                 duration_ms,
+                files=segment_files,
             )
             segment_saved = True
             # 先落库后发事件（与 completed/error 分支一致）
@@ -1065,7 +1142,7 @@ async def run_stream(
         segment_saved = True
         # 执行过程快照与 assistant 消息关联落库（与暂停段合并成全程一棵树，
         # 历史会话/刷新后执行过程仍可见）
-        _save_merged_trace(rid, cid, msg["id"], trace, duration_ms)
+        _save_merged_trace(rid, cid, msg["id"], trace, duration_ms, files=segment_files)
         seq = next_seq()
         db.finish_run(rid, "completed", last_seq=seq)
         await publish(
@@ -1089,7 +1166,7 @@ async def run_stream(
                         db.append_assistant_message(cid, snapshot_text.rstrip() + "\n\n（任务中断）", rid=rid)
                     else:
                         db.retire_pause_marker((db.get_run(rid) or {}).get("pause_msg_id"))
-                    _save_merged_trace(rid, cid, None, {**trace, "tools": tools_snapshot}, None)
+                    _save_merged_trace(rid, cid, None, {**trace, "tools": tools_snapshot}, None, files=segment_files)
                 else:
                     db.retire_pause_marker((db.get_run(rid) or {}).get("pause_msg_id"))
             except Exception:

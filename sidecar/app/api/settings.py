@@ -11,7 +11,7 @@ import asyncio
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import config as cfg
 from ..agent import rebuild_agent
@@ -25,6 +25,8 @@ class ModelBody(BaseModel):
     base_url: str | None = None
     model: str | None = None
     image_support: bool = False
+    # 上下文窗口（token；None=未知/自动）。仅 deepagents 压缩触发档位用，可选。
+    context_window: int | None = Field(default=None, gt=0)
 
 
 class BackgroundRolesBody(BaseModel):
@@ -61,6 +63,7 @@ def _profile_to_api(p: cfg.ModelProfile) -> dict:
         "base_url": p.base_url,
         "model": p.model,
         "image_support": p.image_support,
+        "context_window": p.context_window,
         "key_configured": bool(cfg.model_key(p.id)),
     }
 
@@ -110,6 +113,7 @@ async def put_settings_models(body: ModelsBody):
                 base_url=base_url,
                 model=m.model.strip(),
                 image_support=m.image_support,
+                context_window=m.context_window,
             )
         )
 
