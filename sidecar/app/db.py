@@ -4,9 +4,9 @@ tasks / conversations / messages / runs / artifact_index。与 DeepAgents 的
 checkpointer（data/agent.db）分离，避免锁竞争。所有写操作在各自连接上执行，
 连接默认 autocommit（isolation_level=None）。
 
-任务层（2026-08-31 两态重构）：会话归属任务（conversations.task_id）；产物归任务
-单一真源——包内 meta.json 存 draft/confirmed 两态，conversation_id 仅 provenance
-（记录产出会话），不再有正式稿/过程稿双层。
+任务层（2026-08-31 归属重构；2026-09-04 两态移除）：会话归属任务
+（conversations.task_id）；产物归任务单一真源、单一当前版本，conversation_id
+仅 provenance（记录产出会话），不再有正式稿/过程稿双层。
 
 artifact_index 是类型化 Artifact 的可重建索引 + 运行态（content_seq/emitted）；
 权威身份在每个 Artifact 包的 meta.json（见 artifact_store.py），本表丢失后
@@ -53,7 +53,6 @@ CREATE TABLE IF NOT EXISTS artifact_index(
   content_seq INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL,
   last_run_id TEXT, last_thread_id TEXT,
-  state TEXT NOT NULL DEFAULT 'draft',
   emitted INTEGER NOT NULL DEFAULT 0);
 -- run 执行过程快照（工具步骤树 + todos + 主 agent 思考流）：run 结束落一份，
 -- message_id 关联 assistant 消息（error 中断的 run 无 message_id），
@@ -68,8 +67,10 @@ CREATE TABLE IF NOT EXISTS run_traces(
   reasoning TEXT NOT NULL DEFAULT '',
   files TEXT NOT NULL DEFAULT '[]',
   created_at TEXT NOT NULL);
--- 知识库条目（一个上传文件一条；suggested=LLM 抽取建议、business=确认后真值，
--- 两列之隔即审核边界——确认动作把 suggested 拷入 business，LLM 永不覆盖 business）
+-- 知识库条目（v3 内容角色模型，2026-09-03 全量重建：一个上传文件一条；
+-- suggested=AI 建议（doc_type/内容说明 statement/时间字段）、business=确认后真值，
+-- 两列之隔即审核边界——确认把 suggested 拷入 business，LLM 永不覆盖 business；
+-- progress=进行中工序的进度文本（"素材拆分中 3/5 批"/"图片识别中 12/60 页"），NULL=无）
 CREATE TABLE IF NOT EXISTS kb_items(
   id TEXT PRIMARY KEY,
   file_name TEXT NOT NULL,
@@ -82,14 +83,35 @@ CREATE TABLE IF NOT EXISTS kb_items(
   review_status TEXT NOT NULL DEFAULT 'pending_review',
   suggested_metadata TEXT,
   business_metadata TEXT,
+  progress TEXT,
   error TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL);
 -- 知识库检索切段（FTS5）：按 outline 节点切段一段一行，body 存 jieba 预分词文本
--- （写入/查询两侧同源分词，unicode61 切英文数字 token；索引可从 kb_items+磁盘 md 重建）
+-- （写入/查询两侧同源分词，unicode61 切英文数字 token；索引可从 kb_items+磁盘 md 重建）；
+-- material_id 非空 = 参考文档桶的素材段（素材块复用同一张表、检索一条路径）
 CREATE VIRTUAL TABLE IF NOT EXISTS kb_segments USING fts5(
-  body, item_id UNINDEXED, section_path UNINDEXED,
+  body, item_id UNINDEXED, section_path UNINDEXED, material_id UNINDEXED,
   line_start UNINDEXED, line_end UNINDEXED, page_start UNINDEXED);
+-- 写作素材库（2026-09-04 v2 手工构建，与知识库彻底分离）：素材文件 + 用户勾选建的块
+-- （块=多行号区间集合+用户备注；真值在 materials/parse/<stem>/blocks.json，本表可重建；
+-- 块检索段复用 kb_segments，item_id=素材文件 id mt_ 前缀与知识库天然隔离）
+CREATE TABLE IF NOT EXISTS mt_files(
+  id TEXT PRIMARY KEY,
+  file_name TEXT NOT NULL,
+  file_hash TEXT NOT NULL,
+  parse_status TEXT NOT NULL DEFAULT 'pending',
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mt_blocks(
+  id TEXT PRIMARY KEY,
+  file_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  ranges TEXT NOT NULL,
+  chars INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL);
 """
 
 # 索引与建表分两步：旧库先建表→探测补列→再建索引（索引引用新列，顺序不能反）
@@ -104,6 +126,7 @@ CREATE INDEX IF NOT EXISTS idx_artifact_index_last_run
   ON artifact_index(last_run_id, emitted);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_items_hash ON kb_items(file_hash);
 CREATE INDEX IF NOT EXISTS idx_kb_items_review ON kb_items(review_status);
+CREATE INDEX IF NOT EXISTS idx_mt_blocks_file ON mt_blocks(file_id);
 """
 
 
@@ -724,8 +747,10 @@ def load_recent_history(cid: str, limit: int = 20) -> list[dict]:
 _INDEX_COLS = (
     "artifact_id, task_id, conversation_id, kind, schema_id, schema_version, cardinality, "
     "display_name, content_path, content_seq, updated_at, last_run_id, last_thread_id, "
-    "state, emitted"
+    "emitted"
 )
+
+_NUM_INDEX_COLS = len(_INDEX_COLS.split(","))
 
 
 def upsert_artifact_index(rec: dict) -> None:
@@ -733,13 +758,13 @@ def upsert_artifact_index(rec: dict) -> None:
     conn = _conn()
     try:
         conn.execute(
-            f"INSERT OR REPLACE INTO artifact_index({_INDEX_COLS}) VALUES ({','.join('?' * 15)})",
+            f"INSERT OR REPLACE INTO artifact_index({_INDEX_COLS}) "
+            f"VALUES ({','.join('?' * _NUM_INDEX_COLS)})",
             (
                 rec["artifact_id"], rec.get("task_id"), rec.get("conversation_id"), rec["kind"],
                 rec["schema_id"], rec["schema_version"], rec["cardinality"], rec["display_name"],
                 rec["content_path"], rec.get("content_seq", 1), rec["updated_at"],
                 rec.get("last_run_id"), rec.get("last_thread_id"),
-                rec.get("state", "draft"),
                 rec.get("emitted", 0),
             ),
         )
@@ -808,17 +833,6 @@ def delete_artifact_index(aid: str) -> None:
         conn.close()
 
 
-def set_artifact_state(aid: str, state: str) -> None:
-    """置产物状态（draft/confirmed）。确认盖戳与覆盖降级共用此入口。"""
-    conn = _conn()
-    try:
-        conn.execute(
-            "UPDATE artifact_index SET state=? WHERE artifact_id=?", (state, aid)
-        )
-    finally:
-        conn.close()
-
-
 def get_artifact_index(aid: str) -> dict | None:
     conn = _conn()
     try:
@@ -855,8 +869,8 @@ def rebuild_artifact_index(manifests: list[dict], content_path_of) -> int:
     """用磁盘 meta.json 全量重建索引（meta 权威、索引可重建）。
 
     启动时调用：清空后重扫。运行态复位（content_seq=1、emitted=1——启动时无消费者，
-    残留 emitted=0 只会让 run 边界空转，直接置 1）；**state 是持久用户意图**（确认/
-    降级状态），从 meta.json 读取保留，不随重建复位。
+    残留 emitted=0 只会让 run 边界空转，直接置 1）。旧包 meta.json 里残留的
+    state/confirmed_at 键（两态时代化石）被显式字段映射天然忽略。
     content_path_of: meta -> content_path 的求值函数（注入避免依赖 store）。
     返回重建行数。
     """
@@ -870,14 +884,15 @@ def rebuild_artifact_index(manifests: list[dict], content_path_of) -> int:
                 m.get("cardinality", "task-single"), m.get("display_name", ""),
                 content_path_of(m), 1,
                 m.get("created_at", _now()), None, None,
-                m.get("state", "draft"), 1,
+                1,
             )
         )
     conn = _conn()
     try:
         conn.execute("DELETE FROM artifact_index")
         conn.executemany(
-            f"INSERT INTO artifact_index({_INDEX_COLS}) VALUES ({','.join('?' * 15)})",
+            f"INSERT INTO artifact_index({_INDEX_COLS}) "
+            f"VALUES ({','.join('?' * _NUM_INDEX_COLS)})",
             rows,
         )
     finally:
@@ -890,7 +905,7 @@ def rebuild_artifact_index(manifests: list[dict], content_path_of) -> int:
 _KB_ITEM_COLS = (
     "id, file_name, file_hash, title, ext, doc_type, "
     "parse_status, extract_status, review_status, "
-    "suggested_metadata, business_metadata, error, created_at, updated_at"
+    "suggested_metadata, business_metadata, progress, error, created_at, updated_at"
 )
 
 
@@ -963,11 +978,11 @@ def kb_update_item(kid: str, **fields) -> None:
     """更新 kb_items 指定列（仅白名单列）+ updated_at。"""
     allowed = {
         "title", "doc_type", "parse_status", "extract_status", "review_status",
-        "suggested_metadata", "business_metadata", "error",
+        "suggested_metadata", "business_metadata", "progress", "error",
     }
     keys = [
         k for k in fields
-        if k in allowed and (fields[k] is not None or k == "error")  # error 允许置空清除
+        if k in allowed and (fields[k] is not None or k in ("error", "progress"))  # 允许置空清除
     ]
     if not keys:
         return
@@ -983,7 +998,7 @@ def kb_update_item(kid: str, **fields) -> None:
 def kb_delete_item(kid: str) -> None:
     conn = _conn()
     try:
-        # 单事务：两条 DELETE 之间不留「条目没了段还在」的可见窗口
+        # 单事务：条目/段之间不留「条目没了子行还在」的可见窗口
         conn.execute("BEGIN IMMEDIATE")
         try:
             conn.execute("DELETE FROM kb_items WHERE id=?", (kid,))
@@ -1014,6 +1029,8 @@ def kb_replace_segments(item_id: str, segments: list[dict]) -> None:
     两条语句各自提交会留出「段已清空、新版未入」的可见窗口——确认表单后
     立即检索的调用方恰好落进窗口就空手而归（test_confirm_metadata_flow
     偶发失败的根因；与入库管线/确认路径的线程并发无关也要保证）。
+
+    段 dict 可带 material_id（素材段；普通段缺省 None）。
     """
     conn = _conn()
     try:
@@ -1021,11 +1038,11 @@ def kb_replace_segments(item_id: str, segments: list[dict]) -> None:
         try:
             conn.execute("DELETE FROM kb_segments WHERE item_id=?", (item_id,))
             conn.executemany(
-                "INSERT INTO kb_segments(body, item_id, section_path, line_start, line_end, page_start)"
-                " VALUES(?,?,?,?,?,?)",
+                "INSERT INTO kb_segments(body, item_id, section_path, material_id, line_start, line_end, page_start)"
+                " VALUES(?,?,?,?,?,?,?)",
                 [
                     (
-                        s["body"], item_id, s.get("section_path"),
+                        s["body"], item_id, s.get("section_path"), s.get("material_id"),
                         s.get("line_start"), s.get("line_end"), s.get("page_start"),
                     )
                     for s in segments
@@ -1039,12 +1056,185 @@ def kb_replace_segments(item_id: str, segments: list[dict]) -> None:
         conn.close()
 
 
+# ---------- 写作素材库（mt_files + mt_blocks；块检索段复用 kb_segments） ----------
+
+_MT_FILE_COLS = "id, file_name, file_hash, parse_status, error, created_at, updated_at"
+
+
+def mt_insert_file(file_name: str, file_hash: str) -> dict:
+    fid = f"mt_{uuid.uuid4().hex[:12]}"
+    now = _now()
+    conn = _conn()
+    try:
+        conn.execute(
+            "INSERT INTO mt_files(id, file_name, file_hash, created_at, updated_at)"
+            " VALUES(?,?,?,?,?)",
+            (fid, file_name, file_hash, now, now),
+        )
+    finally:
+        conn.close()
+    return mt_get_file(fid) or {}
+
+
+def mt_get_file(fid: str) -> dict | None:
+    conn = _conn()
+    try:
+        row = conn.execute(f"SELECT {_MT_FILE_COLS} FROM mt_files WHERE id=?", (fid,)).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def mt_get_file_by_hash(file_hash: str) -> dict | None:
+    conn = _conn()
+    try:
+        row = conn.execute(f"SELECT {_MT_FILE_COLS} FROM mt_files WHERE file_hash=?", (file_hash,)).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def mt_list_files() -> list[dict]:
+    """素材文件列表（按创建时间倒序）。"""
+    conn = _conn()
+    try:
+        rows = conn.execute(f"SELECT {_MT_FILE_COLS} FROM mt_files ORDER BY created_at DESC").fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def mt_update_file(fid: str, **fields) -> None:
+    """更新 mt_files 指定列（仅白名单列）+ updated_at。"""
+    allowed = {"parse_status", "error", "file_name"}
+    keys = [
+        k for k in fields
+        if k in allowed and (fields[k] is not None or k == "error")
+    ]
+    if not keys:
+        return
+    sets = ", ".join(f"{k}=?" for k in keys)
+    args = [fields[k] for k in keys] + [_now(), fid]
+    conn = _conn()
+    try:
+        conn.execute(f"UPDATE mt_files SET {sets}, updated_at=? WHERE id=?", args)
+    finally:
+        conn.close()
+
+
+def mt_delete_file(fid: str) -> None:
+    """删素材文件连带块与检索段（单事务不留孤儿）。"""
+    conn = _conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DELETE FROM mt_files WHERE id=?", (fid,))
+            conn.execute("DELETE FROM mt_blocks WHERE file_id=?", (fid,))
+            conn.execute("DELETE FROM kb_segments WHERE item_id=?", (fid,))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+def mt_replace_blocks(file_id: str, rows: list[dict]) -> None:
+    """重建某素材文件的块行（先 DELETE 后 INSERT，幂等；与知识库段重建同款事务纪律）。
+
+    rows dict：{id, title, note, ranges(JSON 字符串 [[s,e],…]), chars}。
+    """
+    now = _now()
+    conn = _conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DELETE FROM mt_blocks WHERE file_id=?", (file_id,))
+            conn.executemany(
+                "INSERT INTO mt_blocks(id, file_id, title, note, ranges, chars, created_at)"
+                " VALUES(?,?,?,?,?,?,?)",
+                [
+                    (r["id"], file_id, r["title"], r.get("note") or "",
+                     r["ranges"], r.get("chars") or 0, now)
+                    for r in rows
+                ],
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+def mt_list_blocks(file_id: str | None = None) -> list[dict]:
+    """块列表（可按文件过滤；ranges 反序列化为 [[s,e],…]；按创建时间倒序）。"""
+    sql = "SELECT id, file_id, title, note, ranges, chars, created_at FROM mt_blocks"
+    args: tuple = ()
+    if file_id:
+        sql += " WHERE file_id=?"
+        args = (file_id,)
+    sql += " ORDER BY created_at DESC"
+    conn = _conn()
+    try:
+        rows = conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["ranges"] = json.loads(d["ranges"]) if d["ranges"] else []
+        except ValueError:
+            d["ranges"] = []
+        out.append(d)
+    return out
+
+
+def mt_get_block(bid: str) -> dict | None:
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT id, file_id, title, note, ranges, chars, created_at FROM mt_blocks WHERE id=?",
+            (bid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["ranges"] = json.loads(d["ranges"]) if d["ranges"] else []
+    except ValueError:
+        d["ranges"] = []
+    return d
+
+
+def mt_count_blocks() -> int:
+    conn = _conn()
+    try:
+        row = conn.execute("SELECT COUNT(*) AS n FROM mt_blocks").fetchone()
+    finally:
+        conn.close()
+    return int(row["n"]) if row else 0
+
+
+def mt_block_counts() -> dict[str, int]:
+    """file_id → 块数（文件列表徽标，一次聚合查询）。"""
+    conn = _conn()
+    try:
+        rows = conn.execute("SELECT file_id, COUNT(*) AS n FROM mt_blocks GROUP BY file_id").fetchall()
+    finally:
+        conn.close()
+    return {r["file_id"]: int(r["n"]) for r in rows}
+
+
 def kb_search_segments(match_expr: str, limit: int = 8) -> list[dict]:
     """FTS5 检索（bm25 排序），返回原始文本（body 是分词后文本，调用方展示用原文摘要）。"""
     conn = _conn()
     try:
         rows = conn.execute(
-            "SELECT item_id, section_path, line_start, line_end, page_start, body,"
+            "SELECT item_id, section_path, material_id, line_start, line_end, page_start, body,"
             " bm25(kb_segments) AS rank"
             " FROM kb_segments WHERE kb_segments MATCH ?"
             " ORDER BY rank LIMIT ?",
@@ -1060,7 +1250,7 @@ def recover_stale_kb() -> int:
     conn = _conn()
     try:
         cur = conn.execute(
-            "UPDATE kb_items SET parse_status='failed',"
+            "UPDATE kb_items SET parse_status='failed', progress=NULL,"
             " error=COALESCE(error, 'sidecar 中断，请重新触发'), updated_at=?"
             " WHERE parse_status IN ('pending','parsing')",
             (_now(),),

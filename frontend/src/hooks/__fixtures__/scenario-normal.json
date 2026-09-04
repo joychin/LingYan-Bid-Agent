@@ -8,7 +8,7 @@
     { "event": "tool.result", "data": { "run_id": "r1", "conversation_id": "c1", "tool": "fetch_url", "summary": "页面内容", "error": null, "tool_call_id": "call_1", "agent_id": null, "seq": 5 } },
     { "event": "agent.token", "data": { "run_id": "r1", "conversation_id": "c1", "text": "完成了：X。", "seq": 6 } },
     { "event": "todo.updated", "data": { "run_id": "r1", "conversation_id": "c1", "done": 1, "total": 2, "items": [{ "content": "t1", "status": "completed" }, { "content": "t2", "status": "pending" }], "seq": 7 } },
-    { "event": "artifact.created", "data": { "run_id": "r1", "conversation_id": "c1", "artifact_id": "a1", "display_name": "投标目录", "kind": "tender.directory", "schema_id": "tender-response-docs", "schema_version": 1, "state": "draft", "task_id": "t1", "seq": 8 } },
+    { "event": "artifact.created", "data": { "run_id": "r1", "conversation_id": "c1", "artifact_id": "a1", "display_name": "投标目录", "kind": "tender.directory", "schema_id": "tender-response-docs", "schema_version": 1, "task_id": "t1", "seq": 8 } },
     { "event": "agent.completed", "data": { "run_id": "r1", "conversation_id": "c1", "message_id": "m1", "seq": 9 } }
   ]
 }

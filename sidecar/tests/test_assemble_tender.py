@@ -150,7 +150,7 @@ def test_assemble_and_publish(env):
     assert m["task_id"] == env["task"]["id"]
     assert m["conversation_id"] == env["conv"]["id"]
     idx = db.get_artifact_index(m["artifact_id"])
-    assert idx["state"] == "draft"  # 发布产出草稿，用户确认后才 confirmed
+    assert idx["content_seq"] == 1  # 发布即当前内容
     assert m["source"]["skill"] == "tender-outline"
     content = json.loads(artifact_store.read_content(m["artifact_id"], m))
     doc = content["response_documents"][0]

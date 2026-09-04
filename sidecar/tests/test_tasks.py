@@ -107,7 +107,6 @@ def test_task_scoped_publish_and_filtering(env):
     row = db.get_artifact_index(m["artifact_id"])
     assert row["conversation_id"] == conv["id"]
     assert row["task_id"] == task["id"]
-    assert row["state"] == "draft"
 
     # 过滤：任务归属可见全部；按会话（provenance）过滤亦命中
     assert len(db.list_artifact_index(task_id=task["id"])) == 1
@@ -156,7 +155,6 @@ def test_publish_tool_funnels_unknown_contract_to_note(env):
 
         rows = db.list_artifact_index(task_id=task["id"])
         assert len(rows) == 1 and rows[0]["kind"] == "doc.note"
-        assert rows[0]["state"] == "draft"
         # 暂存草稿被移动消费，不留残骸
         assert not draft.exists()
     finally:
@@ -184,15 +182,14 @@ def test_read_returns_single_current(env):
     task, conv = _task_env(env)
     runctx.set_run(conv["id"], "r1", task["id"])
     try:
-        publish.publish_artifact(DIR_KEY, _dir_content("草稿"), task_id=task["id"])
+        publish.publish_artifact(DIR_KEY, _dir_content("第一版"), task_id=task["id"])
         out = read_tool.invoke({"contract": DIR_KEY})
-        assert "草稿" in out and "[来源：草稿]" in out
+        assert "第一版" in out and out.lstrip().startswith("{")
 
-        # 确认后仍读同一份（单一真源），来源标「已确认」
-        row = db.find_artifact_index("tender.directory", "tender-response-docs", 1, task_id=task["id"])
-        db.set_artifact_state(row["artifact_id"], "confirmed")
+        # 重发布覆盖 → 读到的即当前内容（单一真源、单一当前版本）
+        publish.publish_artifact(DIR_KEY, _dir_content("第二版"), task_id=task["id"])
         out = read_tool.invoke({"contract": DIR_KEY})
-        assert "草稿" in out and "[来源：已确认]" in out
+        assert "第二版" in out and "第一版" not in out
     finally:
         runctx.clear_run()
 
@@ -214,79 +211,6 @@ def test_read_multi_note_requires_artifact_id(env):
         assert ("甲" in out) or ("乙" in out)
     finally:
         runctx.clear_run()
-
-
-# ---------- 确认 ----------
-
-
-def test_confirm_stamps_in_place(env):
-    """确认 = 原地盖戳（不复制不搬家）：同一 artifact_id，state 草稿→已确认。"""
-    task, conv = _task_env(env)
-    m = publish.publish_artifact(
-        DIR_KEY, _dir_content("初稿"), task_id=task["id"], conversation_id=conv["id"]
-    )
-    aid = m["artifact_id"]
-
-    meta = artifact_store.read_meta(aid, m)
-    meta["state"] = "confirmed"
-    meta["confirmed_at"] = "2026-08-31T00:00:00+00:00"
-    artifact_store.write_meta(meta)
-    db.set_artifact_state(aid, "confirmed")
-
-    row = db.get_artifact_index(aid)
-    assert row["state"] == "confirmed"
-    # 仍是同一份产物、同一份内容（没有 formal 副本）
-    assert db.list_artifact_index(task_id=task["id"]) == [row]
-    assert json.loads(artifact_store.read_content(aid, row))["response_documents"][0]["name"] == "初稿"
-
-
-def test_confirm_endpoint_flow(client):
-    conv = create_conversation(client)
-    tid, cid = conv["task_id"], conv["id"]
-    m = publish.publish_artifact(
-        DIR_KEY, _dir_content("待确认"), task_id=tid, conversation_id=cid
-    )
-    r = client.post(f"/api/artifacts/{m['artifact_id']}/confirm")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["artifact"]["state"] == "confirmed"
-    assert body["artifact"]["task_id"] == tid
-
-    # 列表过滤：任务归属返回该产物，state=confirmed
-    arts = client.get("/api/artifacts", params={"task_id": tid}).json()["artifacts"]
-    assert arts[0]["artifact_id"] == m["artifact_id"]
-    assert arts[0]["state"] == "confirmed"
-
-    # 撤销确认
-    r = client.post(f"/api/artifacts/{m['artifact_id']}/unconfirm")
-    assert r.status_code == 200
-    assert r.json()["artifact"]["state"] == "draft"
-
-    # 不存在产物确认 404
-    assert client.post("/api/artifacts/art_0000000000ff/confirm").status_code == 404
-
-
-def test_confirm_version_binding(client):
-    """confirm 版本绑定：source_content_seq 不符 409（用户确认的是他看到的那份内容）。"""
-    conv = create_conversation(client)
-    tid, cid = conv["task_id"], conv["id"]
-    m = publish.publish_artifact(DIR_KEY, _dir_content("v1"), task_id=tid, conversation_id=cid)
-    aid = m["artifact_id"]
-    seq1 = db.get_artifact_index(aid)["content_seq"]
-
-    # 旧版本号 → 409（内容在用户查看后被更新过）
-    r = client.post(f"/api/artifacts/{aid}/confirm", json={"source_content_seq": seq1 + 5})
-    assert r.status_code == 409
-    assert "已被更新" in r.json()["detail"]
-    # 409 后仍未确认
-    assert db.get_artifact_index(aid)["state"] == "draft"
-
-    # 当前版本号一致 → 成功
-    cur_seq = db.get_artifact_index(aid)["content_seq"]
-    r = client.post(f"/api/artifacts/{aid}/confirm", json={"source_content_seq": cur_seq})
-    assert r.status_code == 200
-    assert db.get_artifact_index(aid)["state"] == "confirmed"
 
 
 # ---------- 进度便签工具 ----------

@@ -41,6 +41,13 @@ def segments_from(md_text: str, outline: list[dict]) -> list[dict]:
             walk(n.get("children", []), chain)
 
     walk(outline, [])
+    if not flat and outline:
+        # 无 level≤2 标题的文档（样式滥用如全六级平铺）：顶层节点兜底成段——
+        # 段带真实标题路径，业绩词表等 section_path 逻辑（roles）对平铺文档生效；
+        # 与章节块候选「无二级退一级」同款语义
+        for n in outline:
+            if isinstance(n, dict) and n.get("标题") and n.get("start_line") and n.get("end_line"):
+                flat.append((1, int(n["start_line"]), int(n["end_line"]), [n["标题"]]))
 
     segs: list[dict] = []
     if flat:

@@ -146,28 +146,27 @@ class _SubagentTagMiddleware(AgentMiddleware):
 
 def _artifact_listing(rows: list[dict]) -> list[str]:
     return [
-        f"- {r['display_name']}（{r['kind']}/{r['schema_id']}@{r['schema_version']}，{r['artifact_id']}，"
-        f"{'已确认' if r.get('state') == 'confirmed' else '草稿'}）"
+        f"- {r['display_name']}（{r['kind']}/{r['schema_id']}@{r['schema_version']}，{r['artifact_id']}）"
         for r in rows
         if artifact_store.package_ready(r["artifact_id"], r)
     ]
 
 
 def _task_context_block(task_id: str, conversation_id: str) -> str:
-    """拼装任务上下文注入块：任务名 + 进度便签 + 单一产物清单（名称 + 状态）。
+    """拼装任务上下文注入块：任务名 + 进度便签 + 单一产物清单（名称）。
 
     共享的是文件夹和结论，不是聊天记录（设计文档 §8.2）：模型要具体内容时
-    经 read_artifact 按需读取。每次模型调用现算——run 中途发布/确认的成果
+    经 read_artifact 按需读取。每次模型调用现算——run 中途发布的成果
     下一次调用即可见。
     """
     task = db.get_task(task_id)
     if not task:
         return ""
     lines = [
-        f"## 当前任务：{task['title']}（本会话属于该任务，产物归任务、分草稿/已确认两态）",
+        f"## 当前任务：{task['title']}（本会话属于该任务，产物归任务、单一当前版本）",
         # §16 任务分组目录：模型引用文件/产物的路径前缀（sources/ 来源、work/ 工作树）
         f"任务工作目录：`{task_id}/`（用户上传的文件在其 sources/ 下，解析与分析过程文件在 "
-        "work/ 下，发布草稿写 _meta/staging/；引用这些路径时带上该前缀）",
+        "work/ 下，发布暂存写 _meta/staging/；引用这些路径时带上该前缀）",
         # 模型不知道当前时间，写产物头部等时间戳时会编造（如零点占位）——每次调用现给
         f"当前时间：{datetime.now(timezone.utc).isoformat(timespec='seconds')}"
         "（写时间戳时用它，不要自己估）",
@@ -180,31 +179,45 @@ def _task_context_block(task_id: str, conversation_id: str) -> str:
         lines.append(kb_line)
     artifacts = _artifact_listing(db.list_artifact_index(task_id=task_id))
     if artifacts:
-        lines.append("### 任务产物（草稿/已确认）\n" + "\n".join(artifacts))
+        lines.append("### 任务产物\n" + "\n".join(artifacts))
     return "\n".join(lines)
 
 
 def _kb_summary_line() -> str:
-    """知识库摘要一行（跨任务共享的公司资料层；条目数 + 类型分布 + 待确认数）。
-
-    无条目时返回空——知识库不存在时不占用上下文。
-    """
-    from .knowledge.types import TYPES
+    """知识库+素材库摘要（事实层=我们有什么/做过什么；素材层=用户手工挑选的写法章节）。
+    无内容时返回空不占上下文。"""
+    from .knowledge.types import ROLE_LABELS, TYPES, role_of
 
     items = db.kb_list_items()
-    if not items:
+    mt_files = db.mt_list_files()
+    if not items and not mt_files:
         return ""
-    counts: dict[str, int] = {}
-    for it in items:
-        code = it.get("doc_type") or "other"
-        counts[code] = counts.get(code, 0) + 1
-    parts = [f"{TYPES[c].name} {n} 份" for c, n in sorted(counts.items()) if c in TYPES]
-    pending = sum(1 for it in items if it["review_status"] == "pending_review")
-    tail = f"，其中 {pending} 份信息待用户确认" if pending else ""
+    lines = []
+    for role in ("fact", "writing"):
+        role_items = [it for it in items if role_of(it.get("doc_type")) == role]
+        if not role_items:
+            continue
+        counts: dict[str, int] = {}
+        for it in role_items:
+            code = it.get("doc_type") or "other"
+            counts[code] = counts.get(code, 0) + 1
+        parts = [f"{TYPES[c].name} {n} 份" for c, n in sorted(counts.items()) if c in TYPES]
+        pending = sum(1 for it in role_items if it["review_status"] == "pending_review")
+        tail = f"，其中 {pending} 份信息待用户确认" if pending else ""
+        label = ROLE_LABELS[role] + "（事实检索用）" if role == "writing" else ROLE_LABELS[role]
+        lines.append(f"{label} {len(role_items)} 份：{'、'.join(parts) or '未分类'}{tail}")
+    if mt_files:
+        n_blocks = db.mt_count_blocks()
+        lines.append(
+            f"写作素材库 {len(mt_files)} 份文件 {n_blocks} 个素材块（用户手工挑选的章节+备注，写法最可靠）"
+        )
     return (
-        f"### 公司知识库（共享资料层）\n共 {len(items)} 份资料：{'、'.join(parts) or '未分类'}{tail}。"
-        "写标书需要公司资质、案例、证书等内容时，先用 search_knowledge 检索，"
-        "再按返回的行号区间用 read_file 精读原文。"
+        "### 公司知识库与写作素材\n" + "\n".join(lines) + "\n"
+        "写标书陈述公司资质/案例/业绩等事实时先用 search_company_assets 检索（历史标书"
+        "里的业绩描述可引用但须与合同核对，拟投入承诺不是现状事实）；参考同类内容怎么写、"
+        "需要整章拷贝修订、或想知道某类产品/服务该写哪些能力模块时用 search_references"
+        "（查用户手工挑选的素材块及其备注；素材≠公司事实，数字与承诺须按本次招标重新核对；"
+        "拷贝素材后必须 check_name_residue 扫旧名残留）。检索后按行号区间用 read_file 精读原文。"
     )
 
 
@@ -358,24 +371,19 @@ def build_agent(profile: cfg.ModelProfile | None = None):
         # 子代理归属插桩；todos 工具；任务上下文按 run 注入
         middleware=[_SubagentTagMiddleware(), TodoListMiddleware(), _TaskContextMiddleware()],
         system_prompt=(
-            "你是标书助理，在一个投标任务下的会话里工作。产物归任务，分两态："
-            "「草稿」（AI 发布的默认状态）与「已确认」（用户确认过的成果）。"
-            "你发布的一律是草稿；想让成果成为正式成果由用户在界面确认，"
-            "不要假装已确认。覆盖一个已确认产物时它会降回草稿，需用户重新确认。"
-            "方法论在 skills 目录中，按各技能的 SKILL.md 执行："
-            "解析招标文件（文件→Markdown、确认来源集合）用 document-parse 技能"
-            "（确认主文件与补充角色→parse_document→解析概况经用户确认）；"
-            "分析招标文件、提取要点用 tender-analysis 技能（前提是 document-parse 已完成，"
-            "读 outline 按行号取区段，禁止整读全文）；"
-            "要点齐后生成投标目录用 tender-outline 技能（首个确认点：确认响应文件怎么拆分→初稿→三道清理→"
-            "assemble_tender 组装发布草稿并提醒用户确认；多响应文件时并发派发"
-            " tender-outline-writer 子代理每册一个，主线程只派发与汇总）。"
+            "你是标书助理，在一个投标任务下的会话里工作。产物归任务、单一当前版本："
+            "同契约在任务内只有一份当前内容，重跑覆盖前系统自动留恢复点，"
+            "你不需要维护版本状态。"
+            "方法论在 skills 目录中，按各技能的 SKILL.md 执行（技能清单见下方列表，"
+            "执行前先读对应 SKILL.md）：解析招标文件（文件→Markdown）用 document-parse；"
+            "系统性提取投标要点用 tender-analysis；生成投标目录用 tender-outline；"
+            "就招标文件回答单个具体问题用 tender-qa。"
             "向用户介绍能力、流程或产物时只说你确定的内容，不虚构具体章节名、"
             "步骤名、字段名；没读技能文件前说到概括层（如「按招标文件结构提取"
             "七个方面的要点」）。"
             "用户上传的文件在当前任务工作目录的 sources/ 下（任务目录前缀见任务上下文，"
             "如 <任务目录>/sources/招标文件.docx）。"
-            "引用结构化成果（如投标目录）时用 read_artifact 按契约读取当前内容（已确认优先），"
+            "引用结构化成果（如投标目录）时用 read_artifact 按契约读取当前内容，"
                 "不要猜文件路径；中途想保存的未登记内容以 doc.note 笔记保存。"
                 "完成阶段性工作后用 update_task_progress 更新任务进度便签（保持简短）。"
                 "输出纪律：调用工具的那一轮，正文只写一句以内的当前动作说明"

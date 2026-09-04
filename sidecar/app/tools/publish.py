@@ -4,8 +4,8 @@
 （必须落在当前任务的 _meta/staging/ 内，防文档内容注入诱导读取敏感文件）与
 移动消费（发布后草稿从暂存区移除，不留残骸）。
 
-2026-08-31 重构语义：产物归任务、发布产出草稿（state=draft）；用户确认为正式成果
-走「确认」动作（界面点击 /confirm），LLM 不参与确认——LLM 只能发布草稿。
+2026-08-31 重构语义：产物归任务；2026-09-04 两态移除——产物即单一当前版本，
+发布即当前内容（重跑覆盖前自动留恢复点），无草稿/正式成果之分。
 未注册契约一律收拢为通用笔记 doc.note（任务记忆不因类型未登记而中断）。
 """
 
@@ -67,7 +67,7 @@ def _as_note_content(content: object, display_name: str | None) -> object:
 
 @tool
 def publish_artifact(contract: str, draft_path: str, display_name: str = "") -> str:
-    """把当前任务 _meta/staging/ 下的 JSON 草稿发布为产物（保存为当前任务的草稿，用户可见可打开）。
+    """把当前任务 _meta/staging/ 下的 JSON 草稿发布为产物（登记后即用户可见可打开的成果）。
 
     使用方法：
     1. 先用文件工具把符合契约的 JSON 写到当前任务的 _meta/staging/ 目录（任务目录见任务
@@ -80,7 +80,8 @@ def publish_artifact(contract: str, draft_path: str, display_name: str = "") -> 
     - doc.note/note-md@1  通用笔记（title + body_md）
     其他未注册类型一律以 doc.note 笔记形态保存（body_md 为 markdown 正文）。
 
-    发布的是草稿；想让成果成为正式成果，需用户在界面确认（确认后才不会被重跑覆盖）。
+    产物是任务内该契约的当前版本：同契约已有成果时本次发布覆盖旧内容
+    （旧内容自动留恢复点，用户可恢复上一版）。
     """
     try:
         path = _resolve_draft(draft_path)
@@ -137,7 +138,7 @@ def publish_artifact(contract: str, draft_path: str, display_name: str = "") -> 
     except OSError:
         pass
 
-    suffix = "，已保存为当前草稿（确认后成为正式成果）。"
+    suffix = "，已保存为当前成果。"
     if note_fallback:
         suffix = "（未注册类型，已按通用笔记保存）" + suffix
     return f"[发布成功] {meta['display_name']}（{meta['artifact_id']}）{suffix}"

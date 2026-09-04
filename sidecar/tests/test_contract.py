@@ -110,7 +110,7 @@ def test_run_boundary_payload_builders_match_contract():
 
 
 def test_artifact_created_payload_matches_contract():
-    """artifact.created 载荷（run 边界与确认端点共用 events.artifact_created_payload）。"""
+    """artifact.created 载荷（run 边界用 events.artifact_created_payload 构造）。"""
     row = {
         "artifact_id": "art_000000000001",
         "display_name": "投标目录",
@@ -119,14 +119,10 @@ def test_artifact_created_payload_matches_contract():
         "schema_version": 1,
         "task_id": "t_1",
         "conversation_id": "c_1",
+        # 旧两态时代的残留键（meta/索引化石）不得混进载荷
         "state": "draft",
     }
     data = events_module.artifact_created_payload(row, "r_1", "c_1", 7)
     ArtifactCreated.model_validate(data)
-    assert data["state"] == "draft"
+    assert "state" not in data
     assert data["task_id"] == "t_1"
-
-    confirmed = {**row, "state": "confirmed"}
-    data2 = events_module.artifact_created_payload(confirmed, "r_1", "c_1", 8)
-    ArtifactCreated.model_validate(data2)
-    assert data2["state"] == "confirmed"

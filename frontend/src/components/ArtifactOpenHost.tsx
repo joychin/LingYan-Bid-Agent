@@ -3,7 +3,7 @@
  *
  * v3 起**不再是居中模态**：由 ArtifactPanel 的工作区态（.ap-ws）渲染，与导航列并排
  * （方案 v2：常规查看/编辑不进模态，模态只留给不可逆确认）。职责仍限通用层——
- * 内容加载、Resolver 唤起 Processor、loading/error/不支持态、作用域徽标与通用动作。
+ * 内容加载、Resolver 唤起 Processor、loading/error/不支持态与通用动作。
  * 不感知任何契约的领域结构。
  */
 
@@ -12,10 +12,17 @@ import { Loader } from '@/components/ai/Loader'
 import { artifactKey, isTauri, revealInFolder } from '@/api/client'
 import { useArtifacts, useArtifactContent } from '@/hooks/useArtifacts'
 import { contractLabel, resolveProcessor } from '@/artifacts/registry'
-import { formatRelativeTime, cn } from '@/lib/utils'
+import { formatRelativeTime } from '@/lib/utils'
 import { useToast } from '@/context/Toast'
 
-export function ArtifactOpenHost({ artifactId }: { artifactId: string | null }) {
+export function ArtifactOpenHost({
+  artifactId,
+  onOpenWorkbench,
+}: {
+  artifactId: string | null
+  /** 透传给 Processor（如目录的来源追溯「查看原文上下文」跳工作台文件） */
+  onOpenWorkbench?: (path: string, anchorLine?: number) => void
+}) {
   const { data: artifacts = [] } = useArtifacts()
   const { data, isLoading, isError, error } = useArtifactContent(artifactId)
   const { toast } = useToast()
@@ -24,7 +31,6 @@ export function ArtifactOpenHost({ artifactId }: { artifactId: string | null }) 
   if (!artifactId || !artifact) return null
 
   const processor = resolveProcessor(artifact)
-  const confirmed = artifact.state === 'confirmed'
 
   const handleReveal = async () => {
     try {
@@ -39,9 +45,6 @@ export function ArtifactOpenHost({ artifactId }: { artifactId: string | null }) 
       <div className="ap-ws-head">
         <FileText className="ap-ws-docico" />
         <span className="ap-ws-title">{artifact.display_name}</span>
-        <span className={cn('ap-scope-badge', !confirmed && 'conv')}>
-          {confirmed ? '正式成果' : '草稿'}
-        </span>
         <span className="ap-ws-contract" title={artifactKey(artifact)}>
           {contractLabel(artifact.kind)} · {formatRelativeTime(artifact.updated_at)}
         </span>
@@ -65,7 +68,7 @@ export function ArtifactOpenHost({ artifactId }: { artifactId: string | null }) 
             加载失败：{error instanceof Error ? error.message : String(error)}
           </p>
         ) : processor ? (
-          <processor.Component artifact={artifact} content={data.content} />
+          <processor.Component artifact={artifact} content={data.content} onOpenWorkbench={onOpenWorkbench} />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
             <Puzzle className="h-8 w-8 text-muted-foreground" strokeWidth={1.5} />

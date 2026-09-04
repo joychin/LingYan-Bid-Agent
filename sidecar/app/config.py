@@ -69,6 +69,11 @@ def knowledge_dir() -> Path:
     return workspace_dir() / "knowledge"
 
 
+def materials_dir() -> Path:
+    """写作素材库目录（与 knowledge 平级；素材=用户勾选章节建的块，与知识库彻底分离）。"""
+    return workspace_dir() / "materials"
+
+
 def skills_source_dir() -> Path:
     return SIDECAR_ROOT / "app" / "skills"
 

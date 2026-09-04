@@ -17,8 +17,7 @@ sources/、_meta/、archive、skills），绕过 schema 校验、content_seq、�
   恢复点）仍拒。FilesystemBackend.write 自带 parent mkdir，无需服务端预建；
 - formal/、threads/ 是 2026-08-31 前旧布局的遗留段名，同样拒写（防文档注入诱导
   模型把内容写进孤儿产物包；不做数据兼容，只堵误写）；
-- 产物状态（草稿/已确认）不影响拦写口径——产物包恒对文件工具只读，写入一律走
-  publish_artifact 管线（草稿发布 / 用户确认盖戳）；
+- 产物包恒对文件工具只读，写入一律走 publish_artifact 管线（单一当前版本）；
 - skills/ 拦写的额外理由：技能目录每次启动从 app/skills/ 同步覆盖，模型写入
   会被静默冲掉，属于必丢数据的路径。
 """

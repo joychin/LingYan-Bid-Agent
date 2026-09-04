@@ -95,6 +95,8 @@ def convert(path: Path) -> ParseResult:
             lines.append(_table_to_md(t))
             lines.append("")
             tables += 1
+    # 内嵌图片计数（v3：docx 图片不再静默丢弃——计数进解析概况，抽取属增强工序）
+    image_count = len(doc.part.package.image_parts) if hasattr(doc.part, "package") else 0
     conversion = "docx-native"
     if styled == 0:
         for idx, text in plain_at:
@@ -111,4 +113,4 @@ def convert(path: Path) -> ParseResult:
         else:
             blank = 0
             out.append(ln)
-    return ParseResult("\n".join(out), {"conversion": conversion, "tables": tables})
+    return ParseResult("\n".join(out), {"conversion": conversion, "tables": tables, "image_count": image_count})

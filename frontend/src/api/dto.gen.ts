@@ -27,7 +27,6 @@ export interface Artifact {
   source: ArtifactSource;
   content_seq: number;
   restore_available: boolean;
-  state: "draft" | "confirmed";
   task_id?: string | null;
   conversation_id?: string | null;
   path: string;
@@ -45,6 +44,14 @@ export interface ArtifactContract {
   llm_write_mode: "suggest" | "direct-on-request";
   editable: boolean;
   default_display_name: string;
+}
+/**
+ * 单产物轻量探测（GET /artifacts/{aid}/meta）：编辑器轮询外部更新
+ * 只取版本号，不再拉全量列表。
+ */
+export interface ArtifactMeta {
+  artifact_id: string;
+  content_seq: number;
 }
 /**
  * 后台任务角色 → profile id（空串=跟随缺省：extract 回 default，vision 自动解析）。
@@ -79,10 +86,13 @@ export interface KbFieldSource {
   value: string;
   source?: string | null;
 }
-export interface KbFieldType {
-  code: string;
-  name: string;
-  fields: string[];
+/**
+ * 时间边界警示（sidecar 从锚点字段动态计算，治理内部化）：
+ * expired 已过期 / expiring 即将到期（90 天内）/ stale 资料较旧（3 年以上）。
+ */
+export interface KbFreshness {
+  kind: "expired" | "expiring" | "stale";
+  label: string;
 }
 export interface KbItem {
   id: string;
@@ -92,18 +102,27 @@ export interface KbItem {
   ext: string;
   doc_type?: string | null;
   doc_type_name: string;
+  role: "fact" | "writing";
+  capability: "stored" | "searchable" | "typed";
   parse_status: "pending" | "parsing" | "ready" | "failed";
   extract_status: "pending" | "running" | "done" | "failed" | "skipped";
   review_status: "pending_review" | "confirmed";
-  suggested_metadata?: KbMetadata | null;
-  business_metadata?: KbMetadata | null;
+  progress?: string | null;
+  suggested?: KbMetadata | null;
+  business?: KbMetadata | null;
+  freshness?: KbFreshness[];
   error?: string | null;
   created_at: string;
   updated_at: string;
   md_ready: boolean;
 }
+/**
+ * suggested（AI 建议）/ business（人工确认）共用形状：类型 + 内容说明
+ * statement（带出处锚点，不预设内容字段）+ 锚点字段 + 自由字段。
+ */
 export interface KbMetadata {
   doc_type: string;
+  statement?: string | null;
   confidence?: number | null;
   fields?: {
     [k: string]: KbFieldSource;
@@ -111,7 +130,6 @@ export interface KbMetadata {
   extra?: {
     [k: string]: KbFieldSource;
   } | null;
-  summary?: string | null;
 }
 export interface KbParseMeta {
   conversion: string;
@@ -119,10 +137,21 @@ export interface KbParseMeta {
   chars?: number | null;
   headings?: number | null;
   tables?: number | null;
+  image_count?: number | null;
   warnings: string[];
   pages?: number | null;
   scanned_pages?: number[] | null;
   top_sections: string[];
+}
+/**
+ * 类型注册表行（GET /kb/types）：role=浏览分组语义（知识库只做事实检索，
+ * 章节拆分/写作素材在独立素材库）。
+ */
+export interface KbTypePayload {
+  code: string;
+  name: string;
+  role: "fact" | "writing";
+  time_fields?: string[];
 }
 /**
  * GET /messages 的 assistant 消息；tools/todos 是 run_traces 快照（嵌套树，松散 dict，
@@ -168,6 +197,42 @@ export interface ModelProfile {
   image_support: boolean;
   context_window?: number | null;
   key_configured: boolean;
+}
+/**
+ * 素材块：用户在目录树勾选的章节区间集合 + 备注（多区间；chars 服务端实算）。
+ */
+export interface MtBlock {
+  id: string;
+  file_id: string;
+  title: string;
+  note?: string;
+  ranges?: number[][];
+  chars?: number;
+  created_at: string;
+  file_name?: string | null;
+}
+/**
+ * 素材库文件（用户上传、后台纯机械解析出目录树；无 LLM）。
+ */
+export interface MtFile {
+  id: string;
+  file_name: string;
+  file_hash: string;
+  parse_status: "pending" | "parsing" | "ready" | "failed";
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+  block_count?: number | null;
+}
+/**
+ * 目录树节点（勾选界面数据源；children 递归）。
+ */
+export interface MtOutlineNode {
+  标题?: string;
+  start_line?: number | null;
+  end_line?: number | null;
+  level?: number | null;
+  children?: MtOutlineNode[];
 }
 /**
  * 百度云文档解析（PaddleOCR-VL）——凭证只认 env，对外只回是否已配置。

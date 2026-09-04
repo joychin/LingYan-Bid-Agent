@@ -3,72 +3,44 @@
  *
  * 查看：响应文件分册 → 目录树（来源徽章/交付形态/概述）→ 来源登记表 → lineage 告警。
  * 编辑：同级拖拽排序 + 改名 + 新增/删除节点（标注字段不可改但整节点保留）。
- * 并发策略（文件夹语义，无租约）：发布即覆盖（服务端留恢复点）；编辑器轮询探测
- * 外部更新——无本地改动则静默跟随，有改动则交用户裁决（拉取最新 / 保留我的=强制覆盖）；
- * 保存撞上外部更新同样二选一。永不静默丢用户编辑；关闭时冲刷挂起保存。
+ * 保存基建走 useAutoSave（2026-09-04 统一）：防抖保存 + content_seq 探测 +
+ * 5s 轮询（meta 端点）——查看态静默跟随外部更新，编辑态交用户裁决
+ * （拉取最新 / 保留我的=强制覆盖）。发布即覆盖（服务端留恢复点），无租约；
+ * 永不静默丢用户编辑；关闭时冲刷挂起保存。
  * 运行期 _id 仅用于树寻址，序列化时剥离、不落盘。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
-  CornerDownRight,
   FileText,
-  GripVertical,
   History,
-  Pencil,
-  Plus,
-  Trash2,
 } from 'lucide-react'
 import type { ProcessorProps } from '@/artifacts/registry'
-import { getArtifactContent, listArtifacts, restoreArtifact, updateArtifactContent } from '@/api/client'
+import { getArtifactContent, getArtifactMeta, listWorkbench, restoreArtifact, updateArtifactContent } from '@/api/client'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/context/Toast'
+import { useAutoSave } from '@/hooks/useAutoSave'
+import { SaveStateBar } from '@/components/editors/SaveStateBar'
+import { SourceTraceDialog } from '@/components/processors/SourceTraceDialog'
+import { DirectoryEditor } from '@/components/processors/DirectoryEditor'
+import { structureSignature, type DirectoryData, type EditNode } from '@/components/processors/directoryTree'
 
-interface TocNode {
-  目录名称: string
-  level: number
-  children?: TocNode[]
-  来源?: string[]
-  来源位置?: string[]
-  交付形态?: string
-  归位理由?: string
-  理由来源?: string[]
-  节点概述?: string
-}
+/** 来源徽章配色（token 派生，暗色自动跟随）：MAND=danger 红 TPL=info 蓝 REQ=brand 青 SCORE=warning 琥珀 */
+const BADGE_COLORS: Array<[prefix: string, color: string]> = [
+  ['MAND', 'var(--Color-danger)'],
+  ['TPL', 'var(--Color-info)'],
+  ['REQ', 'var(--Color-brand-primary)'],
+  ['SCORE', 'var(--Color-warning)'],
+]
 
-/** 编辑态树节点：_id 为运行期寻址键，保存时剥离；children 递归为 EditNode。 */
-interface EditNode extends Omit<TocNode, 'children'> {
-  children?: EditNode[]
-  _id: string
-}
-
-interface RegistryEntry {
-  type?: string
-  text?: string
-  出处?: string
-}
-
-interface DirectoryData {
-  response_documents?: { name?: string; scope?: string; directory?: EditNode[] }[]
-  registry?: Record<string, RegistryEntry>
-  meta?: Record<string, string>
-  lineage_check?: { unused_ids?: string[]; dangling_ids?: string[] }
-  warning?: string
-}
-
-type SaveStatus = 'saved' | 'saving' | 'error'
-
-/** 来源位置徽章配色：MAND=红 TPL=蓝 REQ=青 SCORE=琥珀 */
-function badgeClass(id: string): string {
-  if (id.startsWith('MAND')) return 'bg-red-100 text-red-700'
-  if (id.startsWith('TPL')) return 'bg-blue-100 text-blue-700'
-  if (id.startsWith('REQ')) return 'bg-teal-100 text-teal-700'
-  if (id.startsWith('SCORE')) return 'bg-amber-100 text-amber-700'
-  return 'bg-muted text-muted-foreground'
+function badgeStyle(id: string): React.CSSProperties {
+  const hit = BADGE_COLORS.find(([p]) => id.startsWith(p))
+  const color = hit ? hit[1] : 'var(--Color-text-secondary)'
+  return { color, background: `color-mix(in srgb, ${color} 12%, var(--Color-bg-canvas))` }
 }
 
 function parse(raw: string): DirectoryData | null {
@@ -80,45 +52,20 @@ function parse(raw: string): DirectoryData | null {
   }
 }
 
-// ---------- 树寻址（编辑操作用） ----------
-
-function findInList(list: EditNode[], id: string): { list: EditNode[]; index: number } | null {
-  for (let i = 0; i < list.length; i++) {
-    if (list[i]._id === id) return { list, index: i }
-    if (list[i].children?.length) {
-      const r = findInList(list[i].children!, id)
-      if (r) return r
+/** 树搜索：保留命中节点及其祖先链（命中=目录名称/节点概述含关键词，忽略大小写）。 */
+function filterTree(nodes: EditNode[], q: string): { nodes: EditNode[]; hits: number } {
+  const out: EditNode[] = []
+  let hits = 0
+  for (const n of nodes) {
+    const self = n.目录名称?.toLowerCase().includes(q) || n.节点概述?.toLowerCase().includes(q)
+    const child = filterTree(n.children ?? [], q)
+    if (self) hits += 1
+    if (self || child.hits > 0) {
+      out.push(self ? n : { ...n, children: child.nodes })
+      hits += child.hits
     }
   }
-  return null
-}
-
-function findInDocs(docs: DirectoryData, id: string): { list: EditNode[]; index: number } | null {
-  for (const doc of docs.response_documents ?? []) {
-    const r = findInList(doc.directory ?? [], id)
-    if (r) return r
-  }
-  return null
-}
-
-/** 节点所属父列表的 key（父节点 _id 或 `doc:<i>`）——判定拖拽是否同父。 */
-function parentKeyOf(docs: DirectoryData, id: string): string | null {
-  const walk = (list: EditNode[], key: string): string | null => {
-    for (const n of list) {
-      if (n._id === id) return key
-      if (n.children?.length) {
-        const r = walk(n.children, n._id)
-        if (r) return r
-      }
-    }
-    return null
-  }
-  const ds = docs.response_documents ?? []
-  for (let i = 0; i < ds.length; i++) {
-    const r = walk(ds[i].directory ?? [], `doc:${i}`)
-    if (r !== null) return r
-  }
-  return null
+  return { nodes: out, hits }
 }
 
 function assignIds(data: DirectoryData): DirectoryData {
@@ -136,175 +83,141 @@ function stripIds(data: DirectoryData): DirectoryData {
   return JSON.parse(JSON.stringify(data, (_k, v) => (_k === '_id' ? undefined : v)))
 }
 
-function newNode(level: number): EditNode {
-  return {
-    _id: crypto.randomUUID(),
-    目录名称: '新章节',
-    level,
-    children: [],
-    来源: [],
-    来源位置: [],
-    交付形态: '',
-    归位理由: '',
-    理由来源: [],
-    节点概述: '',
-  }
-}
-
 // ---------- 主组件 ----------
 
-export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
+export function DirectoryProcessor({ artifact, content, onOpenWorkbench }: ProcessorProps) {
   const data = useMemo(() => parse(content), [content])
   const { toast } = useToast()
   const queryClient = useQueryClient()
 
   const [editing, setEditing] = useState(false)
   const [docs, setDocs] = useState<DirectoryData | null>(null)
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
-  const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null)
-  const [status, setStatus] = useState<SaveStatus>('saved')
-  const [conflict, setConflict] = useState(false)
-  const [drag, setDrag] = useState<{ id: string; parentKey: string } | null>(null)
-  const [dropHint, setDropHint] = useState<{ id: string; pos: 'above' | 'below' } | null>(null)
+  // 来源追溯弹窗（查看态徽章点击）与树搜索（命中+祖先链裁剪渲染）
+  const [traceId, setTraceId] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+  // 结构性变更确认条：签名≠已确认基线时拦截保存（提示不阻止，确认后放行并前移基线）
+  const [structConfirm, setStructConfirm] = useState(false)
 
-  // refs：轮询/防抖/卸载冲刷需要最新值，避免闭包过期
+  // refs：保存闭包/树操作需要最新值，避免闭包过期
   const docsRef = useRef<DirectoryData | null>(null)
   const seqRef = useRef(artifact.content_seq)
-  const dirtyRef = useRef(false)
-  const conflictRef = useRef(false)
-  const timerRef = useRef<number | null>(null)
-  const pollRef = useRef<number | null>(null)
-  const savingRef = useRef(false)
+  const confirmedSigRef = useRef('') // 用户已放行的结构基线（进编辑态重置；确认一次前移一次）
+  const pendingSigRef = useRef('') // 触发确认条时的待确认签名
   docsRef.current = docs
-  conflictRef.current = conflict
 
-  const doSave = useCallback(
-    async (force = false): Promise<boolean> => {
+  const auto = useAutoSave({
+    save: async (force) => {
       const d = docsRef.current
-      if (!d || savingRef.current) return true
-      savingRef.current = true
-      setStatus('saving')
-      try {
-        const res = await updateArtifactContent(artifact.artifact_id, stripIds(d), seqRef.current, force)
-        seqRef.current = res.content_seq
-        dirtyRef.current = false
-        setStatus('saved')
-        void queryClient.invalidateQueries({ queryKey: ['artifacts'] })
-        return true
-      } catch (e) {
-        setStatus('error')
-        const err = e as Error & { status?: number }
-        if (err.status === 409) {
-          // 探测信号：内容已被外部更新 → 交用户裁决（拉取最新 / 保留我的）
-          setConflict(true)
-        }
-        return false
-      } finally {
-        savingRef.current = false
-      }
+      if (!d) return seqRef.current
+      const res = await updateArtifactContent(artifact.artifact_id, stripIds(d), seqRef.current, force)
+      seqRef.current = res.content_seq
+      void queryClient.invalidateQueries({ queryKey: ['artifacts'] })
+      return res.content_seq
     },
-    [artifact.artifact_id, queryClient],
-  )
-
-  const scheduleSave = useCallback(() => {
-    dirtyRef.current = true
-    if (timerRef.current) window.clearTimeout(timerRef.current)
-    timerRef.current = window.setTimeout(() => {
-      timerRef.current = null
-      void doSave()
-    }, 800)
-  }, [doSave])
-
-  const mutate = useCallback(
-    (fn: (d: DirectoryData) => void) => {
-      setDocs((prev) => {
-        if (!prev) return prev
-        const next = structuredClone(prev)
-        fn(next)
-        return next
-      })
-      scheduleSave()
+    fetchMeta: async () => (await getArtifactMeta(artifact.artifact_id)).content_seq,
+    initialVersion: artifact.content_seq,
+    // 结构性变更闸：增删/移动（签名变化）在保存前弹确认条——告知不是门禁，用户放行后不再拦同一结构
+    beforeSave: () => {
+      const d = docsRef.current
+      if (!d) return true
+      const sig = structureSignature(d.response_documents ?? [])
+      if (sig === confirmedSigRef.current) return true
+      pendingSigRef.current = sig
+      setStructConfirm(true)
+      return false
     },
-    [scheduleSave],
-  )
+    onExternalUpdate: (remote) => {
+      seqRef.current = remote
+      auto.reset(remote)
+      // 查看态：content prop 经 react-query invalidate 刷新（编辑态 docs 不动，等裁决）
+      void queryClient.invalidateQueries({ queryKey: ['artifacts'] })
+    },
+  })
 
-  const stopEditing = useCallback(() => {
-    if (timerRef.current) window.clearTimeout(timerRef.current)
-    timerRef.current = null
-    if (pollRef.current) window.clearInterval(pollRef.current)
-    pollRef.current = null
+  const mutate = (fn: (d: DirectoryData) => void) => {
+    setDocs((prev) => {
+      if (!prev) return prev
+      const next = structuredClone(prev)
+      fn(next)
+      return next
+    })
+    auto.markDirty()
+  }
+
+  const stopEditing = () => {
     setEditing(false)
-    setRenaming(null)
-    setDrag(null)
-    setDropHint(null)
-    setConflict(false)
-  }, [])
+    setStructConfirm(false)
+  }
 
-  /** 以服务端最新内容作为编辑基底（无本地改动时静默跟随外部更新 / 用户选择「拉取最新」） */
-  const adoptLatest = useCallback(async () => {
+  /** 以服务端最新内容作为编辑基底（无本地改动时静默跟随 / 用户选择「拉取最新」） */
+  const adoptLatest = async () => {
     try {
-      const [{ artifacts: rows }, { content: raw }] = await Promise.all([
-        listArtifacts(),
+      const [{ content: raw }, meta] = await Promise.all([
         getArtifactContent(artifact.artifact_id),
+        getArtifactMeta(artifact.artifact_id),
       ])
-      const row = rows.find((a) => a.artifact_id === artifact.artifact_id)
       const fresh = parse(raw)
-      if (!fresh || !row) return
-      seqRef.current = row.content_seq
-      dirtyRef.current = false
-      setStatus('saved')
+      if (!fresh) return
+      seqRef.current = meta.content_seq
       setDocs(assignIds(structuredClone(fresh)))
+      auto.reset(meta.content_seq)
     } catch {
       /* 探测失败静默，下次轮询再试 */
     }
-  }, [artifact.artifact_id])
+  }
 
   const startEdit = () => {
     if (!data) return
     seqRef.current = artifact.content_seq
-    dirtyRef.current = false
-    setStatus('saved')
-    setConflict(false)
+    auto.reset(artifact.content_seq)
     const clone = assignIds(structuredClone(data))
-    // 编辑态默认展开前两层，保证拖拽目标可见
-    const ex = new Set<string>()
-    const walkAdd = (list: EditNode[], depth: number) => {
-      for (const n of list) {
-        if (n.children?.length && depth < 2) {
-          ex.add(n._id)
-          walkAdd(n.children, depth + 1)
-        }
-      }
-    }
-    for (const doc of clone.response_documents ?? []) walkAdd(doc.directory ?? [], 0)
-    setExpanded(ex)
+    // 结构基线重置：编辑会话起点（默认展开前两层在 DirectoryEditor 内初始化）
+    confirmedSigRef.current = structureSignature(clone.response_documents ?? [])
+    setStructConfirm(false)
     setDocs(clone)
     setEditing(true)
-    // 外部更新探测（文件夹语义）：文件被 AI 发布/别处保存覆盖时——
-    // 无本地改动 → 静默跟随最新；有本地改动 → 弹「拉取最新 / 保留我的」由用户裁决
-    pollRef.current = window.setInterval(() => {
-      if (savingRef.current || conflictRef.current) return
-      listArtifacts()
-        .then(({ artifacts: rows }) => {
-          const row = rows.find((a) => a.artifact_id === artifact.artifact_id)
-          if (!row || row.content_seq <= seqRef.current) return
-          if (dirtyRef.current) setConflict(true)
-          else void adoptLatest()
-        })
-        .catch(() => {})
-    }, 5_000)
   }
 
   const exitEdit = async () => {
-    // 冲突未裁决：留在编辑态由横幅按钮收尾（此时退出=静默丢用户编辑）
-    if (conflictRef.current) {
+    // 冲突/结构确认未裁决：留在编辑态由横幅/确认条按钮收尾（此时退出=静默丢用户编辑）
+    if (auto.state === 'conflict') {
       toast('内容有冲突待裁决：请先在上方横幅选择「拉取最新」或「保留我的」', 'error')
       return
     }
-    // 保存失败（网络错误/409 刚弹裁决横幅）：同样留在编辑态——
-    // 网络错误有「保存失败·点击重试」入口，409 走上一分支，编辑不丢
-    if (dirtyRef.current && !(await doSave())) return
+    if (structConfirm) {
+      toast('有结构性修改待确认：请先在确认条选择「继续保存」或「返回修改」', 'error')
+      return
+    }
+    if (auto.state === 'dirty' && !(await auto.saveNow())) return
     stopEditing()
+  }
+
+  /** 结构确认条「继续保存」：前移基线签名后放行本次保存（同一结构不再拦）。 */
+  const confirmStructuralSave = () => {
+    confirmedSigRef.current = pendingSigRef.current
+    setStructConfirm(false)
+    void auto.saveNow()
+  }
+
+  /** 来源追溯「查看原文上下文」：出处锚点（章节名（L412-L430，第23页））的行号
+   *  指向招标文件解析 md（parse/ 下首个 .md——单主文件场景；多补充文件时用户
+   *  在面板自行切换），打开工作台只读定位视图。 */
+  const openSourceContext = async (_id: string, entry: { 出处?: string }) => {
+    if (!onOpenWorkbench || !artifact.task_id) return
+    const m = entry.出处?.match(/L(\d+)/)
+    const line = m ? Number(m[1]) : undefined
+    try {
+      const { files } = await listWorkbench(artifact.task_id)
+      const parseFile = files.find((f) => f.path.startsWith('parse/'))
+      if (!parseFile) {
+        toast('未找到已解析的原文（work/parse/ 为空）', 'error')
+        return
+      }
+      setTraceId(null)
+      onOpenWorkbench(parseFile.path, line)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error')
+    }
   }
 
   const handleRestore = async () => {
@@ -315,79 +228,6 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), 'error')
     }
-  }
-
-  // 卸载（模态关闭即处理器卸载）：冲刷挂起保存；若撞上外部更新，按「主导权归用户」强制保留用户版本
-  useEffect(() => {
-    return () => {
-      if (timerRef.current) {
-        window.clearTimeout(timerRef.current)
-        if (dirtyRef.current) {
-          void (async () => {
-            if (!(await doSave())) await doSave(true)
-          })()
-        }
-      }
-      if (pollRef.current) window.clearInterval(pollRef.current)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // ---------- 编辑操作 ----------
-
-  const ops = {
-    rename: (id: string, name: string) =>
-      mutate((d) => {
-        const c = findInDocs(d, id)
-        if (c) c.list[c.index].目录名称 = name
-      }),
-    remove: (id: string) =>
-      mutate((d) => {
-        const c = findInDocs(d, id)
-        if (c) c.list.splice(c.index, 1)
-      }),
-    addSibling: (id: string) =>
-      mutate((d) => {
-        const c = findInDocs(d, id)
-        if (c) c.list.splice(c.index + 1, 0, newNode(c.list[c.index].level))
-      }),
-    addChild: (id: string) => {
-      mutate((d) => {
-        const c = findInDocs(d, id)
-        if (!c) return
-        const n = c.list[c.index]
-        n.children = n.children ?? []
-        n.children.push(newNode(n.level + 1))
-      })
-      setExpanded((prev) => new Set(prev).add(id))
-    },
-    move: (id: string, dir: -1 | 1) =>
-      mutate((d) => {
-        const c = findInDocs(d, id)
-        if (!c) return
-        const j = c.index + dir
-        if (j >= 0 && j < c.list.length) {
-          ;[c.list[c.index], c.list[j]] = [c.list[j], c.list[c.index]]
-        }
-      }),
-    dropOn: (dragId: string, targetId: string, pos: 'above' | 'below') =>
-      mutate((d) => {
-        const from = findInDocs(d, dragId)
-        const to = findInDocs(d, targetId)
-        if (!from || !to || from.list !== to.list) return // 仅同级
-        const [node] = from.list.splice(from.index, 1)
-        let targetIdx = to.index
-        if (from.index < to.index) targetIdx -= 1
-        from.list.splice(targetIdx + (pos === 'below' ? 1 : 0), 0, node)
-      }),
-    parentKey: (id: string) => (docs ? parentKeyOf(docs, id) : null),
-    toggleExpand: (id: string) =>
-      setExpanded((prev) => {
-        const n = new Set(prev)
-        if (n.has(id)) n.delete(id)
-        else n.add(id)
-        return n
-      }),
   }
 
   if (!data) {
@@ -401,7 +241,18 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
   const unused = data.lineage_check?.unused_ids ?? []
   const dangling = data.lineage_check?.dangling_ids ?? []
   const registryEntries = Object.entries(data.registry ?? {})
-  const renderDocs = editing ? (docs?.response_documents ?? []) : data.response_documents!
+  const q = query.trim().toLowerCase()
+  const filtering = !editing && q.length > 0
+  let hitCount = 0
+  // 查看态渲染（编辑态树由 DirectoryEditor 渲染，见 editing 分支）；cast 说明同下
+  const renderDocs = filtering
+    ? data.response_documents!.map((doc) => {
+        const r = filterTree(doc.directory ?? [], q)
+        hitCount += r.hits
+        // 查看态渲染只用节点字段；cast 对齐编辑态数组类型（_id 仅编辑态寻址）
+        return { ...doc, directory: r.nodes as EditNode[] }
+      })
+    : data.response_documents!
 
   return (
     <div className="flex flex-col gap-4 text-sm">
@@ -427,6 +278,17 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
               恢复上一版
             </button>
           )}
+          <div className="ml-auto flex items-center gap-2">
+            {filtering && (
+              <span className="shrink-0 text-xs text-muted-foreground">{hitCount} 个匹配</span>
+            )}
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="搜索目录…"
+              className="w-40 rounded-md border border-line bg-card px-2 py-1 text-xs focus:border-primary focus:outline-none"
+            />
+          </div>
         </div>
       )}
       {editing && (
@@ -438,39 +300,50 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
           >
             完成编辑
           </button>
-          {status === 'saving' && <span className="text-xs text-muted-foreground">保存中…</span>}
-          {status === 'saved' && <span className="text-xs text-muted-foreground">已保存</span>}
-          {status === 'error' && !conflict && (
-            <button type="button" onClick={() => void doSave()} className="text-xs text-red-600 hover:underline">
-              保存失败 · 点击重试
-            </button>
-          )}
-          <span className="ml-auto text-xs text-muted-foreground">同级拖拽排序 · 悬停节点改名/增删</span>
+          <SaveStateBar state={auto.state} lastSavedAt={auto.lastSavedAt} onRetry={() => void auto.saveNow()} />
         </div>
       )}
-      {conflict && (
+      {editing && structConfirm && (
         <Banner
           tone="warn"
           action={
             <span className="flex shrink-0 gap-1">
               <button
                 type="button"
-                onClick={() => {
-                  setConflict(false)
-                  void adoptLatest()
-                }}
-                className="rounded border border-amber-400 px-2 py-0.5 hover:bg-amber-100"
+                onClick={() => setStructConfirm(false)}
+                className="rounded border border-warning/60 px-2 py-0.5 hover:bg-warning/15"
+              >
+                返回修改
+              </button>
+              <button
+                type="button"
+                onClick={confirmStructuralSave}
+                className="rounded border border-warning/60 bg-warning px-2 py-0.5 font-medium text-warning-foreground hover:opacity-90"
+              >
+                继续保存
+              </button>
+            </span>
+          }
+        >
+          检测到结构性修改（新增/删除/移动节点）——保存后，后续 AI 将以新目录为准继续工作（生成正文等）。纯改名不会触发本提示。
+        </Banner>
+      )}
+      {auto.state === 'conflict' && (
+        <Banner
+          tone="warn"
+          action={
+            <span className="flex shrink-0 gap-1">
+              <button
+                type="button"
+                onClick={() => void adoptLatest()}
+                className="rounded border border-warning/60 px-2 py-0.5 hover:bg-warning/15"
               >
                 拉取最新内容
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  void doSave(true).then((ok) => {
-                    if (ok) setConflict(false)
-                  })
-                }}
-                className="rounded border border-amber-400 bg-amber-100 px-2 py-0.5 font-medium hover:bg-amber-200"
+                onClick={() => void auto.saveNow(true)}
+                className="rounded border border-warning/60 bg-warning font-medium text-warning-foreground px-2 py-0.5 hover:opacity-90"
               >
                 保留我的版本
               </button>
@@ -499,50 +372,69 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
         </div>
       )}
 
-      {renderDocs.map((doc, idx) => (
-        <section key={doc.name ?? idx} className="rounded-lg border">
-          <header className="flex items-center gap-2 border-b bg-muted/30 px-3 py-2">
-            <FileText className="h-4 w-4 shrink-0 text-primary" />
-            <span className="font-semibold">{doc.name ?? '未命名响应文件'}</span>
-            <span className="text-xs text-muted-foreground">{(doc.directory ?? []).length} 个顶层章节</span>
-          </header>
-          {doc.scope && (
-            <p className="border-b px-3 py-2 text-xs leading-relaxed text-muted-foreground">{doc.scope}</p>
-          )}
-          <div className="px-3 py-2">
-            {(doc.directory ?? []).map((node, i) =>
-              editing ? (
-                <EditableNode
-                  key={node._id}
+      {editing && docs && (
+        <DirectoryEditor
+          docs={docs}
+          mutate={mutate}
+          setDocs={(d) => setDocs(d)}
+          markDirty={auto.markDirty}
+        />
+      )}
+
+      {!editing &&
+        renderDocs.map((doc, idx) => (
+          <section key={doc.name ?? idx} className="rounded-lg border">
+            <header className="flex items-center gap-2 border-b bg-muted/30 px-3 py-2">
+              <FileText className="h-4 w-4 shrink-0 text-primary" />
+              <span className="font-semibold">{doc.name ?? '未命名响应文件'}</span>
+              <span className="text-xs text-muted-foreground">{(doc.directory ?? []).length} 个顶层章节</span>
+            </header>
+            {doc.scope && (
+              <p className="border-b px-3 py-2 text-xs leading-relaxed text-muted-foreground">{doc.scope}</p>
+            )}
+            <div className="px-3 py-2">
+              {(doc.directory ?? []).map((node, i) => (
+                <TreeNode
+                  key={filtering ? `q-${i}` : i}
                   node={node}
                   depth={0}
-                  ops={ops}
-                  expanded={expanded}
-                  renaming={renaming}
-                  setRenaming={setRenaming}
-                  drag={drag}
-                  setDrag={setDrag}
-                  dropHint={dropHint}
-                  setDropHint={setDropHint}
+                  defaultOpen={filtering}
+                  onTrace={setTraceId}
                 />
-              ) : (
-                <TreeNode key={i} node={node} depth={0} />
-              ),
-            )}
-          </div>
-        </section>
-      ))}
+              ))}
+            </div>
+          </section>
+        ))}
 
       {registryEntries.length > 0 && <RegistrySection entries={registryEntries} />}
+
+      <SourceTraceDialog
+        traceId={traceId}
+        entry={traceId ? (data.registry ?? {})[traceId] : undefined}
+        onClose={() => setTraceId(null)}
+        onOpenSource={onOpenWorkbench ? openSourceContext : undefined}
+      />
     </div>
   )
 }
 
 // ---------- 查看态节点 ----------
 
-function TreeNode({ node, depth }: { node: TocNode; depth: number }) {
+function TreeNode({
+  node,
+  depth,
+  defaultOpen,
+  onTrace,
+}: {
+  node: EditNode
+  depth: number
+  /** 搜索过滤模式：只保留命中路径，全部展开 */
+  defaultOpen?: boolean
+  /** 来源徽章点击 → 追溯弹窗 */
+  onTrace?: (id: string) => void
+}) {
   // 深层默认折叠，避免长目录一次性铺满；children 键可能缺失（存储内容不物化默认值）
-  const [open, setOpen] = useState(depth < 1)
+  const [open, setOpen] = useState(defaultOpen ?? depth < 1)
   const children = node.children ?? []
   const hasChildren = children.length > 0
   const tooltip = [node.节点概述, node.归位理由].filter(Boolean).join('｜')
@@ -567,11 +459,24 @@ function TreeNode({ node, depth }: { node: TocNode; depth: number }) {
             <span className="leading-5" title={tooltip || undefined}>
               {node.目录名称}
             </span>
-            {(node.来源位置 ?? []).map((id) => (
-              <span key={id} className={cn('rounded px-1.5 py-px text-[10px] font-medium', badgeClass(id))}>
-                {id}
-              </span>
-            ))}
+            {(node.来源位置 ?? []).map((id) =>
+              onTrace ? (
+                <button
+                  key={id}
+                  type="button"
+                  style={badgeStyle(id)}
+                  onClick={() => onTrace(id)}
+                  title={`查看 ${id} 的登记原文与出处`}
+                  className="cursor-pointer rounded px-1.5 py-px text-[10px] font-medium hover:brightness-95"
+                >
+                  {id}
+                </button>
+              ) : (
+                <span key={id} style={badgeStyle(id)} className="rounded px-1.5 py-px text-[10px] font-medium">
+                  {id}
+                </span>
+              ),
+            )}
             {node.交付形态 && (
               <span className="rounded border border-line px-1.5 py-px text-[10px] text-muted-foreground">
                 {node.交付形态
@@ -588,217 +493,17 @@ function TreeNode({ node, depth }: { node: TocNode; depth: number }) {
       {hasChildren && open && (
         <div>
           {children.map((child, i) => (
-            <TreeNode key={i} node={child} depth={depth + 1} />
+            <TreeNode
+              key={defaultOpen ? `q-${i}` : i}
+              node={child}
+              depth={depth + 1}
+              defaultOpen={defaultOpen}
+              onTrace={onTrace}
+            />
           ))}
         </div>
       )}
     </div>
-  )
-}
-
-// ---------- 编辑态节点 ----------
-
-interface EditableNodeProps {
-  node: EditNode
-  depth: number
-  ops: {
-    rename: (id: string, name: string) => void
-    remove: (id: string) => void
-    addSibling: (id: string) => void
-    addChild: (id: string) => void
-    move: (id: string, dir: -1 | 1) => void
-    dropOn: (dragId: string, targetId: string, pos: 'above' | 'below') => void
-    parentKey: (id: string) => string | null
-    toggleExpand: (id: string) => void
-  }
-  expanded: ReadonlySet<string>
-  renaming: { id: string; draft: string } | null
-  setRenaming: (r: { id: string; draft: string } | null) => void
-  drag: { id: string; parentKey: string } | null
-  setDrag: (d: { id: string; parentKey: string } | null) => void
-  dropHint: { id: string; pos: 'above' | 'below' } | null
-  setDropHint: (h: { id: string; pos: 'above' | 'below' } | null) => void
-}
-
-function EditableNode(p: EditableNodeProps) {
-  const { node, depth, ops } = p
-  const [confirmDel, setConfirmDel] = useState(false)
-  const children = node.children ?? []
-  const hasChildren = children.length > 0
-  const open = p.expanded.has(node._id)
-  const isRenaming = p.renaming?.id === node._id
-  const hint = p.dropHint?.id === node._id ? p.dropHint.pos : null
-
-  const commitRename = () => {
-    const draft = p.renaming?.draft.trim()
-    if (draft && draft !== node.目录名称) ops.rename(node._id, draft)
-    p.setRenaming(null)
-  }
-
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    if (!p.drag || p.drag.id === node._id) return
-    if (ops.parentKey(node._id) !== p.drag.parentKey) return // 仅同级
-    e.preventDefault()
-    const rect = e.currentTarget.getBoundingClientRect()
-    const pos = e.clientY < rect.top + rect.height / 2 ? 'above' : 'below'
-    if (p.dropHint?.id !== node._id || p.dropHint.pos !== pos) {
-      p.setDropHint({ id: node._id, pos })
-    }
-  }
-
-  return (
-    <div>
-      <div
-        className="group flex items-start gap-1 py-1"
-        style={{
-          paddingLeft: depth * 18,
-          boxShadow:
-            hint === 'above'
-              ? 'inset 0 2px 0 0 rgb(37 99 235)'
-              : hint === 'below'
-                ? 'inset 0 -2px 0 0 rgb(37 99 235)'
-                : undefined,
-        }}
-        onDragOver={handleDragOver}
-        onDragLeave={() => p.dropHint?.id === node._id && p.setDropHint(null)}
-        onDrop={(e) => {
-          e.preventDefault()
-          if (p.drag && p.dropHint?.id === node._id) ops.dropOn(p.drag.id, node._id, p.dropHint.pos)
-          p.setDrag(null)
-          p.setDropHint(null)
-        }}
-      >
-        <span
-          draggable={!isRenaming}
-          onDragStart={(e) => {
-            e.dataTransfer.setData('text/plain', node._id)
-            e.dataTransfer.effectAllowed = 'move'
-            const key = ops.parentKey(node._id)
-            if (key) p.setDrag({ id: node._id, parentKey: key })
-          }}
-          onDragEnd={() => {
-            p.setDrag(null)
-            p.setDropHint(null)
-          }}
-          className="mt-1 shrink-0 cursor-grab text-muted-foreground/50 hover:text-muted-foreground active:cursor-grabbing"
-          title="拖拽调整顺序（同级）"
-        >
-          <GripVertical className="h-3.5 w-3.5" />
-        </span>
-        {hasChildren ? (
-          <button
-            type="button"
-            onClick={() => ops.toggleExpand(node._id)}
-            className="mt-1 shrink-0 text-muted-foreground hover:text-foreground"
-            aria-label={open ? '折叠' : '展开'}
-          >
-            {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-          </button>
-        ) : (
-          <span className="mt-1 w-3.5 shrink-0" />
-        )}
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            {isRenaming ? (
-              <input
-                autoFocus
-                value={p.renaming!.draft}
-                onChange={(e) => p.setRenaming({ id: node._id, draft: e.target.value })}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') commitRename()
-                  if (e.key === 'Escape') p.setRenaming(null)
-                }}
-                onBlur={commitRename}
-                className="w-56 rounded border border-primary bg-card px-1.5 py-0.5 text-sm outline-none"
-              />
-            ) : (
-              <span className="leading-5">{node.目录名称}</span>
-            )}
-            {(node.来源位置 ?? []).map((id) => (
-              <span key={id} className={cn('rounded px-1.5 py-px text-[10px] font-medium', badgeClass(id))}>
-                {id}
-              </span>
-            ))}
-            {node.交付形态 && (
-              <span className="rounded border border-line px-1.5 py-px text-[10px] text-muted-foreground">
-                {node.交付形态}
-              </span>
-            )}
-            <span className="ml-1 hidden items-center gap-0.5 group-hover:flex">
-              <IconBtn title="上移" onClick={() => ops.move(node._id, -1)}>
-                <ChevronDown className="h-3 w-3 rotate-180" />
-              </IconBtn>
-              <IconBtn title="下移" onClick={() => ops.move(node._id, 1)}>
-                <ChevronDown className="h-3 w-3" />
-              </IconBtn>
-              <IconBtn title="改名" onClick={() => p.setRenaming({ id: node._id, draft: node.目录名称 })}>
-                <Pencil className="h-3 w-3" />
-              </IconBtn>
-              <IconBtn title="新增同级" onClick={() => ops.addSibling(node._id)}>
-                <Plus className="h-3 w-3" />
-              </IconBtn>
-              <IconBtn title="新增子级" onClick={() => ops.addChild(node._id)}>
-                <CornerDownRight className="h-3 w-3" />
-              </IconBtn>
-              <IconBtn
-                title={confirmDel ? '再点一次确认删除（含子节点）' : '删除'}
-                danger={confirmDel}
-                onClick={() => {
-                  if (confirmDel) ops.remove(node._id)
-                  else {
-                    setConfirmDel(true)
-                    window.setTimeout(() => setConfirmDel(false), 2500)
-                  }
-                }}
-              >
-                <Trash2 className="h-3 w-3" />
-              </IconBtn>
-            </span>
-          </div>
-          {node.节点概述 && (
-            <p className="truncate text-xs leading-5 text-muted-foreground" title={node.节点概述}>
-              {node.节点概述}
-            </p>
-          )}
-        </div>
-      </div>
-      {hasChildren && open && (
-        <div>
-          {children.map((child) => (
-            <EditableNode key={child._id} {...p} node={child} depth={depth + 1} />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function IconBtn({
-  title,
-  onClick,
-  danger,
-  children,
-}: {
-  title: string
-  onClick: () => void
-  danger?: boolean
-  children: React.ReactNode
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      onClick={(e) => {
-        e.stopPropagation()
-        onClick()
-      }}
-      className={cn(
-        'rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground',
-        danger && 'text-red-600 hover:bg-red-50 hover:text-red-700',
-      )}
-    >
-      {children}
-    </button>
   )
 }
 
@@ -817,17 +522,21 @@ function Banner({
     <div
       className={cn(
         'flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed',
-        tone === 'warn' && 'border-amber-300 bg-amber-50 text-amber-800',
+        tone === 'warn' && 'border-warning/50 bg-warning/10 text-warning',
       )}
     >
       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-      <span className="flex-1">{children}</span>
+      <span className="flex-1 text-ink-2">{children}</span>
       {action}
     </div>
   )
 }
 
-function RegistrySection({ entries }: { entries: [string, RegistryEntry][] }) {
+function RegistrySection({
+  entries,
+}: {
+  entries: [string, { type?: string; text?: string; 出处?: string }][]
+}) {
   const [open, setOpen] = useState(false)
   return (
     <section className="rounded-lg border">
@@ -843,7 +552,7 @@ function RegistrySection({ entries }: { entries: [string, RegistryEntry][] }) {
         <div className="divide-y border-t">
           {entries.map(([id, entry]) => (
             <div key={id} className="flex items-start gap-2 px-3 py-2 text-xs">
-              <span className={cn('shrink-0 rounded px-1.5 py-px font-medium', badgeClass(id))}>{id}</span>
+              <span style={badgeStyle(id)} className='shrink-0 rounded px-1.5 py-px font-medium'>{id}</span>
               <div className="min-w-0 flex-1">
                 <p className="leading-5">{entry.text}</p>
                 <p className="text-muted-foreground">{[entry.type, entry.出处].filter(Boolean).join(' · ')}</p>

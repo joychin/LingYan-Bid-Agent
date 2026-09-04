@@ -16,6 +16,8 @@ export interface ProcessorProps {
   artifact: Artifact
   /** 当前内容的原始 JSON 文本；解析与防御性校验由各 Processor 自理 */
   content: string
+  /** 打开工作台文件（来源追溯跳原文等跨表面动作）；宿主未注入时不渲染入口 */
+  onOpenWorkbench?: (path: string, anchorLine?: number) => void
 }
 
 export interface ArtifactProcessor {

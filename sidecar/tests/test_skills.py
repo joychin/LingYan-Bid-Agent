@@ -18,7 +18,7 @@ assert SKILLS, "未发现任何 skill"
 
 def test_at_least_expected_skills():
     names = {p.name for p in SKILLS}
-    assert {"document-parse", "tender-analysis", "tender-outline"} <= names
+    assert {"document-parse", "tender-analysis", "tender-outline", "tender-qa"} <= names
 
 
 @pytest.mark.parametrize("skill_dir", SKILLS, ids=lambda p: p.name)
@@ -41,6 +41,17 @@ def test_referenced_files_exist(skill_dir: Path):
     text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     for rel in set(re.findall(r"references/[\w.-]+\.md", text)):
         assert (skill_dir / rel).is_file(), f"SKILL.md 引用的 {rel} 不存在"
+
+
+@pytest.mark.parametrize("skill_dir", SKILLS, ids=lambda p: p.name)
+def test_shared_files_referenced_exist(skill_dir: Path):
+    """SKILL.md 里以全路径引用的 skills/_shared/*.md 必须真实存在（evidence-rules 同
+    response-guidelines，一条规则一个家）。"""
+    text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    for rel in set(re.findall(r"skills/_shared/([\w.-]+\.md)", text)):
+        assert (skills_source_dir() / "_shared" / rel).is_file(), (
+            f"{skill_dir.name} 引用的 _shared/{rel} 不存在"
+        )
 
 
 GUIDELINES = skills_source_dir() / "_shared" / "response-guidelines.md"

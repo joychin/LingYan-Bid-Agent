@@ -4,6 +4,7 @@ import { Sidebar } from '@/components/Sidebar'
 import { ChatView } from '@/components/ChatView'
 import { ChatHeader } from '@/components/ChatHeader'
 import { KnowledgeView } from '@/components/KnowledgeView'
+import { MaterialsLibraryView } from '@/components/MaterialsLibraryView'
 import { SettingsModal } from '@/components/SettingsModal'
 import { ArtifactPanel } from '@/components/ArtifactPanel'
 import { SidecarBanner } from '@/components/SidecarBanner'
@@ -24,11 +25,12 @@ export default function App() {
   // 「新建会话」草稿页：主区展示欢迎页+输入框（convId=null），所属任务在输入框胶囊里选/建
   const [drafting, setDrafting] = useState(false)
   // 主区形态：chat=对话工作台 / kb=知识库（全局资料层，与任务无关）
-  const [activeView, setActiveView] = useState<'chat' | 'kb'>('chat')
+  const [activeView, setActiveView] = useState<'chat' | 'kb' | 'library'>('chat')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [previewId, setPreviewId] = useState<string | null>(null)
   // 工作台文件（work/ 的 md 过程产物）查看器当前打开的相对路径
   const [workbenchPath, setWorkbenchPath] = useState<string | null>(null)
+  const [workbenchAnchor, setWorkbenchAnchor] = useState<number | null>(null)
   const [pendingSend, setPendingSend] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(LS_SIDEBAR) === '1')
   const [artifactsCollapsed, setArtifactsCollapsed] = useState(() => localStorage.getItem(LS_ARTIFACTS) === '1')
@@ -65,10 +67,12 @@ export default function App() {
 
   // 「本轮文件」chip 的打开动作：打开工作台文件查看器（清掉产物预览态，二者共用
   // 面板工作区）；面板收起时顺带展开（transient，不写 localStorage 偏好）。
-  // useCallback 保引用稳定：MessageList/ChatMessage 是 memo 组件，回调换引用会破白名单
-  const openWorkbenchFile = useCallback((path: string) => {
+  // useCallback 保引用稳定：MessageList/ChatMessage 是 memo 组件，回调换引用会破白名单。
+  // anchorLine：来源追溯「查看原文上下文」定位（编辑器切源码栏滚到行）。
+  const openWorkbenchFile = useCallback((path: string, anchorLine?: number) => {
     setPreviewId(null)
     setWorkbenchPath(path)
+    setWorkbenchAnchor(anchorLine ?? null)
     setArtifactsCollapsed(false)
   }, [])
   // 与上面对称的单槽语义：打开产物时清掉工作台文件态，否则 workbenchPath 优先渲染、
@@ -125,6 +129,7 @@ export default function App() {
           setPendingSend(null)
         }}
         onOpenKnowledge={() => setActiveView('kb')}
+        onOpenLibrary={() => setActiveView('library')}
         activeView={activeView}
         onOpenSettings={() => setSettingsOpen(true)}
         theme={theme}
@@ -135,6 +140,8 @@ export default function App() {
         <SidecarBanner />
         {activeView === 'kb' ? (
           <KnowledgeView />
+        ) : activeView === 'library' ? (
+          <MaterialsLibraryView />
         ) : (
           <>
             <ChatHeader task={currentTask} conversation={viewConv} />
@@ -154,18 +161,20 @@ export default function App() {
           （grid auto 列自动收 0，卸载即停内部轮询）。
           v3：previewId/workbenchPath 驱动面板工作区态，编辑器嵌入面板右侧（覆盖展开），
           不再用居中模态。 */}
-      {activeView !== 'kb' && currentTask && (
+      {activeView === 'chat' && currentTask && (
         <ArtifactPanel
           currentConvId={viewConvId}
           currentTask={currentTask}
           collapsed={artifactsCollapsed}
           previewId={previewId}
           workbenchPath={workbenchPath}
+          workbenchAnchor={workbenchAnchor}
           onOpen={openArtifact}
-          onOpenWorkbench={setWorkbenchPath}
+          onOpenWorkbench={openWorkbenchFile}
           onClearPreview={() => {
             setPreviewId(null)
             setWorkbenchPath(null)
+            setWorkbenchAnchor(null)
           }}
         />
       )}
@@ -180,7 +189,7 @@ export default function App() {
       >
         {sidebarCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
       </button>
-      {activeView !== 'kb' && currentTask && (
+      {activeView === 'chat' && currentTask && (
         <button
           type="button"
           className="head-toggle pin-right"

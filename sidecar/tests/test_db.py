@@ -256,46 +256,47 @@ def test_delete_conversation_keeps_artifacts(client):
     task = create_conversation(client)
     tid, cid = task["task_id"], task["id"]
     scope = {"task_id": tid, "conversation_id": cid}
-    m_draft = artifact_store.new_artifact_id()
+    m_note = artifact_store.new_artifact_id()
     artifact_store.create_package(
-        {"artifact_id": m_draft, "task_id": tid, "conversation_id": cid, "kind": "k", "schema": {}},
+        {"artifact_id": m_note, "task_id": tid, "conversation_id": cid, "kind": "k", "schema": {}},
         "{}",
     )
     db.upsert_artifact_index(
         {
-            "artifact_id": m_draft, "task_id": tid, "conversation_id": cid,
+            "artifact_id": m_note, "task_id": tid, "conversation_id": cid,
             "kind": "doc.note", "schema_id": "note-md", "schema_version": 1,
             "cardinality": "task-multi", "display_name": "笔记",
-            "content_path": str(artifact_store.content_path(m_draft, scope)),
+            "content_path": str(artifact_store.content_path(m_note, scope)),
             "content_seq": 1, "updated_at": "2026-08-25T00:00:00+00:00",
         }
     )
-    m_confirmed = artifact_store.new_artifact_id()
-    confirmed_scope = {"task_id": tid}
+    m_dir = artifact_store.new_artifact_id()
+    dir_scope = {"task_id": tid}
     artifact_store.create_package(
-        {"artifact_id": m_confirmed, "task_id": tid, "kind": "k", "schema": {}},
+        {"artifact_id": m_dir, "task_id": tid, "kind": "k", "schema": {}},
         "{}",
     )
     db.upsert_artifact_index(
         {
-            "artifact_id": m_confirmed, "task_id": tid,
+            "artifact_id": m_dir, "task_id": tid,
             "kind": "tender.directory", "schema_id": "tender-response-docs", "schema_version": 1,
-            "cardinality": "task-single", "display_name": "投标目录", "state": "confirmed",
-            "content_path": str(artifact_store.content_path(m_confirmed, confirmed_scope)),
+            "cardinality": "task-single", "display_name": "投标目录",
+            "content_path": str(artifact_store.content_path(m_dir, dir_scope)),
             "content_seq": 1, "updated_at": "2026-08-25T00:00:00+00:00",
         }
     )
 
     assert client.delete(f"/api/conversations/{cid}").status_code == 200
     # 产物保留（文件归任务），只清转录
-    assert db.get_artifact_index(m_draft)["artifact_id"] == m_draft
-    assert artifact_store.package_ready(m_draft, scope)
-    assert db.get_artifact_index(m_confirmed)["artifact_id"] == m_confirmed
-    assert artifact_store.package_ready(m_confirmed, confirmed_scope)
+    assert db.get_artifact_index(m_note)["artifact_id"] == m_note
+    assert artifact_store.package_ready(m_note, scope)
+    assert db.get_artifact_index(m_dir)["artifact_id"] == m_dir
+    assert artifact_store.package_ready(m_dir, dir_scope)
 
 
 def test_scope_columns_migration(tmp_path, monkeypatch):
-    """旧库（无新列）经 init_db 探测补齐 conversations.task_id 与 artifact_index 的 state 列。"""
+    """旧库（无新列）经 init_db 探测补齐 conversations.task_id；artifact_index 的
+    state/promotion_proposed 列被迁移 19 删除（两态移除后新形状）。"""
     import sqlite3
 
     legacy_dir = tmp_path / "legacy"  # 独立目录：不复用 db_env 已建好的新库
@@ -307,7 +308,8 @@ def test_scope_columns_migration(tmp_path, monkeypatch):
         "CREATE TABLE artifact_index(artifact_id TEXT PRIMARY KEY, task_id TEXT, kind TEXT NOT NULL,"
         " schema_id TEXT NOT NULL, schema_version INTEGER NOT NULL, cardinality TEXT NOT NULL,"
         " display_name TEXT NOT NULL, content_path TEXT NOT NULL, content_seq INTEGER NOT NULL DEFAULT 1,"
-        " updated_at TEXT NOT NULL, last_run_id TEXT, last_thread_id TEXT, emitted INTEGER NOT NULL DEFAULT 0);"
+        " updated_at TEXT NOT NULL, last_run_id TEXT, last_thread_id TEXT, emitted INTEGER NOT NULL DEFAULT 0,"
+        " state TEXT NOT NULL DEFAULT 'draft');"
     )
     conn.commit()
     conn.close()
@@ -317,4 +319,4 @@ def test_scope_columns_migration(tmp_path, monkeypatch):
     cols_a = {r[1] for r in probe.execute("PRAGMA table_info(artifact_index)")}
     probe.close()
     assert "task_id" in cols_c
-    assert "state" in cols_a
+    assert "state" not in cols_a

@@ -174,10 +174,17 @@ class Artifact(_ContractModel):
     source: ArtifactSource
     content_seq: int
     restore_available: bool
-    state: Literal["draft", "confirmed"]
     task_id: str | None = None
     conversation_id: str | None = None
     path: str
+
+
+class ArtifactMeta(_ContractModel):
+    """单产物轻量探测（GET /artifacts/{aid}/meta）：编辑器轮询外部更新
+    只取版本号，不再拉全量列表。"""
+
+    artifact_id: str
+    content_seq: int
 
 
 class ArtifactContract(_ContractModel):
@@ -194,12 +201,19 @@ class ArtifactContract(_ContractModel):
 KbParseStatus = Literal["pending", "parsing", "ready", "failed"]
 KbExtractStatus = Literal["pending", "running", "done", "failed", "skipped"]
 KbReviewStatus = Literal["pending_review", "confirmed"]
+# v3 内容角色（由 doc_type 派生，废除 v2 bucket）
+KbRole = Literal["fact", "writing"]
+KbCapability = Literal["stored", "searchable", "typed"]
 
 
-class KbFieldType(_ContractModel):
+class KbTypePayload(_ContractModel):
+    """类型注册表行（GET /kb/types）：role=浏览分组语义（知识库只做事实检索，
+    章节拆分/写作素材在独立素材库）。"""
+
     code: str
     name: str
-    fields: list[str]
+    role: KbRole
+    time_fields: list[str] = Field(default_factory=list)
 
 
 class KbFieldSource(_ContractModel):
@@ -208,11 +222,22 @@ class KbFieldSource(_ContractModel):
 
 
 class KbMetadata(_ContractModel):
+    """suggested（AI 建议）/ business（人工确认）共用形状：类型 + 内容说明
+    statement（带出处锚点，不预设内容字段）+ 锚点字段 + 自由字段。"""
+
     doc_type: str
+    statement: str | None = None
     confidence: float | None = None
     fields: dict[str, KbFieldSource] | None = None
     extra: dict[str, KbFieldSource] | None = None
-    summary: str | None = None
+
+
+class KbFreshness(_ContractModel):
+    """时间边界警示（sidecar 从锚点字段动态计算，治理内部化）：
+    expired 已过期 / expiring 即将到期（90 天内）/ stale 资料较旧（3 年以上）。"""
+
+    kind: Literal["expired", "expiring", "stale"]
+    label: str
 
 
 class KbItem(_ContractModel):
@@ -223,15 +248,56 @@ class KbItem(_ContractModel):
     ext: str
     doc_type: str | None = None
     doc_type_name: str
+    role: KbRole
+    capability: KbCapability
     parse_status: KbParseStatus
     extract_status: KbExtractStatus
     review_status: KbReviewStatus
-    suggested_metadata: KbMetadata | None = None
-    business_metadata: KbMetadata | None = None
+    progress: str | None = None
+    suggested: KbMetadata | None = None
+    business: KbMetadata | None = None
+    freshness: list[KbFreshness] = Field(default_factory=list)
     error: str | None = None
     created_at: str
     updated_at: str
     md_ready: bool
+
+
+class MtFile(_ContractModel):
+    """素材库文件（用户上传、后台纯机械解析出目录树；无 LLM）。"""
+
+    id: str
+    file_name: str
+    file_hash: str
+    parse_status: KbParseStatus
+    error: str | None = None
+    created_at: str
+    updated_at: str
+    block_count: int | None = None
+
+
+class MtOutlineNode(_ContractModel):
+    """目录树节点（勾选界面数据源；children 递归）。"""
+
+    标题: str = ""
+    start_line: int | None = None
+    end_line: int | None = None
+    level: int | None = None
+    children: list["MtOutlineNode"] = Field(default_factory=list)
+
+
+class MtBlock(_ContractModel):
+    """素材块：用户在目录树勾选的章节区间集合 + 备注（多区间；chars 服务端实算）。"""
+
+    id: str
+    file_id: str
+    title: str
+    note: str = ""
+    ranges: list[list[int]] = Field(default_factory=list)
+    chars: int = 0
+    created_at: str
+    # 块列表端点附带来源文件名
+    file_name: str | None = None
 
 
 class KbParseMeta(_ContractModel):
@@ -240,6 +306,7 @@ class KbParseMeta(_ContractModel):
     chars: int | None = None
     headings: int | None = None
     tables: int | None = None
+    image_count: int | None = None
     warnings: list[str]
     pages: int | None = None
     scanned_pages: list[int] | None = None

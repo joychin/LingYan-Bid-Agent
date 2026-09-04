@@ -42,12 +42,12 @@ CANCELLED_MESSAGE = "任务已停止"
 
 
 def artifact_created_payload(row: dict, rid: str | None, cid: str, seq: int) -> dict:
-    """artifact.created 的 data 载荷（run 边界产物事件；确认端点不发 SSE——不在
-    run 内无 seq 宿主）。
+    """artifact.created 的 data 载荷（run 边界产物事件；不在 run 内无 seq 宿主）。
 
     2026-08-31 重构 reshape（非 additive）：scope/promotion_proposed 两键一次性
-    替换为 state（draft/confirmed），前端 events.gen.ts 同批再生；task_id 恒为
-    所属任务；conversation_id 即事件宿主会话（run 边界产物必属该会话）。
+    替换为 state（draft/confirmed）；2026-09-04 两态整体移除、state 键删除
+    （产物=单一当前版本），前端 events.gen.ts 同批再生。task_id 恒为所属任务；
+    conversation_id 即事件宿主会话（run 边界产物必属该会话）。
     """
     task_id = row.get("task_id")
     return {
@@ -58,7 +58,6 @@ def artifact_created_payload(row: dict, rid: str | None, cid: str, seq: int) -> 
         "kind": row["kind"],
         "schema_id": row["schema_id"],
         "schema_version": row["schema_version"],
-        "state": row.get("state", "draft"),
         "task_id": task_id,
         "seq": seq,
     }

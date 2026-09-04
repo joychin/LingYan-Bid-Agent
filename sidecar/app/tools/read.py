@@ -1,9 +1,9 @@
 """按契约读取当前成果内容（后续阶段消费入口，artifact-system-design.md §9）。
 
-2026-08-31 重构：产物归任务、单一真源（草稿/已确认两态），不再有「正式稿 → 过程稿」
-两级读序——同契约在任务内唯一，读到的就是唯一当前内容（已确认或草稿）。用户手动
-调整保存后，任何会话的后续阶段都应通过本工具按契约读取"当前内容"，而不是依赖文件
-路径——这是"改完的成果成为后续 AI 输入"的闭环点。
+2026-08-31 重构：产物归任务、单一真源，不再有「正式稿 → 过程稿」两级读序——
+同契约在任务内唯一，读到的就是唯一当前内容。2026-09-04 两态移除：无草稿/已确认
+之分。用户手动调整保存后，任何会话的后续阶段都应通过本工具按契约读取"当前内容"，
+而不是依赖文件路径——这是"改完的成果成为后续 AI 输入"的闭环点。
 """
 
 import json
@@ -64,14 +64,12 @@ def read_artifact(contract: str, artifact_id: str = "") -> str:
         # 归属校验：防文档内容注入诱导模型读其他任务的成果进当前上下文
         if row.get("task_id") != task_id:
             return f"[读取失败] 「{artifact_id}」不在当前任务的可读范围内"
-        where = "已确认" if row.get("state") == "confirmed" else "草稿"
     elif c.cardinality != "task-single":
         # task-multi（如笔记）可能有多份：给出清单让模型用 artifact_id 选
         rows = _list_in_task(c.kind, task_id)
         if not rows:
             return f"[无成果] 当前还没有「{c.default_display_name}」（{contract}）；请先运行相应流程生成。"
         row = rows[0]
-        where = "已确认" if row.get("state") == "confirmed" else "草稿"
         if len(rows) > 1:
             listing = "\n".join(f"- {r['artifact_id']}  {r['display_name']}" for r in rows)
             return f"[多份成果] 「{c.default_display_name}」有 {len(rows)} 份，请用 artifact_id 指定：\n{listing}"
@@ -81,7 +79,6 @@ def read_artifact(contract: str, artifact_id: str = "") -> str:
         row = db.find_artifact_index(c.kind, c.schema_id, c.schema_version, task_id=task_id)
         if row is None or not artifact_store.package_ready(row["artifact_id"], row):
             return f"[无成果] 当前还没有「{c.default_display_name}」（{contract}）；请先运行相应流程生成。"
-        where = "已确认" if row.get("state") == "confirmed" else "草稿"
 
     raw = artifact_store.read_content_resolved(row["artifact_id"], row)
     if raw is None:
@@ -91,4 +88,4 @@ def read_artifact(contract: str, artifact_id: str = "") -> str:
         json.loads(raw)
     except ValueError:
         return "[读取失败] 成果内容不是合法 JSON，可能已被外部破坏"
-    return f"[来源：{where}]\n{raw}"
+    return raw

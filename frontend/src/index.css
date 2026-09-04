@@ -55,6 +55,8 @@ html.theme-switching *::after {
   --color-success: var(--Color-success);
   --color-success-soft: color-mix(in srgb, var(--Color-success) 12%, var(--Color-bg-canvas));
   --color-warning: var(--Color-warning);
+  --color-warning-foreground: var(--Color-text-on-color);
+  --color-info: var(--Color-info);
   --color-error: var(--Color-danger);
   --color-inverse: var(--Color-bg-inverse);
   --color-line: var(--Color-border-default);

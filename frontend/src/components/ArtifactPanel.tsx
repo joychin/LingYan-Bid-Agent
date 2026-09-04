@@ -2,10 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { FileText, Maximize2, Minimize2 } from 'lucide-react'
 import type { Artifact, FileItem, Task, WorkbenchFile } from '@/api/client'
-import { useTaskArtifacts, useConversationArtifacts, useUnconfirmArtifact } from '@/hooks/useArtifacts'
+import { useTaskArtifacts, useConversationArtifacts } from '@/hooks/useArtifacts'
 import { useFiles } from '@/hooks/useFiles'
 import { useWorkbench } from '@/hooks/useWorkbench'
-import { ConfirmModal } from '@/components/ConfirmModal'
 import { ArtifactOpenHost } from '@/components/ArtifactOpenHost'
 import { WorkbenchViewer } from '@/components/WorkbenchViewer'
 import { Loader } from '@/components/ai/Loader'
@@ -24,11 +23,11 @@ const wsMaxW = () => Math.max(WS_MIN_W, window.innerWidth - 360)
 const navMaxW = () => Math.max(MIN_W, Math.min(MAX_W, window.innerWidth - 264 - 360))
 
 /**
- * 产物面板 v4（2026-08-31 重构）：任务归属 + 草稿/已确认两态 + 业务流任务树。
+ * 产物面板 v5（2026-09-04 两态移除）：任务归属 + 单一当前版本 + 业务流任务树。
  *
  * 树 = 业务流分类夹（平台封闭）：输入文件（sources 只读）/ 解析 / 分析 / 目录 / 正文 / 笔记。
  * 产物按其 kind 归入对应夹（投标目录→目录夹、笔记→笔记夹），过程文件（work/ 下 parse|analysis|
- * outline|body）与产物同夹并排，靠图标 + 徽章区分。已确认留在业务夹内 + 夹内已确认置顶。
+ * outline|body）与产物同夹并排，靠图标 + 徽章区分。
  * 会话批注 = 纯高亮：产物按 provenance（当前会话产出）行名着品牌 tint（.from-conv）。
  * 覆盖式工作区（宽态编辑器）沿用 v3。
  */
@@ -75,6 +74,7 @@ export function ArtifactPanel({
   collapsed,
   previewId,
   workbenchPath,
+  workbenchAnchor,
   onOpen,
   onOpenWorkbench,
   onClearPreview,
@@ -84,18 +84,18 @@ export function ArtifactPanel({
   collapsed: boolean
   previewId: string | null
   workbenchPath: string | null
+  /** 打开工作台文件时的行号定位（来源追溯「查看原文上下文」）；null=不定位 */
+  workbenchAnchor: number | null
   onOpen: (id: string) => void
-  onOpenWorkbench: (path: string) => void
+  onOpenWorkbench: (path: string, anchorLine?: number) => void
   onClearPreview: () => void
 }) {
   const { data: taskArtifacts = [], isLoading: loadingTask } = useTaskArtifacts(currentTask?.id ?? null)
   const { data: convArtifacts = [] } = useConversationArtifacts(currentConvId)
-  const unconfirm = useUnconfirmArtifact()
   const { data: workbench = [], isLoading: loadingWorkbench } = useWorkbench(currentTask?.id ?? null)
   const { data: sourceFiles = [], isLoading: loadingFiles } = useFiles(currentTask?.id ?? null)
   const [width, setWidth] = useState(DEFAULT_W)
   const [wsWidth, setWsWidth] = useState(() => Math.min(WS_DEFAULT_W, wsMaxW()))
-  const [confirmTarget, setConfirmTarget] = useState<Artifact | null>(null)
   const [dragging, setDragging] = useState(false)
   const appRect = useRef<DOMRect | null>(null)
 
@@ -130,18 +130,17 @@ export function ArtifactPanel({
   const fragmentFiles = workbench.filter((f) => f.path.startsWith('outline/fragments/'))
   const bodyFiles = workbench.filter((f) => f.path.startsWith('body/'))
 
-  // 目录夹：目录产物（已确认置顶）+ 工作表 + fragments
+  // 目录夹：目录产物 + 工作表 + fragments
   const directoryArtifacts = taskArtifacts.filter((a) => a.kind === 'tender.directory')
   const noteArtifacts = taskArtifacts.filter((a) => a.kind === 'doc.note')
 
   const artifactRow = (a: Artifact) => {
-    const confirmed = a.state === 'confirmed'
     const fromConv = convArtifactIds.has(a.artifact_id)
     const icon = kindIcon(a.kind)
     return (
       <div
         key={a.artifact_id}
-        className={cn('ap-row', 'has-action', fromConv && 'from-conv')}
+        className={cn('ap-row', fromConv && 'from-conv')}
         onClick={() => onOpen(a.artifact_id)}
       >
         {icon ? (
@@ -152,38 +151,6 @@ export function ArtifactPanel({
           </span>
         )}
         <span className="ap-row-name truncate">{a.display_name}</span>
-        <span className="ap-row-tail">
-          {confirmed ? (
-            // 撤销确认直接执行（无确认弹窗）：与确认互逆、低风险——恢复为可被
-            // AI 覆盖的草稿；toast + invalidate 由 useUnconfirmArtifact 统一处理
-            <button
-              type="button"
-              className="ap-row-action"
-              title="撤销确认：恢复为草稿（可被 AI 覆盖的工作稿）"
-              onClick={(e) => {
-                e.stopPropagation()
-                unconfirm.mutate(a.artifact_id)
-              }}
-            >
-              撤销
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="ap-row-action"
-              title="确认为正式成果（不复制，可撤销）"
-              onClick={(e) => {
-                e.stopPropagation()
-                setConfirmTarget(a)
-              }}
-            >
-              确认
-            </button>
-          )}
-          <span className={cn('ap-status', confirmed ? 'baseline' : 'regen')}>
-            {confirmed ? '已确认' : '草稿'}
-          </span>
-        </span>
       </div>
     )
   }
@@ -203,11 +170,10 @@ export function ArtifactPanel({
   const loading = loadingTask || loadingWorkbench || loadingFiles
 
   return (
-    <>
-      <div
-        className={cn('ap-slot', collapsed && 'collapsed', dragging && 'dragging')}
-        style={collapsed ? undefined : { width: wsOpen ? undefined : width }}
-      >
+    <div
+      className={cn('ap-slot', collapsed && 'collapsed', dragging && 'dragging')}
+      style={collapsed ? undefined : { width: wsOpen ? undefined : width }}
+    >
         <aside
           className={cn('ap-shell', wsOpen && 'wide', collapsed && 'collapsed', dragging && 'dragging')}
           style={collapsed ? undefined : { width: wsOpen ? wsWidth : width }}
@@ -261,10 +227,10 @@ export function ArtifactPanel({
 
           <div className="ap-body">
             {loading ? (
-              <p className="ap-empty flex items-center gap-1.5">
+              <div className="ap-empty flex items-center gap-1.5">
                 <Loader variant="classic" size="sm" tone="muted" />
                 加载中…
-              </p>
+              </div>
             ) : taskArtifacts.length === 0 && workbench.length === 0 && sourceFiles.length === 0 ? (
               <p className="ap-empty">
                 任务还没有文件。
@@ -274,17 +240,11 @@ export function ArtifactPanel({
             ) : (
               GROUPS.map((g) => {
                 const rows: ReactNode[] = []
-                // 产物（已确认置顶）
+                // 产物
                 if (g.key === 'outline') {
-                  const sorted = directoryArtifacts.toSorted((a, b) =>
-                    (a.state === 'confirmed' ? -1 : 0) - (b.state === 'confirmed' ? -1 : 0),
-                  )
-                  sorted.forEach((a) => rows.push(artifactRow(a)))
+                  directoryArtifacts.forEach((a) => rows.push(artifactRow(a)))
                 } else if (g.key === 'note') {
-                  const sorted = noteArtifacts.toSorted((a, b) =>
-                    (a.state === 'confirmed' ? -1 : 0) - (b.state === 'confirmed' ? -1 : 0),
-                  )
-                  sorted.forEach((a) => rows.push(artifactRow(a)))
+                  noteArtifacts.forEach((a) => rows.push(artifactRow(a)))
                 }
                 // 输入文件（只读行）与过程文件
                 if (g.key === 'sources') sourceFiles.forEach((f) => rows.push(srcRow(f)))
@@ -316,19 +276,19 @@ export function ArtifactPanel({
             (workbenchPath ? (
               // key=路径：切文件即卸载重挂——WorkbenchViewer 的卸载冲刷 effect 捕获
               // 挂载期 path/taskId（[] 依赖），同实例换 path 会把新文件内容 PUT 到
-              // 旧路径（跨文件串写）；重挂后闭包恒持有本实例自己的正确路径
+              // 旧路径（跨文件串写）；重挂后闭包恒持有本实例自己的正确路径。
+              // anchorLine 不进 key：同文件不同行的追溯定位靠 WorkbenchViewer 内
+              // effect 响应 anchorLine 变化。
               <WorkbenchViewer
                 key={workbenchPath}
                 taskId={currentTask?.id ?? null}
-                conversationId={currentConvId}
                 path={workbenchPath}
+                anchorLine={workbenchAnchor}
               />
             ) : (
-              <ArtifactOpenHost artifactId={previewId} />
+              <ArtifactOpenHost artifactId={previewId} onOpenWorkbench={onOpenWorkbench} />
             ))}
         </aside>
       </div>
-      <ConfirmModal artifact={confirmTarget} onClose={() => setConfirmTarget(null)} />
-    </>
   )
 }

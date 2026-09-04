@@ -143,9 +143,11 @@ def test_run_snapshot_dto(client):
 
 def test_kb_dto(client):
     for t in client.get("/api/kb/types").json()["types"]:
-        dto.KbFieldType.model_validate(t)
+        dto.KbTypePayload.model_validate(t)
     assert _upload_kb(client).status_code == 201
     items = client.get("/api/kb/items").json()["items"]
     assert len(items) == 1
     parsed = dto.KbItem.model_validate(items[0])
     assert parsed.parse_status in ("pending", "parsing", "ready", "failed")
+    assert parsed.role in ("fact", "writing")
+    assert parsed.capability in ("stored", "searchable", "typed", "enriched")

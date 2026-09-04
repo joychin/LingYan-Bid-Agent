@@ -13,16 +13,21 @@ import type {
   ActiveRun,
   Artifact,
   ArtifactContract,
+  ArtifactMeta,
   ArtifactSource,
   Conversation,
   FileItem,
   KbFieldSource,
-  KbFieldType,
+  KbFreshness,
   KbItem,
   KbMetadata,
   KbParseMeta,
+  KbTypePayload,
   Message as MessageDto,
   ModelProfile,
+  MtBlock,
+  MtFile,
+  MtOutlineNode,
   RunInfo,
   RunTraceSnapshot as RunTraceSnapshotDto,
   SendMessageResult,
@@ -41,11 +46,15 @@ export type {
   Conversation,
   FileItem,
   KbFieldSource,
-  KbFieldType,
+  KbFreshness,
   KbItem,
   KbMetadata,
   KbParseMeta,
+  KbTypePayload,
   ModelProfile,
+  MtBlock,
+  MtFile,
+  MtOutlineNode,
   RunInfo,
   SendMessageResult,
   Settings,
@@ -343,21 +352,6 @@ export function listArtifacts(scope?: { task_id?: string; conversation_id?: stri
   return request(`/artifacts${qs ? `?${qs}` : ''}`)
 }
 
-/** 确认盖戳（草稿 → 已确认）：原地、可撤销。
- *  带用户确认时所见的内容版本号——后端不符返回 409（内容已被更新，请查看最新版后再确认）。
- *  artifact 并发删除竞态（删任务）下为 null——动作本身已成功。 */
-export function confirmArtifact(id: string, sourceContentSeq?: number): Promise<{ ok: boolean; artifact: Artifact | null }> {
-  return request(`/artifacts/${id}/confirm`, {
-    method: 'POST',
-    body: JSON.stringify({ source_content_seq: sourceContentSeq ?? null }),
-  })
-}
-
-/** 撤销确认（已确认 → 草稿）。 */
-export function unconfirmArtifact(id: string): Promise<{ ok: boolean; artifact: Artifact | null }> {
-  return request(`/artifacts/${id}/unconfirm`, { method: 'POST', body: '{}' })
-}
-
 export function listContracts(): Promise<{ contracts: ArtifactContract[] }> {
   return request('/contracts')
 }
@@ -378,6 +372,11 @@ export function updateArtifactContent(
     method: 'PUT',
     body: JSON.stringify({ content, base_content_seq: baseContentSeq, force }),
   })
+}
+
+/** 轻量探测：编辑器轮询外部更新只比版本号（不拉全量列表）。 */
+export function getArtifactMeta(id: string): Promise<ArtifactMeta> {
+  return request(`/artifacts/${id}/meta`)
 }
 
 /** 恢复上一版（恢复点安全网；恢复本身也留底，可再次撤销）。 */
@@ -403,7 +402,7 @@ export async function checkHealth(): Promise<boolean> {
 
 // ===== 知识库（跨任务共享的公司资料层） =====
 
-export function listKbTypes(): Promise<{ types: KbFieldType[]; field_labels: Record<string, string> }> {
+export function listKbTypes(): Promise<{ types: KbTypePayload[]; field_labels: Record<string, string> }> {
   return request('/kb/types')
 }
 
@@ -415,11 +414,13 @@ export function listKbItems(params?: {
   review_status?: string
   doc_type?: string
   q?: string
+  role?: 'fact' | 'writing'
 }): Promise<{ items: KbItem[] }> {
   const search = new URLSearchParams()
   if (params?.review_status) search.set('review_status', params.review_status)
   if (params?.doc_type) search.set('doc_type', params.doc_type)
   if (params?.q) search.set('q', params.q)
+  if (params?.role) search.set('role', params.role)
   const qs = search.toString()
   return request(`/kb/items${qs ? `?${qs}` : ''}`)
 }
@@ -434,10 +435,22 @@ export function getKbItemContent(
   return request(`/kb/items/${id}/content`)
 }
 
+/** 本文档图片清单（知识库内容页折叠区；图片仅供查看，与素材无关）。 */
+export function getKbItemImages(
+  id: string,
+): Promise<{ id: string; images: { name: string; size: number }[] }> {
+  return request(`/kb/items/${id}/images`)
+}
+
 /** 确认元数据：fields 为 {字段code: 值}，保存即确认（review_status→confirmed）。 */
 export function confirmKbMetadata(
   id: string,
-  body: { doc_type: string; fields: Record<string, string>; extra?: Record<string, string> },
+  body: {
+    doc_type: string
+    statement?: string
+    fields: Record<string, string>
+    extra?: Record<string, string>
+  },
 ): Promise<KbItem> {
   return request(`/kb/items/${id}/metadata`, { method: 'PUT', body: JSON.stringify(body) })
 }
@@ -454,11 +467,29 @@ export function deleteKbItem(id: string): Promise<{ ok: boolean }> {
 export function uploadKbFile(
   file: File,
   onProgress?: (percent: number) => void,
-): Promise<{ id: string; file_name: string; size: number; parse_status: string }> {
+): Promise<{ id: string; file_name: string; size: number }> {
+  return _uploadWithProgress('/api/kb/files', file, onProgress)
+}
+
+// ===== 写作素材库（用户手工构建：上传→目录树勾选→建块+备注；与知识库分离） =====
+
+/** 上传到素材库（解析出目录树供挑章节）。 */
+export function uploadMtFile(
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<{ id: string; file_name: string; size: number }> {
+  return _uploadWithProgress('/api/materials/files', file, onProgress)
+}
+
+function _uploadWithProgress(
+  path: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<{ id: string; file_name: string; size: number }> {
   return new Promise((resolve, reject) => {
     void getSidecarInfo().then(({ baseURL, token }) => {
       const xhr = new XMLHttpRequest()
-      xhr.open('POST', `${baseURL}/api/kb/files`)
+      xhr.open('POST', `${baseURL}${path}`)
       if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100))
@@ -489,11 +520,43 @@ export function uploadKbFile(
   })
 }
 
+export function listMtFiles(): Promise<{ files: MtFile[] }> {
+  return request('/materials/files')
+}
+
+export function getMtOutline(
+  id: string,
+): Promise<{ id: string; outline: MtOutlineNode[]; parse_status: string; error: string | null }> {
+  return request(`/materials/files/${id}/outline`)
+}
+
+export function deleteMtFile(id: string): Promise<{ ok: boolean }> {
+  return request(`/materials/files/${id}`, { method: 'DELETE' })
+}
+
+export function listMtBlocks(): Promise<{ blocks: MtBlock[] }> {
+  return request('/materials/blocks')
+}
+
+export function createMtBlock(
+  fileId: string,
+  body: { title: string; note: string; ranges: [number, number][] },
+): Promise<MtBlock> {
+  return request(`/materials/files/${fileId}/blocks`, { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function updateMtBlock(id: string, body: { title?: string; note?: string }): Promise<MtBlock> {
+  return request(`/materials/blocks/${id}`, { method: 'PUT', body: JSON.stringify(body) })
+}
+
+export function deleteMtBlock(id: string): Promise<{ ok: boolean }> {
+  return request(`/materials/blocks/${id}`, { method: 'DELETE' })
+}
+
 /** 原件二进制（图片条目预览）：带鉴权 fetch blob → objectURL（用完 revoke）。 */
 export async function fetchKbItemRaw(id: string): Promise<string> {
   const { baseURL, token } = await getSidecarInfo()
-  const resp = await fetch(`${baseURL}/api/kb/items/${id}/raw`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  const resp = await fetch(`${baseURL}/api/kb/items/${id}/raw`, {    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   })
   if (!resp.ok) throw new Error(`原件获取失败（${resp.status}）`)
   const blob = await resp.blob()
@@ -510,7 +573,8 @@ export interface WorkbenchFile {
   revised: boolean
   /** parse/ 只读（引用行号的证据基准） */
   editable: boolean
-  has_backup: boolean
+  /** 恢复点栈非空（restorepoints/ 保留 3 个；旧 .bak 未收编时也算） */
+  has_restore: boolean
 }
 
 export interface WorkbenchContent {
@@ -518,7 +582,16 @@ export interface WorkbenchContent {
   hash: string
   revised: boolean
   editable: boolean
-  has_backup: boolean
+  has_restore: boolean
+}
+
+/** 轻量探测：编辑器轮询外部更新只比哈希（不拉全文）。 */
+export function getWorkbenchMeta(
+  taskId: string,
+  path: string,
+): Promise<Omit<WorkbenchContent, 'content'>> {
+  const qs = new URLSearchParams({ task_id: taskId, path })
+  return request(`/workbench/meta?${qs}`)
 }
 
 /** 列出任务 out/ 全部 markdown（json/隐藏文件服务端已排除）。 */
@@ -545,22 +618,10 @@ export function putWorkbenchContent(
   })
 }
 
-/** 恢复上一版（与 .bak 互换，恢复本身可再撤销）。 */
+/** 恢复上一版（当前内容先入恢复点栈，可再次恢复=撤销恢复；栈深 3）。 */
 export function restoreWorkbench(taskId: string, path: string): Promise<WorkbenchContent> {
   return request(`/workbench/restore`, {
     method: 'POST',
     body: JSON.stringify({ task_id: taskId, path }),
-  })
-}
-
-/** 存为笔记：工作台文件内容快照发布为 doc.note 过程稿（后续转正走既有按钮）。 */
-export function saveWorkbenchNote(
-  conversationId: string,
-  path: string,
-  title?: string,
-): Promise<{ artifact_id: string; display_name: string }> {
-  return request(`/workbench/note`, {
-    method: 'POST',
-    body: JSON.stringify({ conversation_id: conversationId, path, title }),
   })
 }

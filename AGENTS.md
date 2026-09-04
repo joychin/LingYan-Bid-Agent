@@ -241,35 +241,37 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
 
 ## 任务层与 Artifact 系统（P1–P4 + §16 任务分组目录已实施）
 
-- **业务模型（2026-08-31 重构定稿：产物归任务 + 草稿/已确认两态；取代旧 P4/§16
-  「正式稿/过程稿」双层模型）**：任务 = 一次投标 = workspace 下一个真实项目文件夹
+- **业务模型（2026-08-31 产物归任务；**2026-09-04 两态移除：单一当前版本**；取代旧
+  P4/§16「正式稿/过程稿」双层模型与 08-31 的草稿/已确认两态）**：任务 = 一次投标 =
+  workspace 下一个真实项目文件夹
   （`workspace/<task_id>/{sources, work, _meta}`，目录名只用不可变 id）——`sources/`
   只读来源（上传原件，AI 物理写不进）；`work/` 工作树（parse/analysis/outline/body
   过程文件 + `artifacts/<aid>/` 登记产物包）；`_meta/` 产物级谱系/暂存（UI 永不展示）。
   会话必须归属任务；产物不再分会话/任务两层——**包磁盘位置 = (artifact_id, task_id)
-  的纯函数**，会话只是 provenance（last_run_id/last_thread_id）；产物状态两态存包内
-  meta.json + `db.artifact_index.state`（draft/confirmed，迁移 14）。共享上下文 =
+  的纯函数**，会话只是 provenance（last_run_id/last_thread_id）。产物=**单一当前版本**：
+  发布即当前内容，无状态机；重跑覆盖（覆盖前留恢复点）。共享上下文 =
   任务名 + 进度便签 + 产物清单 + **任务工作目录**（每次模型调用经
   `_TaskContextMiddleware` 现算注入，模型路径带 `<task_id>/` 前缀），聊天记忆按会话
   隔离。仓库 workspace 根有 out/drafts/artifacts/ 等重构前遗留目录（无代码引用，
   历史化石无害）。
-- **确认（旧「转正」，2026-08-31 改盖戳语义：不复制不搬家）**：AI 发布的产物恒为
-  draft；「确认为正式成果」由用户点击 `POST /api/artifacts/{aid}/confirm`（原地写
-  meta.json.state + 索引、留恢复点，`/unconfirm` 可撤销——面板已确认行的 hover
-  动作即撤销入口，直接执行无弹窗；两端点均不发 SSE——不在 run 内无
-  seq 宿主，前端 confirm 成功后自行刷新产物列表）。LLM 永远无法把产物置为
-  confirmed（发布工具恒写 draft；work/artifacts/ 包目录对 LLM 文件工具只读，
-  fs_guard——`_meta/` 也拒写，**唯 `<task>/_meta/staging/` 豁免**：两步发布流的
-  模型草稿区，publish_artifact 指示模型把契约 JSON 写到那里）。同重构顺带
-  **reshape**：`artifact.created` 载荷的 scope/promotion_proposed 两键一次性替换
-  为 `state`（draft/confirmed）——非 additive，前端 events.gen.ts 同批再生。
-  发布覆盖已确认产物时**先降级 meta 再写内容**（崩溃窗口 fail-safe=草稿+旧内容）。
+- **两态移除（2026-09-04，用户拍板路 A「太小心了」）**：删除草稿/已确认、确认/撤销
+  确认、覆盖降级全部概念——确认按钮是「有承诺（正式成果）没机制（照样被覆盖，只是
+  覆盖后降级）」的摩擦件，要么给真机制（锁定）要么删承诺，中间态最差。
+  端点层：`POST /artifacts/{aid}/confirm`、`/unconfirm` 移除；`artifact.created` 载荷、
+  `GET /artifacts` 行、`GET /artifacts/{aid}/meta` 三处 `state` 字段删除（**reshape 非
+  additive**，前端 gen 文件同批再生——08-31 scope/promotion_proposed→state 的第二次
+  reshape）。db：迁移 19 删 `artifact_index.state` 与死列 `promotion_proposed`（迁移 14
+  保留在历史，v13 旧库先加后删、幂等正确）；旧包 meta.json 残留的 state/confirmed_at
+  键读侧字段映射忽略。`artifact_store.write_meta` 随 confirm/降级三调用方全失而删；
+  work/artifacts/ 包目录对 LLM 文件工具只读不变（fs_guard——`_meta/` 也拒写，
+  **唯 `<task>/_meta/staging/` 豁免**：两步发布流的模型草稿区，publish_artifact 指示
+  模型把契约 JSON 写到那里）。
 - **未登记类型**一律收拢为通用笔记 `doc.note/note-md@1`（发布工具强制文档形态
   title+body_md），客户端 NoteProcessor 打开编辑；类型系统保持平台封闭注册。
-- **发布与读取（2026-08-31 单一真源）**：publish 归属=task_id 必填（只给
+- **发布与读取（单一真源）**：publish 归属=task_id 必填（只给
   conversation_id 时反查所属任务，会话仅 provenance）；read_artifact 不再有
-  「正式稿→过程稿」两级读序——同契约在任务内唯一，读到的就是唯一当前内容
-  （已确认或草稿），用户手改后的成果经它回流为后续 AI 输入（闭环点）。
+  「正式稿→过程稿」两级读序——同契约在任务内唯一，读到的就是唯一当前内容，
+  用户手改后的成果经它回流为后续 AI 输入（闭环点）。
 - **删除语义（文件归任务后简化）**：删会话 = 只清转录 + 索引（db 级联）+ agent.db
   checkpoint（`delete_thread_memory`），**不动任务文件树**（产物/过程文件/来源全保留）；
   删任务 = 整任务目录 mv 到 `workspace/archive/<task_id>/`（文件归任务、归档不删
@@ -285,8 +287,9 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   第一个会话，`with_conversation=false` 供输入区选择器就地新建）；`app/api/workbench.py`
   （work/ 过程文件 API：列出/读取/编辑**只放行 .md**（json/隐藏文件不进列表，「面板
   不是调试器」）、parse/ 只读（证据锚点手改=篡改原文）、base_hash 409 探测（拉取最新/
-  保留我的）、写前 .bak 恢复点（单一上一版、互换可再撤销）、「修订=用户」头标记、
-  存为笔记）；`app/tools/publish.py`（LLM `publish_artifact`，草稿限当前任务
+  保留我的）、写前 .bak 恢复点（单一上一版、互换可再撤销）、「修订=用户」头标记；
+  「存为笔记」已删（2026-09-04 用户拍板砍用户手工产出通道，产物只由 AI 发布））；
+  `app/tools/publish.py`（LLM `publish_artifact`，草稿限当前任务
   `_meta/staging/`（containment 防注入），未知契约收拢 doc.note）；
   `app/tools/read.py`（`read_artifact`：同契约任务内唯一当前内容）；
   `app/tools/task_progress.py`（进度便签）；`app/runctx.py`（contextvars 传
@@ -297,8 +300,9 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   （仅任务创建 + run 启动自愈补 sources/work 骨架，`ensure_task_skeleton` 幂等）。
 - **投标流水线 Phase 1（2026-08-25，入口段 2026-08-26 重构）**：旧 tender-toc skill
   及其工具已移除，新体系 =
-  skill `document-parse`（**文件→markdown 独立技能**，流水线入口：ls 任务 sources/ 枚举候选
-  （.docx/.pdf/.txt/.md 均可解析）→ 同名双格式去重 ask → 来源集合确认（单文件默认主文件
+  skill `document-parse`（**文件→markdown 独立技能**，流水线入口：check_pipeline_state
+  拿候选/已确认来源/未纳入清单（2026-09-03 机械对账工具化，取代 ls+read sources.json 手工比对；
+  .docx/.pdf/.txt/.md 均可解析）→ 同名双格式去重 ask → 来源集合确认（单文件默认主文件
   确认+补传窗口/多文件选主文件/新增只问角色，沿用不重问）→ 写来源确认单
   `work/parse/sources.json`（main/supplements[+role]/excluded——任务级共享状态，
   跨会话交接+重入沿用依据；**变化检测锚点=parse_document 幂等返回**：跳过=未变、
@@ -310,7 +314,11 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   （流式摘要：角色/字符量/页数/标题数/解析档位/顶层章节/警示/降级声明 + ask 确认/停下，
   全部[解析跳过]时不弹门；**数字全部取自 parse_document 返回文案**（跳过同样带全量
   概况），不读 meta.json；档位与出处署名联动））+
-  skill `tender-analysis`（七节要点提取，第 0 步=前置检查：sources.json 就绪+产物齐备+新鲜；
+  skill `tender-analysis`（七节要点提取，第 0 步=前置检查走 check_pipeline_state（2026-09-03
+  机械检查工具化：来源确认/三件套齐备/新鲜度只报事实、零结论，裁决分支留 skill）；
+  每节写完跑 validate_analysis 机器校验（coverage/出处引用两层：锚定/文件名∈来源集合/
+  L 行号≤原文 md 总行数——杀编造引用，提示不是门禁、收尾前必须全绿；
+  **2026-09-04 模型写头已删**：产物不带首行元信息头，修订标记由服务端程序盖）；
   purpose 下沉 references/ 文件级、单项可重跑；导航硬纪律=先读 work/parse/<文件名>/
   <文件名>.outline.json 按行号取区段、补充文件同纪律，禁止整读全文；**出处引用键**：
   必带行号区间「章节名（L412-L430，第23页）」，章节名在作者声明/自报档
@@ -336,8 +344,8 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   同步改为 baidu > VLM > 降级（KB 上传白名单加 .doc，无 baidu 时降级仅存档）。任务文件
   上传**白名单放开**（files API 不再按扩展名拒绝，类型是否可解析由解析层报人话）+
   工具 `assemble_tender`（读 work/analysis 三张机器输入表构建 MAND/TPL/REQ/SCORE 登记表
-  （**行序=编号，产物头部 HTML 注释行会被 registry 跳过**）+ work/outline 目录中间态
-  →lineage_check→发布 `tender.directory` 过程稿+建议转正）。
+  （**行序=编号，注释行（含程序盖的修订标记/旧文件残留头）会被 registry 跳过**）+ work/outline 目录中间态
+  →lineage_check→发布 `tender.directory` 成果）。
   后续 Phase：tender-body / tender-flow skill（规划见 docs 讨论，
   机器输入格式契约在 assemble_tender.py 模块 docstring）；大文件专项优化留在
   document-parse 阵地内迭代。
@@ -355,23 +363,78 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   树格式红线（`- ` 开头/无编号/2 空格缩进/独立附件平级）是
   assemble 的解析协议。`tests/test_skills.py` 对全部 skill 做 frontmatter+references
   存在性校验（deepagents 加载坏 skill 只 warning 不报错，测试升级为硬失败防半接入）。
+- **skill 体系 agentic 化（2026-09-03，审计+业界调研后落地）**：①机械检查下沉为工具——
+  `app/tools/check_pipeline.py`（无参任务级，`[sources]/[candidates]/[parse]/[untracked]/
+  [analysis]/[freshness]` 纯事实报告、零结论：裁决分支留 skill，工具说「可不可以跑」会与
+  「缺节允许跑但声明影响」矛盾；**2026-09-04 freshness 换锚=文件 mtime vs 来源
+  meta.generated_at**（两端均为程序/OS 可靠侧，模型写时间戳不可信——头部删除裁决
+  的一部分；界面编辑/恢复会刷新 mtime，方向漏报不误报）与
+  `app/tools/validate_analysis.py`（coverage/出处引用两层：锚定（同文件
+  或来源文件名开头，「/」段继承「；」段独立，**括号深度 0 才分割**——golden 实测括号内
+  「；后果见…」是行文注释）/文件名∈sources 集合/L 行号≤原文 md 总行数；提示不是门禁、
+  收尾全绿纪律，golden case 8 件 114 条引用校准过）；document-parse 第 1 步、tender-analysis
+  /tender-outline 第 0 步改接工具，**裁决规则文字不动**。②`tender-qa` 新薄技能（重构手册
+  answer_query 空位）：针对已解析招标文件的单点问答——check_pipeline_state 查现状 →
+  **产物优先**（对应节已在则读产物沿用出处，否则按 evidence-rules 导航回原文）→ 五类陈述
+  区分作答；description 与 tender-analysis 消歧（系统提取产文件 vs 单点问答不产文件）。
+  ③证据纪律上提 `_shared/evidence-rules.md`（原 tender-analysis/references/shared-rules.md
+  的安全边界/证据边界/检索纪律/不确定性四段，输出段并入 tender-analysis SKILL.md 输出约定，
+  原文件删除——一条规则一个家，tender-analysis/tender-qa 共用）。④三个 description 重写为
+  「只写触发+关键词」（删流程概述——obra 实测流程概述会让模型走捷径），主 system prompt
+  三技能段同步瘦身为路由一句话（细节唯一真源=SKILL.md）。动因：Anthropic skill 最佳实践
+  （自由度光谱/确定性下沉/plan-validate-execute）+ 用户「LLM 语义、程序机械」铁律。
 - **frontend**：`src/artifacts/registry.ts`（kind/schema@version → Processor 注册表 + 启动契约对账）；
   `components/processors/`（DirectoryProcessor 目录树编辑 / NoteProcessor 通用笔记）；
   `components/ArtifactOpenHost.tsx`（通用容器，未命中契约明确报不支持，**无 JSON 兜底预览**）；
   `components/TaskPicker.tsx`（新会话必选所属任务）；侧栏任务文件夹树（hover 新会话/重命名/删除）；
-  产物面板 v4（任务归属 + 草稿/已确认两态 + 业务流任务树：目录产物已确认置顶 +
-  行内「确认」盖戳（不复制可撤销）+ 工作表/fragments 与产物同夹并排靠图标徽章区分；
-  `work/` 过程文件经 `WorkbenchViewer` 查看/编辑——409 探测/.bak 恢复/修订标记/
+  产物面板 v5（任务归属 + 单一当前版本 + 业务流任务树：产物按 kind 归业务夹 +
+  工作表/fragments 与产物同夹并排靠图标徽章区分；
+  `work/` 过程文件经 `WorkbenchViewer` 查看/编辑——409 探测/恢复点栈/修订标记/
   行数漂移确认）+ 任务进度便签编辑；
   `context/FileUpload.tsx` 带任务 scope（taskScope/setTaskScope，ChatView 按会话/选择器写入），
   文件 chips 只显示当前任务的文件、无任务禁传。
+- **产物查看/编辑重做（2026-09-04，方案真值 `docs/artifact-view-edit-redesign.md`）**：
+  ①**编辑基建统一**——`hooks/useAutoSave.ts`（纯 core `createAutoSaveCore` 不绑 React
+  直测竞态 + 薄 hook 壳；请求序号守卫 + inflight 串行化挂起续存 + 5s 轮询外部更新
+  （无 dirty 静默 adopt/有 dirty 置 conflict）+ `beforeSave` 闸（工作台行数漂移、
+  目录结构确认都挂这里）+ 卸载冲刷先常规后 force）；三个编辑表面（Directory/
+  Note/Workbench）全部换用；`SaveStateBar` 五态恒显（保存中/已保存·时间/未保存/
+  失败重试/有新版本）。配套轻量探测端点 `GET /artifacts/{aid}/meta`（进 dto）与
+  `GET /workbench/meta`（不进 dto）——轮询不再拉全量列表/全文；笔记补上查看态
+  跟随+解析失败错误态。**工作台恢复点升级 3 个**（`<file>.restorepoints/NNNN.bak`
+  不进 rglob 列表与 run_files 收录；restore 语义改「当前入栈+写回最近恢复点」
+  与产物同构可再撤销；旧 `.md.bak` 栈空时自动收编为最旧一条）。
+  ②**目录查看**——来源徽章（MAND/TPL/REQ/SCORE）可点开 `SourceTraceDialog`
+  （registry 原文+出处自足展示）；「查看原文上下文」解析出处 L 行号 →
+  `openWorkbenchFile(path, {line})` 打开 parse/ md 只读定位视图（出处不含文件名，
+  取 parse/ 首个文件=单主文件场景）；树搜索（命中+祖先链裁剪渲染、全展开、
+  key 加 `q-` 前缀强制重挂防折叠态残留）。
+  ③**markdown 统一编辑器**——`components/editors/MarkdownEditor.tsx`（CodeMirror 6
+  `@uiw/react-codemirror`+`@codemirror/lang-markdown`，源码/分屏/预览三态、viewOnly
+  只读预览、readOnly 只读源码（定位视图）；CM 主题走 workspace.css 的 `.md-editor`
+  段消费 token（dark 自动跟随）；受控纪律=父组件仅无 dirty 时换 value）。笔记正文
+  与工作台 textarea 全部替换；分屏滚动同步有意不做。
+  ④**目录树编辑操作集**——`processors/directoryTree.ts` 纯函数库（moveTo 三落点
+  above/below/inside 跨层级+整子树 relevel、promote/demote、isDescendant 拦截、
+  5 级封顶、`structureSignature` 结构签名=节点索引路径集合（增删/移动变、改名不变），
+  vitest 10 例）；`processors/DirectoryEditor.tsx` 编辑态组件（原生 HTML5 拖拽三区
+  落点上 25%/下 25%/中 50%=并入子节点、**有意不引 dnd-kit**（现有同级拖拽原生实现
+  扩展中间区 +30 行 vs 重构 200 行）；右键菜单浮层（升级/降级/上下移/增删、防溢出
+  视口、Escape/外点关）；undo/redo 50 步快照栈（编辑会话内、Cmd+Z、保存成功不清
+  ——「刚保存想撤销」是合法预期）；结构性变更确认条挂 beforeSave（签名≠已确认
+  基线即拦，用户「继续保存」前移基线、纯改名不触发、告知不是门禁）。
+  **UI 风格统一纪律（用户明令 2026-09-04）**：`tokens.css` 加 `--Color-info`（蓝，
+  TPL 徽章），来源徽章四色=MAND danger/TPL info/REQ brand/SCORE warning +
+  color-mix 12% tint 派生（暗色自动适配）；三个编辑表面 15 处硬编码调色板类清零
+  （amber 横幅→warning token、拖拽插入线 rgb→brand、red→destructive）；新增组件
+  一律语义 token，禁 Tailwind 调色板类与硬编码色值。
 - **并发/冲突**：无租约无互斥——任务内 run 随便并发；发布即覆盖（覆盖前自动留恢复点，
   `POST /artifacts/{id}/restore` 可恢复且可再撤销）；`content_seq` 是探测器不是锁
-  （目录编辑器 5s 轮询，外部更新时无本地改动静默跟随、有则弹「拉取最新 / 保留我的=force 覆盖」；
-  NoteProcessor 不轮询，靠保存 409 兜底同一裁决）。
+  （三个编辑表面统一 useAutoSave 5s 轻量探测，外部更新时无本地改动静默跟随、
+  有则弹「拉取最新 / 保留我的=force 覆盖」）。
 - **新契约接入**按设计文档 §13 五步打包：契约定义→SKILL.md 指导→客户端 Processor→
   模板集合→全链路验收；禁止半接入（客户端启动对账会 console.warn）。
-- **已知限制**：任务模板未引入（授权 stub 全允许）；产物确认/编辑不发 SSE（不在
+- **已知限制**：任务模板未引入（授权 stub 全允许）；产物编辑不发 SSE（不在
   run 内无 seq 宿主），前端操作后自行刷新产物列表。
 
 ## HITL（human-in-the-loop，2026-08-25）
@@ -405,43 +468,66 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   （原 HITL 全链路测试载体 ai-news-research 技能及其 news-researcher 子代理已于
   2026-08-27 删除；HITL 机制由 ask_human/task 门禁本身及 tender 流水线持续使用。）
 
-## 知识库（公司资料库，2026-08-27 已实施）
+## 知识库（v3 内容角色模型，2026-09-03 全量重建；废两桶）
 
-跨任务共享的公司资料层（资质证书/合同案例/人员证书/公司介绍等），写标书时检索引用。
-单库、无向量：FTS5 全文检索，`kb_items` + `kb_segments`（FTS5 虚表）两张表，索引可从
-kb_items+磁盘 md 重建（启动 `rebuild_kb_index`）；同 hash 上传 API 层拦截（uq_kb_items_hash）。
+跨任务共享资料层。**v3 断言：事实/写法的区分存在于"问"与"用"的一侧，不存在于"存"的一侧**
+——上传零分类（废除 bucket 列），类型判定唯一语义点，信任边界挂命中级「内容角色」。
+复用三形态：**整章拷贝**（chapter-copy，拷贝修订候选）/ **素材块**（writing-reference·usage
+四档）/ **图片块**（image）；写作两模式：拷贝修订（专业写手主路径）与重写参考。
 
-- **磁盘布局**：`workspace/knowledge/{files,parse}/`——与 skills/archive 同级的**全局目录**
-  （`artifact_store._GLOBAL_DIR_NAMES` 先例，任务目录枚举跳过它、agent 文件工具天然可读）。
-  原件在 files/（投标引用用原件）；解析产物 parse/<stem>/（.md/.outline.json/.meta.json，
-  与任务场景 parse_document 同三件套格式）。
-- **sidecar 模块**：`app/knowledge/types.py`（类型注册表**封闭**，10 类：营业执照/资质证书/
-  人员证书/合同案例/验收报告/财务审计/公司介绍/技术方案/荣誉知产/其他；每类字段模板+
-  文件名提示规则；类型清单不进表结构（doc_type 存 code、字段全收 JSON 列），加类型零迁移）；
-  `segmenter.py`（outline 节点→检索段）；`fts.py`（**jieba 写入/查询两侧同源分词 + 中文
-  bigram 补充**——unicode61 把连续 CJK 当单 token 会整句 miss，bigram 保两字词子串命中）；
-  `ingest.py`（入库管线：上传后 fire-and-forget `asyncio.create_task`+to_thread（titler 先例），
-  状态 parsing→ready（切段完成即可检索）→extracting→ready；启动 `db.recover_stale_kb`
-  对账残留态）；`app/api/knowledge.py`（上传/条目列表详情/PUT metadata 确认/GET kb/badge
-  红点计数/kb/types 类型注册表）；`app/tools/search_knowledge.py`（LLM 检索工具：命中带
-  章节路径+行号区间+摘录+read_file 精读指引；doc_type 过滤后无命中回退未过滤结果
-  （误召回>漏召回）；失败返回「[检索失败]」文案不抛异常打崩 run）。
-- **审核边界=提示不是门禁**：kb_items 双列 suggested_metadata（LLM 抽取建议）/
-  business_metadata（人工确认）；pending_review 条目照常可检索；PUT metadata 确认即
-  confirmed+重建检索段（人工填的字段也要可检索）。
-- **视觉路由**：图片整体走 VL 转写；PDF 按逐页文本量分类（meta.scanned_pages），扫描页
-  渲染成图 VL 转写后拼回页锚点；转写后统一走文本抽取管线（VL 只是图→文本替代 OCR）。
-  VLM 未配置一律降级链：收原件+登记资产+人工填表，**不阻塞上传**。
-- **解析注册表**：`app/parse/`（扩展名→**确定性**转换器，docx/pdf/txt/md→md；知识库入库
-  与 parse_document 工具共用同一套核心转换器，工具层只加场景限制）。注册表不收图片/
-  扫描页转换器（`parse/image.py` 提供但不注册）——外部模型调用不得静默触发，属入库编排层。
-- **VLM 客户端**：`app/vlm.py`，OpenAI 兼容 chat.completions+image_url，配置经
-  VLM_API_KEY/VLM_BASE_URL/VLM_MODEL（三者任一缺失=未配置），provider 无关。
-- **上下文注入**：agent 任务上下文注入附 `_kb_summary_line`（类型清单+待确认数一行，
-  引导模型先 search_knowledge 再写）。
-- **frontend**：`components/KnowledgeView.tsx`（左栏类型分组折叠列表+右区内容/信息两 tab，
-  信息 tab=元数据确认表单）+ `hooks/useKnowledge.ts`（react-query；parsing/extracting
-  分阶段轮询）+ NavRow 红点（badge 60s 轮询）。
+- **能力状态机（派生不落库）**：`stored → searchable → typed → enriched`——每步完成即
+  对外生效（②解析落盘+切段后即可检索，不等慢工序），失败逐层降级不阻塞。进度列
+  `kb_items.progress`（"素材拆分中 N/M 批"/"图片识别中 N/M 页"；云端只写状态不编数字）。
+  预算口径：**数字文档 ≤1 分钟 searchable；扫描件 ≤1 分钟给出明确进度**（不承诺可检索）。
+- **类型注册表=唯一策略源**（`knowledge/types.py`，12 类，每类带 role=fact/writing +
+  decompose=never/auto/manual + extract_images + time_fields + hint）：fact 类 9 个全
+  never（证书/合同/财报…价值在字段），past_proposal/reference_doc=auto、technical_doc=
+  manual；auto 且 md<3 万字自动拆、否则素材 tab「拆分整份」按钮（POST decompose 只跑④）。
+  **改类型即时生效**：reindex 按**当前类型策略**决定素材段/行是否纳入（materials.json
+  真值永不清，纠错可逆）。机器消费锚点字段：时间四字段 + project_name/client（来源
+  标注/关联核对/残留扫描依赖）；其余内容**不预设字段**。
+- **工序③=三合一抽取**（`knowledge/extract.py`，一次 LLM 调用）：类型 + 时间/身份锚点 +
+  **内容说明 statement**（事实类=逐条关键内容带（第N页）锚点 300–800 字；写法类=2–3 句
+  结构概览）→ 进 §statement 检索段（命中标「AI 整理·数字须回原文核对」）。
+- **工序④=增强（两独立子工序）**：④a 素材拆分（`decompose.py`：分批边界对齐 outline
+  二级节不腰斩、8k 预算、3 并发、单批超时 90s 跳过；混合纪律=证书/清单/资信/扫描章节
+  不成块；程序校验=行号夹紧/碎块丢弃/重叠去重/topics 受控词表 24 词/usage 兜底；
+  materials.json version 2 真值，重拆=新 ID=旧引用失效可探测）；④b 图片抽取
+  （`images.py`，确定性零 LLM：docx 解包 media/PDF 逐页提取，短边<200px 与页面占比
+  <10% 过滤装饰图，限额 100；**文字块与图片块共存 materials.json，拆分只重写文字块
+  保留图片块**——bug 修复先例）。
+- **角色派生（`knowledge/roles.py`，命中级纯计算）**：fact 类命中=fact-verified；素材
+  data 档 / **章节标题命中业绩词表**（业绩/案例/成功/客户/合同/验收/项目经验/实施案例，
+  启发式会漏会错，漏的走 unknown+纪律兜底）=fact-candidate；素材 structure/wording/
+  method=writing-reference；写法类顶层章（section_path 链长 1）=chapter-copy。
+- **双检索工具（`tools/search_knowledge.py`，意图路由+角色加权，无文件级硬过滤）**：
+  `search_company_assets`（问事实：全库召回，verified 排前/candidate 附带标「业绩候选·
+  须核对」+项目名 LIKE 关联证明材料/纯写法素材排除；纪律=拟投入承诺不是现状事实、
+  数字一律重核、过期证书不得写有效）；`search_references`（问写法/拷贝：**整章（拷贝
+  修订候选+真实字数+check_name_residue 指引）>素材块>整文件段**三形态并列，fact 排除，
+  范文警示常驻）。统一命中头（角色｜类型｜状态｜时效）+ evidence key + [evidence] JSON
+  行（含 role，validator 消费格式已冻结）。
+- **`tools/check_residue.py`（check_name_residue）**：拷贝修订第一道防线——来源条目
+  project_name/client/文件名主干自动入扫描表+显式名单，机械扫残留行号（行业第一大
+  事故=提交稿残留旧机构名）。
+- **API（`api/knowledge.py`）**：上传无分类参数；列表 role/capability/freshness/
+  material_count/progress；materials 端点（text 块 excerpt/chars 服务端实算）；decompose
+  手动端点（never/未就绪 422、在跑 409）；PUT metadata（statement/fields 确认，改到
+  auto 类自动补拆）；素材库全局 `GET /kb/materials`（topic/kind/q 过滤+来源信息）与
+  `GET /kb/topics`（词表+计数）；图片经 `GET /kb/items/{id}/images/{name}`（路径防穿越）。
+- **迁移 18**：三表整组 DROP 重建（用户明令旧数据可清；v2 两桶结构作废）。
+- **frontend**：`KnowledgeView.tsx`（左栏**事实类/写法类**分组+跨组待确认；行内素材数/
+  过期徽标/进度小字；详情三 tab——内容 tab 含**说明卡**（AI 整理标签+锚点文本）、
+  素材 tab 含拆分按钮/进度/素材卡、信息 tab=说明编辑+锚点字段+类型 fact/writing
+  optgroup）；`MaterialsLibraryView.tsx`（**侧栏「写作素材库」一等入口**：主题 chips+
+  形态筛选+文字卡/图片卡跨文件聚合，图片经鉴权 fetch blob）+ `KnowledgeMaterials.tsx`
+  （素材卡复用）+ hooks（useKbLibraryMaterials/useKbTopics/useDecomposeKbItem）。
+- **agent 注入**：`_kb_summary_line` 角色口径（事实 N 份待确认 M+写法 K 份+素材 L 块；
+  指引双工具+整章拷贝后残留扫描）。
+- **检索技术**：FTS5 jieba+bigram 同源分词、无向量（段 ID 稳定，混合检索留纯增量）；
+  语义层=agent 迭代查询。
+- **有意不做**（v3 复评清单见 docs）：任务成果自动回流、版本替换机制（删旧传新）、
+  VL 图片描述打标（M3）、向量检索（M3 视召回评估）、用户目录机制、素材块级编辑。
 
 ## 命令
 

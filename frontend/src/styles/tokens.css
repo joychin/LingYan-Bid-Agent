@@ -51,6 +51,7 @@
   --Color-success:          #15803D;
   --Color-warning:          #B45309;
   --Color-danger:           #B91C1C;
+  --Color-info:             #1D4ED8;
 
   /* 间距 · 8 档 */
   --Spacing-space-2:  2px;
@@ -123,6 +124,7 @@
   --Color-success:          #34D399;
   --Color-warning:          #FBBF24;
   --Color-danger:           #F87171;
+  --Color-info:             #60A5FA;
 
   --Shadow-shadow-none: none;
   --Shadow-shadow-xs:   0 1px 2px rgba(0, 0, 0, 0.30);

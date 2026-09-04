@@ -75,9 +75,10 @@ class TodoUpdated(BaseModel):
 
 
 class ArtifactCreated(BaseModel):
-    """run 边界产物事件（events.artifact_created_payload；run_id 恒非空——确认端点
-    不发 SSE，不在 run 内无 seq 宿主）。2026-08-31 重构时 scope/promotion_proposed
-    两键一次性替换为 state（reshape 非 additive，前端 events.gen.ts 同批再生）。"""
+    """run 边界产物事件（events.artifact_created_payload；run_id 恒非空——
+    不在 run 内无 seq 宿主）。2026-08-31 scope/promotion_proposed → state；
+    2026-09-04 两态移除、state 键删除（均 reshape 非 additive，前端 events.gen.ts
+    同批再生）。"""
 
     run_id: str | None = None
     conversation_id: str
@@ -86,7 +87,6 @@ class ArtifactCreated(BaseModel):
     kind: str
     schema_id: str
     schema_version: int
-    state: Literal["draft", "confirmed"]
     task_id: str | None = None
     seq: int
 

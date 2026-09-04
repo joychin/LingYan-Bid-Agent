@@ -2,7 +2,7 @@
 
 registry 构建 / 目录树与标注解析 / lineage 核对回收自 tender-toc skill 的
 parse_toc.py（build 路径）；输入位置为技能产物布局（work/analysis + work/outline），
-产物经 publish 管线发布为草稿（用户确认为正式成果走确认动作）。
+产物经 publish 管线发布（单一当前版本，重跑覆盖前自动留恢复点）。
 
 机器输入的格式契约（tender-analysis / tender-outline 的产物必须遵守）：
 - work/analysis/requirements-format.md：`## 二、必须有的章节` 与 `## 三、模板` 两张表
@@ -427,7 +427,7 @@ def _iter_nodes(tree: list[dict]):
 # ---------------------------------------------------------------------------
 @tool
 def assemble_tender() -> str:
-    """组装投标目录并发布为 Artifact（tender.directory 草稿，用户确认为正式成果）。
+    """组装投标目录并发布为 Artifact（tender.directory，任务内唯一当前版本）。
 
     读取当前任务 work/analysis/（requirements-format / requirements-business /
     evaluation 构建来源登记表 MAND/TPL/REQ/SCORE）与 work/outline/tender-response-docs.md
@@ -526,7 +526,7 @@ def assemble_tender() -> str:
         parts.extend(
             [
                 f"JSON 副本：{out_root.relative_to(workspace_dir())}/outline/tender-response-docs.json",
-                "已发布为草稿——请提醒用户在界面确认为正式成果。",
+                "已发布为投标目录成果（任务内唯一，后续阶段经 read_artifact 消费）。",
             ]
         )
         if dangling_ids:

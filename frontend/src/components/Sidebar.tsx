@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import {
   BookOpen,
   Folder,
+  Library,
   FolderOpen,
   MoreHorizontal,
   Moon,
@@ -40,10 +41,12 @@ export interface SidebarProps {
   onSelect: (id: string | null) => void
   /** 「新建任务」：进入新建会话草稿页（所属任务在输入框胶囊里选/建） */
   onNewSession: () => void
+  /** 打开写作素材库视图（素材跨文件浏览） */
+  onOpenLibrary?: () => void
   /** 打开知识库视图（全局资料层） */
   onOpenKnowledge: () => void
   /** 主区形态：决定知识库入口的 active 态 */
-  activeView?: 'chat' | 'kb'
+  activeView?: 'chat' | 'kb' | 'library'
   onOpenSettings: () => void
   /** 当前主题（图标即状态）；切换由 App 落 localStorage + documentElement */
   theme: 'light' | 'dark'
@@ -79,6 +82,7 @@ export function Sidebar({
   onNewSession,
   onOpenKnowledge,
   activeView = 'chat',
+  onOpenLibrary,
   onOpenSettings,
   theme,
   onToggleTheme,
@@ -270,15 +274,21 @@ export function Sidebar({
             badge={(kbBadge.data?.pending ?? 0) > 0}
             onClick={onOpenKnowledge}
           />
+          <NavRow
+            icon={<Library />}
+            label="写作素材库"
+            active={activeView === 'library'}
+            onClick={onOpenLibrary}
+          />
         </div>
 
         {/* count=任务（文件夹）数：子项是任务文件夹树，不是会话数 */}
         <NavSection title="任务" count={groupByTask(tasks, conversations).length}>
           {isLoading && (
-            <p className="flex items-center gap-1.5 px-3 py-1 text-xs text-muted-foreground">
+            <div className="flex items-center gap-1.5 px-3 py-1 text-xs text-muted-foreground">
               <Loader variant="classic" size="sm" tone="muted" />
               加载中…
-            </p>
+            </div>
           )}
           {!isLoading && tasks.length === 0 && (
             <p className="px-3 py-2 text-xs text-muted-foreground">还没有任务，点「新建任务」开始</p>

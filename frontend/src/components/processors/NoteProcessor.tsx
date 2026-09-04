@@ -1,19 +1,26 @@
+/**
+ * 通用笔记 Processor（doc.note/note-md@1）：markdown 文档查看 + 编辑。
+ * 未注册类型的统一收拢形态——LLM 的中间结论/记忆以笔记保存，这里保证一定打得开、改得了。
+ * 保存基建走 useAutoSave（2026-09-04 统一）：防抖自动保存 + content_seq 探测 +
+ * 5s 轮询外部更新（查看态静默跟随、编辑态弹「拉取最新 / 保留我的」用户裁决，
+ * 与目录编辑器同一文件夹语义——此前笔记无轮询、查看态不跟随，本批补齐）。
+ */
+
 import { useEffect, useRef, useState } from 'react'
 import type { ProcessorProps } from '@/artifacts/registry'
-import { getArtifactContent, listArtifacts, restoreArtifact, updateArtifactContent } from '@/api/client'
+import { getArtifactContent, getArtifactMeta, restoreArtifact, updateArtifactContent } from '@/api/client'
 import { useQueryClient } from '@tanstack/react-query'
-import { markdownComponents } from '@/components/ai/MemoMarkdown'
 import { History, Pencil, X } from 'lucide-react'
-import { Loader } from '@/components/ai/Loader'
-import ReactMarkdown from 'react-markdown'
-import { mdRemarkPlugins } from '@/lib/markdown'
+import { useAutoSave } from '@/hooks/useAutoSave'
+import { SaveStateBar } from '@/components/editors/SaveStateBar'
+import { MarkdownEditor, type EditorMode } from '@/components/editors/MarkdownEditor'
 
 interface NoteData {
   title: string
   body_md: string
 }
 
-function parseNote(raw: string): NoteData {
+function parseNote(raw: string): NoteData | null {
   try {
     const obj = JSON.parse(raw) as Record<string, unknown>
     return {
@@ -21,72 +28,57 @@ function parseNote(raw: string): NoteData {
       body_md: typeof obj.body_md === 'string' ? obj.body_md : '',
     }
   } catch {
-    return { title: '', body_md: '' }
+    return null
   }
 }
 
-/**
- * 通用笔记 Processor（doc.note/note-md@1）：markdown 文档查看 + 编辑。
- * 未注册类型的统一收拢形态——LLM 的中间结论/记忆以笔记保存，这里保证一定打得开、改得了。
- * 编辑走防抖自动保存 + content_seq 探测；409 时弹「拉取最新 / 保留我的」用户裁决
- * （与目录编辑器同一文件夹语义）。笔记不做 5s 轮询——保存撞上外部更新时 409 兜底。
- */
 export function NoteProcessor({ artifact, content }: ProcessorProps) {
   const queryClient = useQueryClient()
   const initial = parseNote(content)
   const [editing, setEditing] = useState(false)
-  const [title, setTitle] = useState(initial.title)
-  const [body, setBody] = useState(initial.body_md)
-  const [seq, setSeq] = useState(artifact.content_seq)
-  const [conflict, setConflict] = useState(false)
-  const [saving, setSaving] = useState(false)
+  const [title, setTitle] = useState(initial?.title ?? '')
+  const [body, setBody] = useState(initial?.body_md ?? '')
   const [restoring, setRestoring] = useState(false)
-  const dirty = useRef(false)
-  const timer = useRef<number | null>(null)
-  const latest = useRef({ title, body, seq })
+  const [mode, setMode] = useState<EditorMode>('split')
 
-  latest.current = { title, body, seq }
+  // 基底版本号：保存成功/adopt/reset 三处同步写（useAutoSave 的 core 同步维护同一来源）
+  const seqRef = useRef(artifact.content_seq)
+  const latest = useRef({ title, body })
+  latest.current = { title, body }
 
-  const doSave = async (force = false) => {
-    if (!artifact.editable) return
-    setSaving(true)
-    try {
+  const auto = useAutoSave({
+    save: async (force) => {
       const res = await updateArtifactContent(
         artifact.artifact_id,
         {
           title: latest.current.title.trim() || artifact.display_name,
           body_md: latest.current.body,
         },
-        latest.current.seq,
+        seqRef.current,
         force,
       )
-      setSeq(res.content_seq)
-      setConflict(false)
-      dirty.current = false
+      seqRef.current = res.content_seq
       void queryClient.invalidateQueries({ queryKey: ['artifacts'] })
-    } catch (e) {
-      const err = e as Error & { status?: number }
-      if (err.status === 409) {
-        setConflict(true)
-      } else {
-        // 网络等异常：保留本地内容等下次改动重试（永不回滚用户输入）
-      }
-    } finally {
-      setSaving(false)
-    }
-  }
+      return res.content_seq
+    },
+    fetchMeta: async () => (await getArtifactMeta(artifact.artifact_id)).content_seq,
+    initialVersion: artifact.content_seq,
+    onExternalUpdate: () => {
+      void adoptLatest() // 查看态静默跟随（AI 重新发布后 ≤5s 刷新）
+    },
+  })
 
-  /** 拉取最新：换基底（丢弃本地未保存改动，进入冲突时用户已知情）。 */
+  /** 拉取最新：换基底（无改动静默跟随 / 冲突时用户已知情选择丢弃本地）。 */
   const adoptLatest = async () => {
     const fresh = await getArtifactContent(artifact.artifact_id)
     const note = parseNote(fresh.content)
-    setTitle(note.title)
-    setBody(note.body_md)
-    const { artifacts } = await listArtifacts()
-    const row = artifacts.find((a) => a.artifact_id === artifact.artifact_id)
-    if (row) setSeq(row.content_seq)
-    dirty.current = false
-    setConflict(false)
+    if (note) {
+      setTitle(note.title)
+      setBody(note.body_md)
+    }
+    const meta = await getArtifactMeta(artifact.artifact_id)
+    seqRef.current = meta.content_seq
+    auto.reset(meta.content_seq)
   }
 
   const doRestore = async () => {
@@ -95,50 +87,43 @@ export function NoteProcessor({ artifact, content }: ProcessorProps) {
       await restoreArtifact(artifact.artifact_id)
       const fresh = await getArtifactContent(artifact.artifact_id)
       const note = parseNote(fresh.content)
-      setTitle(note.title)
-      setBody(note.body_md)
-      const { artifacts } = await listArtifacts()
-      const row = artifacts.find((a) => a.artifact_id === artifact.artifact_id)
-      if (row) setSeq(row.content_seq)
-      dirty.current = false
+      if (note) {
+        setTitle(note.title)
+        setBody(note.body_md)
+      }
+      const meta = await getArtifactMeta(artifact.artifact_id)
+      seqRef.current = meta.content_seq
+      auto.reset(meta.content_seq)
       void queryClient.invalidateQueries({ queryKey: ['artifacts'] })
     } finally {
       setRestoring(false)
     }
   }
 
-  // 防抖自动保存（800ms）：改完即生效，无保存确认
+  // 外部内容刷新（react-query refetch）：无本地改动时跟随 + 对齐基底版本号
   useEffect(() => {
-    if (!editing) return
-    if (timer.current) window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => {
-      if (dirty.current) void doSave()
-    }, 800)
-    return () => {
-      if (timer.current) window.clearTimeout(timer.current)
-    }
+    const note = parseNote(content)
+    if (!note) return
+    const s = auto.state
+    if (s === 'dirty' || s === 'saving' || s === 'conflict' || s === 'error') return
+    setTitle(note.title)
+    setBody(note.body_md)
+    seqRef.current = artifact.content_seq
+    auto.reset(artifact.content_seq)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [title, body, editing])
+  }, [content, artifact.content_seq])
 
-  // 关闭编辑/卸载时冲刷挂起保存；撞上外部更新按「主导权归用户」强制保留
-  const flushPending = () => {
-    if (!artifact.editable || !dirty.current) return
-    void updateArtifactContent(
-      artifact.artifact_id,
-      {
-        title: latest.current.title.trim() || artifact.display_name,
-        body_md: latest.current.body,
-      },
-      latest.current.seq,
-      true,
-    ).catch(() => {})
-    dirty.current = false
+  if (!initial) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        内容解析失败：不符合笔记结构
+      </div>
+    )
   }
-  useEffect(() => flushPending, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const stopEditing = () => {
-    if (timer.current) window.clearTimeout(timer.current)
-    flushPending()
+    if (auto.state === 'conflict') return // 留在编辑态等横幅裁决，不静默丢编辑
+    if (auto.state === 'dirty') void auto.saveNow()
     setEditing(false)
   }
 
@@ -150,7 +135,7 @@ export function NoteProcessor({ artifact, content }: ProcessorProps) {
             value={title}
             onChange={(e) => {
               setTitle(e.target.value)
-              dirty.current = true
+              auto.markDirty()
             }}
             placeholder="标题"
             className="w-full max-w-md rounded-md border border-line bg-card px-2 py-1 text-base font-semibold focus:border-primary focus:outline-none"
@@ -159,8 +144,7 @@ export function NoteProcessor({ artifact, content }: ProcessorProps) {
           <h3 className="truncate text-base font-semibold">{title || artifact.display_name}</h3>
         )}
         <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-          {saving && <Loader variant="circular" size="xs" tone="muted" />}
-          {saving ? '保存中…' : editing ? '自动保存' : ''}
+          {editing && <SaveStateBar state={auto.state} lastSavedAt={auto.lastSavedAt} onRetry={() => void auto.saveNow()} />}
           {artifact.editable &&
             (editing ? (
               <button
@@ -196,7 +180,7 @@ export function NoteProcessor({ artifact, content }: ProcessorProps) {
         </span>
       </div>
 
-      {conflict && (
+      {auto.state === 'conflict' && (
         <div className="rounded-lg border border-warning/50 bg-warning/10 px-3 py-2.5 text-sm">
           <p className="font-medium text-warning">内容已被其他会话更新</p>
           <p className="mt-1 text-muted-foreground">
@@ -212,8 +196,8 @@ export function NoteProcessor({ artifact, content }: ProcessorProps) {
             </button>
             <button
               type="button"
-              onClick={() => void doSave(true)}
-              className="rounded-md bg-warning/90 px-2.5 py-1 text-xs font-medium text-white hover:bg-warning"
+              onClick={() => void auto.saveNow(true)}
+              className="rounded-md bg-warning px-2.5 py-1 text-xs font-medium text-warning-foreground hover:opacity-90"
             >
               保留我的版本
             </button>
@@ -222,20 +206,20 @@ export function NoteProcessor({ artifact, content }: ProcessorProps) {
       )}
 
       {editing ? (
-        <textarea
+        <MarkdownEditor
           value={body}
-          onChange={(e) => {
-            setBody(e.target.value)
-            dirty.current = true
+          onChange={(v) => {
+            setBody(v)
+            auto.markDirty()
           }}
+          mode={mode}
+          onModeChange={setMode}
           placeholder="markdown 正文…"
-          className="min-h-0 w-full flex-1 resize-none rounded-lg border border-line bg-card p-3 text-sm leading-relaxed focus:border-primary focus:outline-none"
+          className="rounded-lg"
         />
       ) : (
-        <div className="note-md min-h-0 flex-1 overflow-auto rounded-lg border border-line bg-card p-4 text-sm leading-relaxed">
-          <ReactMarkdown remarkPlugins={mdRemarkPlugins} components={markdownComponents}>
-            {body || '_（空笔记）_'}
-          </ReactMarkdown>
+        <div className="note-md flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line bg-card p-4 text-sm leading-relaxed">
+          <MarkdownEditor value={body} mode="preview" viewOnly emptyLabel="_（空笔记）_" />
         </div>
       )}
     </div>

@@ -1,4 +1,4 @@
-"""产物包存储层（任务归属 + 草稿/已确认两态，2026-08-31 重构定稿）。
+"""产物包存储层（任务归属 + 单一当前版本，2026-09-04 两态移除）。
 
 workspace 按任务分组（目录即命名空间，目录名只用不可变 id）：
     workspace/<task_id>/
@@ -14,9 +14,9 @@ workspace 按任务分组（目录即命名空间，目录名只用不可变 id�
     workspace/archive/<task_id>/  删任务软归档（整任务目录 mv，可手工找回）
     workspace/knowledge/          知识库（跨任务共享，唯一共享层）
 
-包结构（内容与身份/状态分离）：
+包结构（内容与身份分离）：
     .../artifacts/<aid>/
-      meta.json               身份 + 状态：发布后状态可变更（confirm/降级），身份字段不变
+      meta.json               身份（发布后不变）
       content.json            当前内容：唯一工作版本
       restorepoints/          覆盖前留底（保留最近 3 个）
 
@@ -140,11 +140,6 @@ def replace_current_content(aid: str, scope: Mapping, content_text: str) -> None
     _atomic_write(content_path(aid, scope), content_text)
 
 
-def write_meta(meta: dict) -> None:
-    """写回 meta.json（状态变更用：confirm/降级——身份字段不变、状态字段可变）。"""
-    _atomic_write(meta_path(meta["artifact_id"], meta), json.dumps(meta, ensure_ascii=False, indent=2))
-
-
 def archive_task(task_id: str) -> bool:
     """删任务软归档：任务目录**整体移入** workspace/archive/<task_id>/
     （move 失败返回 False，调用方不得删库——目录原样保留，用户可重试或手工处理）。
@@ -218,7 +213,7 @@ def read_content(aid: str, scope: Mapping) -> str | None:
 def read_content_resolved(aid: str, scope: Mapping) -> str | None:
     """读当前内容（containment 版）：resolve 后必须仍在 workspace 内，越界返回 None。
 
-    写路径读取侧统一走此入口（编辑保存 force 留底 / 恢复 / 确认 / 发布覆盖留底 /
+    写路径读取侧统一走此入口（编辑保存 force 留底 / 恢复 / 发布覆盖留底 /
     read_artifact 工具），与 GET content 同标准——包目录被手工篡改出越界 symlink 时
     读不到 workspace 外内容。写侧（_atomic_write）仍直写包内路径：写入位置由
     (aid, task_id) 纯函数派生、无用户输入分量，当前威胁模型下不加 resolve。"""

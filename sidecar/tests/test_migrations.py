@@ -104,12 +104,15 @@ def test_legacy_db_migrates_and_preserves_rows(monkeypatch, tmp_path):
             ("run_traces", "files"),
             ("conversations", "task_id"),
             ("artifact_index", "conversation_id"),
-            ("artifact_index", "promotion_proposed"),
-            ("artifact_index", "state"),
             ("messages", "run_id"),
         ):
             cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
             assert column in cols, f"{table}.{column} 未迁移"
+
+        # 迁移 19（两态移除）：state 与 promotion_proposed 死列被删除
+        cols_art = {r["name"] for r in c.execute("PRAGMA table_info(artifact_index)").fetchall()}
+        assert "state" not in cols_art
+        assert "promotion_proposed" not in cols_art
 
         # 旧消息 run_id 为 NULL（无所属 run 语境，前端按独立消息渲染）
         assert c.execute("SELECT run_id FROM messages WHERE id='m1'").fetchone()["run_id"] is None
@@ -217,15 +220,69 @@ def test_versioned_db_v9_migrates_incrementally(monkeypatch, tmp_path):
         cols_msg = {r["name"] for r in c.execute("PRAGMA table_info(messages)").fetchall()}
         assert "run_id" in cols_msg
         assert c.execute("SELECT run_id FROM messages WHERE id='m1'").fetchone()["run_id"] is None
-        # 迁移 14：state 列就位，旧行（conversation_id NULL）推断为 confirmed
+        # 迁移 19（两态移除）：state/promotion_proposed 列被删除，行数据保留
         cols_art = {r["name"] for r in c.execute("PRAGMA table_info(artifact_index)").fetchall()}
-        assert "state" in cols_art
-        assert c.execute("SELECT state FROM artifact_index WHERE artifact_id='a1'").fetchone()["state"] == "confirmed"
+        assert "state" not in cols_art
+        assert "promotion_proposed" not in cols_art
+        assert c.execute("SELECT display_name FROM artifact_index WHERE artifact_id='a1'").fetchone()[
+            "display_name"
+        ] == "产物九"
         tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         assert "app_settings" in tables
 
         # 升级后的行可被 db 层正常读取
         row = db.get_run("r1")
         assert row is not None and row["status"] == "waiting_input"
+    finally:
+        c.close()
+
+
+# v15 时代的知识库旧形状：kb_items 无 bucket、kb_segments 无 material_id、无 kb_materials
+_KB_V15_SCHEMA = """
+CREATE TABLE kb_items(
+  id TEXT PRIMARY KEY, file_name TEXT NOT NULL, file_hash TEXT NOT NULL,
+  title TEXT NOT NULL, ext TEXT NOT NULL, doc_type TEXT,
+  parse_status TEXT NOT NULL DEFAULT 'pending', extract_status TEXT NOT NULL DEFAULT 'pending',
+  review_status TEXT NOT NULL DEFAULT 'pending_review',
+  suggested_metadata TEXT, business_metadata TEXT, error TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE VIRTUAL TABLE kb_segments USING fts5(
+  body, item_id UNINDEXED, section_path UNINDEXED,
+  line_start UNINDEXED, line_end UNINDEXED, page_start UNINDEXED);
+"""
+
+
+def test_migration_18_kb_v3_rebuild(monkeypatch, tmp_path):
+    """kb 迁移 18（v3 内容角色模型，不兼容旧两桶）：三表整组 DROP 重建——旧 kb 行
+    清空（用户明令旧数据可清）、新形状就位（progress/kind/image_path/page）。"""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    app_db_path().parent.mkdir(parents=True, exist_ok=True)
+    c = _conn()
+    c.executescript(_KB_V15_SCHEMA)
+    c.execute(
+        "INSERT INTO kb_items(id, file_name, file_hash, title, ext, created_at, updated_at)"
+        " VALUES('kb_old', 'a.pdf', 'h', 't', '.pdf', '2026-01-01', '2026-01-01')"
+    )
+    c.execute("INSERT INTO kb_segments(body, item_id) VALUES('旧段内容', 'kb_old')")
+    c.execute("PRAGMA user_version = 15")
+    c.commit()
+    c.close()
+
+    db.init_db()
+
+    c = _conn()
+    try:
+        assert c.execute("PRAGMA user_version").fetchone()[0] == LATEST
+        # 旧数据清空（v3 不兼容重建；迁移 21 再按素材分离重建）
+        assert c.execute("SELECT COUNT(*) FROM kb_items").fetchone()[0] == 0
+        # 新形状：kb_items 有 progress 无 bucket
+        item_cols = {r["name"] for r in c.execute("PRAGMA table_info(kb_items)")}
+        assert "progress" in item_cols and "bucket" not in item_cols
+        seg_cols = {r["name"] for r in c.execute("PRAGMA table_info(kb_segments)")}
+        assert "material_id" in seg_cols
+        # 素材分离（迁移 21）：kb_materials 删除；mt_files/mt_blocks 就位
+        tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "kb_materials" not in tables
+        assert {"mt_files", "mt_blocks"} <= tables
     finally:
         c.close()

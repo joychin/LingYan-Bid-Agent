@@ -1,12 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   confirmKbMetadata,
+  createMtBlock,
   deleteKbItem,
+  deleteMtBlock,
+  deleteMtFile,
   getKbBadge,
   getKbItemContent,
+  getKbItemImages,
+  getMtOutline,
   listKbItems,
   listKbTypes,
+  listMtBlocks,
+  listMtFiles,
   retriggerKbItem,
+  updateMtBlock,
   type KbItem,
 } from '@/api/client'
 
@@ -45,6 +53,15 @@ export function useKbContent(id: string | null) {
   return useQuery({
     queryKey: ['kb', 'content', id],
     queryFn: () => getKbItemContent(id!),
+    enabled: Boolean(id),
+  })
+}
+
+/** 本文档图片清单（内容页折叠区）。 */
+export function useKbItemImages(id: string | null) {
+  return useQuery({
+    queryKey: ['kb', 'images', id],
+    queryFn: () => getKbItemImages(id!),
     enabled: Boolean(id),
   })
 }
@@ -96,4 +113,78 @@ export function useDeleteKbItem() {
 /** 待确认条目（红点文案与筛选用）。 */
 export function pendingCount(items: KbItem[] | undefined): number {
   return (items ?? []).filter((it) => it.review_status === 'pending_review').length
+}
+
+// ===== 写作素材库（用户手工构建） =====
+
+/** 素材文件列表：解析中 5s 轮询收敛。 */
+export function useMtFiles() {
+  return useQuery({
+    queryKey: ['mt', 'files'],
+    queryFn: () => listMtFiles(),
+    refetchInterval: (query) => {
+      const busy = (query.state.data?.files ?? []).some(
+        (f) => f.parse_status === 'pending' || f.parse_status === 'parsing',
+      )
+      return busy ? 5_000 : false
+    },
+  })
+}
+
+/** 全部素材块（块列表视图）。 */
+export function useMtBlocks() {
+  return useQuery({
+    queryKey: ['mt', 'blocks'],
+    queryFn: () => listMtBlocks(),
+  })
+}
+
+/** 目录树（挑章节视图）。 */
+export function useMtOutline(fileId: string | null) {
+  return useQuery({
+    queryKey: ['mt', 'outline', fileId],
+    queryFn: () => getMtOutline(fileId!),
+    enabled: Boolean(fileId),
+  })
+}
+
+function useInvalidateMt() {
+  const qc = useQueryClient()
+  return () => {
+    void qc.invalidateQueries({ queryKey: ['mt'] })
+  }
+}
+
+export function useCreateMtBlock() {
+  const invalidate = useInvalidateMt()
+  return useMutation({
+    mutationFn: ({ fileId, body }: { fileId: string; body: Parameters<typeof createMtBlock>[1] }) =>
+      createMtBlock(fileId, body),
+    onSuccess: invalidate,
+  })
+}
+
+export function useUpdateMtBlock() {
+  const invalidate = useInvalidateMt()
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Parameters<typeof updateMtBlock>[1] }) =>
+      updateMtBlock(id, body),
+    onSuccess: invalidate,
+  })
+}
+
+export function useDeleteMtBlock() {
+  const invalidate = useInvalidateMt()
+  return useMutation({
+    mutationFn: (id: string) => deleteMtBlock(id),
+    onSuccess: invalidate,
+  })
+}
+
+export function useDeleteMtFile() {
+  const invalidate = useInvalidateMt()
+  return useMutation({
+    mutationFn: (id: string) => deleteMtFile(id),
+    onSuccess: invalidate,
+  })
 }

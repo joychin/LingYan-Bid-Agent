@@ -61,7 +61,6 @@ def test_artifacts_list_and_content(client):
     assert a["schema_version"] == 1
     assert a["editable"] is True
     assert a["source"] == {"thread_id": conv["id"], "run_id": "r_1"}
-    assert a["state"] == "draft"
     # 文件归任务：包路径在 <task>/work/artifacts/ 下
     assert a["path"].endswith(
         f"{task['id']}/work/artifacts/{aid}/content.json"
@@ -73,6 +72,23 @@ def test_artifacts_list_and_content(client):
     assert r.json()["response_documents"][0]["name"] == "技术部分"
 
     assert client.get("/api/artifacts/nope/content").status_code == 404
+
+
+def test_meta_endpoint(client):
+    """轻量探测：只回版本号；保存后版本号递增。"""
+    task, conv = _task_conv()
+    aid = _pub(_content(), conv)["artifact_id"]
+
+    r = client.get(f"/api/artifacts/{aid}/meta")
+    assert r.status_code == 200
+    assert r.json() == {"artifact_id": aid, "content_seq": 1}
+
+    updated = _content(name="用户改后")
+    rr = client.put(f"/api/artifacts/{aid}/content", json={"content": updated, "base_content_seq": 1})
+    assert rr.status_code == 200
+    assert client.get(f"/api/artifacts/{aid}/meta").json()["content_seq"] == 2
+
+    assert client.get("/api/artifacts/nope/meta").status_code == 404
 
 
 def test_put_content_flow_no_lease(client):

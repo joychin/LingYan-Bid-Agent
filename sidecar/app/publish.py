@@ -6,14 +6,13 @@
   ③ 内容通过该 contract 的 Pydantic schema 校验
   ④ 落盘（原子写 meta.json + content.json，索引 upsert）
 
-归属（2026-08-31 重构定稿）：文件归任务——task_id 必填、恒为所属任务，产物落
-work/artifacts/<aid>/；conversation_id 只作 provenance（记录发布会话），不再决定
-作用域。LLM 发布工具与用户编辑入口都能写入，但**每次发布产出的都是草稿
-（state=draft）**；已确认产物被重新发布（AI 重跑覆盖）时自动降级回草稿，
-用户须重新确认（信任边界）。
+归属：文件归任务——task_id 必填、恒为所属任务，产物落 work/artifacts/<aid>/；
+conversation_id 只作 provenance（记录发布会话），不再决定作用域。LLM 发布工具
+与用户编辑入口都能写入。**单一当前版本**（2026-09-04 两态移除）：无草稿/已确认
+之分，发布即当前内容；重跑覆盖前留恢复点兜底。
 
 task-single 语义：同契约同任务内已存在 → 复用 artifact_id 与 meta（稳定身份），
-仅替换当前内容、content_seq+1、state 降回 draft；task-multi → 恒新建。
+仅替换当前内容、content_seq+1；task-multi → 恒新建。
 """
 
 import json
@@ -55,7 +54,7 @@ def publish_artifact(
 
     source: {"skill": str, "thread_id": str, "run_id": str}，记录发布来源。
     conversation_id: provenance（发布会话），非作用域——只给 conversation_id 时反查任务。
-    每次发布产出 state=draft；覆盖已确认产物自动降级回草稿（用户须重新确认）。
+    单一当前版本：发布即当前内容，覆盖前留恢复点（用户可一键恢复上一版）。
     """
     if not task_id and conversation_id:
         # 兼容旧调用路径（只传 conversation_id）：反查所属任务
@@ -85,7 +84,7 @@ def publish_artifact(
     content_text = json.dumps(content, ensure_ascii=False, indent=2)
 
     # 写锁（不可见 plumbing，宿主在 artifact_store）：串行化发布落盘，防并发首建
-    # 产生重复成果；编辑保存/恢复/确认端点写同一包时也持同一把锁。不做任何
+    # 产生重复成果；编辑保存/恢复端点写同一包时也持同一把锁。不做任何
     # 用户可见的互斥——覆盖策略遵循文件夹语义。
     with artifact_store.write_lock:
         existing = None
@@ -104,14 +103,6 @@ def publish_artifact(
             prev = artifact_store.read_content_resolved(aid, existing)
             if prev is not None:
                 artifact_store.save_restore_point(aid, existing, existing["content_seq"], prev)
-            # 覆盖已确认产物 → 降级回草稿（信任边界承重点：用户须重新确认）。
-            # **先降级 meta 再写内容**（2026-08-31 review 修复顺序）：两步之间崩溃时
-            # fail-safe=「草稿+旧内容」；反过来会留下「已确认戳+用户没看过的 AI 新内容」，
-            # 重启后索引重建以 meta 为准，确认戳会盖到未经审阅的内容上
-            meta = artifact_store.read_meta(aid, existing) or {}
-            meta["state"] = "draft"
-            meta["confirmed_at"] = None
-            artifact_store.write_meta(meta)
             artifact_store.replace_current_content(aid, existing, content_text)
             db.upsert_artifact_index(
                 {
@@ -120,12 +111,11 @@ def publish_artifact(
                     "updated_at": _now(),
                     "last_run_id": source.get("run_id"),
                     "last_thread_id": source.get("thread_id"),
-                    "state": "draft",
                     "emitted": 0,
                 }
             )
             logger.info("artifact 更新 %s (%s) seq=%s", aid, contract_key, existing["content_seq"] + 1)
-            return meta
+            return artifact_store.read_meta(aid, existing) or {}
 
         aid = artifact_store.new_artifact_id()
         meta = {
@@ -144,8 +134,6 @@ def publish_artifact(
                 "run_id": source.get("run_id"),
             },
             "created_at": _now(),
-            "state": "draft",
-            "confirmed_at": None,
         }
         artifact_store.create_package(meta, content_text)
         db.upsert_artifact_index(
@@ -163,7 +151,6 @@ def publish_artifact(
                 "updated_at": meta["created_at"],
                 "last_run_id": source.get("run_id"),
                 "last_thread_id": source.get("thread_id"),
-                "state": "draft",
                 "emitted": 0,
             }
         )

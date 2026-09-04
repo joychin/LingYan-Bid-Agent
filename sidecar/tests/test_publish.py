@@ -35,14 +35,13 @@ def test_publish_creates_package_and_index(env):
     m = _pub(env, _content(), source={"skill": "demo-skill", "thread_id": env["conv"]["id"], "run_id": "r_1"})
     aid = m["artifact_id"]
 
-    # meta：稳定身份字段齐备；task_id 恒为所属任务；state 默认草稿
+    # meta：稳定身份字段齐备；task_id 恒为所属任务
     assert m["kind"] == "tender.directory"
     assert m["schema"] == {"id": "tender-response-docs", "version": 1}
     assert m["cardinality"] == "task-single"
     assert m["display_name"] == "投标目录"  # 未传 display_name → 契约默认名
     assert m["task_id"] == env["task"]["id"]
     assert m["conversation_id"] == env["conv"]["id"]
-    assert m["state"] == "draft"
     assert artifact_store.read_meta(aid, m) == m
 
     # content：纯业务内容，JSON 可解析且与提交一致；包落在 work/artifacts/ 下
@@ -58,7 +57,6 @@ def test_publish_creates_package_and_index(env):
     assert row["task_id"] == env["task"]["id"]
     assert row["content_seq"] == 1
     assert row["emitted"] == 0
-    assert row["state"] == "draft"
     assert db.pending_emit("r_1") == [row]
 
 
@@ -125,7 +123,6 @@ def test_rebuild_index_from_metas(env):
     assert row is not None
     assert row["task_id"] == env["task"]["id"]
     assert row["emitted"] == 1  # 启动重建后无待发事件
-    assert row["state"] == "draft"  # state 从 meta 保留
     assert db.rebuild_artifact_index(artifact_store.list_from_disk(), to_path) == 1
 
 
@@ -163,27 +160,6 @@ def test_republish_after_package_deleted_creates_new(env):
     ready = [r for r in rows if artifact_store.package_ready(r["artifact_id"], r)]
     assert len(ready) == 1
     assert ready[0]["artifact_id"] == m2["artifact_id"]
-
-
-def test_republish_confirmed_downgrades_to_draft(env):
-    """信任边界：AI 重跑覆盖已确认产物 → 自动降级回草稿（用户须重新确认）。"""
-    m = _pub(env, _content("初稿"))
-    aid = m["artifact_id"]
-    # 确认盖戳
-    meta = artifact_store.read_meta(aid, m)
-    meta["state"] = "confirmed"
-    meta["confirmed_at"] = "2026-08-31T00:00:00+00:00"
-    artifact_store.write_meta(meta)
-    db.set_artifact_state(aid, "confirmed")
-    assert db.get_artifact_index(aid)["state"] == "confirmed"
-
-    # AI 重跑覆盖（同契约 task-single upsert）
-    m2 = _pub(env, _content("重跑版"))
-    assert m2["artifact_id"] == aid
-    assert m2["state"] == "draft"  # 降级
-    assert artifact_store.read_meta(aid, m2)["state"] == "draft"
-    assert artifact_store.read_meta(aid, m2)["confirmed_at"] is None
-    assert db.get_artifact_index(aid)["state"] == "draft"
 
 
 def test_resolved_content_path_containment(env):

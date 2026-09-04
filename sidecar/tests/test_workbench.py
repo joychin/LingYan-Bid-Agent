@@ -1,6 +1,7 @@
-"""workbench API：out/ 工作台 列表/读取/编辑（409+force+修订标记+.bak 恢复）/存为笔记。
+"""workbench API：work/ 工作台 列表/读取/编辑（409+force+修订标记+恢复点栈）。
 
-工作台不是 Artifact（无索引无事件）；parse/ 只读；写走探测+裁决+恢复点兜底。
+工作台不是 Artifact（无索引无事件）；parse/ 只读；写走探测+裁决+恢复点兜底
+（restorepoints/ 保留 3 个，旧单一 .bak 收编）。
 """
 
 
@@ -47,7 +48,11 @@ def test_read_and_containment(client):
     assert r.status_code == 200
     d = r.json()
     assert d["content"].startswith("<!-- x -->")
-    assert len(d["hash"]) == 64 and d["editable"] is True and d["has_backup"] is False
+    assert len(d["hash"]) == 64 and d["editable"] is True and d["has_restore"] is False
+
+    # meta 端点：轻量探测只回哈希与标志，不含全文
+    m = client.get("/api/workbench/meta", params={"task_id": tid, "path": "analysis/evaluation.md"}).json()
+    assert m["hash"] == d["hash"] and m["editable"] is True and m["has_restore"] is False and "content" not in m
 
     # 越界（../ 逃出 out/）与非 md 一律 404
     for bad in ("../files/a.md", "analysis/../../x.md", "analysis/x.json", "nope.md"):
@@ -58,6 +63,7 @@ def test_read_and_containment(client):
 def test_write_stamps_revised_and_conflict(client):
     task = create_task(client)["task"]
     tid = task["id"]
+    # 存量旧文件形态（2026-09-04 前的模型写头）：修订标记仍追加进原注释内——旧文件兼容回归
     _seed_out(tid, "analysis/structure.md", "<!-- tender-analysis | 节=structure | 生成=2026-08-28T00:00:00+00:00 -->\n旧内容\n")
 
     base = client.get("/api/workbench/content", params={"task_id": tid, "path": "analysis/structure.md"}).json()
@@ -70,7 +76,7 @@ def test_write_stamps_revised_and_conflict(client):
     assert r.status_code == 409
 
     # 正确 base → 成功 + 修订标记盖进首行注释 + .bak 留底
-    # （编辑器保存全量内容——含原头部行，故头部保留、标记追加其内）
+    # （编辑器保存全量内容——旧文件的首行注释随内容保留、标记追加其内）
     edited = "<!-- tender-analysis | 节=structure | 生成=2026-08-28T00:00:00+00:00 -->\n用户改的\n"
     r = client.put(
         "/api/workbench/content",
@@ -80,8 +86,8 @@ def test_write_stamps_revised_and_conflict(client):
     d = client.get("/api/workbench/content", params={"task_id": tid, "path": "analysis/structure.md"}).json()
     first = d["content"].splitlines()[0]
     assert first.startswith("<!--") and "修订=用户" in first and "节=structure" in first
-    assert d["revised"] is True and d["has_backup"] is True
-    # .bak 不在列表（列表只收 .md；.md.bak 后缀不匹配）
+    assert d["revised"] is True and d["has_restore"] is True
+    # 恢复点目录不进列表（列表只收 .md；.bak 后缀不匹配）
     listed = client.get("/api/workbench", params={"task_id": tid}).json()["files"]
     assert all(not f["path"].endswith(".bak") for f in listed)
 
@@ -128,41 +134,68 @@ def test_restore_roundtrip(client):
     d = client.get("/api/workbench/content", params={"task_id": tid, "path": "analysis/evaluation.md"}).json()
     assert "版本1" in d["content"]
 
-    # 恢复可再撤销：再 restore 回版本2（互换语义）
+    # 恢复可再撤销：再 restore 回版本2（恢复前内容已入栈成为最新恢复点）
     r = client.post("/api/workbench/restore", json={"task_id": tid, "path": "analysis/evaluation.md"})
     d = client.get("/api/workbench/content", params={"task_id": tid, "path": "analysis/evaluation.md"}).json()
     assert "版本2" in d["content"]
 
-    # 无 .bak → 409
+    # 无恢复点 → 409
     _seed_out(tid, "analysis/structure.md", "无备份文件\n")
     assert client.post("/api/workbench/restore", json={"task_id": tid, "path": "analysis/structure.md"}).status_code == 409
 
 
-def test_save_as_note(client):
-    task, conv = None, None
-    rr = client.post("/api/tasks", json={"title": "任务A"})
-    task = rr.json()["task"]
-    conv = rr.json()["conversation"]
+def test_restore_point_stack_keeps_three(client):
+    """恢复点栈：连续写 4 次保留最近 3 个；恢复点目录不出现在列表/本轮文件口径。"""
+    from pathlib import Path
+
+    from app.api import workbench as wb
+
+    task = create_task(client)["task"]
     tid = task["id"]
-    _seed_out(tid, "analysis/disqualification.md", "<!-- tender-analysis | 节=disqualification -->\n| 1 | 逾期 | 高 |")
+    rel = "analysis/evaluation.md"
+    _seed_out(tid, rel, "<!-- x -->\nv0\n")
+    target: Path = artifact_store.work_dir(tid) / rel
 
-    r = client.post(
-        "/api/workbench/note",
-        json={"conversation_id": conv["id"], "path": "analysis/disqualification.md"},
-    )
-    assert r.status_code == 201, r.text
-    aid = r.json()["artifact_id"]
-    assert r.json()["display_name"].startswith("工作文件快照 · disqualification")
+    for i in range(1, 5):
+        base = client.get("/api/workbench/content", params={"task_id": tid, "path": rel}).json()["hash"]
+        r = client.put(
+            "/api/workbench/content",
+            json={"task_id": tid, "path": rel, "content": f"<!-- x -->\nv{i}\n", "base_hash": base},
+        )
+        assert r.status_code == 200
 
-    # 落在会话作用域（过程稿）、kind=doc.note、可读
-    rows = client.get("/api/artifacts", params={"conversation_id": conv["id"]}).json()["artifacts"]
-    row = next(a for a in rows if a["artifact_id"] == aid)
-    assert row["kind"] == "doc.note" and row["display_name"].startswith("工作文件快照")
+    points = wb._restore_points(target)
+    assert len(points) == 3  # v0 被裁掉；栈内为写 v2/v3/v4 前的内容（即 v1/v2/v3，已盖修订标记）
+    assert points[0].read_text(encoding="utf-8").endswith("v1\n")
+    assert points[-1].read_text(encoding="utf-8").endswith("v3\n")
 
-    # 自定义 title
-    r2 = client.post(
-        "/api/workbench/note",
-        json={"conversation_id": conv["id"], "path": "analysis/disqualification.md", "title": "废标清单定稿"},
-    )
-    assert r2.status_code == 201
-    assert r2.json()["display_name"] == "废标清单定稿"
+    # 恢复点目录不进列表
+    listed = client.get("/api/workbench", params={"task_id": tid}).json()["files"]
+    assert [f["path"] for f in listed] == [rel]
+
+
+def test_legacy_bak_adopted(client):
+    """旧版单一 .bak：首次 push 或 restore 时收编为栈内最旧一条（不删数据）。"""
+    from pathlib import Path
+
+    from app.api import workbench as wb
+
+    task = create_task(client)["task"]
+    tid = task["id"]
+    rel = "analysis/structure.md"
+    _seed_out(tid, rel, "新内容\n")
+    target: Path = artifact_store.work_dir(tid) / rel
+    legacy = target.with_name(target.name + ".bak")
+    legacy.write_text("旧世界的备份\n", encoding="utf-8")
+
+    # has_restore 把 legacy 算在内
+    d = client.get("/api/workbench/content", params={"task_id": tid, "path": rel}).json()
+    assert d["has_restore"] is True
+
+    # restore 触发收编：恢复到 legacy 内容
+    r = client.post("/api/workbench/restore", json={"task_id": tid, "path": rel})
+    assert r.status_code == 200 and "旧世界的备份" in r.json()["content"]
+    assert not legacy.exists()  # 已收编进栈
+    points = wb._restore_points(target)
+    assert len(points) == 2  # legacy（最旧）+ 恢复前的当前内容
+    assert points[0].read_text(encoding="utf-8") == "旧世界的备份\n"

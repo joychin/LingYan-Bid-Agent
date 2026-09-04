@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 
 from . import config as cfg
 from . import db
-from .api import artifacts, conversations, files, knowledge, runs, sse, tasks, workbench
+from .api import artifacts, conversations, files, knowledge, materials, runs, sse, tasks, workbench
 from .api import settings as settings_api
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -63,12 +63,25 @@ CORS_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
 
 def _sync_skills() -> None:
-    """把 app/skills/ 幂等同步到 data/workspace/skills/（FilesystemBackend 的 root）。"""
+    """把 app/skills/ 幂等镜像同步到 data/workspace/skills/（FilesystemBackend 的 root）。
+
+    copytree 只增不删——源里删掉的文件（如撤并的 shared-rules.md）会在目标侧留化石，
+    故复制后清掉源里已不存在的文件与空目录。"""
     src = cfg.skills_source_dir()
     dst = cfg.workspace_dir() / "skills"
     dst.parent.mkdir(parents=True, exist_ok=True)
     if src.exists():
         shutil.copytree(src, dst, dirs_exist_ok=True)
+        for stale in sorted(dst.rglob("*"), reverse=True):
+            rel = stale.relative_to(dst)
+            if not (src / rel).exists():
+                if stale.is_dir():
+                    try:
+                        stale.rmdir()  # 仅删空目录（reverse 保证先清子文件）
+                    except OSError:
+                        pass
+                else:
+                    stale.unlink()
         logger.info("skills 已同步到 %s", dst)
         for p in sorted(dst.glob("*/SKILL.md")):
             logger.info("  [skill] %s", p.relative_to(dst))
@@ -81,7 +94,7 @@ async def lifespan(_app: FastAPI):
     cfg.data_dir().mkdir(parents=True, exist_ok=True)
     # §16 任务分组目录：任务子目录（sources/work/_meta）按需创建，启动不预建
     db.init_db()
-    # meta.json 是权威、索引可重建：启动时全量重扫（运行态复位，emitted 置 1；state 保留）
+    # meta.json 是权威、索引可重建：启动时全量重扫（运行态复位，emitted 置 1）
     from . import artifact_store
 
     rebuilt = db.rebuild_artifact_index(
@@ -156,6 +169,7 @@ app.include_router(sse.router, prefix="/api")
 app.include_router(files.router, prefix="/api")
 app.include_router(artifacts.router, prefix="/api")
 app.include_router(knowledge.router, prefix="/api")
+app.include_router(materials.router, prefix="/api")
 app.include_router(workbench.router, prefix="/api")
 
 
