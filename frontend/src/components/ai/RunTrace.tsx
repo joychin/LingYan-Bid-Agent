@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import type { TodoItem, ToolStep } from '@/api/sse'
 import { Brain, ChevronDown, MessageCircleQuestion } from 'lucide-react'
 import { Steps, StepsContent, StepsItem, StepsTrigger } from '@/components/ai/Steps'
@@ -6,6 +6,7 @@ import { SubagentCard } from '@/components/ai/SubagentCard'
 import { TextShimmer } from '@/components/ai/TextShimmer'
 import { MemoMarkdown } from '@/components/ai/MemoMarkdown'
 import { stepArgLabel, toolDisplayName, toolIcon } from '@/components/ai/toolDisplay'
+import { segmentToolSteps } from '@/components/ai/traceGroups'
 import { useAutoCollapse } from '@/hooks/useAutoCollapse'
 import { humanizeError } from '@/lib/errorText'
 import { mdRemarkPlugins } from '@/lib/markdown'
@@ -56,8 +57,11 @@ export const NarrationLine = memo(function NarrationLine({ text }: { text?: stri
 })
 
 /** 普通工具步骤行：标题只显示「工具名 · 状态」（不展示业务内容，执行中整段微光），
- *  完成后自动收缩（用户手动展开不被覆盖）。点击展开详情 = 关键参数（路径/问题等）+ 结果摘要/错误。 */
-function ToolStepRow({ step }: { step: ToolStep }) {
+ *  完成后自动收缩（用户手动展开不被覆盖）。点击展开详情 = 关键参数（路径/问题等）+ 结果摘要/错误。
+ *  embedded=嵌入折叠组内渲染：组首步骤的旁白/思考已上提组头常驻，跳过防重复。
+ *  memo：步骤是不可变快照（appendReasoning/fillStep 保留未命中引用），子代理思考
+ *  流式期间未受影响的行跳过重渲染。 */
+const ToolStepRow = memo(function ToolStepRow({ step, embedded }: { step: ToolStep; embedded?: boolean }) {
   const [open, setOpen] = useAutoCollapse(step.status)
   const arg = stepArgLabel(step.tool, step.args)
   const Icon = toolIcon(step.tool)
@@ -71,8 +75,12 @@ function ToolStepRow({ step }: { step: ToolStep }) {
           : '成功'
   return (
     <Collapsible className="group" open={open} onOpenChange={setOpen}>
-      <StepThinking text={step.reasoning} />
-      <NarrationLine text={step.text} />
+      {!embedded && (
+        <>
+          <StepThinking text={step.reasoning} />
+          <NarrationLine text={step.text} />
+        </>
+      )}
       <CollapsibleTrigger className="flex w-full cursor-pointer items-center gap-1.5 py-0.5 text-left text-[13px] text-muted-foreground transition-colors hover:text-foreground">
         <Icon className="size-3.5 shrink-0" aria-hidden />
         {step.status === 'running' ? (
@@ -108,12 +116,14 @@ function ToolStepRow({ step }: { step: ToolStep }) {
       </CollapsibleContent>
     </Collapsible>
   )
-}
+})
 
 /** 已回答的提问折叠组（参考图「已询问 N 个问题」形态）：ask_human 步骤收拢为一组，
  *  每项 = 问题 + 你的回答（结果摘要即用户回答原文）。默认收起——回答过的问题不必
- *  常驻展开，转录里也不再渲染独立的「已选：」回答气泡。 */
-function AskedQuestions({ steps }: { steps: ToolStep[] }) {
+ *  常驻展开，转录里也不再渲染独立的「已选：」回答气泡。
+ *  memo 比较器按元素引用（分段每轮重建数组，默认浅比较恒失效）。 */
+const AskedQuestions = memo(
+  function AskedQuestions({ steps }: { steps: ToolStep[] }) {
   const [open, setOpen] = useState(false)
   return (
     <Collapsible className="group" open={open} onOpenChange={setOpen}>
@@ -142,12 +152,84 @@ function AskedQuestions({ steps }: { steps: ToolStep[] }) {
       </CollapsibleContent>
     </Collapsible>
   )
-}
+  },
+  (prev, next) => sameSteps(prev.steps, next.steps),
+)
+
+/** 折叠组 steps 数组的等价判定：分段每轮重建数组，按元素引用比较
+ *  （步骤是不可变快照，引用相等即内容相等）。 */
+const sameSteps = (a: ToolStep[], b: ToolStep[]) =>
+  a.length === b.length && a.every((s, i) => s === b[i])
+
+/** grep 无命中时 deepagents 格式器的固定文案（backends utils format_grep_matches）。
+ *  只用于词表 chip 置灰与命中计数，提示非门禁；上游措辞变化最坏退化为标注不准。 */
+const GREP_NO_MATCH = 'No matches found'
+
+/** 连续 grep 批次折叠组（废标反查词表场景）：N 行「检索文件」收成一行
+ *  「检索 ×N · 命中 H/N」。词表 chips 折叠态常驻可见——哪些词查过、哪些打中
+ *  是废标审计关心的事，不埋进展开区；展开后逐个渲染普通步骤行（参数+结果
+ *  原样可审计）。组首步骤的旁白/思考上提组头常驻（封段规则：同轮只有首个
+ *  调用携带），活跑时计数与 chips 随 tool.called 逐个增长、命中词逐个点亮。
+ *  memo 比较器按元素引用（同 AskedQuestions）。 */
+const GrepBatch = memo(
+  function GrepBatch({ steps }: { steps: ToolStep[] }) {
+  const [open, setOpen] = useState(false)
+  const first = steps[0]
+  const isHit = (s: ToolStep) => s.status === 'done' && !!s.summary && s.summary !== GREP_NO_MATCH
+  const hits = steps.filter(isHit).length
+  const errors = steps.filter((s) => s.status === 'error').length
+  const running = steps.some((s) => s.status === 'running')
+  const Icon = toolIcon('grep')
+  return (
+    <div>
+      <StepThinking text={first.reasoning} />
+      <NarrationLine text={first.text} />
+      <Collapsible className="group" open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger className="flex w-full cursor-pointer items-center gap-1.5 py-0.5 text-left text-[13px] text-muted-foreground transition-colors hover:text-foreground">
+          <Icon className="size-3.5 shrink-0" aria-hidden />
+          {running ? (
+            <TextShimmer className="whitespace-nowrap">检索 ×{steps.length}</TextShimmer>
+          ) : (
+            <span className="whitespace-nowrap">
+              检索 ×{steps.length} · 命中 {hits}/{steps.length}
+              {errors > 0 ? ` · ${errors} 失败` : ''}
+            </span>
+          )}
+          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground/40 transition-transform group-data-[state=open]:rotate-180" />
+        </CollapsibleTrigger>
+        {/* 词表 chips：折叠态常驻，命中正常色、未命中/进行中置灰 */}
+        <div className="flex flex-wrap gap-x-2 gap-y-0.5 py-0.5 pl-5 text-[11px] leading-5">
+          {steps.map((s) => (
+            <span
+              key={s.id ?? s.toolCallId}
+              className={cn(
+                'whitespace-nowrap',
+                isHit(s) ? 'text-foreground' : 'text-muted-foreground/40',
+              )}
+            >
+              {stepArgLabel('grep', s.args)}
+            </span>
+          ))}
+        </div>
+        <CollapsibleContent className="overflow-hidden">
+          <div className="border-line space-y-0.5 border-l-2 py-0.5 pl-3 pr-2">
+            {steps.map((s, i) => (
+              <ToolStepRow key={s.id ?? s.toolCallId ?? i} step={s} embedded={i === 0} />
+            ))}
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
+    </div>
+  )
+  },
+  (prev, next) => sameSteps(prev.steps, next.steps),
+)
 
 /** 执行过程流（工具行 + 任务清单）：RunMessage（运行中）与历史消息（trace 快照）共用。
  *  仿参考产品扁平时间线：旁白正文与工具行按序平铺（外层运行头负责折叠）。
  *  task 步骤渲染 SubagentCard（含子代理 children/reasoning），ask_human 步骤收进
- *  问答折叠组，其余工具渲染普通步骤行。
+ *  问答折叠组，连续 grep 批次收进检索折叠组（分段规则见 traceGroups），其余工具
+ *  渲染普通步骤行。
  *  memo：流式正文 token 期间 tools/todos 引用不变 → 整个过程区跳过重渲染
  *  （白名单制：新增 prop 必须是引用稳定或值类型，否则比较器要同步改）。 */
 export const RunTrace = memo(function RunTrace({
@@ -161,27 +243,24 @@ export const RunTrace = memo(function RunTrace({
   done?: number
   total?: number
 }) {
-  const items: React.ReactNode[] = []
-  let askGroup: ToolStep[] = []
-  const flushAsk = (at?: number) => {
-    if (askGroup.length === 0) return
-    const group = askGroup
-    items.push(<AskedQuestions key={`ask-${group[0]?.id ?? at ?? 'x'}`} steps={group} />)
-    askGroup = []
-  }
-  tools.forEach((s, i) => {
-    if (s.tool === 'ask_human') {
-      askGroup.push(s)
-      return
-    }
-    flushAsk(i)
-    if (s.tool === 'task') {
-      items.push(<SubagentCard key={s.id ?? s.toolCallId ?? i} step={s} />)
-    } else {
-      items.push(<ToolStepRow key={s.id ?? s.toolCallId ?? i} step={s} />)
-    }
-  })
-  flushAsk()
+  // 分段只在 tools 引用变化时重算（todos/done/total 变化不重跑），行级 memo 再挡掉
+  // 未受影响的行（子代理思考流式只换命中的 task 步骤引用）
+  const items: React.ReactNode[] = useMemo(
+    () =>
+      segmentToolSteps(tools).map((seg, i) => {
+        if (seg.kind === 'ask') {
+          return <AskedQuestions key={`ask-${seg.steps[0]?.id ?? i}`} steps={seg.steps} />
+        }
+        if (seg.kind === 'grep') {
+          return <GrepBatch key={`grep-${seg.steps[0]?.id ?? i}`} steps={seg.steps} />
+        }
+        if (seg.kind === 'task') {
+          return <SubagentCard key={seg.step.id ?? seg.step.toolCallId ?? i} step={seg.step} />
+        }
+        return <ToolStepRow key={seg.step.id ?? seg.step.toolCallId ?? i} step={seg.step} />
+      }),
+    [tools],
+  )
 
   return (
     <>

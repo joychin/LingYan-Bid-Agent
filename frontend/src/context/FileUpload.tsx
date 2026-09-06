@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react'
@@ -95,7 +96,12 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
       updateUpload({ id, name: file.name, size: file.size, taskId, status: 'uploading', progress: -1 })
 
       try {
+        // 进度去重：同一整百分比内的连续 chunk 不再逐个 setState（每次都会触发
+        // provider 重渲染 → 全部 consumer 跟着重渲染，大文件上传期的跨树重渲染风暴）
+        let lastPercent = -2
         await uploadFileWithProgress(file, taskId, (percent) => {
+          if (percent === lastPercent) return
+          lastPercent = percent
           updateUpload({ id, name: file.name, size: file.size, taskId, status: 'uploading', progress: percent })
         })
         // done 项保留在数组：InputComposer 的 freshFiles（空文本发送=通知助手处理新文件）依赖它
@@ -182,20 +188,35 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
     return () => input.removeEventListener('change', onChange)
   }, [doUpload, requireScope])
 
+  // value 引用稳定：父级重渲染（如 SidecarHealth 状态切换）不再连带重建 value
+  // 触发全部 consumer 重渲染；真实变化（uploads/taskScope）才换引用
+  const value = useMemo<FileUploadContextValue>(
+    () => ({
+      uploads,
+      taskScope,
+      setTaskScope,
+      openFilePicker,
+      dropFiles,
+      retryUpload,
+      dismissUpload,
+      acknowledgeUploads,
+      removeUploadsByName,
+    }),
+    [
+      uploads,
+      taskScope,
+      setTaskScope,
+      openFilePicker,
+      dropFiles,
+      retryUpload,
+      dismissUpload,
+      acknowledgeUploads,
+      removeUploadsByName,
+    ],
+  )
+
   return (
-    <FileUploadContext.Provider
-      value={{
-        uploads,
-        taskScope,
-        setTaskScope,
-        openFilePicker,
-        dropFiles,
-        retryUpload,
-        dismissUpload,
-        acknowledgeUploads,
-        removeUploadsByName,
-      }}
-    >
+    <FileUploadContext.Provider value={value}>
       {children}
       {/* 2026-08-28 放开类型白名单：不设 accept 过滤，类型是否可解析由后端解析层裁决报人话 */}
       <input ref={inputRef} type="file" className="hidden" multiple />

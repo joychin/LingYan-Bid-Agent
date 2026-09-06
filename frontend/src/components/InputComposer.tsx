@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ArrowUp, ChevronDown, FileText, Folder, Paperclip, Square, X } from 'lucide-react'
+import { ArrowUp, FileText, Paperclip, Square, X } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
-import { useFiles, useDeleteFile } from '@/hooks/useFiles'
 import { useFileUpload } from '@/context/FileUpload'
-import { useToast } from '@/context/Toast'
 import { formatSize, cn } from '@/lib/utils'
 import { ModelSelect } from '@/components/workspace/ModelSelect'
 import { ThinkingSelect } from '@/components/ThinkingSelect'
@@ -12,7 +10,7 @@ import { PromptSuggestionPopover } from '@/components/PromptSuggestionPopover'
 import { PROMPT_SUGGESTIONS, type PromptSuggestionItem } from '@/data/promptCatalog'
 import { getSettings, type ThinkingLevel } from '@/api/client'
 
-/** Workspace 输入区：圆角 24 输入框（自适应高度）+ 附件钮 + 模型胶囊 + 圆形发送 + 文件/上传 chip 行 + 免责声明。 */
+/** Workspace 输入区：圆角 24 输入框（自适应高度）+ 附件钮 + 模型胶囊 + 圆形发送 + 上传 chip 行 + 免责声明。 */
 export function InputComposer({
   running,
   waiting = false,
@@ -58,16 +56,11 @@ export function InputComposer({
   const text = value ?? ''
   const taRef = useRef<HTMLTextAreaElement>(null)
   const [focused, setFocused] = useState(false)
-  const [filesOpen, setFilesOpen] = useState(false)
   const [suggestionsOpen, setSuggestionsOpen] = useState(false)
   const [activeSuggestion, setActiveSuggestion] = useState(0)
   const [sending, setSending] = useState(false)
   const suggestionListId = 'prompt-suggestion-list'
-  const { uploads, taskScope, openFilePicker, retryUpload, dismissUpload, acknowledgeUploads, removeUploadsByName } =
-    useFileUpload()
-  const { data: files = [] } = useFiles(taskScope)
-  const deleteFile = useDeleteFile()
-  const { toast } = useToast()
+  const { uploads, taskScope, openFilePicker, retryUpload, dismissUpload, acknowledgeUploads } = useFileUpload()
   const { data: settings } = useQuery({
     queryKey: ['settings'],
     queryFn: getSettings,
@@ -117,17 +110,7 @@ export function InputComposer({
     el.style.height = `${Math.min(el.scrollHeight, 150)}px`
   }, [text])
 
-  // 文件管理浮层：点击外部关闭（同 TaskPicker 的 data-menu 先例）
-  useEffect(() => {
-    if (!filesOpen) return
-    const onDoc = (e: PointerEvent) => {
-      const t = e.target as HTMLElement | null
-      if (t && !t.closest('[data-files-menu]')) setFilesOpen(false)
-    }
-    document.addEventListener('pointerdown', onDoc)
-    return () => document.removeEventListener('pointerdown', onDoc)
-  }, [filesOpen])
-
+  // 任务文件在产物面板「任务文件」区查看；输入框上方只保留待发送的新上传高亮 chip
   const handleSend = async () => {
     if (disabled || sending) return
     if (running && !waiting) return
@@ -147,21 +130,9 @@ export function InputComposer({
     } finally {
       setSending(false)
     }
-    // 发送后输入区收敛：新上传 chip 已随 acknowledge 移除，文件浮层收起
+    // 发送后输入区收敛：新上传 chip 已随 acknowledge 移除
     acknowledgeUploads(freshFiles.map((f) => f.id))
-    setFilesOpen(false)
     onChange(null)
-  }
-
-  const handleDeleteFile = async (name: string) => {
-    if (!taskScope) return
-    try {
-      await deleteFile.mutateAsync({ name, taskId: taskScope })
-      // 后端已删：同步清掉「新上传」chip，否则空文本发送的合成消息仍会带上它
-      removeUploadsByName(name, taskScope)
-    } catch (err) {
-      toast(err instanceof Error ? err.message : String(err), 'error')
-    }
   }
 
   const runningBlock = running && !waiting
@@ -311,46 +282,6 @@ export function InputComposer({
             >
               <Paperclip />
             </button>
-            {files.length > 0 && (
-              <div className="relative" data-files-menu>
-                <button
-                  type="button"
-                  className="task-select"
-                  onClick={() => setFilesOpen((v) => !v)}
-                  title="任务文件管理"
-                >
-                  <Folder className="task-icon" />
-                  <span className="label">文件 {files.length}</span>
-                  <ChevronDown className={cn('chev transition-transform', filesOpen && 'rotate-180')} />
-                </button>
-                {filesOpen && (
-                  <div className="absolute bottom-full left-0 z-30 mb-2 w-80 rounded-[var(--Radius-radius-12)] border border-line bg-card py-1.5 shadow-md">
-                    <p className="px-2.5 pb-1 pt-0.5 text-[11px] text-muted-foreground">当前任务的文件区</p>
-                    <div className="max-h-64 overflow-y-auto">
-                      {files.map((f) => (
-                        <div key={f.name} className="flex items-center gap-2 px-2.5 py-1.5 text-sm">
-                          <FileText className="h-4 w-4 shrink-0 text-ink-3" />
-                          <span className="min-w-0 flex-1 truncate" title={f.name}>
-                            {f.name}
-                          </span>
-                          <span className="shrink-0 text-xs text-muted-foreground">{formatSize(f.size)}</span>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteFile(f.name)}
-                            disabled={deleteFile.isPending}
-                            className="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                            aria-label={`删除 ${f.name}`}
-                            title="从任务文件区删除"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
             {leftSlot}
           </div>
           <div className="right">

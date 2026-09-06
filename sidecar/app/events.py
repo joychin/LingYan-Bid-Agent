@@ -140,15 +140,18 @@ def _chunk_reasoning(msg: AIMessageChunk) -> str:
 
 
 def _deep_unescape(value):
-    """递归反转义 HTML 实体（仅展示层）。
+    """递归反转义 HTML 实体与字面转义序列（仅展示层）。
 
-    个别模型会把参数里的换行写成 `&#10;` 字面量，前端按纯文本渲染出垃圾字符。
-    html.unescape 是单遍解码，`&amp;#10;` 只解到 `&#10;` 字面量、不会二次展开；
-    这里只作用于下发 UI 的 args 副本，工具实际执行与模型记忆（checkpoint）仍用
-    模型原始输出。
+    个别模型会把参数里的换行写错编码：早期是 `&#10;` 实体；实测还有字面
+    `\\n`（工具调用 JSON 里过度转义 `\\\\n` 的解码产物，落到字符串是反斜杠
+    +n 两个字符）——问答卡原样上屏、首行/副标题分段失效。html.unescape 单遍
+    解码（`&amp;#10;` 只解到 `&#10;`、不会二次展开），字面 `\\n` 再折叠为
+    真实换行；其余转义序列（\\t 等）罕见、不折叠，避免误伤合法反斜杠文本。
+    这里只作用于下发 UI 的 args 副本，工具实际执行与模型记忆（checkpoint）
+    仍用模型原始输出。
     """
     if isinstance(value, str):
-        return html.unescape(value)
+        return html.unescape(value).replace("\\n", "\n")
     if isinstance(value, dict):
         return {k: _deep_unescape(v) for k, v in value.items()}
     if isinstance(value, list):

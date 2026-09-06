@@ -35,8 +35,11 @@ export const KbImage = memo(function KbImage({
           return
         }
         const blob = await resp.blob()
+        // 卸载发生在 blob 到达前时不再创建 objectURL：cleanup 已执行过，之后再创建
+        // 的 URL 无人 revoke（快速滚动图片清单时的泄漏窗口）
+        if (!alive) return
         objectUrl = URL.createObjectURL(blob)
-        if (alive) setUrl(objectUrl)
+        setUrl(objectUrl)
       } catch {
         if (alive) setFailed(true)
       }

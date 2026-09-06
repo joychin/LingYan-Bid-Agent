@@ -296,8 +296,13 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   cid/rid/task_id/thinking 思考档位）；`app/run_files.py`（「本轮文件」起止快照 diff，
   见铁律 3 的 additive 记录）。
   `work/` 是**任务级**技能工作台（`<task>/work/`：parse→analysis→outline→body 的中间
-  产物；2026-08-31 由 out/ 更名），跨任务互不串台；过程子目录按需创建，启动不预建
-  （仅任务创建 + run 启动自愈补 sources/work 骨架，`ensure_task_skeleton` 幂等）。
+  产物；2026-08-31 由 out/ 更名），跨任务互不串台；已知管线子目录同样预建
+  （`_PROCESS_DIRS` = parse/analysis/outline/outline/fragments，任务创建 + run 启动
+  自愈双入口，`ensure_task_skeleton` 幂等）——2026-09-06 根治「目录空窗期 ls 吃
+  path_not_found 红错」（写文件自动建父目录但 ls 撞不上，标准版式里的目录对模型
+  不该是意外；空目录 UI 零可见=工作台/本轮文件只扫 .md），2026-08-29 sources/work
+  先例的延伸；新管线目录（如 tender-body 的 body/）随技能落地同步加清单，
+  artifacts/ 与 _meta/ 仍按需（publish/fs_guard 各自拥有）。
 - **投标流水线 Phase 1（2026-08-25，入口段 2026-08-26 重构）**：旧 tender-toc skill
   及其工具已移除，新体系 =
   skill `document-parse`（**文件→markdown 独立技能**，流水线入口：check_pipeline_state
@@ -355,7 +360,7 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   **三道清理固定顺序**（①查漏补缺/②评分对齐/③走查定稿，原则从 document_helpler 老流水线
   逐字保留，各有跳过条件与声明义务，节点增删改同步维护来源标注/目录说明）→
   assemble_tender 组装发布。**单册**主线程就地做；**多册（≥2）**并发派发
-  `tender-outline-writer` 子代理每册一个（同一消息全部 task 调用，一次审批卡批量放行；
+  `tender-outline-writer` 子代理每册一个（同一消息全部 task 调用直接并行执行；
   子代理不继承任务上下文注入也不自动载 skill——派发 description 自带任务目录前缀/
   scope/fragment 路径，方法论让它 read_file skills/tender-outline/references/*.md；
   每册产物落 `work/outline/fragments/<册名>.md`，返回后主线程按册序合并覆盖写
@@ -439,9 +444,11 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
 
 ## HITL（human-in-the-loop，2026-08-25）
 
-- 用 deepagents 原生 `interrupt_on`（`agent.INTERRUPT_ON`，当前两项：`ask_human`
-  `allowed_decisions=["respond"]` 问答型；`task` approve/reject——子代理派发审批门禁，
-  tender-outline 多册并发派发前用户确认）。给其他工具加门禁改这里。子代理 spec 的
+- 用 deepagents 原生 `interrupt_on`（`agent.INTERRUPT_ON`，当前一项：`ask_human`
+  `allowed_decisions=["respond"]` 问答型。`task` 派发审批门禁已删——2026-09-06
+  用户拍板：每次派发子代理都弹审批卡太吵，直接执行；恢复加回
+  `"task": {"allowed_decisions": ["approve", "reject"]}` 即可）。给其他工具加门禁改
+  这里。子代理 spec 的
   `interrupt_on` 是**整体替换继承**——tender-outline-writer 传 `{}` 即排除（子代理不直接问用户）。
 - **暂停语义**：langgraph 在 updates 模式以 `{"__interrupt__": (Interrupt,...)}` 下发
   （值是元组，不专门处理会被 `events.iter_stream` 静默丢弃且 run 以空回复 completed）；
@@ -596,7 +603,20 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   - skills 从 `app/skills/` 启动时同步到 `data/workspace/skills/`（FilesystemBackend root）。
 - **src-tauri**（Rust stable ≥1.85）：
   - `src/sidecar.rs`：选空闲端口 → 随机 token → spawn（`process_group(0)`）→ healthz(nonce 校验,1s×30) →
-    指数退避重启（上限 3 次）→ 退出杀进程树并 wait 回收。env 只注入 plumbing
+    指数退避重启（上限 3 次）→ 退出杀进程树并 wait 回收。**崩溃韧性六件套（2026-09-05）**：
+    ①稳定窗口=探活成功后存活满 30s 才清失败计数（防「活 N 秒必崩」型起-崩永久循环，Docker
+    成功窗口先例）；②spawn 失败与探活失败/意外退出同样计入熔断上限（此前 spawn Err 无限 2s
+    重试）；③`restart_sidecar` command=手动重启入口（清零熔断计数+置 restart_requested，
+    supervisor 存活监控/熔断等待两处消费；探活成功时主动消费积压请求防误杀健康进程）；
+    ④失败分类 `FailureInfo{kind,detail}`（spawn_failed/boot_timeout/crashed/exited，
+    classify_exit_status 纯函数+单测；wait status 编码：信号态=信号号本身、退出码才是 code<<8）
+    经 `get_sidecar_failure` 透出前端红态横幅（`lib/sidecarFailure.ts` kind→人话标题+单测）；
+    ⑤stderr 留档 `data/logs/sidecar-boot.log`（每次 spawn 截断重写，捕捉 Python 日志初始化前的
+    启动早期错误；创建失败回退 null 不阻断拉起）；⑥`export_diagnostics` 导出单个 txt 诊断报告
+    （版本/OS/失败原因+Rust 壳日志尾部+sidecar.log 尾部+boot 留档，零新依赖，尾部自附隐私提示）
+    + `reveal_sidecar_logs` 打开日志目录（前端拿不到绝对路径，Rust 侧直接 reveal）。
+    `get_sidecar_info` 在 Failed 且无重启请求时快速返回 Err（熔断后 info=None，否则前端每个
+    请求挂满 20s 才报错）。env 只注入 plumbing
     （SIDECAR_TOKEN + TENDER_HEALTHZ_NONCE）——模型配置与凭证 2026-08-29 起在 sidecar
     的 app.db，钥匙串/MODEL_KEYS 注入/设置类 command（set_model_key 等）已全部移除；
     `stopping` 标志保证应用退出后 supervisor 不再拉起孤儿进程。
@@ -632,6 +652,15 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
     `hooks/useThrottledValue`（state 存精确值、只节流渲染层），贴底滚动走 rAF 合并。
     memo 白名单制：`ChatMessage`/`RunTrace`/`SubagentCard`/`MessageList` 的比较器/引用
     稳定性依赖 props 全部为值或稳定引用，**新增 prop 必须同步进比较器**（漏了 = UI 不更新）。
+  - **连续 grep 批次折叠组（2026-09-06）**：RunTrace 显示层把相邻 grep（废标反查词表
+    20 连发）收进 `GrepBatch` 折叠组——「检索 ×N · 命中 H/N」组头 + 词表 chips 折叠态
+    常驻（命中正常色/未命中置灰；命中判定=done 且 summary 非空且 ≠ deepagents
+    'No matches found' 固定文案，提示非门禁）；**旁白/思考非空 = 新轮首个调用即断组**
+    （组数诚实对应模型轮次、旁白常驻组头不被折叠吞掉）；≥2 才成组、单个（自扩词反查）
+    维持普通步骤行；展开后逐个渲染 `ToolStepRow`（参数+结果原样可审计，组首行
+    `embedded` 抑制已上提组头的旁白/思考）。分段纯函数 `traceGroups.ts` + vitest；
+    数据/SSE 契约/runReducer 零改动，活跑与历史 trace 同构生效（勿扩到 read_file——
+    逐章推进感有信息量；子代理 ChildStep 未接）。
   - UI 全手写、**零 radix/cva**：`components/ui/` 是 shadcn 风格基础件
     （button/dialog/input/collapsible/hover-card），`collapsible.tsx` 支持透传 data-*。
     `components/ai/` 是从 prompt-kit 移植的 AI 组件（Loader/TextShimmer/PromptSuggestion/

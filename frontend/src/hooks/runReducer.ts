@@ -109,6 +109,16 @@ export type Action =
     }
   /** SSE 断线后的 HTTP 对账收敛（getLatestRun 确认已结束才触发） */
   | { type: 'reconcile-converge'; error: string | null }
+  /** 流式高频事件（agent.token/agent.reasoning）的合并应用：useRun 把 200ms 窗口内的
+   *  增量攒成一次 dispatch——逐 token 应用会让 ChatView 每 token 重渲染（reasoning
+   *  还带整棵工具树的递归拷贝）。顺序语义不变：任何其他 action 之前先冲刷缓冲。
+   *  seq = 缓冲内最大序号（去重水位续接，无 seq 事件不携带）。 */
+  | {
+      type: 'stream-batch'
+      tokens: string
+      deltas: Array<{ agentId: string | null; text: string }>
+      seq?: { runId: string; seq: number }
+    }
 
 export interface ReducerResult {
   state: RunState
@@ -356,11 +366,37 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
     }
     case 'reconcile-converge':
       return result(convergeRun(s, action.error))
+    case 'stream-batch': {
+      // 合并窗口的流式增量一次应用（一棵树最多每 agent 走一遍，而非每 token 一遍）
+      let tools = s.tools
+      let streamText = s.streamText
+      let reasoningText = s.reasoningText
+      let lastSeq = s.lastSeq
+      let changed = false
+      const seq = action.seq
+      if (seq && (!lastSeq || lastSeq.runId !== seq.runId || seq.seq > lastSeq.seq)) {
+        lastSeq = seq
+        changed = true
+      }
+      if (action.tokens) {
+        streamText += action.tokens
+        changed = true
+      }
+      for (const d of action.deltas) {
+        if (d.agentId) tools = appendReasoning(tools, d.agentId, d.text)
+        else reasoningText += d.text
+        changed = true
+      }
+      return changed ? result({ ...s, streamText, reasoningText, tools, lastSeq }) : result(s)
+    }
   }
 }
 
 function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): ReducerResult {
   const { event, data, now } = action
+  // seq 未推进前的原引用：no-op 分支返回它让 setState 同值 bail（避免每条杂项事件
+  // 白触发一次 ChatView 整树渲染；代价是这些事件的 seq 水位不前移，最坏多一条缺口告警）
+  const orig = s
   // seq 去重（契约 additive 扩展）：双连接残留的重复投递直接丢弃（结构上终结重影）；
   // 缺口告警不重放（MVP 断线策略仍是重拉 messages）。无 seq（旧 sidecar/连接级事件）照常接受。
   if (typeof data.seq === 'number') {
@@ -388,7 +424,7 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
     case 'tool.called': {
       // 幂等兜底：双连接窗口内同一调用可能投递两次（单飞订阅已基本防住）
       const callId = data.tool_call_id ?? null
-      if (callId && hasStepByCallId(s.tools, callId)) return result(s)
+      if (callId && hasStepByCallId(s.tools, callId)) return result(orig)
       const step = newStep(`${now}-${s.stepCounter}`, data, now)
       s = { ...s, stepCounter: s.stepCounter + 1 }
       if (!data.agent_id) {
@@ -421,7 +457,7 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
       // 连接建立时的对账（sidecar 不补发历史事件）：
       // 在跑则恢复 running（重连/新挂载错过 agent.started），已结束则收敛
       if (data.status === 'running') {
-        if (s.terminalRuns.has(data.run_id)) return result(s)
+        if (s.terminalRuns.has(data.run_id)) return result(orig)
         // 恢复 running 态：计时从恢复时刻重新起算（拿不到真实起点，近似）；
         // 对账事件以 sidecar 权威 run_id 为准（本地旧值可能属于已结束的 run，
         // 保留会让停止钮 POST 到错误的 run）
@@ -438,7 +474,7 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
         // 断线恰好跨过 run.interrupt 的客户端，工具树/思考/未封口正文同样不清空；
         // pauseNarration 保留既有值，重复对账不抹掉已冻结的旁白）。
         // 半截回复已由 sidecar 落库，拉回消息（活卡存续期间暂停消息不渲染）
-        if (s.terminalRuns.has(data.run_id)) return result(s)
+        if (s.terminalRuns.has(data.run_id)) return result(orig)
         return result(
           {
             ...s,
@@ -485,7 +521,7 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
         },
       ])
     default:
-      return result(s)
+      return result(orig)
   }
 }
 

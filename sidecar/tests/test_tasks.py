@@ -70,11 +70,13 @@ def test_conversation_requires_task(client):
 
 
 def test_task_creation_prebuilds_skeleton_dirs(client):
-    """新建任务预建 sources/work：agent 开工第一步的 ls 不再 path_not_found。"""
+    """新建任务预建 sources/work + 管线子目录：agent 的 ls 不再 path_not_found。"""
     body = create_task(client, "骨架目录任务")
     tid = body["task"]["id"]
     assert artifact_store.sources_dir(tid).is_dir()
     assert artifact_store.work_dir(tid).is_dir()
+    for rel in artifact_store._PROCESS_DIRS:
+        assert (artifact_store.work_dir(tid) / rel).is_dir(), rel
 
 
 def test_skeleton_self_heal_for_legacy_task(client):
@@ -89,6 +91,8 @@ def test_skeleton_self_heal_for_legacy_task(client):
     artifact_store.ensure_task_skeleton(tid)
     assert artifact_store.sources_dir(tid).is_dir()
     assert artifact_store.work_dir(tid).is_dir()
+    for rel in artifact_store._PROCESS_DIRS:
+        assert (artifact_store.work_dir(tid) / rel).is_dir(), rel
 
 
 # ---------- 任务归属发布与过滤 ----------

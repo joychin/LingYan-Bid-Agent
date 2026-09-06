@@ -28,7 +28,8 @@ import { useFileUpload } from '@/context/FileUpload'
 import { useToast } from '@/context/Toast'
 import { useKbBadge } from '@/hooks/useKnowledge'
 import { useActiveRuns } from '@/hooks/useActiveRuns'
-import { markRead, markUnread, useUnreadConvs } from '@/lib/unreadConvs'
+import { markRead, markUnread, forgetConvs, useUnreadConvs } from '@/lib/unreadConvs'
+import { LS_MODEL_BY_CONV } from '@/components/ChatView'
 import { cn, formatRelativeTime } from '@/lib/utils'
 import type { Conversation, Task } from '@/api/client'
 import { ChatItem } from '@/components/workspace/ChatItem'
@@ -73,6 +74,19 @@ const STATUS_LABEL: Record<string, string> = {
 function errMsg(e: unknown): string {
   const m = e instanceof Error ? e.message : String(e)
   return m === 'signal timed out' ? '请求超时，请重试' : m
+}
+
+/** 删除会话时清掉「按会话粘性的模型选择」map 条目（键真值在 ChatView 的
+ *  LS_MODEL_BY_CONV；坏数据静默忽略——偏好清理不是关键路径）。 */
+function forgetModelPrefs(convIds: string[]) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_MODEL_BY_CONV) || '{}')
+    let changed = false
+    for (const id of convIds) changed = delete raw[id] || changed
+    if (changed) localStorage.setItem(LS_MODEL_BY_CONV, JSON.stringify(raw))
+  } catch {
+    /* 忽略坏数据 */
+  }
 }
 
 /** Workspace 侧栏：快捷导航 + 「任务」分区（任务文件夹 → 会话两级）+ 用户栏。 */
@@ -201,6 +215,9 @@ export function Sidebar({
     }
     setConfirmDelete(null)
     setConfirmError(null)
+    // 本地偏好残留清理（卫生问题，量极小）：未读圆点与按会话粘性的模型选择条目
+    forgetConvs([deletingId])
+    forgetModelPrefs([deletingId])
     if (willReset) {
       if (neighbors.length > 0) onSelect(neighbors[0].id)
       else onSelect(null)
@@ -212,6 +229,7 @@ export function Sidebar({
     const tid = confirmDeleteTask.id
     const survivors = conversations.filter((c) => c.task_id !== tid)
     const willReset = conversations.some((c) => c.id === selectedId && c.task_id === tid)
+    const taskConvIds = conversations.filter((c) => c.task_id === tid).map((c) => c.id)
     try {
       await deleteTaskM.mutateAsync(tid)
     } catch (e) {
@@ -224,6 +242,9 @@ export function Sidebar({
     // 同步清掉上传归属任务：会话切换/列表刷新到位前重挂载的输入区不再拿着
     // 已删任务的 taskScope 去拉 files（否则吃到一次 404）
     setTaskScope(null)
+    // 本地偏好残留清理（同删除会话；任务的全部会话一并清）
+    forgetConvs(taskConvIds)
+    forgetModelPrefs(taskConvIds)
     if (willReset) {
       if (survivors.length > 0) onSelect(survivors[0].id)
       else onSelect(null)

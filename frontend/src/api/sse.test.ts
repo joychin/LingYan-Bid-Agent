@@ -66,7 +66,7 @@ interface FesMsg {
 interface FesOpts {
   onopen?: (res: Response) => Promise<void>
   onmessage?: (msg: FesMsg) => void
-  onerror?: (err: unknown) => number | null | undefined
+  onerror?: (err: unknown) => void
 }
 const lastOpts = (): FesOpts =>
   vi.mocked(fetchEventSource).mock.lastCall![1] as unknown as FesOpts
@@ -106,27 +106,100 @@ describe('SSE 协议处理', () => {
     ).rejects.toThrow('503')
   })
 
-  it('onerror 指数退避（1s 起、封顶 15s），onopen 成功后归零', async () => {
-    const onError = vi.fn()
-    subscribeSSE('c1', { onEvent: vi.fn(), onError })
+  it('onerror 恒抛出（重连节奏与地址重解析由外层循环掌控），错误原样透传', async () => {
+    subscribeSSE('c1', { onEvent: vi.fn() })
     await flush()
-    const opts = lastOpts()
-    expect(opts.onerror!(new Error('boom'))).toBe(1000)
-    expect(opts.onerror!(new Error('boom'))).toBe(2000)
-    for (let i = 0; i < 10; i++) opts.onerror!(new Error('boom'))
-    expect(opts.onerror!(new Error('boom'))).toBe(15000)
-    // 建连成功：退避归零（断线风暴恢复后不沿用长间隔）
-    await opts.onopen!({ ok: true, status: 200 } as unknown as Response)
-    expect(opts.onerror!(new Error('boom'))).toBe(1000)
+    const err = new Error('boom')
+    expect(() => lastOpts().onerror!(err)).toThrow(err)
   })
 
-  it('404 停连：onerror 原样抛出（不返回重连间隔），不经 onError 重复回调', async () => {
-    const onError = vi.fn()
-    subscribeSSE('c1', { onEvent: vi.fn(), onError })
-    await flush()
-    const err = new Error('SSE 打开失败: 404') as Error & { status?: number }
-    err.status = 404
-    expect(() => lastOpts().onerror!(err)).toThrow(err)
-    expect(onError).not.toHaveBeenCalled()
+  it('断线重连时重新解析 sidecar 地址（重启换端口/token 后自愈）', async () => {
+    vi.useFakeTimers()
+    try {
+      let infoCalls = 0
+      vi.mocked(getSidecarInfo).mockImplementation(
+        async () => ({ baseURL: `http://p${++infoCalls}`, token: null }),
+      )
+      let rejectFirst!: (e: Error) => void
+      vi.mocked(fetchEventSource)
+        .mockImplementationOnce(() => new Promise((_r, reject) => (rejectFirst = reject)))
+        .mockImplementation(() => new Promise(() => {}))
+      const ctrl = subscribeSSE('c1', { onEvent: vi.fn() })
+      await vi.advanceTimersByTimeAsync(0) // 建连（getSidecarInfo 微任务链）
+      expect(fetchEventSource).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(fetchEventSource).mock.calls[0]?.[0]).toContain('http://p1')
+      rejectFirst(new Error('connection reset'))
+      await vi.advanceTimersByTimeAsync(0) // onError + 排定 1s 重试
+      expect(fetchEventSource).toHaveBeenCalledTimes(1) // 退避期内未重连
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchEventSource).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(fetchEventSource).mock.calls[1]?.[0]).toContain('http://p2') // 换了新地址
+      ctrl.abort()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('服务端干净关闭响应体：上报一次错误并重连，不静默终结订阅', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(fetchEventSource)
+        .mockImplementationOnce(async () => undefined) // resolve = 干净结束
+        .mockImplementation(() => new Promise(() => {}))
+      const onError = vi.fn()
+      const ctrl = subscribeSSE('c1', { onEvent: vi.fn(), onError })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(onError).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchEventSource).toHaveBeenCalledTimes(2)
+      ctrl.abort()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('指数退避（1s/2s/4s…），onopen 成功后归零', async () => {
+    vi.useFakeTimers()
+    try {
+      let rejectSecond!: (e: Error) => void
+      vi.mocked(fetchEventSource)
+        .mockImplementationOnce(() => Promise.reject(new Error('boom')))
+        .mockImplementationOnce(() => new Promise((_r, reject) => (rejectSecond = reject)))
+        .mockImplementation(() => new Promise(() => {}))
+      const ctrl = subscribeSSE('c1', { onEvent: vi.fn() })
+      await vi.advanceTimersByTimeAsync(0) // 第 1 次失败 → 排定 1s
+      expect(fetchEventSource).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(999)
+      expect(fetchEventSource).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1) // t=1s：第 2 次建连
+      expect(fetchEventSource).toHaveBeenCalledTimes(2)
+      await lastOpts().onopen!({ ok: true, status: 200 } as unknown as Response) // 退避归零
+      rejectSecond(new Error('boom'))
+      await vi.advanceTimersByTimeAsync(999)
+      expect(fetchEventSource).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(1) // 归零后仍按 1s 重连（未归零则是 2s）
+      expect(fetchEventSource).toHaveBeenCalledTimes(3)
+      ctrl.abort()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('404 停连：错误经 onError 回调一次，此后不再重连', async () => {
+    vi.useFakeTimers()
+    try {
+      const err = new Error('SSE 打开失败: 404') as Error & { status?: number }
+      err.status = 404
+      vi.mocked(fetchEventSource).mockImplementationOnce(() => Promise.reject(err))
+      const onError = vi.fn()
+      const ctrl = subscribeSSE('c1', { onEvent: vi.fn(), onError })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(onError).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(fetchEventSource).toHaveBeenCalledTimes(1) // 终止重连
+      ctrl.abort()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

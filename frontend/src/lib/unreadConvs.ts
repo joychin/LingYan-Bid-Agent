@@ -48,6 +48,17 @@ export function markRead(convId: string) {
   emit()
 }
 
+/** 删除会话/任务时清掉未读残留（被删 id 不再永久滞留集合）。 */
+export function forgetConvs(convIds: string[]) {
+  const next = new Set(state)
+  let changed = false
+  for (const id of convIds) changed = next.delete(id) || changed
+  if (!changed) return
+  state = next
+  persist()
+  emit()
+}
+
 function subscribe(fn: () => void) {
   listeners.add(fn)
   return () => {

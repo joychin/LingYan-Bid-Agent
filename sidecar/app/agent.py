@@ -37,11 +37,11 @@ from .tools import TOOLS
 logger = logging.getLogger(__name__)
 
 # HITL：这些工具的调用先 interrupt 暂停、等用户裁决后 resume。ask_human 只允许
-# respond（回答代替执行）；task = 子代理派发审批（并发子代理是重操作，派发前用户
-# 确认——tender-outline 多册并发等场景的门禁，不需要时删除该行）。
+# respond（回答代替执行）。task 派发审批门禁已于 2026-09-06 删除（用户拍板：
+# 每次派发子代理都弹审批卡太吵，直接执行）；要恢复门禁加回
+# "task": {"allowed_decisions": ["approve", "reject"]} 即可。
 INTERRUPT_ON: dict = {
     "ask_human": {"allowed_decisions": ["respond"]},
-    "task": {"allowed_decisions": ["approve", "reject"]},
 }
 
 # LLM 流式调用的瞬时错误（连接断开/超时/限流）：可从 checkpoint 断点自动重试——
@@ -639,8 +639,10 @@ def _run_agent_stream(
     # 主 agent 思考流按轮分段：reasoning 先于它催生的 tool_called 到达，tool_called
     # 到达即封口挂该步骤 reasoning（与旁白封段同一条规则；同轮连发多调用只有首个带），
     # run 结束时最后未封口段 = 最终回复前的思考，随 trace 落 run_traces.reasoning。
-    # 子代理 reasoning 另走 task_step["reasoning"]。
+    # 子代理 reasoning 走 sub_reasoning_bufs 缓冲（dict STORE_SUBSCR += 每 chunk 整串
+    # 拷贝，长思考是 O(n²)），结构性事件/段收尾经 _sync_sub_reasoning 统一 join 落值。
     cur_reasoning: list[str] = []
+    sub_reasoning_bufs: dict[str, list[str]] = {}
     error = None
     top_steps: list[dict] = []
     last_todos: list = []
@@ -672,9 +674,7 @@ def _run_agent_stream(
                             },
                         )
                         if payload.get("agent_id"):
-                            task_step = _find_task_step(top_steps, payload["agent_id"])
-                            if task_step is not None:
-                                task_step["reasoning"] += payload["text"]
+                            sub_reasoning_bufs.setdefault(payload["agent_id"], []).append(payload["text"])
                         else:
                             cur_reasoning.append(payload["text"])
                         # reasoning chunk 是 token 级高频事件：不在此处更新快照（逐 chunk
@@ -708,6 +708,7 @@ def _run_agent_stream(
                             step["reasoning"] = "".join(cur_reasoning)
                             cur_reasoning.clear()
                         _attach_step(top_steps, step, payload.get("agent_id"))
+                        _sync_sub_reasoning(top_steps, sub_reasoning_bufs)
                         set_live_trace(
                             rid,
                             {"tools": top_steps, "todos": last_todos, "reasoning": "".join(cur_reasoning)},
@@ -732,6 +733,7 @@ def _run_agent_stream(
                             step["summary"] = payload["summary"]
                             step["error"] = payload.get("error")
                             step["endedAt"] = int(time.time() * 1000)
+                        _sync_sub_reasoning(top_steps, sub_reasoning_bufs)
                         set_live_trace(
                             rid,
                             {"tools": top_steps, "todos": last_todos, "reasoning": "".join(cur_reasoning)},
@@ -753,6 +755,7 @@ def _run_agent_stream(
                                 ],
                             },
                         )
+                        _sync_sub_reasoning(top_steps, sub_reasoning_bufs)
                         set_live_trace(
                             rid,
                             {"tools": top_steps, "todos": last_todos, "reasoning": "".join(cur_reasoning)},
@@ -796,6 +799,7 @@ def _run_agent_stream(
         runctx.clear_run()
         events.clear_subagent_registry(rid)
     # 最终回复 = 最后未封口段（未被 tool.called 跟随）；旁白已挂在 trace 步骤 text 上
+    _sync_sub_reasoning(top_steps, sub_reasoning_bufs)
     return (
         "".join(cur_text_parts),
         error,
@@ -854,6 +858,18 @@ def _iter_trace_steps(steps: list[dict]):
     for s in steps:
         yield s
         yield from _iter_trace_steps(s.get("children") or [])
+
+
+def _sync_sub_reasoning(top_steps: list[dict], bufs: dict[str, list[str]]) -> None:
+    """把子代理思考缓冲 join 落值到对应 task 步骤。落值点=结构性事件快照与段收尾
+    （live 快照语义不变：reasoning 本就随下一个结构性事件入库），chunk 级只 append。"""
+    if not bufs:
+        return
+    for s in _iter_trace_steps(top_steps):
+        if s.get("tool") == "task":
+            buf = bufs.get(s.get("tool_call_id"))
+            if buf is not None:
+                s["reasoning"] = "".join(buf)
 
 
 def _merge_trace_trees(old: list[dict], new: list[dict]) -> list[dict]:

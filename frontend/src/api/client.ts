@@ -9,6 +9,7 @@
  */
 
 import type { TodoItem, ToolStep } from './sse'
+import { normalizeToolSteps } from '@/lib/toolSteps'
 import type {
   ActiveRun,
   Artifact,
@@ -205,8 +206,12 @@ export function deleteConversation(id: string): Promise<{ ok: boolean }> {
   return request(`/conversations/${id}`, { method: 'DELETE' })
 }
 
-export function listMessages(convId: string): Promise<{ messages: Message[] }> {
-  return request(`/conversations/${convId}/messages`)
+export async function listMessages(convId: string): Promise<{ messages: Message[] }> {
+  const res = await request<{ messages: Message[] }>(`/conversations/${convId}/messages`)
+  // 历史 trace 松散 dict 的防御归一（旧快照缺 children/text 等键不再打崩渲染层）
+  return {
+    messages: res.messages.map((m) => (m.tools ? { ...m, tools: normalizeToolSteps(m.tools) } : m)),
+  }
 }
 
 /** 思考档位（标准 reasoning_effort 三档；模型默认开思考，无关闭项） */
@@ -238,8 +243,9 @@ export interface RunSnapshot extends Omit<RunTraceSnapshotDto, 'tools' | 'todos'
   todos: TodoItem[]
 }
 
-export function getRunSnapshot(rid: string): Promise<RunSnapshot> {
-  return request(`/runs/${rid}/snapshot`)
+export async function getRunSnapshot(rid: string): Promise<RunSnapshot> {
+  const snap = await request<RunSnapshot>(`/runs/${rid}/snapshot`)
+  return { ...snap, tools: normalizeToolSteps(snap.tools), todos: Array.isArray(snap.todos) ? snap.todos : [] }
 }
 
 /** HITL 裁决续跑：waiting_input 的 run 以 decisions 从 interrupt 处继续（202 后台执行）。 */
@@ -624,4 +630,47 @@ export function restoreWorkbench(taskId: string, path: string): Promise<Workbenc
     method: 'POST',
     body: JSON.stringify({ task_id: taskId, path }),
   })
+}
+
+// ==== sidecar 进程监管（Tauri 壳命令；浏览器开发模式一律返回空值） ====
+
+/** Rust supervisor 记录的最近一次失败（kind 供前端分组文案，detail 已是中文人话）。 */
+export interface SidecarFailure {
+  kind: 'spawn_failed' | 'boot_timeout' | 'crashed' | 'exited'
+  detail: string
+}
+
+/** 红态「重试」：清零熔断计数并请求 supervisor 重新拉起进程（仅 Tauri）。 */
+export async function restartSidecar(): Promise<void> {
+  if (!isTauri() || !window.__TAURI_INTERNALS__) return
+  await window.__TAURI_INTERNALS__.invoke('restart_sidecar')
+}
+
+/** 最近一次 sidecar 失败原因；无记录/非 Tauri 返回 null。 */
+export async function getSidecarFailure(): Promise<SidecarFailure | null> {
+  if (!isTauri() || !window.__TAURI_INTERNALS__) return null
+  try {
+    const failure = (await window.__TAURI_INTERNALS__.invoke('get_sidecar_failure')) as
+      | SidecarFailure
+      | null
+    return failure ?? null
+  } catch {
+    return null
+  }
+}
+
+/** 导出诊断报告 txt（应用信息+失败原因+三路日志尾部），返回文件路径（仅 Tauri）。 */
+export async function exportDiagnostics(): Promise<string | null> {
+  if (!isTauri() || !window.__TAURI_INTERNALS__) return null
+  const timestamp = new Date().toLocaleString('zh-CN', { hour12: false })
+  const path = (await window.__TAURI_INTERNALS__.invoke('export_diagnostics', {
+    timestamp,
+  })) as string
+  return path ?? null
+}
+
+/** 在文件管理器中打开 sidecar 日志目录（sidecar.log / sidecar-boot.log / 诊断报告）。 */
+export async function revealSidecarLogs(): Promise<void> {
+  if (!isTauri() || !window.__TAURI_INTERNALS__) return
+  await window.__TAURI_INTERNALS__.invoke('reveal_sidecar_logs')
 }

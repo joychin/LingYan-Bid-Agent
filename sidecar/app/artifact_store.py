@@ -85,14 +85,24 @@ def archive_task_dir(task_id: str) -> Path:
     return workspace_dir() / "archive" / task_id
 
 
-def ensure_task_skeleton(task_id: str) -> None:
-    """预建 sources/work 骨架目录（任务创建时 + 每次run启动自愈，双入口）。
+# work/ 下的已知管线子目录（parse→analysis→outline 主线 + fragments 多册中间态）。
+# 预建它们是因为「声明版式里的目录不存在」对模型永远是意外：写文件会自动建父目录，
+# 但 ls 撞上空窗期吃 path_not_found 红错（2026-09-06 实测，2026-08-29 sources/work
+# 先例的延伸）。新管线目录（如 tender-body 的 body/）随技能落地同步加这里。
+_PROCESS_DIRS = ("parse", "analysis", "outline", "outline/fragments")
 
-    这两个是 agent 开工第一步最常探测的（ls sources/ 看资料），按需创建语义下
-    它们在首次使用前不存在，模型的 ls 直接 path_not_found 吃红错（2026-08-29 实测）。
-    artifacts/ 与过程子目录按需创建（发布/解析各自 mkdir）。
+
+def ensure_task_skeleton(task_id: str) -> None:
+    """预建 sources/work + 已知管线子目录（任务创建时 + 每次 run 启动自愈，双入口）。
+
+    这些是 agent 开工最常探测的（ls sources/ 看资料、ls work/outline/fragments/
+    等子代理产出），按需创建语义下它们在首次使用前不存在，模型的 ls 直接
+    path_not_found 吃红错。artifacts/ 与 _meta/ 仍按需创建（publish/fs_guard
+    各自拥有，模型不经文件工具访问）。
     """
-    for d in (sources_dir(task_id), work_dir(task_id)):
+    dirs = [sources_dir(task_id), work_dir(task_id)]
+    dirs += [work_dir(task_id) / rel for rel in _PROCESS_DIRS]
+    for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
 
 

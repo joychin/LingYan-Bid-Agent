@@ -853,6 +853,12 @@
   font-weight: 700;
   color: var(--Color-text-primary);
 }
+/* markdown 图片不带尺寸信息：限宽防横向爆版（晚加载的大图把气泡/滚动区撑出
+   横向滚动条）；高度按比例，图片加载本身的内容增长不在此规则范围 */
+.bubble img {
+  max-width: 100%;
+  height: auto;
+}
 .msg.user .bubble {
   background: var(--Color-bg-subtle);
   color: var(--Color-text-primary);

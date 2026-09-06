@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query'
 import { useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
@@ -178,7 +179,9 @@ export function MaterialsLibraryView() {
   const [title, setTitle] = useState('')
   const [note, setNote] = useState('')
   const [creating, setCreating] = useState(false)
+  const [uploading, setUploading] = useState<{ name: string; percent: number } | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const qc = useQueryClient()
   const { toast } = useToast()
 
   const { data: filesData } = useMtFiles()
@@ -199,12 +202,18 @@ export function MaterialsLibraryView() {
   }, [blocks, query])
 
   const onUpload = async (file: File) => {
+    // 反馈三段：立即切到文件视图显示「上传中 N%」→ 上传完成刷新列表出现「解析中…」行
+    // （refetchInterval 5s 轮询收敛到 ready）→ toast 收尾
+    setUploading({ name: file.name, percent: 0 })
+    setView('files')
     try {
-      await uploadMtFile(file)
+      await uploadMtFile(file, (p) => setUploading((u) => (u ? { ...u, percent: p } : u)))
+      await qc.invalidateQueries({ queryKey: ['mt', 'files'] })
       toast('已上传，正在解析目录…', 'info')
-      setView('files')
     } catch (e) {
       toast(e instanceof Error ? e.message : '上传失败', 'error')
+    } finally {
+      setUploading(null)
     }
   }
 
@@ -320,7 +329,7 @@ export function MaterialsLibraryView() {
             文件 {files.length || ''}
           </button>
         </div>
-        <Button size="sm" onClick={() => fileInput.current?.click()}>
+        <Button size="sm" disabled={!!uploading} onClick={() => fileInput.current?.click()}>
           <Upload className="h-3.5 w-3.5" />
           上传文件
         </Button>
@@ -349,10 +358,18 @@ export function MaterialsLibraryView() {
             shownBlocks.map((b) => <BlockCard key={b.id} block={b} fileId2Name={fileId2Name} />)
           )
         ) : view === 'files' ? (
-          files.length === 0 ? (
+          files.length === 0 && !uploading ? (
             <div className="kb-empty">还没有文件——点「上传文件」传历史标书/范文</div>
           ) : (
-            files.map((f) => (
+            <>
+              {uploading && !files.some((f) => f.file_name === uploading.name) && (
+                <div className="mt-file-row">
+                  <Loader variant="classic" size="sm" tone="muted" />
+                  <span className="mt-file-name">{uploading.name}</span>
+                  <span className="mt-file-meta">上传中 {uploading.percent}%</span>
+                </div>
+              )}
+              {files.map((f) => (
               <div key={f.id} className="mt-file-row">
                 <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <span className="mt-file-name">{f.file_name}</span>
@@ -378,7 +395,8 @@ export function MaterialsLibraryView() {
                   <Trash2 className="h-3 w-3" />
                 </button>
               </div>
-            ))
+            ))}
+            </>
           )
         ) : (
           /* ---- 挑章节视图 ---- */

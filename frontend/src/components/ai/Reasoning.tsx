@@ -8,10 +8,12 @@ import { cn } from '@/lib/utils'
 /**
  * prompt-kit Reasoning 移植：可折叠「深度思考」块；isStreaming 时首次自动展开、结束自动收起。
  * 用 react-markdown 替代 prompt-kit 的 Markdown（同栈，无新依赖）。
+ * 内容 once-open 挂载（同 ui/collapsible）：历史消息默认收起的执行过程整棵树
+ * （工具详情/思考全文）首次展开前不进 DOM。
  */
-const ReasoningContext = createContext<{ isOpen: boolean; onOpenChange: (open: boolean) => void } | undefined>(
-  undefined,
-)
+const ReasoningContext = createContext<
+  { isOpen: boolean; onOpenChange: (open: boolean) => void; mounted: boolean } | undefined
+>(undefined)
 
 function useReasoningContext() {
   const ctx = useContext(ReasoningContext)
@@ -37,6 +39,8 @@ export function Reasoning({
 
   const isControlled = open !== undefined
   const isOpen = isControlled ? open : internalOpen
+  const [everOpened, setEverOpened] = useState(false)
+  if (isOpen && !everOpened) setEverOpened(true)
 
   const handleOpenChange = (newOpen: boolean) => {
     if (!isControlled) setInternalOpen(newOpen)
@@ -55,7 +59,7 @@ export function Reasoning({
   }, [isStreaming, wasAutoOpened, isControlled])
 
   return (
-    <ReasoningContext.Provider value={{ isOpen, onOpenChange: handleOpenChange }}>
+    <ReasoningContext.Provider value={{ isOpen, onOpenChange: handleOpenChange, mounted: everOpened }}>
       <div className={className}>{children}</div>
     </ReasoningContext.Provider>
   )
@@ -94,7 +98,7 @@ export function ReasoningContent({
   contentClassName?: string
   markdown?: boolean
 } & HTMLAttributes<HTMLDivElement>) {
-  const { isOpen } = useReasoningContext()
+  const { isOpen, mounted } = useReasoningContext()
   return (
     <div
       data-state={isOpen ? 'open' : 'closed'}
@@ -104,11 +108,13 @@ export function ReasoningContent({
     >
       <div className="overflow-hidden">
         <div className={cn('text-muted-foreground', contentClassName)}>
-          {markdown ? (
-            <ReactMarkdown remarkPlugins={mdRemarkPlugins}>{children as string}</ReactMarkdown>
-          ) : (
-            children
-          )}
+          {mounted ? (
+            markdown ? (
+              <ReactMarkdown remarkPlugins={mdRemarkPlugins}>{children as string}</ReactMarkdown>
+            ) : (
+              children
+            )
+          ) : null}
         </div>
       </div>
     </div>

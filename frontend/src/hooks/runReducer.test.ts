@@ -489,3 +489,79 @@ describe('seq 去重与缺口', () => {
     expect(state.lastSeq).toEqual({ runId: 'r2', seq: 2 })
   })
 })
+
+describe('stream-batch（流式高频事件合并应用）', () => {
+  const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+  const taskCall: Action = {
+    type: 'sse',
+    event: 'tool.called',
+    now: NOW,
+    data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', args: { description: '写第一册' }, tool_call_id: 't1', agent_id: null },
+  }
+
+  it('token 与主/子代理思考增量合并应用；seq 续接去重水位', () => {
+    const s0 = runReducer(started, taskCall).state
+    const { state } = runReducer(s0, {
+      type: 'stream-batch',
+      tokens: '正文A',
+      deltas: [
+        { agentId: null, text: '主思考' },
+        { agentId: 't1', text: '子思考1' },
+        { agentId: 't1', text: '子思考2' },
+      ],
+      seq: { runId: 'r1', seq: 9 },
+    })
+    expect(state.streamText).toBe('正文A')
+    expect(state.reasoningText).toBe('主思考')
+    const task = state.tools.find((t) => t.tool === 'task')
+    expect(task?.reasoning).toBe('子思考1子思考2')
+    expect(state.lastSeq).toEqual({ runId: 'r1', seq: 9 })
+  })
+
+  it('batch 后紧跟 tool.called：封段语义与逐 token 应用一致（缓冲先落地）', () => {
+    const s0 = runReducer(started, {
+      type: 'stream-batch',
+      tokens: '我先查资料。',
+      deltas: [{ agentId: null, text: '想想' }],
+      seq: { runId: 'r1', seq: 3 },
+    }).state
+    const s1 = runReducer(s0, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'grep', args: {}, tool_call_id: 'g1', agent_id: null },
+    }).state
+    expect(s1.tools[0].text).toBe('我先查资料。')
+    expect(s1.tools[0].reasoning).toBe('想想')
+    expect(s1.streamText).toBe('')
+  })
+
+  it('空增量不换 state 引用（setState 同值 bail 生效）', () => {
+    const r = runReducer(started, { type: 'stream-batch', tokens: '', deltas: [] })
+    expect(r.state).toBe(started)
+  })
+
+  it('seq 不回退：旧 seq 的 batch 只应用文本不拉低水位', () => {
+    const s0 = runReducer(started, { type: 'stream-batch', tokens: 'a', deltas: [], seq: { runId: 'r1', seq: 5 } }).state
+    const { state } = runReducer(s0, { type: 'stream-batch', tokens: 'b', deltas: [], seq: { runId: 'r1', seq: 3 } })
+    expect(state.lastSeq).toEqual({ runId: 'r1', seq: 5 })
+    expect(state.streamText).toBe('ab')
+  })
+
+  it('未识别事件不换 state 引用（no-op 渲染 bail）', () => {
+    const r = runReducer(started, {
+      type: 'sse',
+      event: 'future.event',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', seq: 2 },
+    })
+    expect(r.state).toBe(started)
+  })
+
+  it('重复 tool_call_id 幂等丢弃且不换引用', () => {
+    const s0 = runReducer(started, taskCall).state
+    const r = runReducer(s0, taskCall)
+    expect(r.state).toBe(s0)
+    expect(r.state.tools).toHaveLength(1)
+  })
+})

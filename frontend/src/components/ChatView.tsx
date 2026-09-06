@@ -1,8 +1,9 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getSettings } from '@/api/client'
 import { ArrowDown, CirclePause } from 'lucide-react'
 import { UploadDropzone } from '@/components/UploadDropzone'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { ChatMessage, DeepThinking } from '@/components/ChatMessage'
 import { MemoMarkdown, markdownComponents } from '@/components/ai/MemoMarkdown'
 import { Loader } from '@/components/ai/Loader'
@@ -21,6 +22,7 @@ import { TextShimmer } from '@/components/ai/TextShimmer'
 import { toolDisplayName } from '@/components/ai/toolDisplay'
 import { Message as WMessage } from '@/components/workspace/Message'
 import { ArtifactCard } from '@/components/ArtifactCard'
+import { placeArtifacts } from '@/lib/artifactPlacement'
 import { WelcomeScreen } from '@/components/WelcomeScreen'
 import { InputComposer } from '@/components/InputComposer'
 import { TaskPicker } from '@/components/TaskPicker'
@@ -35,13 +37,17 @@ import { useFileUpload } from '@/context/FileUpload'
 import { useToast } from '@/context/Toast'
 import { formatDay } from '@/lib/utils'
 import { isLivePauseMessage, isRespondAnswer, lastInstructionText, splitMarker } from '@/lib/hitlMessage'
+import { computeWindowStart } from '@/lib/messageWindow'
 import type { Artifact, Message, ThinkingLevel } from '@/api/client'
 
 /** 思考档位的本地记忆（App.tsx 的 LS_* 先例：tender-agent.<名字>） */
 const LS_THINKING = 'tender-agent.thinking-level'
-/** 模型选中的本地记忆：按会话粘性 map（cid→profile id）+ 上次使用（新会话默认） */
-const LS_MODEL_BY_CONV = 'tender-agent.model-by-conv'
+/** 模型选中的本地记忆：按会话粘性 map（cid→profile id）+ 上次使用（新会话默认）。
+ *  导出供 Sidebar 删除会话时清理条目。 */
+export const LS_MODEL_BY_CONV = 'tender-agent.model-by-conv'
 const LS_MODEL_LAST = 'tender-agent.model-last'
+/** 长会话首屏窗口大小（条）：尾部窗口 + 「加载更早」按此步进扩窗（见 messageWindow.ts） */
+const MESSAGE_WINDOW = 50
 
 function loadThinking(): ThinkingLevel {
   const v = localStorage.getItem(LS_THINKING)
@@ -317,6 +323,41 @@ export function ChatView({
     () => (convId ? artifacts.filter((a) => a.conversation_id === convId) : []),
     [artifacts, convId],
   )
+  // ---- 长会话尾部窗口（INP：切换会话的冷挂载从全量降到尾部）----
+  // 首屏只渲染最近一个窗口，「加载更早」逐步扩窗；ChatView 以 convId 为 key 挂载
+  // （App），换会话窗口态自动重置。起点经 computeWindowStart 对齐到回合头，保证
+  // MessageList 的回答隐藏/回合分组在窗口边界不错位。
+  const [windowCount, setWindowCount] = useState(MESSAGE_WINDOW)
+  const windowStart = useMemo(() => computeWindowStart(messages, windowCount), [messages, windowCount])
+  const visibleMessages = useMemo(() => messages.slice(windowStart), [messages, windowStart])
+  // 窗外 run 的产物卡不进转录：placeArtifacts 匹配不到回合会兜底到可见窗口末尾，
+  // 位置错乱（旧产物浮到最新消息下面）；无 run_id 的产物保持尾部兜底不变，扩窗后
+  // 窗外产物自然回归各自回合之后。
+  const windowArtifacts = useMemo(() => {
+    if (windowStart === 0) return convArtifacts
+    const rids = new Set<string>()
+    for (let i = windowStart; i < messages.length; i++) {
+      const rid = messages[i].run_id
+      if (rid) rids.add(rid)
+    }
+    return convArtifacts.filter((a) => !a.source?.run_id || rids.has(a.source.run_id))
+  }, [convArtifacts, messages, windowStart])
+  // 「加载更早」的滚动锚定：扩窗在顶部插入内容，按 scrollHeight 差值补偿 scrollTop
+  // 让视口停在原消息上（不跳顶、不误触贴底）
+  const expandAnchor = useRef<{ start: number; height: number } | null>(null)
+  const loadEarlier = useCallback(() => {
+    const el = scrollRef.current
+    if (el) expandAnchor.current = { start: windowStart, height: el.scrollHeight }
+    setWindowCount((c) => c + MESSAGE_WINDOW)
+  }, [windowStart])
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    const prev = expandAnchor.current
+    if (!el || !prev || prev.start === windowStart) return
+    el.scrollTop += el.scrollHeight - prev.height
+    expandAnchor.current = null
+    atBottom.current = false
+  }, [windowStart])
   // isError 不能掉进欢迎页空态：加载失败是错误不是「没有消息」
   const empty = messages.length === 0 && !running && !isLoading && !isError
 
@@ -431,13 +472,27 @@ export function ChatView({
                   onPrompt={fillPrompt}
                 />
               )}
-              <MessageList
-                messages={messages}
-                convArtifacts={convArtifacts}
-                onOpenArtifact={onOpenArtifact}
-                onOpenWorkbench={onOpenWorkbench}
-                hiddenPauseRunId={liveRunId}
-              />
+              {/* 子树边界：一条坏历史数据只降级消息区占位卡，不再打到根级整窗错误页 */}
+              <ErrorBoundary compact resetKey={convId ?? 'root'}>
+                {windowStart > 0 && (
+                  <div className="flex justify-center py-1">
+                    <button
+                      type="button"
+                      className="rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
+                      onClick={loadEarlier}
+                    >
+                      {`加载更早的消息（还有 ${windowStart} 条）`}
+                    </button>
+                  </div>
+                )}
+                <MessageList
+                  messages={visibleMessages}
+                  convArtifacts={windowArtifacts}
+                  onOpenArtifact={onOpenArtifact}
+                  onOpenWorkbench={onOpenWorkbench}
+                  hiddenPauseRunId={liveRunId}
+                />
+              </ErrorBoundary>
               {(running || interrupt) && (
                 <RunMessage
                   running={running}
@@ -597,9 +652,16 @@ function RunMessage({
   continuationKind: RunState['continuationKind']
   continuationAnswer: string
 }) {
-  const hasSubagents = hasTaskStep(tools)
-  const startingSubagents = continuationKind === 'subagents' && hasSubagents && !tools.some((step) => step.children.length > 0 || step.reasoning)
-  const label = activeStatusLabel(tools, startingSubagents)
+  // 状态行的三次 O(steps) 树遍历只在 tools 变化时重算（正文 token 流期间跳过）
+  const hasSubagents = useMemo(() => hasTaskStep(tools), [tools])
+  const startingSubagents = useMemo(
+    () =>
+      continuationKind === 'subagents' &&
+      hasSubagents &&
+      !tools.some((step) => step.children.length > 0 || step.reasoning),
+    [continuationKind, hasSubagents, tools],
+  )
+  const label = useMemo(() => activeStatusLabel(tools, startingSubagents), [tools, startingSubagents])
   // 流式渲染节流：state 仍是精确值，渲染层把 markdown 重解析合并到每 200ms 一档
   // （历史消息已被 ChatMessage memo 隔离，此处只剩流式正文与思考两块热路径）
   const shownText = useThrottledValue(text)
@@ -704,6 +766,12 @@ const MessageList = memo(function MessageList({
       items.push({ kind: 'solo', m })
     }
   }
+  // 产物卡挂回发布它的回合（placeArtifacts）：恒追加转录末尾的话，新消息一插
+  // 进来产物卡就会被挤到用户气泡之后（2026-09-06 实测错位）
+  const placed = placeArtifacts(
+    convArtifacts,
+    items.flatMap((it) => (it.kind === 'group' ? [it.runId] : [])),
+  )
 
   const nodes: React.ReactNode[] = []
   let lastDay = ''
@@ -766,8 +834,12 @@ const MessageList = memo(function MessageList({
         })}
       </div>,
     )
+    // 该回合发布的产物卡紧随其后（旧数据/活卡进行中的 run 落尾部兜底）
+    for (const a of placed.byRun.get(item.runId) ?? []) {
+      nodes.push(<ArtifactCard key={a.artifact_id} artifact={a} onOpen={onOpenArtifact} />)
+    }
   }
-  for (const a of convArtifacts) {
+  for (const a of placed.tail) {
     nodes.push(<ArtifactCard key={a.artifact_id} artifact={a} onOpen={onOpenArtifact} />)
   }
   return <>{nodes}</>

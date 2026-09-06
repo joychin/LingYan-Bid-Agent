@@ -63,4 +63,6 @@ async def _event_generator(cid: str):
 async def stream_events(cid: str):
     if not db.get_conversation(cid):
         raise HTTPException(status_code=404, detail="会话不存在")
-    return EventSourceResponse(_event_generator(cid))
+    # ping=0 禁用 sse-starlette 库级注释 ping（默认 15s）：_event_generator 的
+    # wait_for 超时分支已发同周期的应用层 event: ping，双份 keepalive 纯冗余
+    return EventSourceResponse(_event_generator(cid), ping=0)

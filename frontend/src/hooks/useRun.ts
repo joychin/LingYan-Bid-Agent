@@ -8,6 +8,21 @@ import { INITIAL_STATE, runReducer, type Action, type RunState } from './runRedu
 export type { ToolStep }
 export type { RunState }
 
+/** 流式高频事件的合并窗口（ms）：token/思考增量最多每 200ms 应用进 React state 一次，
+ *  与渲染层 useThrottledValue 的节流档一致。 */
+const STREAM_BATCH_MS = 200
+
+/** 合并窗口内攒下的流式增量（tokens=正文；mainReasoning=主 agent 思考；
+ *  byAgent=各子代理思考，键=task 的 tool_call_id）。 */
+interface StreamBatch {
+  tokens: string
+  mainReasoning: string
+  byAgent: Map<string, string>
+  /** 缓冲事件的最高 seq（flush 时续接去重水位） */
+  maxSeq: number
+  seqRunId: string | null
+}
+
 /** 订阅会话事件流并驱动一个正在进行的 run（agent.started -> token… -> completed）。
  *
  * 事件 → 状态的全部决策在 ./runReducer（纯函数，vitest 事件回放覆盖）；本 hook 是薄执行层：
@@ -22,10 +37,14 @@ export function useRun(convId: string | null) {
   const stateRef = useRef<RunState>(INITIAL_STATE)
   // SSE 断线对账的限频记号（2s 内只查一次最新 run）
   const lastReconcileRef = useRef(0)
+  // 流式合并缓冲与窗口定时器（见 dispatch 内说明）
+  const batchRef = useRef<StreamBatch | null>(null)
+  const batchTimerRef = useRef<number | null>(null)
 
   const dispatchRef = useRef<(a: Action) => void>(() => {})
 
-  const dispatch = useCallback(
+  /** reducer 应用层（原 dispatch 主体）：同步算下一状态 + 执行 Effect。 */
+  const applyAction = useCallback(
     (action: Action) => {
       const { state: next, effects } = runReducer(stateRef.current, action)
       stateRef.current = next
@@ -44,6 +63,74 @@ export function useRun(convId: string | null) {
       }
     },
     [convId, queryClient],
+  )
+
+  /** 冲刷流式合并缓冲：攒下的 token/思考增量合成一次 stream-batch 应用。 */
+  const flushStreamBatch = useCallback(() => {
+    if (batchTimerRef.current != null) {
+      clearTimeout(batchTimerRef.current)
+      batchTimerRef.current = null
+    }
+    const b = batchRef.current
+    batchRef.current = null
+    if (!b) return
+    const deltas: Array<{ agentId: string | null; text: string }> = []
+    if (b.mainReasoning) deltas.push({ agentId: null, text: b.mainReasoning })
+    for (const [agentId, text] of b.byAgent) deltas.push({ agentId, text })
+    if (!b.tokens && deltas.length === 0) return
+    applyAction({
+      type: 'stream-batch',
+      tokens: b.tokens,
+      deltas,
+      ...(b.seqRunId && b.maxSeq > 0 ? { seq: { runId: b.seqRunId, seq: b.maxSeq } } : {}),
+    })
+  }, [applyAction])
+
+  const dispatch = useCallback(
+    (action: Action) => {
+      // 流式高频事件合并：逐 token dispatch 会让 ChatView 每 token 重渲染一次
+      // （子代理 reasoning 还带整棵工具树的递归拷贝，长 run 二次方退化）。空闲后的
+      // 首个事件立即应用（首字不迟滞），其后 200ms 窗口内的增量攒成一次应用；
+      // 其他任何 action 到达前先冲刷缓冲——封段（tool.called 读 streamText/
+      // reasoningText）、收敛、快照都依赖缓冲文本先落地，事件间相对顺序不变。
+      if (action.type === 'sse' && (action.event === 'agent.token' || action.event === 'agent.reasoning')) {
+        const { event, data } = action
+        // seq 去重与 reducer 同规则：缓冲期 lastSeq 未推进，与缓冲内最大 seq 一并比对
+        if (typeof data.seq === 'number') {
+          const last = stateRef.current.lastSeq
+          const b = batchRef.current
+          const seen = Math.max(
+            last && last.runId === data.run_id ? last.seq : 0,
+            b && b.seqRunId === data.run_id ? b.maxSeq : 0,
+          )
+          if (data.seq <= seen) return
+        }
+        if (batchTimerRef.current == null) {
+          applyAction(action)
+          batchTimerRef.current = window.setTimeout(() => {
+            batchTimerRef.current = null
+            flushStreamBatch()
+          }, STREAM_BATCH_MS)
+          return
+        }
+        const b = (batchRef.current ??= { tokens: '', mainReasoning: '', byAgent: new Map(), maxSeq: 0, seqRunId: null })
+        if (typeof data.seq === 'number') {
+          b.maxSeq = Math.max(b.maxSeq, data.seq)
+          b.seqRunId = data.run_id
+        }
+        if (event === 'agent.token') {
+          b.tokens += data.text ?? ''
+        } else if (data.agent_id) {
+          b.byAgent.set(data.agent_id, (b.byAgent.get(data.agent_id) ?? '') + (data.text ?? ''))
+        } else {
+          b.mainReasoning += data.text ?? ''
+        }
+        return
+      }
+      flushStreamBatch()
+      applyAction(action)
+    },
+    [applyAction, flushStreamBatch],
   )
   dispatchRef.current = dispatch
 
@@ -130,7 +217,15 @@ export function useRun(convId: string | null) {
         void reconcile()
       },
     })
-    return () => ctrl.abort()
+    return () => {
+      ctrl.abort()
+      // 丢弃未冲刷的流式缓冲（状态随 effect 重置，冲刷无意义）并清掉窗口定时器
+      if (batchTimerRef.current != null) {
+        clearTimeout(batchTimerRef.current)
+        batchTimerRef.current = null
+      }
+      batchRef.current = null
+    }
     // reconnectSeq 递增（sidecar 恢复/换端口）时重挂流
   }, [convId, queryClient, reconnectSeq, dispatch, restoreSnapshot, reconcile])
 

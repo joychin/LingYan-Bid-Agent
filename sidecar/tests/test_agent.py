@@ -220,7 +220,7 @@ def test_task_context_block_injects_clock(tmp_path, monkeypatch):
 def test_subagent_specs():
     """显式注册的子代理守护：执行单元齐全、不直接向用户提问。
 
-    interrupt_on={} 是整体替换继承——漏写会让子代理继承 ask_human/task 门禁，
+    interrupt_on={} 是整体替换继承——漏写会让子代理继承 ask_human 门禁，
     子代理的 ask_human 无人应答会挂死；tender-outline-writer 的提示词必须引用
     references（方法论单一事实源在 skill 里，不复制进提示词）。
     """

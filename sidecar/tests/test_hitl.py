@@ -140,6 +140,30 @@ def test_tool_args_html_entities_unescaped():
     assert interrupt["requests"][0]["args"]["question"] == "确认开始？\n\n为什么问"
 
 
+def test_tool_args_literal_backslash_n_folded():
+    """模型偶发把换行过度转义成字面反斜杠n 两个字符 → 展示层折叠为真实换行。
+
+    2026-09-06 实测：ask_human question 里出现字面反斜杠n，问答卡原样上屏
+    且首行/副标题分段失效。与 &#10; 修复同点（_deep_unescape），三端共用；
+    已是真实换行的字符串不受影响，其余转义序列不折叠。
+    """
+    assert events._tool_args(
+        {"question": "确认解析结果无误、开始提取投标要点？ \\n默认接下来会提取要点"}
+    ) == {"question": "确认解析结果无误、开始提取投标要点？ \n默认接下来会提取要点"}
+    assert events._tool_args({"q": "A&#10;B\\nC"}) == {"q": "A\nB\nC"}
+    assert events._tool_args({"q": "第一行\n第二行"}) == {"q": "第一行\n第二行"}
+
+    msg = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "ask_human", "args": {"question": "确认开始？\\n说明"}, "id": "t10"}
+        ],
+    )
+    out = list(events.iter_stream(iter([("updates", {"model": {"messages": [msg]}})])))
+    [called] = [d for k, d in out if k == "tool_called"]
+    assert called["args"]["question"] == "确认开始？\n说明"
+
+
 # ---------- run_stream：中断边界 ----------
 
 

@@ -10,6 +10,7 @@ import { ArtifactPanel } from '@/components/ArtifactPanel'
 import { SidecarBanner } from '@/components/SidecarBanner'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { reconcileContracts } from '@/artifacts/registry'
+import { cn } from '@/lib/utils'
 import { useConversations, useCreateConversation } from '@/hooks/useConversations'
 import { useTasks, taskOfConversation } from '@/hooks/useTasks'
 
@@ -18,8 +19,8 @@ const LS_ARTIFACTS = 'tender-agent.artifacts-collapsed'
 const LS_THEME = 'tender-agent.theme'
 
 export default function App() {
-  const { data: conversations = [] } = useConversations()
-  const { data: tasks = [] } = useTasks()
+  const { data: conversations = [], isLoading: conversationsLoading } = useConversations()
+  const { data: tasks = [], isLoading: tasksLoading } = useTasks()
   const createConv = useCreateConversation()
   const [selectedId, setSelectedId] = useState<string | null>(null)
   // 「新建会话」草稿页：主区展示欢迎页+输入框（convId=null），所属任务在输入框胶囊里选/建
@@ -161,6 +162,13 @@ export default function App() {
           （grid auto 列自动收 0，卸载即停内部轮询）。
           v3：previewId/workbenchPath 驱动面板工作区态，编辑器嵌入面板右侧（覆盖展开），
           不再用居中模态。 */}
+      {/* 面板列宽预留（CLS）：会话已选而 tasks/conversations 仍在加载时先占住同宽
+          槽位，任务数据到达后面板原地出现——聊天列不再被迟到的 300px 挤窄整列
+          重折行（一次大位移的主因之一）；加载完确无所属任务则不占位。
+          collapsed 偏好同步应用（收起态槽位宽度 0，与真实面板同宽）。 */}
+      {activeView === 'chat' && viewConvId && !currentTask && (conversationsLoading || tasksLoading) && (
+        <div className={cn('ap-slot', artifactsCollapsed && 'collapsed')} aria-hidden />
+      )}
       {activeView === 'chat' && currentTask && (
         <ArtifactPanel
           currentConvId={viewConvId}

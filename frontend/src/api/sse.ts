@@ -86,58 +86,82 @@ export interface SSEHandlers {
  *  会把连接预算挤爆，后续普通请求（messages 等）永久排队，表现为会话骨架屏永不消失。 */
 let activeCtrl: AbortController | null = null
 
+/** 可被 abort 立即打断的退避睡眠（组件卸载/新订阅掐线时不留悬空定时器与监听器）。 */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 /** 订阅会话事件流，返回 AbortController（组件卸载时 abort）。 */
 export function subscribeSSE(convId: string, handlers: SSEHandlers): AbortController {
   activeCtrl?.abort()
   const ctrl = new AbortController()
   activeCtrl = ctrl
   ;(async () => {
-    const { baseURL, token } = await getSidecarInfo()
-    // React StrictMode 开发模式会「挂载→立刻 abort→重挂载」。abort 若发生在下面的
-    // await 期间，fetch-event-source 内部的 addEventListener('abort') 对已取消的
-    // 信号永不触发，会留下一条永不关闭的孤儿 SSE 连接——同一事件被两条连接各投递
-    // 一次，前端流式文本就会整段翻倍。建立连接前主动检查即可闭合该竞态。
-    if (ctrl.signal.aborted) return
-    // 重连退避：库默认固定 1s 无限重试——会话被删（永远 404）或 sidecar 长时间不可用时
-    // 会形成「每秒重连 + 每次对账触发 messages 重拉」的风暴，拖垮页面交互。
-    // 改为指数退避（成功后归零）；404 = 会话不存在，重连无意义，直接终止。
+    // 重连退避：1s 起指数增长、15s 封顶、建连成功归零。会话被删（永远 404）重连无
+    // 意义；退避防的是「sidecar 长时间不可用时每秒重连 + 每次对账触发 messages 重拉」
+    // 的风暴拖垮页面交互。
     let retryMs = 1000
-    await fetchEventSource(`${baseURL}/api/conversations/${convId}/events`, {
-      method: 'GET',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      signal: ctrl.signal,
-      onopen: async (res) => {
-        if (!res.ok) {
-          const err = new Error(`SSE 打开失败: ${res.status}`) as Error & { status?: number }
-          err.status = res.status
-          throw err
-        }
-        retryMs = 1000
-      },
-      onmessage: (msg) => {
-        if (!msg.event || msg.event === 'ping') return
-        try {
-          handlers.onEvent(msg.event, JSON.parse(msg.data) as AgentEventData)
-        } catch {
-          /* 忽略解析失败的数据 */
-        }
-      },
-      onerror: (err) => {
-        const status = (err as Error & { status?: number }).status
-        if (status === 404) throw err // 会话已删：终止重连（错误经外层 catch 回调）
+    // 自旋重连循环：每轮重新解析 sidecar 地址。Tauri 重启 sidecar 会换端口+token，
+    // 建连时的地址快照永久失效——库内重连（onerror 返回延迟）只会复用旧 URL 绕不过
+    // 这个缺口，重试节奏必须由本循环掌控。
+    while (!ctrl.signal.aborted) {
+      try {
+        const { baseURL, token } = await getSidecarInfo()
+        // React StrictMode 开发模式会「挂载→立刻 abort→重挂载」。abort 若发生在上面的
+        // await 期间，fetch-event-source 内部的 addEventListener('abort') 对已取消的
+        // 信号永不触发，会留下一条永不关闭的孤儿 SSE 连接——同一事件被两条连接各投递
+        // 一次，前端流式文本就会整段翻倍。建连前主动检查即可闭合该竞态。
+        if (ctrl.signal.aborted) return
+        await fetchEventSource(`${baseURL}/api/conversations/${convId}/events`, {
+          method: 'GET',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          signal: ctrl.signal,
+          onopen: async (res) => {
+            if (!res.ok) {
+              const err = new Error(`SSE 打开失败: ${res.status}`) as Error & { status?: number }
+              err.status = res.status
+              throw err
+            }
+            retryMs = 1000
+          },
+          onmessage: (msg) => {
+            if (!msg.event || msg.event === 'ping') return
+            try {
+              handlers.onEvent(msg.event, JSON.parse(msg.data) as AgentEventData)
+            } catch {
+              /* 忽略解析失败的数据 */
+            }
+          },
+          // 一律抛出（不返回重连间隔）：重连节奏与地址重解析由外层循环统一控制
+          onerror: (err) => {
+            throw err instanceof Error ? err : new Error(String(err))
+          },
+        })
+        // fetchEventSource 正常返回 = 服务端干净结束了响应体（sidecar 重启/优雅关停都
+        // 可能走这条路）。不能静默收场——那会让订阅永久死亡（无事件也无报错，流式卡
+        // 死到用户切会话）。当作一次断线上报，走重连 + 对账。
+        if (!ctrl.signal.aborted) handlers.onError?.(new Error('SSE 连接已被服务端关闭'))
+      } catch (err) {
+        if (ctrl.signal.aborted) return
+        // 404 = 会话已删，重连无意义：回调一次错误后彻底终止
         handlers.onError?.(err instanceof Error ? err : new Error(String(err)))
-        const delay = retryMs
-        retryMs = Math.min(retryMs * 2, 15000)
-        return delay
-      },
-    })
-  })()
-    .catch((err) => {
-      // 订阅本身失败（如 getSidecarInfo 拿不到地址、建连失败）也要回调，避免 UI 静默卡在 running
-      handlers.onError?.(err instanceof Error ? err : new Error(String(err)))
-    })
-    .finally(() => {
-      if (activeCtrl === ctrl) activeCtrl = null
-    })
+        if ((err as Error & { status?: number }).status === 404) return
+      }
+      await sleep(retryMs, ctrl.signal)
+      retryMs = Math.min(retryMs * 2, 15000)
+    }
+  })().finally(() => {
+    if (activeCtrl === ctrl) activeCtrl = null
+  })
   return ctrl
 }

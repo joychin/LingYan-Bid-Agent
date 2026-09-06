@@ -429,13 +429,19 @@ function ItemDetail({
 
   useEffect(() => {
     setImgUrl(null)
+    // 局部变量而非 state 读值：cleanup 闭包共享本变量，revoke 到的是 fetch 完成后的
+    // 真实 URL（读 state 的旧闭包恒拿到 null，objectURL 从不被释放——每看一张图泄一张）
+    let url: string | null = null
     if (isImage && item.md_ready === false) {
       void fetchKbItemRaw(item.id)
-        .then(setImgUrl)
+        .then((u) => {
+          url = u
+          setImgUrl(u)
+        })
         .catch(() => setImgUrl(null))
     }
     return () => {
-      if (imgUrl) URL.revokeObjectURL(imgUrl)
+      if (url) URL.revokeObjectURL(url)
     }
   }, [item.id]) // eslint-disable-line react-hooks/exhaustive-deps
 

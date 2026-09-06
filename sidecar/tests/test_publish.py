@@ -112,7 +112,7 @@ def test_list_from_disk_skips_conversation_history(env):
 
 
 def test_rebuild_index_from_metas(env):
-    m = _pub(env, _content(), source={"skill": "t", "run_id": "r_1"})
+    m = _pub(env, _content(), source={"skill": "t", "thread_id": env["conv"]["id"], "run_id": "r_1"})
     db.mark_emitted(m["artifact_id"])
 
     # meta 权威：索引清空后可重建（包位置按 meta scope 派生），幂等
@@ -123,6 +123,9 @@ def test_rebuild_index_from_metas(env):
     assert row is not None
     assert row["task_id"] == env["task"]["id"]
     assert row["emitted"] == 1  # 启动重建后无待发事件
+    # 发布来源随重建恢复（索引是 last_run_id 的唯一宿主；聊天产物卡按发布 run 归位依赖它）
+    assert row["last_run_id"] == "r_1"
+    assert row["last_thread_id"] == env["conv"]["id"]
     assert db.rebuild_artifact_index(artifact_store.list_from_disk(), to_path) == 1
 
 

@@ -871,19 +871,22 @@ def rebuild_artifact_index(manifests: list[dict], content_path_of) -> int:
     启动时调用：清空后重扫。运行态复位（content_seq=1、emitted=1——启动时无消费者，
     残留 emitted=0 只会让 run 边界空转，直接置 1）。旧包 meta.json 里残留的
     state/confirmed_at 键（两态时代化石）被显式字段映射天然忽略。
+    last_run_id/last_thread_id 从 meta.source 恢复：索引是 last_run_id 的唯一宿主
+    （meta.json 有 source），丢了它聊天产物卡无法按发布 run 归位（2026-09-06）。
     content_path_of: meta -> content_path 的求值函数（注入避免依赖 store）。
     返回重建行数。
     """
     rows = []
     for m in manifests:
         schema = m.get("schema", {})
+        source = m.get("source") or {}
         rows.append(
             (
                 m["artifact_id"], m.get("task_id"), m.get("conversation_id"), m["kind"],
                 schema.get("id", ""), schema.get("version", 1),
                 m.get("cardinality", "task-single"), m.get("display_name", ""),
                 content_path_of(m), 1,
-                m.get("created_at", _now()), None, None,
+                m.get("created_at", _now()), source.get("run_id"), source.get("thread_id"),
                 1,
             )
         )

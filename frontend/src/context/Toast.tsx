@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 
 type ToastKind = 'info' | 'success' | 'error'
@@ -28,8 +28,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     }, 3000)
   }, [])
 
+  // value 引用稳定：toast 增删引发的重渲染不再连带重建 value 触发全部 consumer
+  const value = useMemo<ToastContextValue>(() => ({ toast }), [toast])
+
   return (
-    <ToastContext.Provider value={{ toast }}>
+    <ToastContext.Provider value={value}>
       {children}
       <div className="pointer-events-none fixed bottom-4 right-4 z-[100] flex w-72 flex-col gap-2">
         {toasts.map((t) => (
