@@ -152,3 +152,169 @@ def test_revised_marker_reported(env):
     _seed_analysis(task, "structure", revised=True)
     r = check_pipeline_state.invoke({})
     assert "structure，修订=用户" in r
+
+
+# ---------- [body] 正文阶段 ----------
+
+_KEY = "tender.directory/tender-response-docs@1"
+
+
+def _dir_content():
+    return {
+        "response_documents": [
+            {
+                "name": "技术部分",
+                "scope": "",
+                "directory": [
+                    {"目录名称": "3.1 项目理解与需求分析", "level": 1, "children": [],
+                     "交付形态": "正文编写", "来源位置": ["REQ-01"]},
+                    {"目录名称": "3.2 总体设计方案", "level": 1, "children": [],
+                     "交付形态": "混合", "来源位置": ["SCORE-02"]},
+                    {"目录名称": "3.3 项目团队配置", "level": 1, "children": [],
+                     "交付形态": "待核验", "来源位置": []},
+                    {"目录名称": "附件：资质证书复印件", "level": 1, "children": [],
+                     "交付形态": "模板或附件填充", "来源位置": ["MAND-02"]},
+                ],
+            }
+        ]
+    }
+
+
+def _seed_directory(env, content=None):
+    from app import publish
+
+    publish.publish_artifact(_KEY, content or _dir_content(), task_id=env[0]["id"])
+
+
+def _write_body(env, rel, text="正文\n", mtime=None):
+    p = _wroot(env[0]) / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    if mtime:
+        ts = datetime.fromisoformat(mtime).timestamp()
+        os.utime(p, (ts, ts))
+    return p
+
+
+def test_body_not_started_without_directory(env):
+    r = check_pipeline_state.invoke({})
+    assert "[body] 无目录产物" in r
+
+
+def test_body_not_started_with_directory(env):
+    _seed_directory(env)
+    r = check_pipeline_state.invoke({})
+    assert "[body] 未开始（无写作指引、无正文文件）" in r
+
+
+def test_body_guide_sections_and_missing(env):
+    _seed_directory(env)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    _write_body(env, "body/关键事实与承诺.md", "清单\n")
+    _write_body(env, "body/3.1 项目理解与需求分析.md")
+    _write_body(env, "body/3.2 总体设计方案.md")
+    r = check_pipeline_state.invoke({})
+    assert "[body] 指引已生成；承诺清单已生成；已写 2 节" in r
+    assert "[body] 目录节点未写正文：3.3 项目团队配置" in r
+    assert "无对应目录节点" not in r  # 附件节点是模板填充（非正文叶子），不报缺也不算多余
+
+
+def test_body_extra_file_after_outline_change(env):
+    _write_body(env, "body/旧版遗留节.md")  # 先有旧文件（基于旧目录写的）
+    _seed_directory(env)  # 后发布新目录（content.json mtime 更新）
+    _write_body(env, "body/写作指引.md", "指引表\n")  # 指引晚于目录 → 不报过期
+    r = check_pipeline_state.invoke({})
+    assert "[body] body/ 文件无对应目录节点（标题不一致或目录已改版）：旧版遗留节" in r
+    assert "目录产物更新晚于正文" in r and "旧版遗留节.md" in r.split("目录产物更新晚于正文")[1]
+
+
+def test_body_stale_not_reported_when_written_after_publish(env):
+    _seed_directory(env)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    _write_body(env, "body/3.1 项目理解与需求分析.md")
+    r = check_pipeline_state.invoke({})
+    assert "目录产物更新晚于正文" not in r
+
+
+def test_body_orphan_files_without_directory(env):
+    _write_body(env, "body/3.1 项目理解与需求分析.md")
+    r = check_pipeline_state.invoke({})
+    assert "[body] 无目录产物（正文依据投标目录当前内容" in r
+    assert "[body] 但 work/body/ 已有 1 个文件" in r
+
+
+def test_body_multi_volume_layout(env):
+    content = _dir_content()
+    content["response_documents"].append({
+        "name": "商务部分", "scope": "",
+        "directory": [{"目录名称": "6.1 售后服务承诺", "level": 1, "children": [],
+                       "交付形态": "正文编写", "来源位置": ["SCORE-09"]}],
+    })
+    _seed_directory(env, content)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    _write_body(env, "body/技术部分/3.1 项目理解与需求分析.md")
+    _write_body(env, "body/商务部分/6.1 售后服务承诺.md")
+    r = check_pipeline_state.invoke({})
+    assert "已写 2 节" in r
+    assert "[body] 目录节点未写正文：技术部分/3.2 总体设计方案、技术部分/3.3 项目团队配置" in r
+    assert "无对应目录节点" not in r
+
+
+# ---------- [body] docx 形态（现役）与旧 .md 兼容 ----------
+
+
+def _make_docx(env, rel: str):
+    from docx import Document
+
+    p = _wroot(env[0]) / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    Document().save(p)
+    return p
+
+
+def test_body_docx_sections_counted(env):
+    _seed_directory(env)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    _make_docx(env, "body/3.1 项目理解与需求分析.docx")
+    _make_docx(env, "body/3.2 总体设计方案.docx")
+    r = check_pipeline_state.invoke({})
+    assert "[body] 指引已生成；承诺清单未生成；已写 2 节" in r
+    assert "[body] 目录节点未写正文：3.3 项目团队配置" in r
+
+
+def test_body_volume_file_excluded(env):
+    """「整本-」合册产物是派生产物：不算节、不报「无对应目录节点」。"""
+    _seed_directory(env)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    _make_docx(env, "body/3.1 项目理解与需求分析.docx")
+    _make_docx(env, "body/整本-技术部分.docx")
+    r = check_pipeline_state.invoke({})
+    assert "无对应目录节点" not in r
+    assert "已写 1 节" in r
+
+
+def test_body_template_fill_file_is_legitimate(env):
+    """模板填充类叶子产出格式件节文件：合法节文件不误报 extra；未产出也不报缺。"""
+    _seed_directory(env)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    _make_docx(env, "body/3.1 项目理解与需求分析.docx")
+    _make_docx(env, "body/3.2 总体设计方案.docx")
+    _make_docx(env, "body/3.3 项目团队配置.docx")
+    _make_docx(env, "body/附件：资质证书复印件.docx")
+    r = check_pipeline_state.invoke({})
+    assert "无对应目录节点" not in r
+    assert "目录节点未写正文" not in r
+    assert "已写 4 节" in r
+    assert "叶子对账一致" in r
+
+
+def test_body_docx_md_coexist_reports_fact(env):
+    """同名 .docx/.md 并存：对账以 docx 为准（去重不双计），并存报事实。"""
+    _seed_directory(env)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    _write_body(env, "body/3.1 项目理解与需求分析.md", "旧稿\n")
+    _make_docx(env, "body/3.1 项目理解与需求分析.docx")
+    r = check_pipeline_state.invoke({})
+    assert "[body] 同时存在 .docx 与 .md 的节：3.1 项目理解与需求分析" in r
+    assert "旧稿残留，以 docx 为准" in r
+    assert "已写 1 节" in r

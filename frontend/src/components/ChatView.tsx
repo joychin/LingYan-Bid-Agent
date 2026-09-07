@@ -524,9 +524,14 @@ export function ChatView({
                         onReasonChange: setStepReason,
                         onNav: wizardNav,
                       }}
+                      onOpenWorkbench={onOpenWorkbench}
                     />
                   ) : (
-                    <InterruptCard requests={interrupt.requests} onDecide={(d) => void decide(d)} />
+                    <InterruptCard
+                      requests={interrupt.requests}
+                      onDecide={(d) => void decide(d)}
+                      onOpenWorkbench={onOpenWorkbench}
+                    />
                   )}
                 </div>
               )}

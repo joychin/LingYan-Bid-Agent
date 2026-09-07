@@ -199,3 +199,59 @@ def test_legacy_bak_adopted(client):
     points = wb._restore_points(target)
     assert len(points) == 2  # legacy（最旧）+ 恢复前的当前内容
     assert points[0].read_text(encoding="utf-8") == "旧世界的备份\n"
+
+
+# ---------- docx 正文（只读列表 + 文本视图端点 + 写拒绝） ----------
+
+
+def _seed_docx(task_id: str, rel: str, title: str = "3.1 需求分析", paragraphs: str = "正文第一段。") -> None:
+    from docx import Document
+
+    p = artifact_store.work_dir(task_id) / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    doc = Document()
+    doc.add_heading(title, 1)
+    for line in paragraphs.split("\n"):
+        if line.strip():
+            doc.add_paragraph(line.strip())
+    doc.save(p)
+
+
+def test_docx_listed_readonly_flag(client):
+    task = create_task(client)["task"]
+    tid = task["id"]
+    _seed_docx(tid, "body/3.1 需求分析.docx")
+    r = client.get("/api/workbench", params={"task_id": tid})
+    files = {f["path"]: f for f in r.json()["files"]}
+    assert "body/3.1 需求分析.docx" in files
+    entry = files["body/3.1 需求分析.docx"]
+    assert entry["editable"] is False and entry["revised"] is False
+    assert entry["has_restore"] is False
+
+
+def test_docx_view_endpoint(client):
+    task = create_task(client)["task"]
+    tid = task["id"]
+    _seed_docx(tid, "body/技术部分/3.1 需求分析.docx", paragraphs="正文第一段。\n正文第二段。")
+    r = client.get("/api/workbench/docx-view", params={"task_id": tid, "path": "body/技术部分/3.1 需求分析.docx"})
+    assert r.status_code == 200
+    d = r.json()
+    assert "[P1]（Heading 1）3.1 需求分析" in d["lines"]
+    assert "[P2]（Normal）正文第一段。" in d["lines"]
+    assert d["abs_path"].endswith("3.1 需求分析.docx")
+    # md 不走本端点
+    _seed_out(tid, "analysis/evaluation.md", "内容")
+    r2 = client.get("/api/workbench/docx-view", params={"task_id": tid, "path": "analysis/evaluation.md"})
+    assert r2.status_code == 400
+
+
+def test_docx_rejected_on_md_endpoints(client):
+    task = create_task(client)["task"]
+    tid = task["id"]
+    _seed_docx(tid, "body/3.1 需求分析.docx")
+    qs = {"task_id": tid, "path": "body/3.1 需求分析.docx"}
+    assert client.get("/api/workbench/meta", params=qs).status_code == 400
+    assert client.get("/api/workbench/content", params=qs).status_code == 400
+    body = {"task_id": tid, "path": "body/3.1 需求分析.docx", "content": "x", "base_hash": "", "force": True}
+    assert "Word" in client.put("/api/workbench/content", json=body).json()["detail"]
+    assert client.post("/api/workbench/restore", json={"task_id": tid, "path": qs["path"]}).status_code == 400

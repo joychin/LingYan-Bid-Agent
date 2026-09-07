@@ -204,6 +204,11 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        // shell 插件：打包模式下经 app.shell().sidecar() 解析并拉起 PyInstaller 冻结的
+        // sidecar 二进制（externalBin 的跨平台落点只有它知道）。Rust 侧直接调用不经
+        // ACL 校验（scope 只拦 webview 发起的 IPC 命令层），故 capabilities 无需为它
+        // 配 shell:allow-spawn——配了反而把带任意参数的 spawn 暴露给前端可调。
+        .plugin(tauri_plugin_shell::init())
         .manage(mgr.clone())
         .setup(move |app| {
             sidecar::run_supervisor(app.handle().clone(), mgr.clone());

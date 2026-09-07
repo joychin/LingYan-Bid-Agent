@@ -47,6 +47,23 @@ def mt_parse_paths(file_name: str) -> tuple[Path, Path, Path]:
     )
 
 
+def read_element_map(file_name: str) -> list[list[int]] | None:
+    """docx 元素映射（[body 子元素全序索引, 起行, 止行]，最终 md 行号闭区间）。
+
+    仅 docx 原件解析时产出（pdf/txt 无元素可映射）；缺文件或损坏返回 None，
+    调用方据此决定是否重跑解析补产（run_parse 幂等，md 内容不变）。
+    """
+    p = mt_parse_dir(file_name) / "element_map.json"
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    el = data.get("element_lines") if isinstance(data, dict) else None
+    return el if isinstance(el, list) and el else None
+
+
 def ensure_dirs() -> None:
     mt_files_dir().mkdir(parents=True, exist_ok=True)
 
@@ -121,6 +138,13 @@ def run_parse(fid: str) -> dict:
     else:
         md_path.unlink(missing_ok=True)
     write_atomic(outline_path, json.dumps(outline, ensure_ascii=False, indent=2))
+    element_lines = (result.info or {}).get("element_lines")
+    if element_lines:
+        # docx 元素映射（行号区间 → 原件 body 子元素），素材元素级注入的寻址基础
+        write_atomic(
+            mt_parse_dir(f["file_name"]) / "element_map.json",
+            json.dumps({"version": 1, "file_name": f["file_name"], "element_lines": element_lines}, ensure_ascii=False),
+        )
     db.mt_update_file(
         fid,
         parse_status="ready",

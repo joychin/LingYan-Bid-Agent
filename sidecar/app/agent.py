@@ -12,6 +12,7 @@ import asyncio
 import copy
 import dataclasses
 import itertools
+import json
 import logging
 import sqlite3
 import threading
@@ -28,7 +29,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from openai import BadRequestError
 
-from . import artifact_store, db, events, run_files, runctx
+from . import artifact_store, db, events, run_files, runctx, token_usage
 from . import config as cfg
 from .bus import publish
 from .fs_guard import GuardedBackend
@@ -100,6 +101,40 @@ SUBAGENTS: list[dict] = [
         ),
         "interrupt_on": {},
     },
+    {
+        # 正文编写子代理：单节生成的执行单元（tender-body 多节并发）。同 outline-writer：
+        # 任务目录前缀只注入主 agent——派发 description 必须自带全部路径与承诺清单值
+        # （承诺值不传，子代理拿不到就会编）。
+        "name": "tender-body-writer",
+        "description": (
+            "按写作指引写单个目录节的响应文件正文（tender-body 技能多节并发时的执行单元）"
+        ),
+        "system_prompt": (
+            "你是响应文件正文编写子代理，只负责一个目录节的正文。任务描述会给出："
+            "任务目录前缀（读写路径都必须带该前缀）、节文件输出路径（.docx）、该节的"
+            "写作模式与依据来源 ID、可用素材块 id、要求出处的行号区段（格式跟随/格式件"
+            "节另带来源文件名）、承诺清单的全部值、兄弟节开头摘要。\n"
+            "开工前先 read_file skills/tender-body/references/section-writing.md，"
+            "严格按素材先行五步执行（docx 直出，模型不直接写 docx 二进制）：检索"
+            "（search_references）→ 列使用计划 → docx_section_create 建节 + "
+            "docx_material_inject 素材块保真贴底稿（非 docx 素材才自行撰写）→ "
+            "docx_section_read 拿段号 + docx_section_revise 改写适配本项目 → "
+            "validate_body(section=<节路径>, block_ids=<使用计划的块>) 自查。\n"
+            "格式跟随/格式件节：出处原件是 docx 时用 docx_source_inject（source=任务"
+            "描述给的来源文件名，lines=行号区间；独立格式附件整文件拷）把招标格式原样"
+            "拷进节文件，再 revise 填空——表格空格子 fill、旧值 replace（表格按 "
+            "table/row/col 格坐标寻址）；pdf 原件无可拷元素，按解析文本自行成形。\n"
+            "硬纪律：承诺类数字只能使用任务描述给出的承诺清单值，清单没有的一律写"
+            "【待澄清：…】不得编造；缺料写【待补：…】继续写不阻塞；正文是干净文本，"
+            "不带任何头部/元信息；兄弟节已覆盖的要点参考摘要避免重复展开；只写自己"
+            "名分的节文件（已存在的节重建传 replace=true），不动任何其他文件。\n"
+            "禁止调用 ask_human（无人应答）：需要用户裁决的写【待澄清：…】带回。\n"
+            "禁止改写写作指引与关键事实与承诺清单（共享文件只归主线程维护）。\n"
+            "完成后返回简短中文摘要：节名、字数、使用素材块与重叠率、自查结果、"
+            "待补/待澄清清单。"
+        ),
+        "interrupt_on": {},
+    },
 ]
 
 _agents: dict[str, object] = {}  # profile_id -> agent（跨供应商多模型：每 profile 一份）
@@ -156,8 +191,10 @@ def _task_context_block(task_id: str, conversation_id: str) -> str:
     """拼装任务上下文注入块：任务名 + 进度便签 + 单一产物清单（名称）。
 
     共享的是文件夹和结论，不是聊天记录（设计文档 §8.2）：模型要具体内容时
-    经 read_artifact 按需读取。每次模型调用现算——run 中途发布的成果
-    下一次调用即可见。
+    经 read_artifact 按需读取。**必须经 _task_context_block_frozen 使用**——直接
+    每次调用现算会让秒级时间/便签/产物清单逐次变化，打断模型供应商的前缀缓存
+    （DeepSeek 自动前缀缓存按字节前缀匹配，断点后全部按未命中全价计费；
+    2026-09-06 实测一个正文 run 烧掉千万级 token 的主因）。
     """
     task = db.get_task(task_id)
     if not task:
@@ -167,9 +204,10 @@ def _task_context_block(task_id: str, conversation_id: str) -> str:
         # §16 任务分组目录：模型引用文件/产物的路径前缀（sources/ 来源、work/ 工作树）
         f"任务工作目录：`{task_id}/`（用户上传的文件在其 sources/ 下，解析与分析过程文件在 "
         "work/ 下，发布暂存写 _meta/staging/；引用这些路径时带上该前缀）",
-        # 模型不知道当前时间，写产物头部等时间戳时会编造（如零点占位）——每次调用现给
-        f"当前时间：{datetime.now(timezone.utc).isoformat(timespec='seconds')}"
-        "（写时间戳时用它，不要自己估）",
+        # 天级日期（Claude Code 同款精度）：秒级时间戳每次调用都变会打断前缀缓存，
+        # 一天只断一次可接受；模型写时间戳的场景已删（分析产物头部 2026-09-04 裁决），
+        # 日期足够定位"今天"。需要精确时刻的少数场景按业务就近说明。
+        f"今天日期：{datetime.now(timezone.utc).strftime('%Y-%m-%d')}（UTC；涉及时效判断时用它，不要自己估）",
     ]
     note = (task.get("progress_note") or "").strip()
     if note:
@@ -181,6 +219,27 @@ def _task_context_block(task_id: str, conversation_id: str) -> str:
     if artifacts:
         lines.append("### 任务产物\n" + "\n".join(artifacts))
     return "\n".join(lines)
+
+
+# 任务上下文块的 run 内冻结缓存：run_id -> 块文本。前缀缓存铁律——system 在整个
+# run 内必须字节稳定（见 _task_context_block docstring），便签/产物清单随块在 run
+# 起点定格：run 中途的更新不再自动可见，模型要新鲜状态自己 read_artifact/查目录
+# （工具就是它的眼睛）。HITL 续跑同 run_id 沿用冻结块（续段缓存还能接上）。容量
+# 守卫防长驻进程累积（run 结束不回调清理，靠覆盖+清空，条目只是短文本）。
+_FROZEN_CTX: dict[str, str] = {}
+
+
+def _task_context_block_frozen(task_id: str, conversation_id: str, run_id: str | None) -> str:
+    """run 内冻结版任务上下文块：每个 run 计算一次、字节不变；非 run 态现算。"""
+    if not run_id:
+        return _task_context_block(task_id, conversation_id)
+    block = _FROZEN_CTX.get(run_id)
+    if block is None:
+        if len(_FROZEN_CTX) > 64:
+            _FROZEN_CTX.clear()
+        block = _task_context_block(task_id, conversation_id)
+        _FROZEN_CTX[run_id] = block
+    return block
 
 
 def _kb_summary_line() -> str:
@@ -232,7 +291,8 @@ class _TaskContextMiddleware(AgentMiddleware):
         ctx = runctx.current_run()
         if ctx is None or not ctx.task_id:
             return handler(request)
-        block = _task_context_block(ctx.task_id, ctx.conversation_id)
+        # run 内冻结（前缀缓存铁律）：同 run 每次调用字节相同，见 _FROZEN_CTX 注释
+        block = _task_context_block_frozen(ctx.task_id, ctx.conversation_id, ctx.run_id)
         if not block:
             return handler(request)
         base = request.system_message.content if request.system_message is not None else ""
@@ -304,7 +364,7 @@ class _NoThinkingRetryCompletions:
 
     def create(self, **kwargs):
         try:
-            return self._inner.create(**kwargs)
+            resp = self._inner.create(**kwargs)
         except BadRequestError as e:
             msg = str(e)
             msg_lower = msg.lower()
@@ -317,7 +377,61 @@ class _NoThinkingRetryCompletions:
             logger.warning(
                 "网关思考回传校验 400（reasoning_text），本请求降级 reasoning_effort=none 重试"
             )
-            return self._inner.create(**{**kwargs, "reasoning_effort": "none"})
+            resp = self._inner.create(**{**kwargs, "reasoning_effort": "none"})
+        # run 级 token 用量观测：主 agent 与子代理共享本实例，每次响应都过这里
+        #（runctx 传播已验证；非 run 态在内部丢弃）。全链路流式——create(stream=True)
+        # 返回的是逐块 Stream，usage 只在流吐完后的最后一块（stream_usage=True 让
+        # langchain 请求 stream_options.include_usage 服务端才回），故流式包一层、
+        # 消费完再记账；非流式（_generate 等）响应自带 .usage 直接取。
+        if kwargs.get("stream") and resp is not None and hasattr(resp, "__iter__"):
+            return _UsageCapturingStream(resp)
+        try:
+            token_usage.record_from_response(resp)
+        except Exception:
+            logger.debug("token 用量提取失败（不影响主流程）", exc_info=True)
+        return resp
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _UsageCapturingStream:
+    """流式响应包装：逐块吐完后从最后一块的 usage 记账。
+
+    langchain 以 `with create(...) as stream: for chunk in stream` 消费，包这一层
+    不改变迭代契约，只在流耗尽后取最后一块的 usage（服务端在 include_usage 时于
+    末块回 usage）交给 token_usage——观测点从「请求返回」（此刻流未消费、usage 取
+    不到）挪到「流消费完」。chunk 可能是 SDK 模型或 dict，防御性两种都取。
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __iter__(self):
+        last_usage = None
+        for chunk in self._inner:
+            usage = getattr(chunk, "usage", None)
+            if usage is None and isinstance(chunk, dict):
+                usage = chunk.get("usage")
+            if usage is not None:
+                last_usage = usage
+            yield chunk
+        if last_usage is not None:
+            try:
+                token_usage.record_usage(last_usage)
+            except Exception:
+                logger.debug("token 用量提取失败（不影响主流程）", exc_info=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        if hasattr(self._inner, "__exit__"):
+            return self._inner.__exit__(*exc_info)
+        close = getattr(self._inner, "close", None)
+        if close:
+            close()
+        return False
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -349,6 +463,10 @@ def build_agent(profile: cfg.ModelProfile | None = None):
         model=p.model,
         timeout=180,
     )
+    # 流式请求必须带回 usage：langchain 只在默认 base_url / LangSmith 网关下默认开
+    # stream_usage（自定义 base_url 默认关），不开则不带 stream_options.include_usage、
+    # 服务端不回 usage——run 级 token 用量统计（_UsageCapturingStream）就拿不到数。
+    model.stream_usage = True
     # 用户显式配置的上下文窗口（设置 → 模型 → 高级选项）覆盖进 langchain 的 model
     # profile——deepagents SummarizationMiddleware 检测到 max_input_tokens 后自动按
     # 窗口比例（85% 触发/保留 10%）触发压缩。与注册表自动解析的档案**合并**而非整体
@@ -377,7 +495,9 @@ def build_agent(profile: cfg.ModelProfile | None = None):
             "方法论在 skills 目录中，按各技能的 SKILL.md 执行（技能清单见下方列表，"
             "执行前先读对应 SKILL.md）：解析招标文件（文件→Markdown）用 document-parse；"
             "系统性提取投标要点用 tender-analysis；生成投标目录用 tender-outline；"
-            "就招标文件回答单个具体问题用 tender-qa。"
+            "编写响应文件正文用 tender-body；"
+            "就招标文件回答单个具体问题用 tender-qa；"
+            "去除文本中的 AI 写作痕迹、让中文读起来更自然用 humanizer-zh。"
             "向用户介绍能力、流程或产物时只说你确定的内容，不虚构具体章节名、"
             "步骤名、字段名；没读技能文件前说到概括层（如「按招标文件结构提取"
             "七个方面的要点」）。"
@@ -600,6 +720,7 @@ def _retire_broken_steps(top_steps: list[dict], rid: str, cid: str, _publish) ->
 def _run_agent_stream(
     agent, cid: str, rid: str, task_id: str | None, _publish, user_text: str | None, resume_decisions: list | None,
     cancel_event: threading.Event | None = None, thinking: str = "low",
+    resume_payload: dict | None = None,
 ) -> tuple[str, str | None, dict, dict | None]:
     """worker 线程里跑完整流，逐块实时回调 _publish(event, data)。
 
@@ -629,8 +750,12 @@ def _run_agent_stream(
     # run 上下文随 context 拷贝进入本线程：工具据此记录产物来源与作用域，
     # _TaskContextMiddleware 据此注入任务上下文，模型壳据此注入思考档位（同线程同一份 context）
     runctx.set_run(cid, rid, task_id, thinking)
-    if resume_decisions is not None:
-        stream_input: object = Command(resume={"decisions": resume_decisions})
+    if resume_payload is not None:
+        # 多中断恢复（langgraph 要求 {interrupt_id: value} 映射；api/runs.py 按
+        # 快照里的 interrupt_id 分组组装）——单中断旧格式仍走 resume_decisions
+        stream_input: object = Command(resume=resume_payload)
+    elif resume_decisions is not None:
+        stream_input = Command(resume={"decisions": resume_decisions})
     else:
         stream_input = {"messages": [("user", user_text or "")]}
     # 正文按轮次分段：cur_text_parts 是当前未封口段；主 agent 的 tool_called 到达即
@@ -1003,6 +1128,26 @@ def is_cancel_pending(rid: str) -> bool:
     return event is not None and event.is_set()
 
 
+def _usage_json_final(rid: str) -> str | None:
+    """run 终态/暂停时的用量快照：已落库值（此前 HITL 段累计）+ 本段累计（取走清零）。
+
+    两边都空返回 None——db 层 None=保留旧值（续段无新增模型调用时不覆盖）。"""
+    current = token_usage.take(rid)
+    if not current:
+        return None
+    prev: dict = {}
+    try:
+        loaded = json.loads((db.get_run(rid) or {}).get("token_usage") or "{}")
+        if isinstance(loaded, dict):
+            prev = {str(k): v for k, v in loaded.items() if isinstance(v, (int, float))}
+    except (TypeError, ValueError):
+        prev = {}
+    merged = dict(prev)
+    for k, v in current.items():
+        merged[k] = int(merged.get(k, 0)) + v
+    return json.dumps(merged, ensure_ascii=False)
+
+
 async def run_stream(
     cid: str,
     rid: str,
@@ -1011,13 +1156,16 @@ async def run_stream(
     start_seq: int = 0,
     thinking: str = "low",
     model: str | None = None,
+    resume_payload: dict | None = None,
 ) -> None:
     """后台任务：驱动一段 agent 流式执行并实时发布 §5.5 事件。
 
     首段传 user_text；HITL 续段传 resume_decisions（同一 run 从 interrupt 处续跑，
     start_seq 接上一段的事件序号--前端按 run_id 去重，重置会吞掉续段事件）。
-    thinking 是本 run 的思考档位（low/medium/high，续跑沿用首段存档值）。
-    model 是本 run 选用的模型 profile id（None=default；续跑沿用首段存档值）。
+    多中断续段传 resume_payload（{interrupt_id: {"decisions": [...]}} 映射，
+    langgraph 对多个 pending interrupt 的恢复要求）。thinking 是本 run 的思考档位
+    （low/medium/high，续跑沿用首段存档值）。model 是本 run 选用的模型 profile id
+    （None=default；续跑沿用首段存档值）。
     """
     # 用户请求停止（POST /runs/{rid}/cancel）：注册协作式取消事件，run 结束时摘除
     cancel_event = threading.Event()
@@ -1073,7 +1221,8 @@ async def run_stream(
             logger.exception("本轮文件起点快照失败（cid=%s rid=%s）", cid, rid)
             start_files = None
         text, error, trace, interrupt = await asyncio.to_thread(
-            _run_agent_stream, agent, cid, rid, task_id, _publish, user_text, resume_decisions, cancel_event, thinking
+            _run_agent_stream, agent, cid, rid, task_id, _publish, user_text, resume_decisions,
+            cancel_event, thinking, resume_payload,
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
 
@@ -1115,7 +1264,7 @@ async def run_stream(
             segment_saved = True
             # 先落库后发事件（与 completed 分支一致）：客户端收到终态事件即可立即对账
             seq = next_seq()
-            db.finish_run(rid, "error", error, last_seq=seq)
+            db.finish_run(rid, "error", error, last_seq=seq, token_usage_json=_usage_json_final(rid))
             # code（契约 additive）：cancelled=用户主动停止，前端据此中性呈现（非红色错误卡）
             await publish(
                 cid,
@@ -1150,7 +1299,7 @@ async def run_stream(
             segment_saved = True
             # 先落库后发事件（与 completed/error 分支一致）
             seq = next_seq()
-            db.interrupt_run(rid, interrupt["requests"], seq, pause_msg_id=msg_id)
+            db.interrupt_run(rid, interrupt["requests"], seq, pause_msg_id=msg_id, token_usage_json=_usage_json_final(rid))
             await publish(
                 cid,
                 {
@@ -1168,7 +1317,7 @@ async def run_stream(
         # 历史会话/刷新后执行过程仍可见）
         _save_merged_trace(rid, cid, msg["id"], trace, duration_ms, files=segment_files)
         seq = next_seq()
-        db.finish_run(rid, "completed", last_seq=seq)
+        db.finish_run(rid, "completed", last_seq=seq, token_usage_json=_usage_json_final(rid))
         await publish(
             cid,
             {
@@ -1199,7 +1348,7 @@ async def run_stream(
             seq = next_seq()
             # 终态守卫：worker 分支已落的终态不被覆盖——error 分支写入的原始错误
             # 文案不被内部异常顶掉、completed 不被翻成 error（error 事件照发）
-            db.finish_run_if_running(rid, "error", str(e), last_seq=seq)
+            db.finish_run_if_running(rid, "error", str(e), last_seq=seq, token_usage_json=_usage_json_final(rid))
             # code 恒有键（契约 2026-08-27 additive）：此前此处漏发 code，靠前端 ?? null 兜住
             await publish(
                 cid,

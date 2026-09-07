@@ -18,7 +18,8 @@ assert SKILLS, "未发现任何 skill"
 
 def test_at_least_expected_skills():
     names = {p.name for p in SKILLS}
-    assert {"document-parse", "tender-analysis", "tender-outline", "tender-qa"} <= names
+    assert {"document-parse", "tender-analysis", "tender-outline", "tender-body", "tender-qa",
+            "humanizer-zh"} <= names
 
 
 @pytest.mark.parametrize("skill_dir", SKILLS, ids=lambda p: p.name)
@@ -94,3 +95,12 @@ def test_tender_outline_unused_ids_disclosure():
     text = (skills_source_dir() / "tender-outline" / "SKILL.md").read_text(encoding="utf-8")
     for kw in ("未被任何目录节点引用", "重新组装", "最终回复"):
         assert kw in text, f"tender-outline/SKILL.md 缺少未归位披露分支关键词：{kw}"
+
+
+def test_tender_body_kickoff_and_material_first():
+    """tender-body 开工纪律锚点：指引确认门+承诺拍板、素材先行、并发派发必带清单。"""
+    text = (skills_source_dir() / "tender-body" / "SKILL.md").read_text(encoding="utf-8")
+    for kw in ("写作指引", "关键事实与承诺", "素材先行", "block_ids", "待补", "待澄清",
+               "validate_body", "guide_path", "tender-body-writer", "兄弟节开头摘要",
+               "不传就会编", "只重写我指定的章节", "共享\n  内容在前、节差异在后"):
+        assert kw in text, f"tender-body/SKILL.md 缺少开工纪律关键词：{kw}"

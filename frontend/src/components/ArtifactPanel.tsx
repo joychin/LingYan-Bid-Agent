@@ -6,9 +6,10 @@ import { useTaskArtifacts, useConversationArtifacts } from '@/hooks/useArtifacts
 import { useFiles } from '@/hooks/useFiles'
 import { useWorkbench } from '@/hooks/useWorkbench'
 import { ArtifactOpenHost } from '@/components/ArtifactOpenHost'
+import { DocxView } from '@/components/DocxView'
 import { WorkbenchViewer } from '@/components/WorkbenchViewer'
 import { Loader } from '@/components/ai/Loader'
-import { kindIcon } from '@/artifacts/registry'
+import { fileExtIcon, kindIcon } from '@/artifacts/registry'
 import { cn, formatSize } from '@/lib/utils'
 
 const DEFAULT_W = 300
@@ -43,6 +44,8 @@ const WB_NAMES: Record<string, string> = {
   'analysis/evaluation.md': '评分标准',
   'analysis/clarifications.md': '待澄清',
   'outline/tender-response-docs.md': '投标目录（工作表）',
+  'body/写作指引.md': '写作指引',
+  'body/关键事实与承诺.md': '关键事实与承诺',
 }
 
 /** 业务流分类夹（平台封闭）。产物按其 kind 归入 group；过程文件按 path 前缀归入 group。 */
@@ -155,17 +158,21 @@ export function ArtifactPanel({
     )
   }
 
-  const wbRow = (f: WorkbenchFile, name?: string) => (
-    <div key={f.path} className="ap-row compact" onClick={() => onOpenWorkbench(f.path)} title={f.path}>
-      <span className="ft-ico-glyph">
-        <FileText className="ft-ico-svg" />
-      </span>
-      <span className="ap-row-name truncate">{name ?? WB_NAMES[f.path] ?? f.path.split('/').pop()}</span>
-      <span className="ap-row-tail">
-        <span className="ap-status regen">{f.editable ? '可重生成' : '解析只读'}</span>
-      </span>
-    </div>
-  )
+  const wbRow = (f: WorkbenchFile, name?: string) => {
+    // 图标按扩展名（.docx=W 徽章，与素材库/知识库同一色板族）
+    const icon = fileExtIcon(f.path)
+    return (
+      <div key={f.path} className="ap-row compact" onClick={() => onOpenWorkbench(f.path)} title={f.path}>
+        <span className={cn('ft-ico', icon.cls)}>{icon.mark}</span>
+        <span className="ap-row-name truncate">{name ?? WB_NAMES[f.path] ?? f.path.split('/').pop()}</span>
+        <span className="ap-row-tail">
+          <span className="ap-status regen">
+            {f.editable ? '可重生成' : f.path.endsWith('.docx') ? 'Word 正文' : '解析只读'}
+          </span>
+        </span>
+      </div>
+    )
+  }
 
   const loading = loadingTask || loadingWorkbench || loadingFiles
 
@@ -278,13 +285,18 @@ export function ArtifactPanel({
               // 挂载期 path/taskId（[] 依赖），同实例换 path 会把新文件内容 PUT 到
               // 旧路径（跨文件串写）；重挂后闭包恒持有本实例自己的正确路径。
               // anchorLine 不进 key：同文件不同行的追溯定位靠 WorkbenchViewer 内
-              // effect 响应 anchorLine 变化。
-              <WorkbenchViewer
-                key={workbenchPath}
-                taskId={currentTask?.id ?? null}
-                path={workbenchPath}
-                anchorLine={workbenchAnchor}
-              />
+              // effect 响应 anchorLine 变化。docx（tender-body 正文/整本）走只读
+              // 视图（DocxView），无编辑态故无串写面，key 同款只为查询独立。
+              workbenchPath.endsWith('.docx') ? (
+                <DocxView key={workbenchPath} taskId={currentTask?.id ?? null} path={workbenchPath} />
+              ) : (
+                <WorkbenchViewer
+                  key={workbenchPath}
+                  taskId={currentTask?.id ?? null}
+                  path={workbenchPath}
+                  anchorLine={workbenchAnchor}
+                />
+              )
             ) : (
               <ArtifactOpenHost artifactId={previewId} onOpenWorkbench={onOpenWorkbench} />
             ))}

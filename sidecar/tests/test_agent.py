@@ -205,7 +205,8 @@ def test_main_reasoning_only_first_call_in_batch():
 
 
 def test_task_context_block_injects_clock(tmp_path, monkeypatch):
-    """任务上下文注入当前时间：模型不知道时间，写时间戳（analysis 产物头部等）会编造。"""
+    """任务上下文注入天级日期（2026-09-06：秒级时间戳会打断前缀缓存，降为
+    Claude Code 同款天级精度；模型写时间戳场景已删，日期足够）。"""
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     from app import db
     from app.agent import _task_context_block
@@ -214,20 +215,20 @@ def test_task_context_block_injects_clock(tmp_path, monkeypatch):
     task = db.create_task("测试任务")
     block = _task_context_block(task["id"], "c1")
     assert "当前任务：测试任务" in block
-    assert "当前时间：" in block
+    assert "今天日期：" in block
 
 
 def test_subagent_specs():
     """显式注册的子代理守护：执行单元齐全、不直接向用户提问。
 
     interrupt_on={} 是整体替换继承——漏写会让子代理继承 ask_human 门禁，
-    子代理的 ask_human 无人应答会挂死；tender-outline-writer 的提示词必须引用
+    子代理的 ask_human 无人应答会挂死；两个 writer 的提示词必须引用
     references（方法论单一事实源在 skill 里，不复制进提示词）。
     """
     from app.agent import SUBAGENTS
 
     specs = {s["name"]: s for s in SUBAGENTS}
-    assert set(specs) == {"tender-outline-writer"}
+    assert set(specs) == {"tender-outline-writer", "tender-body-writer"}
     for spec in specs.values():
         assert spec["interrupt_on"] == {}
         assert spec["system_prompt"].strip()
@@ -235,6 +236,12 @@ def test_subagent_specs():
     for ref in ("generate.md", "annotation.md", "revise-gapfill.md", "revise-scoring.md", "revise-walkthrough.md"):
         assert ref in writer["system_prompt"]
     assert "禁止调用 ask_human" in writer["system_prompt"]
+    body = specs["tender-body-writer"]
+    assert "section-writing.md" in body["system_prompt"]  # 素材先行方法论单一真源
+    assert "禁止调用 ask_human" in body["system_prompt"]
+    # 承诺纪律与共享写边界（并发下唯一写边界，漏写=子代理改清单/编承诺值）
+    assert "承诺清单" in body["system_prompt"]
+    assert "禁止改写写作指引与关键事实与承诺清单" in body["system_prompt"]
 
 
 def test_system_prompt_response_guidelines():

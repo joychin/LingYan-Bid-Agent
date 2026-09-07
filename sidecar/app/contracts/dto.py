@@ -78,6 +78,9 @@ class RunInfo(_ContractModel):
     created_at: str
     requests: list[InterruptRequestPayload] | None = None
     last_seq: int | None = None
+    # 本 run 模型用量快照（additive，2026-09-06）：JSON 文本 {input,output,cached,
+    # reasoning}，旧 run / 进行中为 None；前端展示下一批接
+    token_usage: str | None = None
 
 
 class ActiveRun(_ContractModel):

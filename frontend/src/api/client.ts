@@ -577,7 +577,7 @@ export interface WorkbenchFile {
   size: number
   /** 首行头部注释含「修订=用户」：人工改过，模型重跑前会提示 */
   revised: boolean
-  /** parse/ 只读（引用行号的证据基准） */
+  /** 只读=parse/（引用行号的证据基准）或 .docx（渲染器不显示修订标记，正文节在 Word 中改） */
   editable: boolean
   /** 恢复点栈非空（restorepoints/ 保留 3 个；旧 .bak 未收编时也算） */
   has_restore: boolean
@@ -630,6 +630,18 @@ export function restoreWorkbench(taskId: string, path: string): Promise<Workbenc
     method: 'POST',
     body: JSON.stringify({ task_id: taskId, path }),
   })
+}
+
+/** docx 正文只读文本视图：段落编号+样式+表格概览（与模型侧 docx_section_read 同一序列化）。
+ *  abs_path 供「在文件夹中显示」唤起 Word（看格式/审修订标记）。 */
+export interface WorkbenchDocxView {
+  lines: string[]
+  abs_path: string
+}
+
+export function getWorkbenchDocxView(taskId: string, path: string): Promise<WorkbenchDocxView> {
+  const qs = new URLSearchParams({ task_id: taskId, path })
+  return request(`/workbench/docx-view?${qs}`)
 }
 
 // ==== sidecar 进程监管（Tauri 壳命令；浏览器开发模式一律返回空值） ====

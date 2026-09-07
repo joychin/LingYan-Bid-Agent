@@ -213,35 +213,41 @@ def _friendly_description(name: str, args: dict) -> str:
 
 
 def _hitl_requests(interrupts) -> dict:
-    """把 langgraph Interrupt 元组归一化 {requests: [{tool, args, description, allowed}]}。
+    """把 langgraph Interrupt 元组归一化 {requests: [{tool, args, description, allowed, interrupt_id}]}。
 
-    HumanInTheLoopMiddleware 每次 suspend 只发一个 interrupt（batch 模式下多个
-    tool call 合并进同一 HITLRequest）；多个 Interrupt 属并行分支，MVP 取第一个。
-    allowed 取 review_configs 的 allowed_decisions，前端据此分支渲染审批卡/问答卡。
+    遍历**全部** Interrupt（同一轮多个 ask_human 会各产生一个，只取第一个会让
+    第二个悬空——resume 时 langgraph 报「must specify the interrupt id」把 run
+    打死，2026-09-06 实测）；单个 Interrupt 的 batch 模式下多个 tool call 仍合并在
+    同一 value.action_requests。每条 request 附 interrupt_id（resume 按 id 分组映射
+    恢复；旧快照无此字段）。allowed 取 review_configs 的 allowed_decisions，前端
+    据此分支渲染审批卡/问答卡。
     """
-    first = interrupts[0] if isinstance(interrupts, (tuple, list)) else interrupts
-    value = getattr(first, "value", None) or {}
-    allowed_by_tool: dict[str, list[str]] = {}
-    for rc in value.get("review_configs", []):
-        if isinstance(rc, dict) and rc.get("action_name"):
-            allowed_by_tool[rc["action_name"]] = list(rc.get("allowed_decisions") or [])
+    items = interrupts if isinstance(interrupts, (tuple, list)) else (interrupts,)
     requests = []
-    for ar in value.get("action_requests", []):
-        if not isinstance(ar, dict):
-            continue
-        name = ar.get("name") or "unknown"
-        args = _tool_args(ar.get("args"))
-        desc = ar.get("description") or ""
-        if desc.startswith(_HITL_TEMPLATE_PREFIX):
-            desc = _friendly_description(name, args)
-        requests.append(
-            {
-                "tool": name,
-                "args": args,
-                "description": desc,
-                "allowed": allowed_by_tool.get(name) or ["approve", "reject"],
-            }
-        )
+    for it in items:
+        value = getattr(it, "value", None) or {}
+        iid = getattr(it, "id", "") or ""
+        allowed_by_tool: dict[str, list[str]] = {}
+        for rc in value.get("review_configs", []):
+            if isinstance(rc, dict) and rc.get("action_name"):
+                allowed_by_tool[rc["action_name"]] = list(rc.get("allowed_decisions") or [])
+        for ar in value.get("action_requests", []):
+            if not isinstance(ar, dict):
+                continue
+            name = ar.get("name") or "unknown"
+            args = _tool_args(ar.get("args"))
+            desc = ar.get("description") or ""
+            if desc.startswith(_HITL_TEMPLATE_PREFIX):
+                desc = _friendly_description(name, args)
+            requests.append(
+                {
+                    "tool": name,
+                    "args": args,
+                    "description": desc,
+                    "allowed": allowed_by_tool.get(name) or ["approve", "reject"],
+                    "interrupt_id": iid,
+                }
+            )
     return {"requests": requests}
 
 

@@ -85,11 +85,11 @@ def archive_task_dir(task_id: str) -> Path:
     return workspace_dir() / "archive" / task_id
 
 
-# work/ 下的已知管线子目录（parse→analysis→outline 主线 + fragments 多册中间态）。
+# work/ 下的已知管线子目录（parse→analysis→outline→body 主线 + fragments 多册中间态）。
 # 预建它们是因为「声明版式里的目录不存在」对模型永远是意外：写文件会自动建父目录，
 # 但 ls 撞上空窗期吃 path_not_found 红错（2026-09-06 实测，2026-08-29 sources/work
-# 先例的延伸）。新管线目录（如 tender-body 的 body/）随技能落地同步加这里。
-_PROCESS_DIRS = ("parse", "analysis", "outline", "outline/fragments")
+# 先例的延伸）。新管线目录随技能落地同步加这里。
+_PROCESS_DIRS = ("parse", "analysis", "outline", "outline/fragments", "body")
 
 
 def ensure_task_skeleton(task_id: str) -> None:

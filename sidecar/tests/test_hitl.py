@@ -38,7 +38,8 @@ def _make_interrupt(question: str = "用哪个方案？") -> Interrupt:
 
 
 def test_iter_stream_parses_interrupt():
-    stream = iter([("updates", {"__interrupt__": (_make_interrupt(),)})])
+    it = _make_interrupt()
+    stream = iter([("updates", {"__interrupt__": (it,)})])
     out = list(events.iter_stream(stream))
     assert out == [
         (
@@ -50,6 +51,8 @@ def test_iter_stream_parses_interrupt():
                         "args": {"question": "用哪个方案？"},
                         "description": "确认方案",
                         "allowed": ["respond"],
+                        # 多中断恢复的分组键（2026-09-06）：归一化逐条挂中断 id
+                        "interrupt_id": getattr(it, "id", "") or "",
                     }
                 ]
             },
@@ -489,8 +492,8 @@ def test_resume_endpoint_flow(client, tmp_path, monkeypatch):
     cid, rid = _waiting_setup(tmp_path, monkeypatch)
     captured: dict = {}
 
-    async def fake_run_stream(cid_, rid_, user_text=None, resume_decisions=None, start_seq=0, thinking="low", model=None):
-        captured.update(cid=cid_, rid=rid_, resume_decisions=resume_decisions, start_seq=start_seq)
+    async def fake_run_stream(cid_, rid_, user_text=None, resume_decisions=None, start_seq=0, thinking="low", model=None, resume_payload=None):
+        captured.update(cid=cid_, rid=rid_, resume_decisions=resume_decisions, start_seq=start_seq, resume_payload=resume_payload)
 
     monkeypatch.setattr(runs_api, "run_stream", fake_run_stream)
 

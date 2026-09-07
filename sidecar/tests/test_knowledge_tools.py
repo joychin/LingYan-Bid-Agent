@@ -158,7 +158,8 @@ def test_check_residue_detects_planted_name(tmp_path, monkeypatch):
 
 
 def test_check_residue_accepts_mt_file_id(tmp_path, monkeypatch):
-    """残留扫描 source_item_id 兼收素材文件 id（mt 前缀）——文件名主干入名单。"""
+    """残留扫描 source_item_id 兼收素材文件 id（mt 前缀）——文件名主干入**弱级**
+    名单（2026-09-06 分级：项目名常混通用产品词，命中是疑似提示非必须清零）。"""
     _setup(tmp_path, monkeypatch)
     md = "# 方案\n\n" + "正文内容说明。" * 10
     import hashlib
@@ -168,4 +169,22 @@ def test_check_residue_accepts_mt_file_id(tmp_path, monkeypatch):
     f = db.mt_insert_file(file_name="智慧园区一期 方案.txt",
                           file_hash=hashlib.sha256(md.encode()).hexdigest())
     out = check_name_residue.invoke({"text": "本方案基于智慧园区一期经验。", "source_item_id": f["id"]})
+    assert "疑似残留提示" in out
     assert "智慧园区一期" in out
+    assert "旧名残留告警" not in out  # 纯文件名来源=弱级，不进硬告警段
+
+
+def test_check_residue_hard_and_soft_tiers_together(tmp_path, monkeypatch):
+    """硬级（元数据项目名/显式名单）与弱级（文件名主干）同现时分段输出；
+    通过文案带两级计数。"""
+    _setup(tmp_path, monkeypatch)
+    kid = _seed("# 业绩\n\n内容", "某项目 旧档案库.txt", "past_proposal",
+                {"doc_type": "past_proposal",
+                 "fields": {"project_name": {"value": "智慧园区一期"}}})
+    text = "本项目沿用智慧园区一期经验，整理自旧档案库，老东家华信科技提供。"
+    out = check_name_residue.invoke({"text": text, "source_item_id": kid, "old_names": ["华信科技"]})
+    assert "旧名残留告警" in out
+    assert "智慧园区一期" in out and "华信科技" in out
+    assert "疑似残留提示" in out and "旧档案库" in out  # 文件名主干分段词≥4字入弱级
+    # 硬级与弱级分段：弱级名不作为独立残留条目进「必须替换」段（行上下文引文除外）
+    assert "残留「旧档案库」" not in out.split("疑似残留提示")[0]

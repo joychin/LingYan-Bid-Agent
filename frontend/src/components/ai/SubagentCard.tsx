@@ -123,9 +123,9 @@ export const SubagentCard = memo(function SubagentCard({ step }: { step: ToolSte
       >
         <Bot className="size-4 shrink-0 text-primary" aria-label="子代理任务" />
         {isRunning ? (
-          <TextShimmer className="whitespace-nowrap">{shortName}</TextShimmer>
+          <TextShimmer className="min-w-0 flex-1 truncate">{shortName}</TextShimmer>
         ) : (
-          <span className="whitespace-nowrap">{shortName}</span>
+          <span className="min-w-0 flex-1 truncate">{shortName}</span>
         )}
         <span
           className={cn(
@@ -160,7 +160,7 @@ export const SubagentCard = memo(function SubagentCard({ step }: { step: ToolSte
                   ? '已暂停'
                   : '已完成'}
         </span>
-        <ChevronDown className="ml-auto size-4 shrink-0 text-muted-foreground/50 transition-transform group-data-[state=open]:rotate-180" />
+        <ChevronDown className="size-4 shrink-0 text-muted-foreground/50 transition-transform group-data-[state=open]:rotate-180" />
       </CollapsibleTrigger>
       <CollapsibleContent className="overflow-hidden">
         <div className="max-h-72 space-y-2 overflow-y-auto py-1 pr-1">

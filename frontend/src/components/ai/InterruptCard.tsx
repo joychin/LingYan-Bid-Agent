@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ArrowLeft, ArrowRight, Check, MessageCircleQuestion, ShieldQuestion, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, FileText, MessageCircleQuestion, ShieldQuestion, X } from 'lucide-react'
 import type { HitlDecision } from '@/api/client'
 import type { InterruptRequest } from '@/api/sse'
 import { TextShimmer } from '@/components/ai/TextShimmer'
@@ -206,6 +206,13 @@ export interface WizardProps {
   onNav: (dir: -1 | 1) => void
 }
 
+/** 提问 args 里带 guide_path（work/ 相对路径）时渲染「打开指引」按钮——视图动作，
+ *  不参与 resume；打开面板的回调由宿主传入。 */
+function guidePathOf(req: InterruptRequest): string {
+  const v = req.args?.guide_path
+  return typeof v === 'string' ? v.trim() : ''
+}
+
 /**
  * HITL 待裁决卡（run.interrupt 后渲染）。两种形态：
  * 含问答（单问=向导 N=1 特例）→ 逐项卡内作答（点选+补充输入框+提交）；
@@ -217,6 +224,7 @@ export function InterruptCard({
   onDecide = () => {},
   disabled = false,
   wizard,
+  onOpenWorkbench,
 }: {
   requests: InterruptRequest[]
   /** 审批决策回调（纯审批形态）；向导形态由 onNav 统一提交，不使用 */
@@ -224,10 +232,13 @@ export function InterruptCard({
   disabled?: boolean
   /** 含问答形态（单问/多问向导统一走这里） */
   wizard?: WizardProps
+  /** 提问带 guide_path 时的「打开指引」动作（面板覆盖式打开，ChatView 注入） */
+  onOpenWorkbench?: (path: string) => void
 }) {
   // hooks 必须在早返回之前调用（wizard 分支不使用 reason，仅保 hook 顺序稳定）
   const [reason, setReason] = useState('')
-  if (wizard) return <WizardCard requests={requests} disabled={disabled} {...wizard} />
+  if (wizard)
+    return <WizardCard requests={requests} disabled={disabled} {...wizard} onOpenWorkbench={onOpenWorkbench} />
 
   return (
     <div className="w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm">
@@ -284,7 +295,8 @@ function WizardCard({
   onApprovalChoice,
   onReasonChange,
   onNav,
-}: WizardProps & { requests: InterruptRequest[]; disabled: boolean }) {
+  onOpenWorkbench,
+}: WizardProps & { requests: InterruptRequest[]; disabled: boolean; onOpenWorkbench?: (path: string) => void }) {
   const total = requests.length
   const idx = Math.min(stepIndex, total - 1)
   const req = requests[idx]
@@ -350,6 +362,18 @@ function WizardCard({
             placeholder={options.length > 0 ? '补充说明（可选）…' : '输入你的回答…'}
             className="mt-2 w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-[13px] text-ink outline-none placeholder:text-muted-foreground focus:border-line-2 disabled:opacity-50"
           />
+          {guidePathOf(req) && onOpenWorkbench && (
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onOpenWorkbench(guidePathOf(req))}
+              title={guidePathOf(req)}
+              className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-line bg-background px-2.5 py-1.5 text-xs font-medium text-ink-2 hover:border-line-2 hover:text-foreground disabled:opacity-50"
+            >
+              <FileText className="h-3.5 w-3.5" />
+              打开指引查看 / 修改
+            </button>
+          )}
         </div>
       ) : (
         <div className="mt-2.5">

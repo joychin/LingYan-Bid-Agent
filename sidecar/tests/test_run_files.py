@@ -21,7 +21,7 @@ def _write(tid: str, rel: str, content: str = "x"):
 
 
 def test_snapshot_scope(ws):
-    """收录范围与工作台面板同口径：只收 .md；json/隐藏文件/artifacts 产物包子树不收。"""
+    """收录范围与工作台面板同口径：只收 .md/.docx；json/隐藏文件/artifacts 产物包子树不收。"""
     tid = "t_snap"
     artifact_store.ensure_task_skeleton(tid)
     _write(tid, "analysis/structure.md")
@@ -29,8 +29,15 @@ def test_snapshot_scope(ws):
     _write(tid, "parse/招标文件/招标文件.md")
     _write(tid, ".hidden.md")  # 隐藏文件（工作台 .bak 兜底同族）
     _write(tid, "artifacts/art_abc123def456/meta.md")  # 产物包子树：产物卡通道
+    _write(tid, "body/3.1 需求分析.docx", content="binary")  # docx 正文节（面板有只读视图）
+    # 恢复点目录（docx_ops replace / 工作台编辑同款命名）——.bak 不匹配 rglob
+    _write(tid, "body/3.1 需求分析.docx.restorepoints/20260906000000000000.bak", content="old")
     snap = run_files.snapshot_work_files(tid)
-    assert set(snap) == {"analysis/structure.md", "parse/招标文件/招标文件.md"}
+    assert set(snap) == {
+        "analysis/structure.md",
+        "parse/招标文件/招标文件.md",
+        "body/3.1 需求分析.docx",
+    }
     # 无任务（会话缺 task_id 兜底）/ 任务目录不存在
     assert run_files.snapshot_work_files(None) is None
     assert run_files.snapshot_work_files("t_nope") == {}

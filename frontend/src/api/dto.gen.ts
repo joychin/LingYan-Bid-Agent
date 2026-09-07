@@ -81,6 +81,7 @@ export interface InterruptRequestPayload {
   };
   description?: string;
   allowed?: string[];
+  interrupt_id?: string;
 }
 export interface KbFieldSource {
   value: string;
@@ -248,6 +249,7 @@ export interface RunInfo {
   created_at: string;
   requests?: InterruptRequestPayload[] | null;
   last_seq?: number | null;
+  token_usage?: string | null;
 }
 /**
  * GET /runs/{rid}/snapshot：运行中过程快照（SSE 断线/页面重挂对账用）。

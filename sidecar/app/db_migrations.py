@@ -11,7 +11,7 @@
 
 import sqlite3
 
-LATEST = 21
+LATEST = 22
 
 
 def _add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -129,6 +129,10 @@ MIGRATIONS: list[tuple[int, object]] = [
     (
         21,
         lambda c: _migrate_materials_v2(c),
+    ),
+    (
+        22,
+        lambda c: _add_column(c, "runs", "token_usage", "ALTER TABLE runs ADD COLUMN token_usage TEXT"),
     ),
 ]
 

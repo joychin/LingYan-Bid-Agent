@@ -222,7 +222,8 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    前端先重取消息再拆活卡，files 经消息接口到达）。数据来源=`app/run_files.py`：
    run_stream 起点（task_id 解析 + 骨架自愈之后）对 `<task>/work/` 做快照，终态前
    diff 得「本轮新建/修改」清单（纯机械、无锁、不依赖工具登记；文件系统唯一真值）。
-   收录范围与工作台面板同口径：work/ 下 `.md`、跳隐藏文件与 `work/artifacts/`
+   收录范围与工作台面板同口径：work/ 下 `.md` 与 `.docx`（2026-09-06 docx 直出
+   后扩收正文节文件）、跳隐藏文件与 `work/artifacts/`
    子树（产物包由产物卡展示，用户拍板；json 机器文件不可点开不收）。持久化=
    `run_traces` 新列 `files`（迁移 15，PRAGMA 探测 ALTER 同 reasoning 先例），
    与 tools/todos 同一挂载点（同 run 最终/中断消息才带）；HITL 续跑分段=
@@ -235,6 +236,34 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    mtime/size 判修改=同内容重写也显示修改（parse_document 同 hash 幂等已避免
    最常见情形）；旧 run 无 files 恒 `[]`；waiting_input 暂停段的部分文件活卡
    期间不可见、续跑终态后随最终消息显示（与 tools 同挂载语义）。
+   **契约 additive 扩展（2026-09-06 30M token 修复批）**：①**多中断恢复**——
+   events._hitl_requests 遍历全部 Interrupt 合并 requests 并逐条附 `interrupt_id`
+   （此前只取第一个：同轮双 ask_human 的第二个悬空，resume 撞 langgraph
+   「must specify the interrupt id」直接打死 run，实测复现）；resume 端
+   `_resume_map` 按快照 interrupt_id 分组组装 `{id: {"decisions":[…]}}` 映射
+   （langgraph 对多 pending 的硬要求），旧快照无 id 走单中断旧格式；run_stream
+   增 `resume_payload` 参数。②**任务上下文注入 run 内冻结**
+   （`_task_context_block_frozen` + `_FROZEN_CTX`）——时间降为天级日期
+   （Claude Code 同款精度；秒级时间戳每次调用都变），便签/产物清单随块在 run
+   起点定格（中途更新不自动可见，模型按需 read_artifact），换 system 整 run
+   字节稳定吃前缀缓存——秒级时间戳曾把主线程缓存全废（正文 run 千万级 token
+   的主因；HITL 续跑同 run_id 沿用冻结块，续段缓存续上）。③**token 用量入库**
+   ——`app/token_usage.py` 在模型壳 `_NoThinkingRetryCompletions.create` 返回处
+   累计（主 agent+子代理共享模型实例全经过，runctx contextvars 传播），字段
+   input/output/cached（openai 标准 `prompt_tokens_details.cached_tokens` 与
+   DeepSeek 非标 `prompt_cache_hit_tokens` 都试）/reasoning；`runs.token_usage`
+   （迁移 22，JSON）终态与暂停经 `_usage_json_final` 合并落库（HITL 分段累计），
+   get_run / runs/latest 透出（additive）。④tender-body SKILL 第 0 步加
+   「已写节 × 重写指令 → ask 范围（全部/指定章/仅自查不过）」不默认全量重写
+   （实测整本 32 节被「重写一遍」全量重派的翻倍事故）；派发说明重排
+   「短名 → 共享块（任务前缀+承诺清单）→ 节差异」——共享内容字节一致前置，
+   各子代理共享更长缓存前缀。⑤**校验器误报分级**（同日二批，实测 81 次自查
+   94% 一次通过、5 次未通过里 3 次是校验器误判）：残留扫描按来源分两级——
+   硬级（显式名单+KB 元数据项目名/客户名）必须清零，**弱级（文件名主干）
+   降为疑似提示**（「流程管理」等通用产品词误报）；validate_body 的节级残留
+   命中全部弱级→warning、指引「需正文节点模式=—」降为提示并给表格类出路
+   （评标索引表/分项报价表被目录形态错标为需正文的兜底）；tender-outline
+   annotation.md 补「表格/索引/清单/填表类节点交付形态=模板或附件填充」。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。
@@ -294,7 +323,8 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   `app/tools/read.py`（`read_artifact`：同契约任务内唯一当前内容）；
   `app/tools/task_progress.py`（进度便签）；`app/runctx.py`（contextvars 传
   cid/rid/task_id/thinking 思考档位）；`app/run_files.py`（「本轮文件」起止快照 diff，
-  见铁律 3 的 additive 记录）。
+  见铁律 3 的 additive 记录）；`app/token_usage.py`（run 级模型用量累计，见铁律 3
+  的 2026-09-06 修复批）。
   `work/` 是**任务级**技能工作台（`<task>/work/`：parse→analysis→outline→body 的中间
   产物；2026-08-31 由 out/ 更名），跨任务互不串台；已知管线子目录同样预建
   （`_PROCESS_DIRS` = parse/analysis/outline/outline/fragments，任务创建 + run 启动
@@ -351,9 +381,68 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   工具 `assemble_tender`（读 work/analysis 三张机器输入表构建 MAND/TPL/REQ/SCORE 登记表
   （**行序=编号，注释行（含程序盖的修订标记/旧文件残留头）会被 registry 跳过**）+ work/outline 目录中间态
   →lineage_check→发布 `tender.directory` 成果）。
-  后续 Phase：tender-body / tender-flow skill（规划见 docs 讨论，
-  机器输入格式契约在 assemble_tender.py 模块 docstring）；大文件专项优化留在
+  后续 Phase：tender-flow skill（规划中）；大文件专项优化留在
   document-parse 阵地内迭代。
+- **投标流水线 Phase 3·第一批（2026-09-06，tender-body 打法固化）**：skill
+  `tender-body`（SKILL.md + references/{guide-format,section-writing}.md）——正文=
+  逐节回应的展开，产物为 `work/body/` 过程文件（**零新契约**；目录树节点
+  无稳定 id，正文文件名↔节点按「清洗后标题」对账，映射契约真值=`tools/body_contract.py`）。
+  **正文形态后续已切换为 docx 直出（第三批，一节一 .docx）**——写作与修订全走
+  docx_ops 工具族（建节/读视图/修订标记/合册），本段的 md 流程描述为打法起源，
+  现行形态以第三批为准。
+  流程五段：①check_pipeline_state（新增 `[body]` 段：指引/承诺清单存在性、已写节、
+  叶子对账、目录产物 content.json mtime vs 正文 mtime 新鲜度——**该工具首次引入
+  db/artifact 依赖**）②开工=生成 `work/body/写作指引.md`（每节一行：节｜模式｜依据｜
+  素材｜缺口；模式=素材修订/格式跟随/推理撰写「+」组合；素材列记素材块 id、缺标【缺】
+  =备料对账）→ ask_human 确认（**提问文案自带面板查看路径**——run 期间工作台列表不刷新
+  的已知缺口缓解）→ ask_human 收承诺值落 `work/body/关键事实与承诺.md`（事项｜值｜
+  说明；**承诺只出自清单，拍板前不写正文**）③逐节生成按指引模式路由（模板填充列待填
+  清单/容器跳过/待核验问人；缺料【待补】不阻塞；待澄清内联）④validate_body 节级自查
+  ⑤收尾待澄清/待补逐条点名。**素材先行五步**（references/section-writing.md）=检索→
+  **列使用计划（记块 id）**→素材贴底稿→改写适配→自查——2026-09-06 用户实测教训
+  「检索≠使用」的流程化修复，拷贝修订为默认模式。新工具 `validate_body(section,
+  block_ids)`（tools/validate_body.py）：按文件名分流——写作指引.md 校验表完整性
+  （叶子有行/模式合法/blk 可解析），其余 body md 校验占位清点（清单非错误）+旧名残留
+  （复用 check_residue 抽出的纯函数 scan_residue，行为零变化）+素材使用率（与选用块
+  同款归一化后 10 字 shingle 重叠率，<10% 提示未实质使用——提示不是门禁）。
+  `_PROCESS_DIRS` 加 body/（骨架自愈）；agent.py 主 prompt 路由句加 tender-body。
+  本批**串行写节**（并发子代理+兄弟摘要、全局跨节审计、语义审阅、字数校准留后续
+  批次）；联网检索模式=枚举预留未实现。
+- **投标流水线 Phase 3·第二批（2026-09-06，前端补齐+整本并发铺开）**：①前端三小件
+  ——ask_human 加可选 `guide_path` 参数（透传前端、工具体不消费，提问卡渲染
+  「打开指引」按钮直开 workbench 文件，InterruptCard/ChatView 两文件）+ run 终态
+  （agent.completed/error）invalidate `['workbench']`（run 期间新写的 body 文件结束
+  时自动进面板列表）+ WB_NAMES 显示名；②并发铺开——agent.py SUBAGENTS 加
+  `tender-body-writer` 子代理（interrupt_on:{}；先读 section-writing.md 按素材先行；
+  硬纪律=承诺只用派发说明给的清单值/缺料【待补】/裁决【待澄清】带回/**禁改指引与
+  承诺清单**——共享写点只归主线程，并发下唯一写边界），SKILL 第 2 步按范围分执行
+  方式：单节就地、多节（≥2）同一消息并发派发（**派发 description 必带清单缺一不
+  派**：任务前缀/输出路径/指引行/行号出处/承诺清单全部值/兄弟节开头摘要）、整本
+  按一级章节分批派批间汇报；③validate_body 加**全局模式**（section="body" 目录）：
+  承诺清单「事项｜值」每个值去空白归一化子串匹配扫全部正文节，未落正文点名
+  （单向清单→正文；反向不一致属语义审阅留批次 3）。
+- **投标流水线 Phase 3·第三批（2026-09-06，招标格式件拷贝+表格单元格修订）**：
+  ①新工具 `docx_source_inject`（tools/docx_ops.py）——任务 sources/ 的招标
+  docx 原件按「整文件或 md 行号区间（tolerate L 前缀）」元素级拷进正文节
+  （现场跑解析注册表拿 element_lines 确定性定位，不依赖任务侧解析落盘——
+  独立格式附件可能没走过 parse；basename+sources_dir containment，与
+  material_inject 共用图片/样式/编号迁移引擎）；场景=格式跟随节与模板填充类
+  格式件（投标函/授权书/一览表），pdf 原件无可拷元素维持文本成形。②
+  docx_section_revise 支持**表格单元格修订**：视图逐行展开 `[T1] R2：C1=文本
+  C2=（空）`（格截断 60 字、合并格标「同左/同上」）；edits 扩 {table,row,col}
+  寻址，action=replace（格内段落按接受视角定位复用 _tracked_replace）/
+  fill（仅限接受视角空格，新 `_tracked_fill` 整段落 w:ins 填空）；插行/删行/
+  嵌套表格不支持（在 Word 中改）；`_flatten_rejected` 自校验扩到格内段落
+  （表格内写坏同样拒存）。③**模板填充产出即并整本**（2026-09-06 用户拍板，
+  取代「不写正文不占位」旧口径）：docx_assemble_volume 对 NON_PROSE 叶子改
+  「有节文件→按树序发标题并入；无文件→跳过+计数行『模板填充类未产出 N 节
+  （按附件对待）』」；check_pipeline [body] extra 侧改全叶集合（iter_leaves）、
+  missing 侧维持 prose_leaves——格式件文件不再误报「无对应目录节点」。④
+  validate_body docx 节占位/残留定位标签：段落 P{i}、表格行 T{t}R{r}（
+  docx_ops.section_lines_labeled 单源，section_text_lines 变其投影）——与读
+  视图互查，修掉表格行被标越界 P 号的隐患。SKILL/section-writing/guide-format
+  /tender-body-writer prompt 同批接线（格式跟随扩拷原件支路、模板填充执行期
+  二分：格式表格类拷+填空产出 vs 物理附件类维持待填清单）。
 - **投标流水线 Phase 2（2026-08-25；多册并发 2026-08-26）**：skill `tender-outline`
   （SKILL.md + 6 references）：
   R1 响应文件分解（首个 LLM 裁量确认点=两问测试，多方案 ask_human）→ R2 初稿 +
@@ -388,6 +477,11 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   「只写触发+关键词」（删流程概述——obra 实测流程概述会让模型走捷径），主 system prompt
   三技能段同步瘦身为路由一句话（细节唯一真源=SKILL.md）。动因：Anthropic skill 最佳实践
   （自由度光谱/确定性下沉/plan-validate-execute）+ 用户「LLM 语义、程序机械」铁律。
+- **通用文本润色技能（2026-09-06 引入）**：`humanizer-zh`——第三方 MIT 技能
+  （op7418/Humanizer-zh，SKILL.md 原样移植，frontmatter 加 `license: MIT`，处理流程接
+  `_shared/response-guidelines.md`），去除中文文本的 AI 写作痕迹（夸大的象征意义/宣传语/
+  模糊归因/破折号/三段式/AI 词汇/否定式排比等，基于维基百科 Signs of AI writing）；正文
+  草稿润色等场景用，主 prompt 路由句已登记，deepagents 启动自动发现加载。
 - **frontend**：`src/artifacts/registry.ts`（kind/schema@version → Processor 注册表 + 启动契约对账）；
   `components/processors/`（DirectoryProcessor 目录树编辑 / NoteProcessor 通用笔记）；
   `components/ArtifactOpenHost.tsx`（通用容器，未命中契约明确报不支持，**无 JSON 兜底预览**）；
@@ -580,6 +674,11 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
     该连接进程存活期**只开一条、永不关闭**（rebuild 只换 agent 对象复用同一 conn/saver），
     否则运行中 PUT /settings 会让正在跑的旧流 checkpoint 崩溃。
   - 新增工具：在 `app/tools/` 里 `@tool` + zod（或 docstring schema），并加入 `tools/__init__.TOOLS`；
+  - **前缀缓存铁律（2026-09-06 30M token 事故的教训）**：进 system/请求前缀的任何内容
+    必须整个 run 内字节稳定——每次调用现算的易变项（时间戳/便签/产物清单）一律 run
+    冻结（`_task_context_block_frozen` 先例）或挪请求末尾；模型供应商前缀缓存按字节
+    前缀匹配，断点之后全部按未命中全价计费（DeepSeek 命中价约 1/10-1/30）。新加
+    「每次模型调用注入 XXX」类功能前先过这道检查。
     领域事件由 server 装配的 eventSink 落库，工具不直接写 UI。
   - **Artifact 存储内容是原始 dict 序列化——Pydantic 校验只验证、不物化默认值**，
     合法内容的 `directory/children/name` 键仍可能缺失，前端 Processor 必须防御性解析（`?? []`）。
@@ -620,18 +719,41 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
     （SIDECAR_TOKEN + TENDER_HEALTHZ_NONCE）——模型配置与凭证 2026-08-29 起在 sidecar
     的 app.db，钥匙串/MODEL_KEYS 注入/设置类 command（set_model_key 等）已全部移除；
     `stopping` 标志保证应用退出后 supervisor 不再拉起孤儿进程。
-  - 生产分发限制：目前用 `Command` 直接 spawn `.venv/bin/python -m uvicorn` + 自定义 supervisor
-    （随机端口/token 注入/healthz 探活/退避重启），dev 期没问题，甚至比官方 `sidecar()` 更强
-    （官方不做健康检查/鉴权/重启）；但 `tauri build` 分发时打包应用找不到 Python。届时须转官方模式：
-    PyInstaller 把 sidecar 打成二进制 → `bundle.externalBin` 注册（`-$TARGET_TRIPLE` 后缀）→
-    shell 插件 `sidecar()` 拉起（capabilities 配 `shell:allow-spawn`），保留现有 supervisor
-    探活/重启逻辑、仅把 python 路径换成打包二进制。
-    参考 https://github.com/dieharders/example-tauri-python-server-sidecar
+  - 打包分发（2026-09-07 已实施，取代原「生产分发限制」备注）：PyInstaller one-file 冻结
+    sidecar → `bundle.externalBin` 注册（`binaries/tender-agent-sidecar`，构建产物带
+    `-$TARGET_TRIPLE` 后缀）→ tauri-plugin-shell `app.shell().sidecar()` 拉起（capabilities
+    加 `shell:allow-spawn`，scope 限定本 sidecar 二进制）。sidecar.rs 启动探测**双模式**：
+    `sidecar_dir()` 下有 pyproject.toml=dev（走 `.venv/bin/python` 原路径，`npm run dev`
+    零变化），否则 bundled（shell 插件拉起 + `DATA_DIR=app_data_dir` env 注入——one-file
+    下 Python `__file__` 在临时解压目录 `_MEIPASS`，不注入数据全丢；config.py 的 env 优先
+    逻辑零改动生效；RESOLVED_DATA_DIR OnceLock 供 export_diagnostics/reveal 前缀校验同源）。
+    supervisor（healthz nonce/退避/熔断/稳定窗口）全保留，仅句柄双形态化：dev=std Child
+    （try_wait 轮询+进程组 SIGKILL），bundled=CommandChild（**无 wait/try_wait**——stderr
+    转发线程消费 CommandEvent 通道置终态标志，通道不消费会堵死子进程；退出分类共用
+    classify_termination 纯函数）。杀进程 bundled 模式=SIGTERM→轮询终态≤3s→按端口
+    `lsof -ti tcp:PORT` 清孤儿→SIGKILL（**实测 macOS one-file 确是 bootloader+python 双进程**，
+    只杀 bootloader 留孤儿占端口（tauri#11686 同款）；SIGTERM 会被 bootloader 转发、整树
+    正常退出），Windows=taskkill /T /F。打包三件套在 sidecar/：`run_frozen.py` 冻结入口
+    （app/main.py 是相对导入不能直当入口脚本；`--smoke` 冻结自检八项：pymupdf/jieba/
+    FTS5/trafilatura/openai 懒资源/agent 栈/server 栈/app.main）+ `tender-agent-sidecar.spec`
+    （datas 收 `app/skills/**`；collect_data trafilatura+**justext**（stoplists 是冻结冒烟
+    抓的漏）；collect_submodules 保底 deepagents/langchain 全家/openai——3.x 懒资源代理是
+    纯字符串 import_module；**upx=False 硬性**，UPX 压缩产物过不了 codesign）+
+    `build_sidecar.sh`（**独立 .build-venv**=uv 管的 python-build-standalone 3.12 按
+    uv.lock 装，绝不用日常 .venv——它是 miniforge 软链，conda dylib 指前缀、用户机必炸；
+    锁版 pyinstaller==6.14.1；产物落 `src-tauri/binaries/`（gitignore））。
+    `npm run build:sidecar` / `build:release`（先 sidecar 后 tauri build，有意不塞
+    beforeBuildCommand）。冒烟基线：89MB 二进制、冷启动至 healthy 11-14s（bundled 探活
+    窗口放宽到 60s）。已知坑备案：Windows NSIS 覆盖安装不更新 externalBin（tauri#15134，
+    靠版本号变化规避）；未签名 one-file 杀软误报偏高（正式 Developer ID 签名大幅缓解，
+    Tauri bundler 会自动逐个签 externalBin 并公证）；macOS universal 需 lipo 合成 sidecar
+    或发双包；Linux /tmp noexec 需 `--runtime-tmpdir`。签名/CI/Linux/自动更新器=后续门未做。
   - ~~钥匙串用 macOS `security` CLI 子进程~~（2026-08-29 已移除：Key 改存 app.db，见铁则 2；
     历史：keyring crate 在此 macOS 写 Data Protection 钥匙串，`security` CLI 不可见）。
-  - 已装插件仅两枚官方 plumbing：`tauri-plugin-single-instance`（须第一个注册——GUI 双开会撞
+  - 已装插件仅三枚官方 plumbing：`tauri-plugin-single-instance`（须第一个注册——GUI 双开会撞
     agent.db 单库 checkpoint，二次启动聚焦已有窗口，不做互斥协调）+ `tauri-plugin-window-state`
-    （记住窗口大小/位置）；均纯 Rust 侧、零 IPC 权限、前端零依赖。
+    （记住窗口大小/位置）+ `tauri-plugin-shell`（2026-09-07 打包分发：bundled 模式经
+    `app.shell().sidecar()` 拉起冻结 sidecar，见上条）；均纯 Rust 侧使用、前端零依赖。
 - **frontend**：sidecar 地址解析在 `src/api/client.ts` 的 `getSidecarInfo()`——
   Tauri 环境走 `__TAURI_INTERNALS__.invoke('get_sidecar_info')`；浏览器开发模式默认返回
   相对路径（`/api/...`），由 `vite.config.ts` 的 `server.proxy` 同源转发到 8765——CORS

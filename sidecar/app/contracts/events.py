@@ -114,6 +114,9 @@ class InterruptRequestPayload(BaseModel):
     args: dict
     description: str = ""
     allowed: list[str] = ["approve", "reject"]
+    # 归属的 langgraph Interrupt id（additive，2026-09-06 多中断恢复：resume 按 id
+    # 分组映射；旧快照/前端不消费为可缺省）
+    interrupt_id: str = ""
 
 
 class RunInterrupt(BaseModel):

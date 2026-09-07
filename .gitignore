@@ -20,6 +20,8 @@ coverage/
 
 # ─── sidecar/：Python 3.12 + uv + FastAPI + pytest ───────
 .venv/
+# PyInstaller 冻结用的独立构建环境（uv 管的 python-build-standalone，见 build_sidecar.sh）
+.build-venv/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -37,6 +39,8 @@ sidecar/data/
 # ─── src-tauri/：Tauri 2 / Rust（Cargo.lock 保留入库）─────
 src-tauri/target/
 src-tauri/gen/
+# PyInstaller 冻结产物（build_sidecar.sh 生成，tauri externalBin 捆绑，构建期存在即可）
+src-tauri/binaries/
 
 # ─── 环境变量 / 密钥（.env.example 保留模板）──────────────
 .env

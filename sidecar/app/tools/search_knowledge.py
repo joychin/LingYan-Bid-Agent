@@ -240,7 +240,9 @@ def search_references(query: str) -> str:
     Returns:
         素材块命中（标题+备注+来源文件+多区间行号+真实字数）与精读指引；命中文件
         附全部块清单（该来源文件的能力全景）。**拷贝素材后必须调用 check_name_residue
-        扫描旧项目名/客户名残留（old_names 传来源文件名中的机构名）**。
+        扫描旧项目名/客户名残留（old_names 传来源文件名中的机构名）**。写正文节时
+        docx 原件的块优先 docx_material_inject 按块 id 整体保真注入（元素级拷贝），
+        纯文本参考才自行改写。
     """
     try:
         hits = _dedupe(_search_all(query, limit=24))
@@ -298,7 +300,8 @@ def search_references(query: str) -> str:
             )
         out.append(
             "精读指引：用 read_file 读 `materials/parse/<文件名去扩展名>/<原文件名>.md` 的对应行号区间"
-            "（拷贝修订取块的全部区间）。"
+            "（拷贝修订取块的全部区间）。写正文节时，docx 原件的块优先 docx_material_inject"
+            " 按块 id 整体保真注入再定向修订（表格/图片/格式零转写）；非 docx 原件才按文本参考改写。"
         )
         out.append(_evidence_line(ev))
         return "\n".join(out)

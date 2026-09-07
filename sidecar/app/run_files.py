@@ -4,11 +4,13 @@ run 开始时对 <task>/work/ 做文件清单快照，终态时重新枚举做 d
 唯一真值，不依赖任何工具配合登记（未来加新工具自动覆盖），「新建/修改」的判定
 是精确的（开始前是否已存在 + mtime/size 是否变化）。
 
-收录范围与工作台面板同一先例（api/workbench.py 的 rglob("*.md") + 跳隐藏文件，
-「面板不是调试器」）：只收 work/ 下的 .md 过程文件；json/机器文件不可点开不收；
-work/artifacts/（登记产物包）显式跳过--产物有自己的展示通道（产物卡），且包内
+收录范围与工作台面板同一先例（api/workbench.py 的 rglob + 跳隐藏文件，
+「面板不是调试器」）：只收 work/ 下的 .md/.docx 过程文件（docx=tender-body 正文
+节与整本合册产物，面板有只读视图与 Finder 唤起）；json/机器文件不可点开不收；
+work/artifacts/（登记产物包）显式跳过——产物有自己的展示通道（产物卡），且包内
 本就无 .md。path 存 posix 相对路径（相对 work/），与 WorkbenchFile.path 同约定，
-前端 chip 可直接透传给工作台查看器。
+前端 chip 可直接透传给工作台查看器。恢复点目录（<文件名>.restorepoints/，.bak
+后缀）天然不匹配 rglob。
 
 有意接受的限制：
 - 同任务并发 run 互不感知，diff 可能把对方 run 的写入归到本 run（无锁铁则）。
@@ -18,21 +20,24 @@ work/artifacts/（登记产物包）显式跳过--产物有自己的展示通道
 
 from . import artifact_store
 
+_SUFFIXES = (".md", ".docx")
 
-def _walk_work_md(task_id: str) -> dict[str, tuple[int, int]]:
-    """枚举 work/ 下 .md 文件 -> {posix 相对路径: (mtime_ns, size)}；目录缺失返回 {}。"""
+
+def _walk_work_files(task_id: str) -> dict[str, tuple[int, int]]:
+    """枚举 work/ 下 .md/.docx 文件 -> {posix 相对路径: (mtime_ns, size)}；目录缺失返回 {}。"""
     root = artifact_store.work_dir(task_id)
     if not root.is_dir():
         return {}
     out: dict[str, tuple[int, int]] = {}
-    for p in root.rglob("*.md"):
-        if not p.is_file() or p.name.startswith("."):
-            continue
-        rel = p.relative_to(root)
-        if rel.parts[0] == "artifacts":  # 产物包子树：产物卡通道，不进「本轮文件」
-            continue
-        st = p.stat()
-        out[rel.as_posix()] = (st.st_mtime_ns, st.st_size)
+    for suffix in _SUFFIXES:
+        for p in root.rglob(f"*{suffix}"):
+            if not p.is_file() or p.name.startswith("."):
+                continue
+            rel = p.relative_to(root)
+            if rel.parts[0] == "artifacts":  # 产物包子树：产物卡通道，不进「本轮文件」
+                continue
+            st = p.stat()
+            out[rel.as_posix()] = (st.st_mtime_ns, st.st_size)
     return out
 
 
@@ -40,7 +45,7 @@ def snapshot_work_files(task_id: str | None) -> dict[str, tuple[int, int]] | Non
     """run 起点快照；task_id 为空（会话无任务，理论不发生）返回 None=无探测语义。"""
     if not task_id:
         return None
-    return _walk_work_md(task_id)
+    return _walk_work_files(task_id)
 
 
 def diff_work_files(
@@ -53,7 +58,7 @@ def diff_work_files(
     """
     if start is None or not task_id:
         return None
-    end = _walk_work_md(task_id)
+    end = _walk_work_files(task_id)
     files: list[dict] = []
     for path, stat in end.items():
         if path not in start:

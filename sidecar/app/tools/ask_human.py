@@ -11,7 +11,7 @@ from langchain_core.tools import tool
 
 
 @tool
-def ask_human(question: str, options: str = "", multiple: bool = False) -> str:
+def ask_human(question: str, options: str = "", multiple: bool = False, guide_path: str = "") -> str:
     """当你缺少关键信息、或面临需要用户拍板的取舍时，用本工具向用户提问，不要自行猜测。
 
     question 两段式写法：第一行是一句完整、具体的问题（中文）；随后换一行，
@@ -27,6 +27,10 @@ def ask_human(question: str, options: str = "", multiple: bool = False) -> str:
     标记（如「三册分立（资格/商务/技术）（推荐）；技术商务合并+报价单独」），
     前端显示为推荐角标。multiple 为 true 时允许多选（默认单选）。回答以
     「已选：…」+ 补充文字的形式回传。
+
+    guide_path 可选：提问涉及让用户查看/修改某个工作台文件时，传该文件的
+    work/ 相对路径（如 body/写作指引.md）——前端会在提问卡上渲染「打开」按钮，
+    一键在右侧面板打开该文件；不涉及则不传。
 
     提问会暂停任务并展示给用户，等待回答后继续。适用场景：招标文件里互相矛盾
     的条款怎么取舍、缺少必须由用户提供的信息（如资质、报价策略）、目录结构

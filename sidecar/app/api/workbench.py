@@ -1,5 +1,5 @@
 """任务工作树 API（2026-08-31 重构：out/ → work/）：
-列出 / 读取 / 编辑 work/ 下的 markdown 过程产物。
+列出 / 读取 / 编辑 work/ 下的 markdown 过程产物 + docx 正文只读视图。
 
 过程文件不是产物（不进索引、无事件）：它是任务级共享、随流水线重跑覆盖的
 活中间态（parse→analysis→outline 的产物）。编辑走「探测 + 用户裁决 + 恢复点
@@ -8,7 +8,9 @@
 栈内最旧一条）、成功后盖「修订=用户」头标记（模型重跑前的提示线索，见
 tender-analysis/tender-outline SKILL 纪律）。
 json/隐藏文件不进列表（机器格式，面板不是调试器）；parse/ 只读（引用行号的
-证据基准，手改=篡改原文）。
+证据基准，手改=篡改原文）；.docx（tender-body 正文节/整本合册）只读——文本
+视图走 /workbench/docx-view，格式与修订标记的审阅在 Word（abs_path 供前端
+reveal 唤起）。
 """
 
 import hashlib
@@ -37,10 +39,14 @@ def _require_task(task_id: str) -> None:
 
 
 def _resolve(task_id: str, path: str) -> Path:
-    """把相对路径收进 <task>/work/（resolve 防 ../ 越界）；只放行 .md。"""
+    """把相对路径收进 <task>/work/（resolve 防 ../ 越界）；放行 .md 与 .docx。"""
     root = artifact_store.work_dir(task_id).resolve()
     target = (root / path).resolve()
-    if not target.is_relative_to(root) or target.suffix != ".md" or target.name.startswith("."):
+    if (
+        not target.is_relative_to(root)
+        or target.suffix not in (".md", ".docx")
+        or target.name.startswith(".")
+    ):
         raise HTTPException(status_code=404, detail="工作文件不存在")
     return target
 
@@ -121,6 +127,17 @@ def _has_restore(target: Path) -> bool:
 def _entry(p: Path, root: Path) -> dict:
     rel = p.relative_to(root).as_posix()
     st = p.stat()
+    if p.suffix == ".docx":
+        # docx 无「修订=用户」头部语义；不可编辑（只读视图 + Word 审阅）；
+        # 恢复点目录公式与 md 同款（<文件名>.restorepoints/），_has_restore 直接可用
+        return {
+            "path": rel,
+            "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+            "size": st.st_size,
+            "revised": False,
+            "editable": False,
+            "has_restore": _has_restore(p),
+        }
     text_head = ""
     with p.open(encoding="utf-8", errors="replace") as f:
         text_head = f.readline()
@@ -136,15 +153,25 @@ def _entry(p: Path, root: Path) -> dict:
 
 @router.get("/workbench")
 async def list_workbench(task_id: str):
-    """列出 work/ 全部 markdown（json/隐藏文件排除），扁平相对路径清单。"""
+    """列出 work/ 全部 markdown 与 docx（json/隐藏文件排除），扁平相对路径清单。"""
     _require_task(task_id)
     root = artifact_store.work_dir(task_id)
     entries: list[dict] = []
     if root.is_dir():
-        for p in sorted(root.rglob("*.md")):
+        for p in sorted(list(root.rglob("*.md")) + list(root.rglob("*.docx"))):
             if not p.name.startswith(".") and p.is_file():
                 entries.append(_entry(p, root))
     return {"files": entries}
+
+
+def _reject_docx(target: Path, *, writing: bool) -> None:
+    """docx 走专用只读通道：md 的 meta/content/写/恢复端点一律明确拒绝（不猜二进制）。"""
+    if target.suffix == ".docx":
+        hint = (
+            "编辑请用 Word（「在文件夹中显示」后双击打开），面板只提供只读视图"
+            if writing else "docx 的只读文本视图走 GET /workbench/docx-view"
+        )
+        raise HTTPException(status_code=400, detail=f"docx 是 Word 正文文件（二进制）——{hint}")
 
 
 @router.get("/workbench/meta")
@@ -154,6 +181,7 @@ async def read_meta(task_id: str, path: str):
     target = _resolve(task_id, path)
     if not target.is_file():
         raise HTTPException(status_code=404, detail="工作文件不存在")
+    _reject_docx(target, writing=False)
     text = target.read_text(encoding="utf-8")
     return {
         "hash": _hash(text),
@@ -169,6 +197,7 @@ async def read_content(task_id: str, path: str):
     target = _resolve(task_id, path)
     if not target.is_file():
         raise HTTPException(status_code=404, detail="工作文件不存在")
+    _reject_docx(target, writing=False)
     text = target.read_text(encoding="utf-8")
     return {
         "content": text,
@@ -177,6 +206,27 @@ async def read_content(task_id: str, path: str):
         "editable": not path.startswith("parse/"),
         "has_restore": _has_restore(target),
     }
+
+
+@router.get("/workbench/docx-view")
+async def read_docx_view(task_id: str, path: str):
+    """docx 正文只读文本视图：段落编号+样式+图片/修订标记+表格概览。
+
+    与模型侧 docx_section_read 是同一份序列化（tools/docx_ops.view_lines）——
+    面板不渲染格式：浏览内容结构用本视图，看格式/审修订标记经 abs_path
+    reveal 到文件夹后用 Word 打开。不进 dto 契约（与 /workbench/meta 同先例）。
+    """
+    _require_task(task_id)
+    target = _resolve(task_id, path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="工作文件不存在")
+    if target.suffix != ".docx":
+        raise HTTPException(status_code=400, detail="本端点只服务 .docx（markdown 用 /workbench/content）")
+    from docx import Document
+
+    from ..tools.docx_ops import view_lines
+
+    return {"lines": view_lines(Document(str(target))), "abs_path": str(target)}
 
 
 class WorkbenchWrite(BaseModel):
@@ -193,6 +243,7 @@ async def write_content(body: WorkbenchWrite):
     target = _resolve(body.task_id, body.path)
     if not target.is_file():
         raise HTTPException(status_code=404, detail="工作文件不存在")
+    _reject_docx(target, writing=True)
     if body.path.startswith("parse/"):
         raise HTTPException(status_code=403, detail="解析产物只读（引用行号的证据基准，修改请重新上传解析）")
     current = target.read_text(encoding="utf-8")
@@ -217,6 +268,7 @@ async def restore_backup(body: dict):
     target = _resolve(task_id, path)
     if not target.is_file():
         raise HTTPException(status_code=409, detail="没有可恢复的上一版")
+    _reject_docx(target, writing=True)
     _adopt_legacy_backup(target)
     points = _restore_points(target)
     if not points:

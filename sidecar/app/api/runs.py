@@ -36,6 +36,23 @@ class ResumeBody(BaseModel):
     decisions: list[DecisionBody] = Field(min_length=1)
 
 
+def _resume_map(requests: list, decisions: list) -> dict | None:
+    """多中断恢复映射 {interrupt_id: {"decisions": [子集]}}（langgraph 硬要求）。
+
+    同一轮多个 ask_human 各产生一个 pending Interrupt，恢复值必须是 {中断id: 值}
+    映射（langgraph _loop：非映射且 pending>1 直接 RuntimeError）。快照里全部条目
+    都带 interrupt_id（2026-09-06 起归一化附上）才组装映射；旧快照无 id 返回 None，
+    走单中断兼容的 {"decisions": [...]} 旧格式。
+    """
+    if not requests or not all(isinstance(r, dict) and r.get("interrupt_id") for r in requests):
+        return None
+    grouped: dict[str, dict] = {}
+    for r, d in zip(requests, decisions):
+        iid = r["interrupt_id"]
+        grouped.setdefault(iid, {"decisions": []})["decisions"].append(d)
+    return grouped
+
+
 @router.get("/runs/active")
 async def active_runs():
     """占用中的 run 清单（running/waiting_input）：侧栏跨会话状态指示的轻量轮询端点。"""
@@ -116,6 +133,7 @@ async def resume(rid: str, body: ResumeBody):
             # 续跑沿用首段档位/模型（旧库空串兜底 low / default），客户端无需重传
             thinking=run.get("thinking") or "low",
             model=run.get("model") or None,
+            resume_payload=_resume_map(requests, decisions),
         )
     )
     logger.info("run %s 已按用户裁决续跑（%s）", rid, ",".join(d["type"] for d in decisions))

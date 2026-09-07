@@ -512,6 +512,8 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
       // 流式累积文本与落库内容一致，替换是无缝的（settle 在消息拉回后执行）
       return result(markTerminal(s, data.run_id), [
         { kind: 'settle-after-messages', action: { type: 'settle-completed' } },
+        // run 期间模型可能新写了工作台文件（body/ 指引与正文），结束时刷新面板列表
+        { kind: 'invalidate', queryKey: ['workbench'] },
       ])
     case 'agent.error':
       return result(markTerminal(s, data.run_id), [
@@ -519,6 +521,7 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
           kind: 'settle-after-messages',
           action: { type: 'settle-error', error: data.error ?? '未知错误', code: data.code ?? null },
         },
+        { kind: 'invalidate', queryKey: ['workbench'] },
       ])
     default:
       return result(orig)

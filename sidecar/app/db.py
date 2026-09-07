@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS runs(
   interrupt TEXT, last_seq INTEGER NOT NULL DEFAULT 0,
   pause_msg_id TEXT,
   thinking TEXT NOT NULL DEFAULT '',
-  model TEXT NOT NULL DEFAULT '');
+  model TEXT NOT NULL DEFAULT '',
+  token_usage TEXT);
 CREATE TABLE IF NOT EXISTS app_settings(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL);
@@ -553,39 +554,52 @@ def create_run(cid: str, thinking: str = "low", model: str = "") -> dict:
     return {"id": rid, "conversation_id": cid, "status": "running", "error": None, "created_at": now, "thinking": thinking, "model": model}
 
 
-def finish_run(rid: str, status: str, error: str | None = None, last_seq: int | None = None) -> None:
+def finish_run(
+    rid: str, status: str, error: str | None = None, last_seq: int | None = None,
+    token_usage_json: str | None = None,
+) -> None:
     """run 收尾。last_seq 回写终态事件序号（此前只有 interrupt_run 写过——续跑完成后
-    runs.last_seq 永远停在暂停值，对账/排查拿到的是错数）。"""
+    runs.last_seq 永远停在暂停值，对账/排查拿到的是错数）。token_usage_json 是本 run
+    的模型用量快照（input/output/cached/reasoning，agent 层 take 出来的 JSON 文本，
+    None=保留旧值——HITL 分段落库时首段已写，续段无新增时不覆盖）。"""
+    sets = ["status=?", "error=?"]
+    args: list = [status, error]
+    if last_seq is not None:
+        sets.append("last_seq=?")
+        args.append(last_seq)
+    if token_usage_json is not None:
+        sets.append("token_usage=?")
+        args.append(token_usage_json)
+    args.append(rid)
     conn = _conn()
     try:
-        if last_seq is not None:
-            conn.execute(
-                "UPDATE runs SET status=?, error=?, last_seq=? WHERE id=?",
-                (status, error, last_seq, rid),
-            )
-        else:
-            conn.execute("UPDATE runs SET status=?, error=? WHERE id=?", (status, error, rid))
+        conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id=?", args)
     finally:
         conn.close()
 
 
-def finish_run_if_running(rid: str, status: str, error: str | None = None, last_seq: int | None = None) -> bool:
+def finish_run_if_running(
+    rid: str, status: str, error: str | None = None, last_seq: int | None = None,
+    token_usage_json: str | None = None,
+) -> bool:
     """终态守卫版收尾：仅当 run 仍处 running 时写入，返回是否落库。
 
     供 agent 外层异常兜底使用——worker 分支已落的终态不被覆盖：原始 error 文案
     不被内部异常文案顶掉、completed 不被翻成 error（error 事件照发，DB 真值不动）。"""
+    sets = ["status=?", "error=?"]
+    args: list = [status, error]
+    if last_seq is not None:
+        sets.append("last_seq=?")
+        args.append(last_seq)
+    if token_usage_json is not None:
+        sets.append("token_usage=?")
+        args.append(token_usage_json)
+    args.append(rid)
     conn = _conn()
     try:
-        if last_seq is not None:
-            cur = conn.execute(
-                "UPDATE runs SET status=?, error=?, last_seq=? WHERE id=? AND status='running'",
-                (status, error, last_seq, rid),
-            )
-        else:
-            cur = conn.execute(
-                "UPDATE runs SET status=?, error=? WHERE id=? AND status='running'",
-                (status, error, rid),
-            )
+        cur = conn.execute(
+            f"UPDATE runs SET {', '.join(sets)} WHERE id=? AND status='running'", args
+        )
         return cur.rowcount > 0
     finally:
         conn.close()
@@ -595,7 +609,7 @@ def get_run(rid: str) -> dict | None:
     conn = _conn()
     try:
         row = conn.execute(
-            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq, pause_msg_id, thinking, model"
+            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq, pause_msg_id, thinking, model, token_usage"
             " FROM runs WHERE id=?",
             (rid,),
         ).fetchone()
@@ -604,16 +618,26 @@ def get_run(rid: str) -> dict | None:
     return dict(row) if row else None
 
 
-def interrupt_run(rid: str, requests: list, last_seq: int, pause_msg_id: str | None = None) -> None:
+def interrupt_run(
+    rid: str, requests: list, last_seq: int, pause_msg_id: str | None = None,
+    token_usage_json: str | None = None,
+) -> None:
     """HITL 暂停：置 waiting_input 并保存快照（前端恢复审批卡）与事件序号（续段续接）。
     pause_msg_id 记录暂停时落的半截消息——续跑段终止且无新产出时据此改写其
-    「等待你的输入…」标记（retire_pause_marker），避免对话停在已失效的等待态。"""
+    「等待你的输入…」标记（retire_pause_marker），避免对话停在已失效的等待态。
+    token_usage_json 落半程用量（续段累计时 agent 层把首段值加回再落）。"""
     conn = _conn()
     try:
-        conn.execute(
-            "UPDATE runs SET status='waiting_input', interrupt=?, last_seq=?, pause_msg_id=? WHERE id=?",
-            (json.dumps(requests, ensure_ascii=False), last_seq, pause_msg_id, rid),
-        )
+        if token_usage_json is not None:
+            conn.execute(
+                "UPDATE runs SET status='waiting_input', interrupt=?, last_seq=?, pause_msg_id=?, token_usage=? WHERE id=?",
+                (json.dumps(requests, ensure_ascii=False), last_seq, pause_msg_id, token_usage_json, rid),
+            )
+        else:
+            conn.execute(
+                "UPDATE runs SET status='waiting_input', interrupt=?, last_seq=?, pause_msg_id=? WHERE id=?",
+                (json.dumps(requests, ensure_ascii=False), last_seq, pause_msg_id, rid),
+            )
     finally:
         conn.close()
 
@@ -717,7 +741,7 @@ def get_latest_run(cid: str) -> dict | None:
     conn = _conn()
     try:
         row = conn.execute(
-            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq"
+            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq, token_usage"
             " FROM runs WHERE conversation_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (cid,),
         ).fetchone()

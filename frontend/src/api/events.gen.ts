@@ -73,6 +73,7 @@ export interface InterruptRequestPayload {
   };
   description?: string;
   allowed?: string[];
+  interrupt_id?: string;
 }
 export interface RunInterrupt {
   run_id: string;

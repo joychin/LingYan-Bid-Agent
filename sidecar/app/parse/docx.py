@@ -66,14 +66,20 @@ def _table_to_md(table) -> str:
 @register([".docx"])
 def convert(path: Path) -> ParseResult:
     """docx → (markdown, 信息)。标题优先 Word 样式/outlineLvl（作者声明）；
-    一个样式标题都没有时对正文段落跑中文编号启发式（conversion=docx-numbered）。"""
+    一个样式标题都没有时对正文段落跑中文编号启发式（conversion=docx-numbered）。
+
+    meta.element_lines：body 子元素全序索引 → 最终 md 行区间（1-based 闭区间）
+    的映射，供 docx 元素级注入按行号区间回找元素（素材块勾选锚定的是 md 行号）。
+    空行折叠会删行，故折叠时同步维护原始行 → 输出行换算，映射以最终 md 为准。
+    """
     doc = Document(str(path))
     lines: list[str] = []
     plain_at: list[tuple[int, str]] = []  # (行索引, 文本)——兜底二次标记用
+    el_lines: list[list[int]] = []  # [元素全序索引, 起行, 止行]（lines 坐标，闭区间）
     styled = 0
     tables = 0
     body = doc.element.body
-    for child in body.iterchildren():
+    for el_idx, child in enumerate(body.iterchildren()):
         tag = child.tag.split("}")[-1]
         if tag == "p":
             from docx.text.paragraph import Paragraph
@@ -81,20 +87,24 @@ def convert(path: Path) -> ParseResult:
             p = Paragraph(child, doc)
             text = p.text.strip()
             lvl = _heading_level(p)
+            start = len(lines) + 1
             if lvl > 0:
                 styled += 1
                 lines.append("#" * min(lvl, 6) + " " + text)
             else:
                 plain_at.append((len(lines), text))
                 lines.append(("- " + text) if _is_numbered(p) else (text if text else ""))
+            el_lines.append([el_idx, start, len(lines)])
         elif tag == "tbl":
             from docx.table import Table
 
             t = Table(child, doc)
+            start = len(lines) + 1
             lines.append("")
             lines.append(_table_to_md(t))
             lines.append("")
             tables += 1
+            el_lines.append([el_idx, start, len(lines)])
     # 内嵌图片计数（v3：docx 图片不再静默丢弃——计数进解析概况，抽取属增强工序）
     image_count = len(doc.part.package.image_parts) if hasattr(doc.part, "package") else 0
     conversion = "docx-native"
@@ -105,12 +115,23 @@ def convert(path: Path) -> ParseResult:
                 lines[idx] = "#" * lvl + " " + text
         conversion = "docx-numbered"
     out, blank = [], 0
-    for ln in lines:
+    orig_to_out: dict[int, int] = {}  # 空行折叠后的行号换算（被折叠删除的行无映射）
+    for i, ln in enumerate(lines, 1):
         if ln == "":
             blank += 1
             if blank <= 2:
+                orig_to_out[i] = len(out) + 1
                 out.append(ln)
         else:
             blank = 0
+            orig_to_out[i] = len(out) + 1
             out.append(ln)
-    return ParseResult("\n".join(out), {"conversion": conversion, "tables": tables, "image_count": image_count})
+    element_lines = []
+    for el_idx, s, e in el_lines:
+        kept = [orig_to_out[i] for i in range(s, e + 1) if i in orig_to_out]
+        if kept:
+            element_lines.append([el_idx, min(kept), max(kept)])
+    return ParseResult(
+        "\n".join(out),
+        {"conversion": conversion, "tables": tables, "image_count": image_count, "element_lines": element_lines},
+    )
