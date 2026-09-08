@@ -75,18 +75,35 @@ async def get_messages(cid: str):
     if not db.get_conversation(cid):
         raise HTTPException(status_code=404, detail="会话不存在")
     messages = db.list_messages(cid)
-    # assistant 消息挂执行过程快照（run_traces），历史会话/刷新后执行过程与深度思考仍可见
-    traces = db.get_traces_for_messages([m["id"] for m in messages if m["role"] == "assistant"])
+    # 过程快照瘦身（2026-09-08）：tools/todos/reasoning 大对象不再随列表下发
+    # （标书会话实测 11.4MB、随历史线性涨，而每次 run 收尾/invalidate 都全量重拉）；
+    # 折叠头只需步数/是否暂停摘要，完整过程点开时按需取（下方 trace 端点）。
+    summaries = db.get_message_trace_summaries(
+        [m["id"] for m in messages if m["role"] == "assistant"]
+    )
     for m in messages:
-        t = traces.get(m["id"])
-        if t is not None:
-            m["tools"] = t["tools"]
-            m["todos"] = t["todos"]
-            m["durationMs"] = t.get("durationMs")
-            m["reasoning"] = t.get("reasoning", "")
-            # 本轮文件（run_files 起止 diff）：work/ 下新建/修改的 .md 过程文件
-            m["files"] = t.get("files") or []
+        s = summaries.get(m["id"])
+        if s is not None:
+            m["traceSteps"] = s["steps"]
+            m["tracePaused"] = s["paused"]
+            m["durationMs"] = s["durationMs"]
+            m["files"] = s["files"]
     return {"messages": messages}
+
+
+@router.get("/conversations/{cid}/messages/{mid}/trace")
+async def get_message_trace(cid: str, mid: str):
+    """单条消息的完整执行过程（按需，2026-09-08）：tools 步骤树 + todos + 最终段
+    思考。用户点开历史消息过程区时前端才取（按消息缓存）；cid 归属校验防跨会话。"""
+    if not db.get_conversation(cid):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    msg = db.get_message(mid)
+    if msg is None or msg["conversation_id"] != cid:
+        raise HTTPException(status_code=404, detail="消息不存在")
+    t = db.get_trace_by_message(mid)
+    if t is None:
+        raise HTTPException(status_code=404, detail="该消息没有执行过程")
+    return {"tools": t["tools"], "todos": t["todos"], "reasoning": t["reasoning"]}
 
 
 @router.get("/conversations/{cid}/runs/latest")

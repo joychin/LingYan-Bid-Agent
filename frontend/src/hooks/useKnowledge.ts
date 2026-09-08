@@ -8,6 +8,7 @@ import {
   getKbBadge,
   getKbItemContent,
   getKbItemImages,
+  getMtBlockContent,
   getMtOutline,
   listKbItems,
   listKbTypes,
@@ -131,11 +132,11 @@ export function useMtFiles() {
   })
 }
 
-/** 全部素材块（块列表视图）。 */
-export function useMtBlocks() {
+/** 全部素材块（块列表视图；q 非空走服务端——正文 FTS ∪ 标题/备注匹配）。 */
+export function useMtBlocks(q?: string) {
   return useQuery({
-    queryKey: ['mt', 'blocks'],
-    queryFn: () => listMtBlocks(),
+    queryKey: ['mt', 'blocks', q ?? ''],
+    queryFn: () => listMtBlocks(q),
   })
 }
 
@@ -145,6 +146,16 @@ export function useMtOutline(fileId: string | null) {
     queryKey: ['mt', 'outline', fileId],
     queryFn: () => getMtOutline(fileId!),
     enabled: Boolean(fileId),
+  })
+}
+
+/** 块内容（预览用，展开时才拉）。 */
+export function useMtBlockContent(id: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ['mt', 'block-content', id],
+    queryFn: () => getMtBlockContent(id!),
+    enabled: Boolean(id) && enabled,
+    staleTime: 60_000,
   })
 }
 

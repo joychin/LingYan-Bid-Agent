@@ -23,13 +23,20 @@ ENV_FILE = SIDECAR_DIR / ".env"
 
 
 def _load_env() -> dict[str, str]:
+    """只取 LLM 相关配置，语义对齐 `uv run --env-file`（剥行内注释）。仓内 .env 的
+    模板行都带 ` # 说明`：裸解析会把注释并进值——SIDECAR_TOKEN 变 truthy 开鉴权
+    （冒烟全部 401）、LLM_BASE_URL 带中文注释拼进 URL（httpx header ascii 编码
+    崩溃），2026-09-08 e2e 实测两连坑。SIDECAR_TOKEN/TENDER_HEALTHZ_NONCE 是
+    Tauri 壳的鉴权 plumbing，被测 sidecar 一律不注入。"""
     env: dict[str, str] = {}
     if ENV_FILE.exists():
         for line in ENV_FILE.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                env[k.strip()] = v.strip()
+                if k.strip() in ("SIDECAR_TOKEN", "TENDER_HEALTHZ_NONCE"):
+                    continue
+                env[k.strip()] = v.split(" #", 1)[0].strip()
     return env
 
 

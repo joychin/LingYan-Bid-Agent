@@ -39,6 +39,7 @@ html.theme-switching *::after {
   --color-popover: var(--Color-bg-canvas);
   --color-popover-foreground: var(--Color-text-primary);
   --color-primary: var(--Color-brand-primary);
+  --color-primary-hover: var(--Color-brand-primary-hover);
   --color-primary-foreground: var(--Color-text-on-color);
   --color-secondary: var(--Color-bg-subtle);
   --color-secondary-foreground: var(--Color-text-primary);

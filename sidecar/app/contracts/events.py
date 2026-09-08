@@ -32,6 +32,9 @@ class AgentToken(BaseModel):
     conversation_id: str
     text: str
     seq: int
+    # 微合批（2026-09-08 additive）：SSE 发送层把窗口内连续增量合并成一帧时
+    # seq=合并的最大序号、seq_from=首序号——前端缺口检查用 seq_from（连续=非缺口）。
+    seq_from: int | None = None
 
 
 class AgentReasoning(BaseModel):
@@ -42,6 +45,7 @@ class AgentReasoning(BaseModel):
     text: str
     agent_id: str | None = None
     seq: int
+    seq_from: int | None = None
 
 
 class ToolCalled(BaseModel):
@@ -102,8 +106,24 @@ class AgentError(BaseModel):
     run_id: str
     conversation_id: str
     error: str
-    # cancelled=用户主动停止（前端中性呈现）；非取消恒为 None（键恒存在，2026-08-27 additive）
+    # 错误定性（键恒存在，2026-08-27 additive；取值域 2026-09-08 扩展）：
+    # cancelled=用户主动停止（中性呈现）；llm_unavailable=模型服务方过载/超时/断流
+    # （自动重试耗尽）；llm_auth=模型未配置/Key 失效（前端给「去设置」入口）；
+    # internal=程序自身错误；None=未分类（旧 sidecar）。error 文案首行人话、
+    # 次行起为服务方/异常原文（前端按 \n 拆行渲染）
     code: str | None = None
+    seq: int
+
+
+class AgentRetry(BaseModel):
+    """LLM 瞬时错误自动重试的等待期通知（additive 2026-09-08）：前端在输出区显示
+    「正在自动重试」shimmer 并清空未封口正文。attempt 从 1 起。"""
+
+    run_id: str
+    conversation_id: str
+    attempt: int
+    total: int
+    wait_seconds: float
     seq: int
 
 
@@ -133,8 +153,13 @@ class RunState(BaseModel):
     conversation_id: str
     status: RunStatus
     error: str | None = None
+    # 错误定性（取值域同 AgentError.code：error 终态时下发，含 interrupted=
+    # sidecar 重启中断——仅经本事件恢复的历史 run 会见到）
     code: str | None = None
     requests: list[InterruptRequestPayload] | None = None
+    # run 开始时间（epoch ms，来源 runs.created_at）：客户端刷新/重连恢复 running 态时
+    # 活卡计时按真实起点续算（此前拿不到起点、从恢复时刻重算是可见失真）
+    started_at: int | None = None
 
 
 class ConversationRenamed(BaseModel):
@@ -156,6 +181,7 @@ EVENT_PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "artifact.created": ArtifactCreated,
     "agent.completed": AgentCompleted,
     "agent.error": AgentError,
+    "agent.retry": AgentRetry,
     "run.interrupt": RunInterrupt,
     "run.state": RunState,
     "conversation.renamed": ConversationRenamed,

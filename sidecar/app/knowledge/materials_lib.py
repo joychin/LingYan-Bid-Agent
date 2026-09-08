@@ -93,9 +93,18 @@ def delete_file_disk(file_name: str) -> None:
 # ---------- 解析（后台，纯机械） ----------
 
 def schedule_parse(fid: str) -> bool:
-    """上传后后台解析（单飞）。"""
+    """上传后后台解析（单飞）。
+
+    陈旧标记自愈：run_parse 在工作线程内写终态、`_run_safe` 回到事件循环后才
+    discard in-flight——负载下这两个动作之间有调度窗口（实测全量测试套件下
+    ~百毫秒），期间 db 已是 ready/failed 但守卫仍拒 409。终态已写 = 上一次
+    解析的实质工作已结束，标记判为陈旧：清掉重进，不挡重试。
+    """
     if fid in _inflight:
-        return False
+        f = db.mt_get_file(fid)
+        if not (f and f.get("parse_status") in ("ready", "failed")):
+            return False  # 真正在解析（pending/parsing）：单飞拒绝
+        _inflight.discard(fid)
     _inflight.add(fid)
     asyncio.get_running_loop().create_task(_run_safe(fid))
     return True
@@ -133,6 +142,8 @@ def run_parse(fid: str) -> dict:
     outline = outline_with_lines(md_text) if md_text else []
     md_path, outline_path, _ = mt_parse_paths(f["file_name"])
     md_path.parent.mkdir(parents=True, exist_ok=True)
+    # 重解析前旧 md 行数（块区间沿用旧行号，行数变化=区间漂移，须提示用户复核）
+    old_lines = len(md_path.read_text(encoding="utf-8").splitlines()) if md_path.is_file() else None
     if md_text:
         write_atomic(md_path, md_text)
     else:
@@ -145,16 +156,31 @@ def run_parse(fid: str) -> dict:
             mt_parse_dir(f["file_name"]) / "element_map.json",
             json.dumps({"version": 1, "file_name": f["file_name"], "element_lines": element_lines}, ensure_ascii=False),
         )
+    warnings: list[str] = []
+    if not outline:
+        warnings.append("未识别到目录结构——无法挑章节（该文件没有可用标题）")
+    if md_text and old_lines is not None and len(md_text.splitlines()) != old_lines and read_blocks(fid):
+        warnings.append(f"重解析后行号有变化（{old_lines}→{len(md_text.splitlines())} 行），素材块的勾选区间可能错位，请复核")
     db.mt_update_file(
         fid,
         parse_status="ready",
-        error=None if outline else "未识别到目录结构——无法挑章节（该文件没有可用标题）",
+        error="；".join(warnings) or None,
     )
+    # 重解析收尾：块索引与检索段跟随新 md 重建（无块时 no-op，上传路径不受影响）
+    try:
+        _sync_blocks(fid)
+        reindex_blocks(fid)
+    except Exception:
+        logger.exception("素材块索引同步异常：%s", fid)
     return db.mt_get_file(fid) or {}
 
 
 def read_outline(fid: str) -> list[dict]:
-    """目录树（勾选界面数据源：全层级带行号）。"""
+    """目录树（勾选界面数据源：全层级带行号 + 节点字数）。
+
+    字数按节点区间实算（剥页锚注释行、与块切片同口径），只增强内存返回，
+    不改 outline.json 落盘格式；md 缺失（解析前）时不带 chars。
+    """
     f = db.mt_get_file(fid)
     if not f:
         return []
@@ -165,7 +191,28 @@ def read_outline(fid: str) -> list[dict]:
         data = json.loads(outline_path.read_text(encoding="utf-8"))
     except ValueError:
         return []
-    return data if isinstance(data, list) else []
+    nodes = data if isinstance(data, list) else []
+    md_path, _, _ = mt_parse_paths(f["file_name"])
+    lines: list[str] | None = None
+    if md_path.is_file():
+        try:
+            lines = md_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = None
+
+    def fill_chars(list_: list[dict]) -> None:
+        for n in list_:
+            s, e = n.get("start_line"), n.get("end_line")
+            if lines is not None and isinstance(s, int) and isinstance(e, int) and 1 <= s <= e:
+                chunk = [
+                    ln.replace("<!--", "").replace("-->", "").strip()
+                    for ln in lines[s - 1 : e]
+                ]
+                n["chars"] = len("\n".join(ln for ln in chunk if ln))
+            fill_chars(n.get("children") or [])
+
+    fill_chars(nodes)
+    return nodes
 
 
 # ---------- 块（真值 blocks.json + 索引 + 检索段） ----------
@@ -217,12 +264,12 @@ def _squash_ranges(raw: list, total_lines: int) -> list[list[int]]:
     return [list(r) for r in sorted(cleaned)]
 
 
-def _slice(md_path: Path, ranges: list[list[int]]) -> str:
-    """按区间拼接块内容（页锚点等注释行剥掉）。"""
+def slice_sections(md_path: Path, ranges: list[list[int]]) -> list[dict]:
+    """按区间逐节切片（页锚点等注释行剥掉）；[{start, end, text}]，空节丢弃。"""
     if not md_path.is_file():
-        return ""
+        return []
     lines = md_path.read_text(encoding="utf-8").splitlines()
-    parts: list[str] = []
+    out: list[dict] = []
     for s, e in ranges:
         chunk = [
             ln.replace("<!--", "").replace("-->", "").strip()
@@ -230,8 +277,76 @@ def _slice(md_path: Path, ranges: list[list[int]]) -> str:
         ]
         text = "\n".join(ln for ln in chunk if ln)
         if text:
-            parts.append(text)
-    return "\n\n".join(parts)
+            out.append({"start": s, "end": e, "text": text})
+    return out
+
+
+def _slice(md_path: Path, ranges: list[list[int]]) -> str:
+    """按区间拼接块内容（slice_sections 的拼接投影）。"""
+    return "\n\n".join(sec["text"] for sec in slice_sections(md_path, ranges))
+
+
+# 纯图片段的 md 占位行（parse/docx.py 产出；一段多图也只一行）
+_IMAGE_PLACEHOLDER = "![](图片)"
+
+
+def block_image_count(file_name: str, ranges: list) -> int:
+    """块区间内图片段数（占位行计数；段内嵌图/一段多图不可见，旧解析无占位恒 0）。"""
+    md_path, _, _ = mt_parse_paths(file_name)
+    if not md_path.is_file():
+        return 0
+    try:
+        lines = md_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    n = 0
+    for r in ranges or []:
+        if not (isinstance(r, (list, tuple)) and len(r) == 2):
+            continue
+        s, e = max(1, int(r[0])), min(len(lines), int(r[1]))
+        n += sum(1 for ln in lines[s - 1 : e] if ln.strip() == _IMAGE_PLACEHOLDER)
+    return n
+
+
+def block_content(bid: str) -> dict | None:
+    """块内容（预览用）：分节切片 + chars 实算；块/文件缺失返回 None。"""
+    b = db.mt_get_block(bid)
+    if not b:
+        return None
+    f = db.mt_get_file(b["file_id"])
+    if not f:
+        return None
+    md_path, _, _ = mt_parse_paths(f["file_name"])
+    sections = slice_sections(md_path, b.get("ranges") or [])
+    return {
+        "id": b["id"],
+        "title": b["title"],
+        "chars": sum(len(sec["text"]) for sec in sections),
+        "sections": sections,
+    }
+
+
+def search_block_ids(q: str, limit: int = 48) -> set[str]:
+    """FTS 检索命中的素材块 id（块的标题+备注+正文都在检索段里）。
+
+    供块列表 ?q= 过滤用；检索失败/无有效关键词回退空集（调用方仍有
+    标题/备注本地匹配兜底）。
+    """
+    from . import fts
+
+    expr = fts.build_match_expr(q)
+    if expr is None:
+        return set()
+    try:
+        hits = db.kb_search_segments(expr, limit=limit)
+    except Exception:
+        logger.exception("素材块 FTS 检索失败：%s", q)
+        return set()
+    return {
+        h["material_id"]
+        for h in hits
+        if str(h.get("item_id", "")).startswith("mt_") and h.get("material_id")
+    }
 
 
 def reindex_blocks(fid: str) -> None:

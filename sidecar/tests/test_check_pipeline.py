@@ -7,7 +7,7 @@ from datetime import datetime
 import pytest
 
 from app import artifact_store, runctx
-from app.tools.check_pipeline import check_pipeline_state
+from app.tools.check_pipeline import _balanced_waves, check_pipeline_state
 from tests.util import init_env
 
 
@@ -318,3 +318,100 @@ def test_body_docx_md_coexist_reports_fact(env):
     assert "[body] 同时存在 .docx 与 .md 的节：3.1 项目理解与需求分析" in r
     assert "旧稿残留，以 docx 为准" in r
     assert "已写 1 节" in r
+
+
+# ---------- [body] 均衡分波参考 ----------
+
+_GUIDE_HEADER = ["| 节 | 模式 | 依据 | 素材 | 缺口/备注 |", "|---|---|---|---|---|"]
+
+
+def _write_guide(env, rows: list[str]):
+    _write_body(env, "body/写作指引.md", "\n".join(_GUIDE_HEADER + rows) + "\n")
+
+
+def test_balanced_waves_lpt_balance():
+    """LPT 贪心：降序逐项补最轻波——2 波时权重 9..1 分成 23/22（蛇形奇偶交替是 25/20）。"""
+    items = [(f"n{w}", w) for w in range(9, 0, -1)]
+    waves = _balanced_waves(items)
+    assert len(waves) == 2
+    sums = [sum(w for _, w in wave) for wave in waves]
+    assert sum(sums) == 45
+    assert max(sums) - min(sums) <= 1
+
+
+def test_balanced_waves_capacity_respected():
+    """容量上限优先于负载均衡：10 + 九个 1 → 轻波满 8 项封顶，溢出项进重波。"""
+    items = [("heavy", 10)] + [(f"l{i}", 1) for i in range(9)]
+    waves = _balanced_waves(items)
+    assert sum(len(w) for w in waves) == 10
+    assert all(len(w) <= 8 for w in waves)
+
+
+def test_balanced_waves_small_set_single_wave():
+    assert [len(w) for w in _balanced_waves([(f"n{i}", 1) for i in range(8)])] == [8]
+    assert _balanced_waves([]) == []
+
+
+def test_body_wave_reference(env):
+    """分波参考：格式件参与、物理附件排除、指引缺行兜底、已写节剔除、权重=基数+块数。"""
+    content = _dir_content()
+    content["response_documents"][0]["directory"].insert(0, {
+        "目录名称": "投标函", "level": 1, "children": [],
+        "交付形态": "模板或附件填充", "来源位置": ["MAND-03"],
+    })
+    content["response_documents"][0]["directory"].append({
+        "目录名称": "3.4 实施与服务方案", "level": 1, "children": [],
+        "交付形态": "正文编写", "来源位置": ["REQ-02"],
+    })
+    _seed_directory(env, content)
+    _write_guide(env, [
+        "| 投标函 | — | MAND-03 | — | 格式件：docx_source_inject 拷原件+revise 填空 |",
+        "| 3.1 项目理解与需求分析 | 素材修订 | REQ-01 | blk_1a2b3c4d5e6f | — |",
+        "| 3.2 总体设计方案 | 素材修订+推理撰写 | SCORE-02 | blk_0f1e2d3c4b5a | — |",
+        "| 3.4 实施与服务方案 | 格式跟随 | REQ-02 | — | — |",
+        "| 附件：资质证书复印件 | — | MAND-02 | — | 物理附件，列待填清单 |",
+    ])  # 3.3 指引缺行 → 兜底补入
+    r = check_pipeline_state.invoke({})
+    assert "[body] 均衡分波参考" in r
+    wave_text = r.split("均衡分波参考", 1)[1]
+    # 投标函1 + 3.1(2+1块) + 3.2(max(2,3)+1块) + 3.3兜底1 + 3.4格式跟随1
+    assert "第1波（权重和 10）" in wave_text
+    assert "投标函" in wave_text
+    assert "3.3 项目团队配置" in wave_text and "兜底" in wave_text
+    assert "资质证书复印件" not in wave_text  # 物理附件不参与
+    _make_docx(env, "body/3.1 项目理解与需求分析.docx")
+    r = check_pipeline_state.invoke({})
+    assert "均衡分波参考" in r  # 仍有 4 节待写 → 参考仍在
+    wave_text = r.split("均衡分波参考", 1)[1]
+    assert "3.1 项目理解与需求分析" not in wave_text  # 已写节剔除
+    assert "第1波（权重和 7）" in wave_text  # 10 - 3.1 的权重 3
+
+
+def test_body_wave_reference_multi_volume_keys(env):
+    """多册分波键=「册名/标题」，与对账行同口径。"""
+    content = _dir_content()
+    content["response_documents"].append({
+        "name": "商务部分", "scope": "",
+        "directory": [{"目录名称": "6.1 售后服务承诺", "level": 1, "children": [],
+                       "交付形态": "正文编写", "来源位置": ["SCORE-09"]}],
+    })
+    _seed_directory(env, content)
+    _write_guide(env, [
+        "| 技术部分/3.1 项目理解与需求分析 | 素材修订 | REQ-01 | — | — |",
+        "| 技术部分/3.2 总体设计方案 | 推理撰写 | SCORE-02 | — | — |",
+        "| 技术部分/3.3 项目团队配置 | 推理撰写 | SCORE-05 | — | — |",
+        "| 商务部分/6.1 售后服务承诺 | 素材修订 | SCORE-09 | — | — |",
+    ])
+    r = check_pipeline_state.invoke({})
+    wave_text = r.split("均衡分波参考", 1)[1]
+    assert "商务部分/6.1 售后服务承诺" in wave_text
+    assert "技术部分/3.3 项目团队配置" in wave_text
+    assert "兜底" not in wave_text  # 指引行齐 → 无兜底
+
+
+def test_body_wave_reference_skipped_when_few_pending(env):
+    """待写节 <4 不值得分波：不出参考行（既有占位指引用例也不受影响）。"""
+    _seed_directory(env)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    r = check_pipeline_state.invoke({})
+    assert "均衡分波参考" not in r

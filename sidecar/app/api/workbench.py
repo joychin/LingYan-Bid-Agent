@@ -8,9 +8,9 @@
 栈内最旧一条）、成功后盖「修订=用户」头标记（模型重跑前的提示线索，见
 tender-analysis/tender-outline SKILL 纪律）。
 json/隐藏文件不进列表（机器格式，面板不是调试器）；parse/ 只读（引用行号的
-证据基准，手改=篡改原文）；.docx（tender-body 正文节/整本合册）只读——文本
-视图走 /workbench/docx-view，格式与修订标记的审阅在 Word（abs_path 供前端
-reveal 唤起）。
+证据基准，手改=篡改原文）；.docx（tender-body 正文节/整本合册）只读——面板
+版式预览走 /workbench/raw 取字节（浏览器 docx-preview 本地渲染），文本结构
+视图走 /workbench/docx-view，修订标记的审阅在 Word（abs_path 供前端 reveal 唤起）。
 """
 
 import hashlib
@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .. import artifact_store, db
@@ -38,8 +39,35 @@ def _require_task(task_id: str) -> None:
         raise HTTPException(status_code=404, detail="任务不存在")
 
 
+def _unique_suffix_match(root: Path, path: str, task_id: str) -> Path | None:
+    """work/ 全树唯一后缀兜底：模型给的路径（ask_human guide_path 等）可能少前缀
+    （body/ 下相对）或多前缀（work/、<task_id>/）。剥掉已知前缀后在全树找以剩余
+    路径结尾的唯一真实文件（按路径边界匹配，防 asub/x.md 误中 sub/x.md）；
+    无命中或歧义返回 None——维持精确路径的原有行为（下游 404）。
+    """
+    parts = path.split("/")
+    while parts and parts[0] in ("work", task_id):
+        parts.pop(0)
+    cleaned = "/".join(parts)
+    if not cleaned:
+        return None
+
+    def _hit(p: Path) -> bool:
+        if not p.is_file() or p.suffix not in (".md", ".docx") or p.name.startswith("."):
+            return False
+        rel = p.relative_to(root).as_posix()
+        return rel == cleaned or rel.endswith("/" + cleaned)
+
+    hits = [p for p in root.rglob("*") if _hit(p)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _resolve(task_id: str, path: str) -> Path:
-    """把相对路径收进 <task>/work/（resolve 防 ../ 越界）；放行 .md 与 .docx。"""
+    """把相对路径收进 <task>/work/（resolve 防 ../ 越界）；放行 .md 与 .docx。
+
+    精确路径不存在时走 _unique_suffix_match 唯一兜底（读写恢复/meta 全端点同口径，
+    前端用原始路径保存/轮询也会确定性地落到同一真实文件）。
+    """
     root = artifact_store.work_dir(task_id).resolve()
     target = (root / path).resolve()
     if (
@@ -48,6 +76,10 @@ def _resolve(task_id: str, path: str) -> Path:
         or target.name.startswith(".")
     ):
         raise HTTPException(status_code=404, detail="工作文件不存在")
+    if not target.exists():
+        fuzzy = _unique_suffix_match(root, path, task_id)
+        if fuzzy is not None:
+            return fuzzy
     return target
 
 
@@ -127,24 +159,22 @@ def _has_restore(target: Path) -> bool:
 def _entry(p: Path, root: Path) -> dict:
     rel = p.relative_to(root).as_posix()
     st = p.stat()
+    # abs_path：面板右键「打开文件夹」直取（与 docx-view/产物行的绝对路径口径一致）
+    common = {
+        "path": rel,
+        "abs_path": str(p),
+        "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+        "size": st.st_size,
+    }
     if p.suffix == ".docx":
         # docx 无「修订=用户」头部语义；不可编辑（只读视图 + Word 审阅）；
         # 恢复点目录公式与 md 同款（<文件名>.restorepoints/），_has_restore 直接可用
-        return {
-            "path": rel,
-            "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(timespec="seconds"),
-            "size": st.st_size,
-            "revised": False,
-            "editable": False,
-            "has_restore": _has_restore(p),
-        }
+        return {**common, "revised": False, "editable": False, "has_restore": _has_restore(p)}
     text_head = ""
     with p.open(encoding="utf-8", errors="replace") as f:
         text_head = f.readline()
     return {
-        "path": rel,
-        "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(timespec="seconds"),
-        "size": st.st_size,
+        **common,
         "revised": bool(_REVISED_RE.search(text_head)),
         "editable": not rel.startswith("parse/"),
         "has_restore": _has_restore(p),
@@ -227,6 +257,23 @@ async def read_docx_view(task_id: str, path: str):
     from ..tools.docx_ops import view_lines
 
     return {"lines": view_lines(Document(str(target))), "abs_path": str(target)}
+
+
+_DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@router.get("/workbench/raw")
+async def read_raw(task_id: str, path: str):
+    """docx 原始字节：面板版式预览用（docx-preview 在浏览器本地渲染，文件不出本机）。
+    限 .docx（markdown 走 /workbench/content 文本端点）；只读，不参与恢复点语义。
+    不进 dto 契约（与 docx-view 同先例）。"""
+    _require_task(task_id)
+    target = _resolve(task_id, path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="工作文件不存在")
+    if target.suffix != ".docx":
+        raise HTTPException(status_code=400, detail="本端点只服务 .docx（markdown 用 /workbench/content）")
+    return FileResponse(target, media_type=_DOCX_MEDIA_TYPE)
 
 
 class WorkbenchWrite(BaseModel):

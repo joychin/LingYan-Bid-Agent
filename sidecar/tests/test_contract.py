@@ -75,7 +75,7 @@ def test_stream_event_payloads_match_contract():
     def capture(e: str, d: dict) -> None:
         published.append((e, {**d, "seq": next(counter)}))
 
-    text, error, trace, interrupt = _run_agent_stream(
+    text, error, _error_code, trace, interrupt = _run_agent_stream(
         _StubAgent(items), "cid", "rid", None, capture, "hi", None
     )
 
@@ -105,6 +105,13 @@ def test_run_boundary_payload_builders_match_contract():
     err = events_module.error_payload("r", "c", "boom", None, 3)
     EVENT_PAYLOAD_MODELS["agent.error"].model_validate(err)
     assert "code" in err  # 契约要求恒有键（此前 run_stream 外层 except 漏发过）
+    # 错误定性 code 取值域（2026-09-08 additive）全部过模型
+    for code in ("cancelled", "llm_unavailable", "llm_auth", "internal", "interrupted"):
+        EVENT_PAYLOAD_MODELS["agent.error"].model_validate(
+            events_module.error_payload("r", "c", "e", code, 3)
+        )
+    retry = events_module.retry_payload("r", "c", 1, 3, 10.0)
+    EVENT_PAYLOAD_MODELS["agent.retry"].model_validate({**retry, "seq": 5})
     evt = events_module.interrupt_payload("r", "c", [], 4)
     EVENT_PAYLOAD_MODELS["run.interrupt"].model_validate(evt)
 

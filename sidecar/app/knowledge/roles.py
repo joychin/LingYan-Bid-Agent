@@ -58,6 +58,22 @@ def statement_of(item: dict) -> str:
     return ""
 
 
+def questions_of(item: dict) -> list[str]:
+    """检索问题（business 优先，镜像 statement_of）——§questions 段摘录用。"""
+    for key in ("business_metadata", "suggested_metadata"):
+        raw = item.get(key)
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                raw = None
+        if isinstance(raw, dict) and isinstance(raw.get("questions"), list):
+            qs = [q.strip() for q in raw["questions"] if isinstance(q, str) and q.strip()]
+            if qs:
+                return qs
+    return []
+
+
 def derive_role(item: dict, hit: dict) -> str:
     t = get_type(item.get("doc_type"))
     role = t.role if t else ROLE_FACT

@@ -25,6 +25,9 @@ EVENT_TODO_UPDATED = "todo.updated"
 EVENT_ARTIFACT_CREATED = "artifact.created"
 # 推理模型（DeepSeek reasoner）的 chain-of-thought 增量文本；非推理模型不产生该事件
 EVENT_REASONING = "agent.reasoning"
+# LLM 瞬时错误自动重试的等待期通知（契约 additive 2026-09-08）：前端在输出区显示
+# 「正在自动重试」shimmer 并清空未封口正文（与 sidecar cur_text_parts.clear() 对齐）
+EVENT_AGENT_RETRY = "agent.retry"
 # HITL：agent 调用 interrupt_on 登记的工具时暂停，等待用户裁决（approve/reject/respond/edit）
 # 后经 Command(resume={"decisions":[...]}) 续跑（契约 additive 扩展）
 EVENT_RUN_INTERRUPT = "run.interrupt"
@@ -76,13 +79,37 @@ def completed_payload(rid: str, cid: str, message_id: str, seq: int) -> dict:
 
 
 def error_payload(rid: str, cid: str, error: str, code: str | None, seq: int) -> dict:
-    """agent.error：code 恒有键（cancelled=用户主动停止，非取消 None——2026-08-27 additive）。"""
+    """agent.error：code 恒有键（2026-08-27 additive）。取值域（2026-09-08 扩展）：
+    cancelled=用户主动停止；llm_unavailable=模型服务方过载/超时/断流（重试耗尽）；
+    llm_auth=模型未配置/Key 失效；internal=程序自身错误；None=未分类（旧 sidecar）。
+    error 文案首行人话、次行起为服务方/异常原文（前端按 \\n 拆行渲染）。"""
     return {"run_id": rid, "conversation_id": cid, "error": error, "code": code, "seq": seq}
+
+
+def retry_payload(rid: str, cid: str, attempt: int, total: int, wait_seconds: float) -> dict:
+    """agent.retry：自动重试等待期通知（seq 由 _publish 闭包统一补，同 tool 事件）。"""
+    return {
+        "run_id": rid,
+        "conversation_id": cid,
+        "attempt": attempt,
+        "total": total,
+        "wait_seconds": wait_seconds,
+    }
 
 
 def interrupt_payload(rid: str, cid: str, requests: list, seq: int) -> dict:
     return {"run_id": rid, "conversation_id": cid, "requests": requests, "seq": seq}
 
+
+# updates 流里「真实执行节点」白名单：只有这两个节点的 messages 代表本轮新工作
+# （model=模型新产出的 AIMessage（tool_calls→tool.called）、tools=工具执行结果
+# （ToolMessage→tool.result））。其余节点的 messages 是状态重写不是新工作——尤其
+# deepagents PatchToolCallsMiddleware 的 before_agent 钩子：新 run 开头发现悬空
+# tool_calls（上一 run 中断/停止遗留）时，会把整段历史消息原对象 + 补插的取消
+# ToolMessage 一并写进 updates，照译会把上一轮全部工具步骤重放进本轮的 SSE 与
+# trace（2026-09-08 实证：中断 run 的下一轮 trace 混入 12~64 个外来 tool_call_id，
+# 前端活卡显示上一轮的工具卡）。子代理子图同名节点照常翻译（ns 归属不受影响）。
+_TOOL_EVENT_NODES = frozenset({"model", "tools"})
 
 # ---- 子代理归属注册表 ----
 # task 工具执行时（agent._SubagentTagMiddleware.wrap_tool_call）登记：tools 任务的
@@ -305,6 +332,10 @@ def iter_stream(stream: Iterator, rid: str | None = None) -> Iterator[tuple[str,
                         if key != last_todos_key:
                             last_todos_key = key
                             yield ("todo_updated", todos)
+                    # 消息→工具事件的翻译只认真实执行节点（见 _TOOL_EVENT_NODES 注释）；
+                    # 中间件伪节点的 messages 是历史重写，跳过
+                    if _node not in _TOOL_EVENT_NODES:
+                        continue
                     messages = update.get("messages", [])
                     for m in messages:
                         if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):

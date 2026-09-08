@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AgentEventData } from '@/api/sse'
+import type { AgentEventData, ToolStep } from '@/api/sse'
 import { INITIAL_STATE, runReducer, type Action, type Effect, type RunState } from './runReducer'
 
 // JSON 字面量推断类型与契约联合（literal status / null 宽窄）不完全对齐，回放侧整体断言转换
@@ -308,6 +308,34 @@ describe('HITL 中断与续跑', () => {
     expect(again.tools[0].status).toBe('paused')
   })
 
+  it('run.state running 对账：started_at 权威起点续算（刷新/重连后计时不重算）', () => {
+    // 刷新/切会话后 RunState 复位：对账事件携带 runs.created_at 换算的权威起点
+    const r = runReducer(INITIAL_STATE, {
+      type: 'sse',
+      event: 'run.state',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', status: 'running', started_at: NOW - 60_000 },
+    })
+    expect(r.state.running).toBe(true)
+    expect(r.state.startedAt).toBe(NOW - 60_000)
+
+    // 旧 sidecar 无 started_at：退回本地值（同 run 重连保留既有起点），再退回当前时刻
+    const reconnected = runReducer(r.state, {
+      type: 'sse',
+      event: 'run.state',
+      now: NOW + 5_000,
+      data: { run_id: 'r1', conversation_id: 'c1', status: 'running' },
+    })
+    expect(reconnected.state.startedAt).toBe(NOW - 60_000)
+    const legacy = runReducer(INITIAL_STATE, {
+      type: 'sse',
+      event: 'run.state',
+      now: NOW,
+      data: { run_id: 'r2', conversation_id: 'c1', status: 'running' },
+    })
+    expect(legacy.state.startedAt).toBe(NOW)
+  })
+
   it('continuation sticky：续跑乐观置位后，SSE agent.started 二次到达不冲掉；settle 复位', () => {
     const first = replay(hitl.events.slice(0, 3))
     const settles = settleActionsFor(first.effects)
@@ -487,6 +515,287 @@ describe('seq 去重与缺口', () => {
     expect(warn).toHaveBeenCalledTimes(1)
     expect(String(warn.mock.calls[0][0])).toContain('事件缺口')
     expect(state.lastSeq).toEqual({ runId: 'r2', seq: 2 })
+  })
+
+  it('seq 缺口发出过程对账 effect（告警+自愈，2026-09-08）', () => {
+    const { effects } = replay(seq.events)
+    // seq 1 → 5 的缺口恰好在 r1 上发生一次；重复（5）、连续（6）、换 run（r2:2）不触发
+    expect(effects).toContainEqual({ kind: 'reconcile-trace', runId: 'r1' })
+    expect(effects.filter((e) => e.kind === 'reconcile-trace')).toHaveLength(1)
+  })
+
+  it('stream-batch 的 seq 跳号同样触发过程对账（丢的可能不止 token）', () => {
+    const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    const withSeq = runReducer(started, {
+      type: 'stream-batch',
+      tokens: 'x',
+      deltas: [],
+      seq: { runId: 'r1', seq: 3 },
+    }).state
+    expect(withSeq.lastSeq).toEqual({ runId: 'r1', seq: 3 })
+    const gap = runReducer(withSeq, {
+      type: 'stream-batch',
+      tokens: 'y',
+      deltas: [],
+      seq: { runId: 'r1', seq: 8 },
+    })
+    expect(gap.effects).toContainEqual({ kind: 'reconcile-trace', runId: 'r1' })
+    const continuous = runReducer(withSeq, {
+      type: 'stream-batch',
+      tokens: 'z',
+      deltas: [],
+      seq: { runId: 'r1', seq: 4 },
+    })
+    expect(continuous.effects.filter((e) => e.kind === 'reconcile-trace')).toHaveLength(0)
+  })
+
+  it('合批帧 seq_from 连续不触发对账，真缺口仍触发（SSE 微合批 2026-09-08）', () => {
+    const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    // 水位 null → 首帧跳号不算缺口；单帧带 seq_from（侧未合并也带）
+    const s1 = runReducer(started, {
+      type: 'sse',
+      event: 'agent.token',
+      data: { run_id: 'r1', conversation_id: 'c1', text: 'x', seq: 3, seq_from: 1 },
+      now: NOW,
+    })
+    expect(s1.state.streamText).toBe('x')
+    expect(s1.state.lastSeq).toEqual({ runId: 'r1', seq: 3 })
+    expect(s1.effects.filter((e) => e.kind === 'reconcile-trace')).toHaveLength(0)
+    expect(warn).not.toHaveBeenCalled()
+    // 服务端合并跳号（seq 3→6 但 seq_from=4 连续）→ 不告警不对账
+    const s2 = runReducer(s1.state, {
+      type: 'sse',
+      event: 'agent.token',
+      data: { run_id: 'r1', conversation_id: 'c1', text: 'y', seq: 6, seq_from: 4 },
+      now: NOW,
+    })
+    expect(s2.state.lastSeq).toEqual({ runId: 'r1', seq: 6 })
+    expect(s2.effects.filter((e) => e.kind === 'reconcile-trace')).toHaveLength(0)
+    expect(warn).not.toHaveBeenCalled()
+    // 真缺口（seq_from=9 > 水位+1）→ 告警+对账
+    const s3 = runReducer(s2.state, {
+      type: 'sse',
+      event: 'agent.token',
+      data: { run_id: 'r1', conversation_id: 'c1', text: 'z', seq: 12, seq_from: 9 },
+      now: NOW,
+    })
+    expect(s3.effects).toContainEqual({ kind: 'reconcile-trace', runId: 'r1' })
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0][0])).toContain('事件缺口')
+  })
+
+  it('stream-batch 携带 seqFrom 时合并跳号不对账、真缺口对账', () => {
+    const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    const withSeq = runReducer(started, {
+      type: 'stream-batch',
+      tokens: 'x',
+      deltas: [],
+      seq: { runId: 'r1', seq: 3, seqFrom: 1 },
+    }).state
+    expect(withSeq.lastSeq).toEqual({ runId: 'r1', seq: 3 })
+    // 合并跳号 3→8、seqFrom=4 连续 → 不对账，水位推进
+    const merged = runReducer(withSeq, {
+      type: 'stream-batch',
+      tokens: 'y',
+      deltas: [],
+      seq: { runId: 'r1', seq: 8, seqFrom: 4 },
+    })
+    expect(merged.effects.filter((e) => e.kind === 'reconcile-trace')).toHaveLength(0)
+    expect(merged.state.lastSeq).toEqual({ runId: 'r1', seq: 8 })
+    // 真缺口 seqFrom=10 → 对账
+    const gap = runReducer(merged.state, {
+      type: 'stream-batch',
+      tokens: 'z',
+      deltas: [],
+      seq: { runId: 'r1', seq: 12, seqFrom: 10 },
+    })
+    expect(gap.effects).toContainEqual({ kind: 'reconcile-trace', runId: 'r1' })
+  })
+})
+
+describe('过程对账 merge（树非空时快照补死步/丢步骤，2026-09-08）', () => {
+  const baseStep = (id: string, tool: string, over: Partial<ToolStep> = {}): ToolStep => ({
+    id,
+    tool,
+    args: { description: `节-${id}` },
+    status: 'running',
+    summary: '',
+    error: null,
+    toolCallId: id,
+    reasoning: '',
+    text: '',
+    children: [],
+    startedAt: NOW,
+    endedAt: null,
+    ...over,
+  })
+  const task = (id: string, over: Partial<ToolStep> = {}): ToolStep => baseStep(id, 'task', over)
+  const grep = (id: string, over: Partial<ToolStep> = {}): ToolStep => baseStep(id, 'grep', over)
+
+  /** 前置：running 态 + 已有部分树（8 路子代理并发场景的活卡） */
+  const liveWith = (tools: ToolStep[], over: Partial<RunState> = {}): RunState => ({
+    ...INITIAL_STATE,
+    running: true,
+    runId: 'r1',
+    lastSeq: { runId: 'r1', seq: 10 },
+    streamText: '正在流出',
+    tools,
+    ...over,
+  })
+
+  const snapInto = (
+    s: RunState,
+    tools: ToolStep[],
+    over: Partial<Extract<Action, { type: 'snapshot' }>> = {},
+  ) =>
+    runReducer(s, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools,
+      todos: [],
+      reasoningText: '',
+      ...over,
+    }).state
+
+  it('死步修复：本地 running（丢 tool.result）+ 快照终态 → 采用快照终态', () => {
+    const s = snapInto(liveWith([task('t1')]), [
+      task('t1', { status: 'done', summary: '已写入 低代码产品方案.docx', endedAt: NOW + 9000 }),
+    ])
+    expect(s.tools[0].status).toBe('done')
+    expect(s.tools[0].summary).toBe('已写入 低代码产品方案.docx')
+    expect(s.tools[0].endedAt).toBe(NOW + 9000)
+    // merge 不动流式状态（快照没有未封口正文）
+    expect(s.streamText).toBe('正在流出')
+  })
+
+  it('拉取竞态防护：本地终态不被略旧的快照盖回 running', () => {
+    const s = snapInto(liveWith([grep('g1', { status: 'done', summary: '命中 3' })]), [
+      grep('g1', { status: 'running' }),
+    ])
+    expect(s.tools[0].status).toBe('done')
+    expect(s.tools[0].summary).toBe('命中 3')
+  })
+
+  it('快照 paused 不覆盖本地 running（冻结职责在 run.state 对账，续跑 revive 不被打断）', () => {
+    const s = snapInto(liveWith([task('t1')]), [task('t1', { status: 'paused' })])
+    expect(s.tools[0].status).toBe('running')
+  })
+
+  it('假「启动中」卡修复：本地 task 零 children（内部事件全丢）→ 采用快照 children', () => {
+    const childDone = grep('c1', { status: 'done', summary: '读视图' })
+    const childFixed = grep('c2', { status: 'done', summary: '写入节文件' })
+    const s = snapInto(liveWith([task('t1')]), [task('t1', { children: [childDone, childFixed] })])
+    expect(s.tools[0].children).toHaveLength(2)
+    // 本地 children 为空整棵采用（含其中终态）
+    expect(s.tools[0].children[0].status).toBe('done')
+    expect(s.tools[0].children[1].summary).toBe('写入节文件')
+  })
+
+  it('丢 tool.called 的步骤按快照位置补回；拉取窗口内新建的本地步骤尾部附加', () => {
+    const s = snapInto(liveWith([grep('a', { status: 'done' }), task('t1'), task('t2')]), [
+      grep('a', { status: 'done' }),
+      grep('b', { status: 'done', summary: '丢过 tool.called 的步骤' }),
+      task('t1', { status: 'done', summary: '已完成' }),
+    ])
+    expect(s.tools.map((t) => t.toolCallId)).toEqual(['a', 'b', 't1', 't2'])
+    expect(s.tools[1].summary).toBe('丢过 tool.called 的步骤')
+    expect(s.tools[2].status).toBe('done')
+    expect(s.tools[3].status).toBe('running')
+  })
+
+  it('封段字段本地缺失时补快照值；本地有值则保留', () => {
+    const s = snapInto(
+      liveWith([
+        grep('a', { status: 'running', text: '', reasoning: '' }),
+        grep('b', { status: 'running', text: '本地旁白', reasoning: '本地思考' }),
+      ]),
+      [
+        grep('a', { text: '快照旁白', reasoning: '快照思考' }),
+        grep('b', { text: '快照旁白', reasoning: '快照思考' }),
+      ],
+    )
+    expect(s.tools[0].text).toBe('快照旁白')
+    expect(s.tools[0].reasoning).toBe('快照思考')
+    expect(s.tools[1].text).toBe('本地旁白')
+    expect(s.tools[1].reasoning).toBe('本地思考')
+  })
+
+  it('todos 与计数随快照重算（「任务清单 0/0」同源修复）', () => {
+    const s = snapInto(liveWith([task('t1')], { todos: [], done: 0, total: 0 }), [], {
+      todos: [
+        { content: '解析', status: 'completed' as const },
+        { content: '目录', status: 'completed' as const },
+        { content: '正文', status: 'in_progress' as const },
+      ],
+    })
+    expect(s.todos).toHaveLength(3)
+    expect(s.done).toBe(2)
+    expect(s.total).toBe(3)
+  })
+
+  it('merge 路径同样受终态守卫：已终态的 run 不被快照复活', () => {
+    const marked = liveWith([task('t1')], { running: false, terminalRuns: new Set(['r1']) })
+    const s = snapInto(marked, [task('t1', { status: 'done' })])
+    expect(s).toBe(marked) // 原引用 bail：守卫命中直接返回
+  })
+})
+
+describe('agent.retry（LLM 自动重试可见，2026-09-08 契约 additive）', () => {
+  it('agent.retry 清未封口正文并置 retrying；流恢复即清除；settle-error 不残留', () => {
+    const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    // 半截正文已流出 → 自动重试到达（sidecar cur_text_parts.clear() 的前端镜像）
+    const s1 = runReducer(started, {
+      type: 'sse',
+      event: 'agent.token',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', text: '半截', seq: 2 },
+    }).state
+    const s2 = runReducer(s1, {
+      type: 'sse',
+      event: 'agent.retry',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', attempt: 1, total: 3, wait_seconds: 3, seq: 3 },
+    }).state
+    expect(s2.retrying).toEqual({ attempt: 1, total: 3, waitSeconds: 3 })
+    expect(s2.streamText).toBe('') // 重试完整重流出，半截 token 不拼重复
+    // 重试成功：流恢复，token 继续到达 → shimmer 撤下
+    const s3 = runReducer(s2, {
+      type: 'sse',
+      event: 'agent.token',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', text: '重流出的正文', seq: 4 },
+    }).state
+    expect(s3.retrying).toBeNull()
+    expect(s3.streamText).toBe('重流出的正文')
+    // 重试耗尽 → settle-error（code=llm_unavailable）不残留 retrying
+    const s4 = runReducer(s3, {
+      type: 'sse',
+      event: 'agent.retry',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', attempt: 3, total: 3, wait_seconds: 30, seq: 5 },
+    }).state
+    const settled = runReducer(s4, {
+      type: 'settle-error',
+      error: '模型服务暂时不可用，已自动重试 3 次仍失败。\n服务方返回：overloaded',
+      code: 'llm_unavailable',
+    }).state
+    expect(settled.retrying).toBeNull()
+    expect(settled.errorCode).toBe('llm_unavailable')
+  })
+
+  it('stream-batch 流增量清除 retrying；仅 seq 推进（无 token/思考）不清除', () => {
+    const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    const s1 = runReducer(started, {
+      type: 'sse',
+      event: 'agent.retry',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', attempt: 2, total: 3, wait_seconds: 10, seq: 3 },
+    }).state
+    const s2 = runReducer(s1, { type: 'stream-batch', tokens: '', deltas: [], seq: { runId: 'r1', seq: 4 } }).state
+    expect(s2.retrying).not.toBeNull() // 纯 seq 推进不是流恢复
+    const s3 = runReducer(s2, { type: 'stream-batch', tokens: '正文', deltas: [], seq: { runId: 'r1', seq: 5 } }).state
+    expect(s3.retrying).toBeNull()
   })
 })
 

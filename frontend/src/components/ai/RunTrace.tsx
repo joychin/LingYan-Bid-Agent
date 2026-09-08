@@ -26,7 +26,7 @@ export const StepThinking = memo(function StepThinking({ text }: { text?: string
   const [open, setOpen] = useState(false)
   if (!text) return null
   return (
-    <Collapsible className="group" open={open} onOpenChange={setOpen}>
+    <Collapsible className="group cv-step" open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger className="flex w-full cursor-pointer items-center gap-1.5 py-0.5 text-left text-[13px] text-muted-foreground/80 transition-colors hover:text-foreground">
         <Brain className="size-3.5 shrink-0" aria-hidden />
         <span className="whitespace-nowrap">思考</span>
@@ -74,7 +74,7 @@ const ToolStepRow = memo(function ToolStepRow({ step, embedded }: { step: ToolSt
           ? '已暂停'
           : '成功'
   return (
-    <Collapsible className="group" open={open} onOpenChange={setOpen}>
+    <Collapsible className="group cv-step" open={open} onOpenChange={setOpen}>
       {!embedded && (
         <>
           <StepThinking text={step.reasoning} />
@@ -181,7 +181,7 @@ const GrepBatch = memo(
   const running = steps.some((s) => s.status === 'running')
   const Icon = toolIcon('grep')
   return (
-    <div>
+    <div className="cv-step">
       <StepThinking text={first.reasoning} />
       <NarrationLine text={first.text} />
       <Collapsible className="group" open={open} onOpenChange={setOpen}>

@@ -676,21 +676,30 @@
   display: flex;
   gap: 12px;
   align-items: flex-start;
+  /* 离屏消息行跳过布局/绘制/合成（2026-09-08 活卡内存暴涨修复）：长会话 + 活卡
+     过程树的离屏部分不再参与每帧样式重算。auto 关键字 = 记住上次渲染尺寸，
+     scrollHeight 估高稳定（贴底 scrollTo 与「加载更早」锚定补偿都只依赖差值自洽）。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 140px;
+}
+/* 过程区步骤行（ToolStepRow/StepThinking/GrepBatch/SubagentCard）：同 .msg 的
+   离屏跳过策略；估高 48px = 单行步骤行典型高度 */
+.cv-step {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 48px;
 }
 .msg.user {
   justify-content: flex-end;
 }
+/* 燕子 logo：形状来自 public/logo.svg（mask 镂刻、背景透明），填充色用文字主色
+   随主题自适应——深墨 logo 直塞 <img> 会在深色模式下隐身 */
 .msg-avatar {
   width: 32px;
   height: 32px;
-  border-radius: 50%;
   flex: none;
   background: var(--Color-text-primary);
-  color: var(--Color-bg-canvas);
-  display: grid;
-  place-items: center;
-  font-size: 13px;
-  font-weight: 700;
+  -webkit-mask: url(/logo.svg) center / 100% no-repeat;
+  mask: url(/logo.svg) center / 100% no-repeat;
 }
 .msg-body {
   min-width: 0;
@@ -1188,20 +1197,20 @@
 
 /* ---------- Bottom chat input ---------- */
 .composer {
-  background: var(--Color-bg-canvas);
   padding: 8px 16px 8px; /* 与 .chat 左右 padding 对齐：输入框与正文列同宽基准 */
   flex: none;
 }
+/* 三层结构（2026-09-07 参考用户提供的 ZCode 输入框截图重做）：
+   .box = 灰色外卡（顶带放 ghost 任务选择器）→ .box-inner = 白色内嵌卡承装输入区 */
 .composer .box {
   position: relative;
   max-width: 720px; /* 与 .chat 同宽对齐（2026-08-29 review：由 896 收窄） */
   margin: 0 auto;
-  border-radius: 14px;
-  background: var(--Color-bg-canvas);
-  border: 1px solid var(--Color-border-default);
+  border-radius: 13px; /* 外 13 = 内 12 + 间隙 1，同心嵌套防内卡圆角顶穿 */
+  background: var(--Color-bg-subtle);
   box-shadow: none;
-  transition: border-color 0.15s, box-shadow 0.15s;
-  padding: 12px;
+  transition: box-shadow 0.15s;
+  padding: 1px; /* 2026-09-07 收细：默认态灰边 4px→1px，不再显粗 */
 }
 .prompt-suggestions {
   position: absolute;
@@ -1235,9 +1244,15 @@
 }
 
 .composer .box:focus-within {
-  /* 焦点中性化（2026-08-30 去彩色）：大青色光环改墨色系，只加深边框+极淡光晕 */
-  border-color: var(--Color-text-tertiary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--Color-text-primary) 6%, transparent);
+  /* 焦点中性化（2026-08-30 去彩色；2026-09-07 收细）：1px 细描边，与 kb-filter 等
+     输入件「只提亮不加粗」的焦点态同款克制 */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--Color-text-primary) 25%, transparent);
+}
+.composer .box-inner {
+  position: relative;
+  border-radius: var(--Radius-radius-12);
+  background: var(--Color-bg-canvas);
+  padding: 10px 12px 8px;
 }
 .composer textarea {
   width: 100%;
@@ -1262,6 +1277,13 @@
   justify-content: space-between;
   gap: 8px;
   margin-top: 12px;
+}
+/* 顶带：ghost 任务选择器的容身位（外卡 padding 4px + 本行 padding 凑出左缘缩进） */
+.composer .box-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
 }
 .composer-plus {
   width: 32px;
@@ -1324,22 +1346,27 @@
   fill: none;
   stroke-width: 1.7;
 }
+/* ghost 选择器（ZCode 顶带同款）：无边框透明底，icon+文字+chevron，hover 浮出淡墨底 */
 .task-select {
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 10px;
-  border-radius: 20px;
-  border: 1px solid var(--Color-border-default);
+  padding: 6px 10px;
+  border-radius: var(--Radius-radius-8);
+  border: none;
   background: transparent;
   color: var(--Color-text-primary);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: 0.12s;
+  transition: background 0.12s;
 }
 .task-select:hover {
-  background: var(--Color-bg-subtle);
+  background: color-mix(in srgb, var(--Color-text-primary) 6%, transparent);
+}
+.task-select:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--Color-text-primary) 12%, transparent);
 }
 .task-select .task-icon {
   width: 16px;
@@ -2921,6 +2948,41 @@
   background: color-mix(in srgb, var(--Color-danger, #ef4444) 10%, transparent);
   color: var(--Color-danger, #ef4444);
 }
+/* 锚点回文核对结果（程序核对自动确认的依据 / 待确认条目的原因点名） */
+.kb-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.kb-check-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--Color-success, #22c55e) 10%, transparent);
+  color: var(--Color-success, #22c55e);
+}
+.kb-check--fail {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--Color-warning, #f59e0b) 8%, transparent);
+}
+.kb-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--Color-warning, #f59e0b);
+  line-height: 1.5;
+}
+.kb-check-note {
+  color: var(--Color-text-tertiary, #8a8f98);
+}
 /* 参考文档常驻警示（范文≠公司事实，历史数字不自动沿用） */
 .kb-ref-warn {
   display: flex;
@@ -3138,6 +3200,243 @@
 .kb-statement-input:focus {
   outline: none;
   border-color: var(--Color-brand-primary);
+}
+
+/* 内容说明卡里的检索问题 pills */
+.kb-q-block {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.kb-q-label {
+  font-size: 11px;
+  color: var(--Color-text-secondary);
+}
+.kb-q-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.kb-q-pill {
+  font-size: 11.5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--Color-brand-primary) 8%, transparent);
+  color: var(--Color-text-primary);
+}
+/* 信息页检索问题编辑器 */
+.kb-q-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.kb-q-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  color: var(--Color-text-secondary);
+  cursor: pointer;
+}
+.kb-q-del:hover {
+  background: color-mix(in srgb, var(--Color-destructive) 10%, transparent);
+  color: var(--Color-destructive);
+}
+.kb-q-add,
+.kb-q-adopt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--Color-text-secondary);
+}
+.kb-q-add:hover,
+.kb-q-adopt:hover {
+  background: var(--Color-bg-subtle);
+  color: var(--Color-text-primary);
+}
+.kb-q-adopt {
+  color: var(--Color-brand-primary);
+}
+
+/* ===== 识别更新条 + 对比采纳卡（重新识别后亮差异、逐区采纳） ===== */
+.kb-update-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--Color-brand-primary) 35%, transparent);
+  background: color-mix(in srgb, var(--Color-brand-primary) 6%, transparent);
+  font-size: 12.5px;
+  color: var(--Color-text-primary);
+}
+.kb-update-bar > svg {
+  color: var(--Color-brand-primary);
+}
+.kb-update-text {
+  flex: 1;
+  min-width: 0;
+}
+.kb-update-act {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--Color-brand-primary);
+  border: 1px solid color-mix(in srgb, var(--Color-brand-primary) 40%, transparent);
+  background: transparent;
+}
+.kb-update-act:hover {
+  background: color-mix(in srgb, var(--Color-brand-primary) 10%, transparent);
+}
+.kb-update-act:focus-visible {
+  outline: 1px solid var(--Color-brand-primary);
+}
+.kb-update-act--ghost {
+  border-color: transparent;
+  color: var(--Color-text-secondary);
+}
+.kb-update-act--ghost:hover {
+  background: var(--Color-bg-subtle);
+  color: var(--Color-text-primary);
+}
+.kb-adopt {
+  margin-bottom: 10px;
+  border: 1px solid var(--Color-border-default);
+  border-radius: 8px;
+}
+.kb-adopt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--Color-border-default);
+}
+.kb-adopt-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--Color-text-secondary);
+  cursor: pointer;
+}
+.kb-adopt-close:hover {
+  background: var(--Color-bg-subtle);
+  color: var(--Color-text-primary);
+}
+.kb-adopt-section {
+  padding: 9px 12px;
+}
+.kb-adopt-section + .kb-adopt-section,
+.kb-adopt-foot {
+  border-top: 1px solid var(--Color-border-default);
+}
+.kb-adopt-sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.kb-adopt-sec-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--Color-text-secondary);
+}
+.kb-adopt-choices {
+  display: flex;
+  gap: 12px;
+}
+.kb-adopt-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--Color-text-secondary);
+  cursor: pointer;
+}
+.kb-adopt-choice input {
+  margin: 0;
+  accent-color: var(--Color-brand-primary);
+}
+.kb-adopt-choice--on {
+  color: var(--Color-text-primary);
+}
+.kb-adopt-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+.kb-adopt-sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 7px;
+}
+.kb-adopt-side {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--Color-bg-subtle);
+  font-size: 12px;
+  color: var(--Color-text-secondary);
+}
+.kb-adopt-side-tag {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 11px;
+}
+.kb-adopt-side p {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.kb-adopt-side--new {
+  background: color-mix(in srgb, var(--Color-brand-primary) 7%, transparent);
+}
+.kb-adopt-side--new .kb-adopt-side-tag {
+  color: var(--Color-brand-primary);
+}
+.kb-adopt-field {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 5px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.kb-adopt-field-label {
+  flex-shrink: 0;
+  color: var(--Color-text-secondary);
+}
+.kb-adopt-field-old,
+.kb-adopt-field-arrow {
+  color: var(--Color-text-secondary);
+}
+.kb-adopt-field-new {
+  color: var(--Color-text-primary);
+}
+.kb-adopt-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 12px;
 }
 
 /* ===== 写作素材库视图 ===== */
@@ -3398,11 +3697,58 @@
   accent-color: var(--Color-brand-primary);
 }
 .mt-node-title {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 勾选区（chevron 在 label 外——button 不能嵌 label）：flex:1 由 label 承担 */
+.mt-node-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+/* 折叠箭头（叶子占位对齐，visibility 保 16px 槽位） */
+.mt-node-chev {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--Color-text-tertiary);
+  cursor: pointer;
+}
+.mt-node-chev:hover {
+  background: var(--Color-bg-subtle);
+}
+.mt-node-chev--leaf {
+  visibility: hidden;
+}
+.mt-chev-ico {
+  width: 13px;
+  height: 13px;
+  transform: rotate(-90deg);
+  transition: transform 0.15s ease;
+}
+.mt-chev-ico--open {
+  transform: rotate(0deg);
+}
+/* 已建块徽章（节点区间落入现有块；中性灰——只报事实不劝阻） */
+.mt-node-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--Color-text-secondary);
+  background: color-mix(in srgb, var(--Color-text-tertiary) 14%, transparent);
 }
 .mt-node-range {
   flex: none;
@@ -3415,6 +3761,91 @@
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
+}
+/* 全部展开/收起（picker 头右缘） */
+.mt-picker-treeops {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: auto;
+}
+/* 树过滤提示行（命中计数） */
+.mt-tree-filterinfo {
+  margin: 0 0 6px;
+  font-size: 11.5px;
+  color: var(--Color-text-tertiary);
+}
+/* 卡头折叠箭头（素材卡展开——此前类名存在但无定义，箭头从不转） */
+.kb-chev {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--Color-text-tertiary);
+  transition: transform 0.15s ease;
+}
+.kb-chev--open {
+  transform: rotate(90deg);
+}
+/* AI 引用徽章（search_references 命中 + docx 注入合计） */
+.mt-usage-badge {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--Color-success);
+  background: color-mix(in srgb, var(--Color-success) 12%, transparent);
+}
+/* 块内容预览（分节：区间标签 + 正文，限高滚动） */
+.mt-block-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--Color-border-default);
+  background: var(--Color-bg-subtle);
+}
+.mt-preview-section {
+  min-width: 0;
+}
+.mt-preview-tag {
+  margin-bottom: 3px;
+  font-size: 10.5px;
+  color: var(--Color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.mt-preview-text {
+  margin: 0;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--Color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.mt-preview-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--Color-text-tertiary);
+}
+/* 建块重复探测（提示不阻断——裁决归用户） */
+.mt-dup-warn {
+  margin: 0 0 2px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--Color-warning);
+  background: color-mix(in srgb, var(--Color-warning) 12%, transparent);
+}
+.mt-dup-hint {
+  margin: 0 0 2px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--Color-text-secondary);
+  background: var(--Color-bg-subtle);
 }
 /* 生成素材块模态（勾选确认+标题+备注 textarea） */
 .mt-modal {
@@ -3517,6 +3948,12 @@
   resize: vertical;
   outline: none;
 }
+/* 纵向列里压掉 .mt-input 的 flex:1（同 .mt-modal-body .mt-input 的压扁坑） */
+.mt-note-edit .mt-input {
+  flex: none;
+  width: 100%;
+  height: 32px;
+}
 .mt-note-edit textarea:focus {
   border-color: var(--Color-text-tertiary);
 }
@@ -3583,4 +4020,129 @@
 .md-editor .cm-code,
 .md-editor .cm-monospace {
   color: var(--Color-warning);
+}
+
+/* ---------- docx/pdf 版式预览（本地渲染，纸面白底） ----------
+   docx-preview 会向容器注入自己的基础样式（.docx-wrapper 灰底、section.docx 纸面），
+   这里只覆盖外围观感（specificity 高于其注入样式，无需 !important）。
+   预览区在暗色下保持文档本色白底——纸就是纸，外圈留 muted 过渡。 */
+
+/* 中文字体别名：docx 里写的「宋体/SimSun」等字面名在 macOS 不存在，
+   经 local() 映射到系统等价字体（Windows 本机同名直接命中，不受影响） */
+@font-face {
+  font-family: '宋体';
+  src: local('Songti SC'), local('STSong'), local('SimSun');
+}
+@font-face {
+  font-family: 'SimSun';
+  src: local('Songti SC'), local('STSong'), local('SimSun');
+}
+@font-face {
+  font-family: '黑体';
+  src: local('Heiti SC'), local('SimHei');
+}
+@font-face {
+  font-family: 'SimHei';
+  src: local('Heiti SC'), local('SimHei');
+}
+@font-face {
+  font-family: '仿宋';
+  src: local('STFangsong'), local('FangSong');
+}
+@font-face {
+  font-family: 'FangSong';
+  src: local('STFangsong'), local('FangSong');
+}
+@font-face {
+  font-family: '楷体';
+  src: local('STKaiti'), local('KaiTi');
+}
+@font-face {
+  font-family: 'KaiTi';
+  src: local('STKaiti'), local('KaiTi');
+}
+@font-face {
+  font-family: '微软雅黑';
+  src: local('PingFang SC'), local('Microsoft YaHei');
+}
+@font-face {
+  font-family: 'Microsoft YaHei';
+  src: local('PingFang SC'), local('Microsoft YaHei');
+}
+
+.docx-preview-root {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--Color-bg-subtle);
+}
+.docx-preview-root .docx-wrapper {
+  background: var(--Color-bg-subtle);
+  padding: 16px 12px 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.docx-preview-root .docx-wrapper > section.docx {
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.16);
+  margin-bottom: 16px;
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+.pdf-preview-root {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--Color-bg-subtle);
+  padding: 12px;
+  position: relative;
+}
+.pdf-page-indicator {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  width: fit-content;
+  margin: 0 auto 10px;
+  padding: 2px 10px;
+  border: 1px solid var(--Color-border-default);
+  border-radius: var(--Radius-radius-full, 9999px);
+  background: var(--Color-bg-canvas);
+  color: var(--Color-text-secondary);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.pdf-page-slot {
+  margin: 0 auto 12px;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.16);
+  /* 未渲染占位按 A4 竖页近似比例（横页渲染后会跳一下，可接受） */
+  aspect-ratio: 1 / 1.414;
+}
+.pdf-page-slot canvas {
+  display: block;
+  width: 100%;
+}
+.pdf-preview-loading {
+  padding: 16px;
+  color: var(--Color-text-tertiary);
+  font-size: 12px;
+}
+
+/* 来源图片直览（sources/ 的 png/jpg 等） */
+.source-img-root {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--Color-bg-subtle);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.source-img-root img {
+  max-width: 100%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.16);
 }

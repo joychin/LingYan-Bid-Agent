@@ -21,9 +21,10 @@ def test_must_deliver_events_survive_full_queue():
                 drained.append(q.get_nowait())
             events_out = [e["event"] for e in drained]
             # 必达事件挤掉最旧一条（token i=0）送达；其余 token 保留
-            assert q.maxsize == 500 and len(drained) == 500
+            # （容量是性能旋钮：bus.subscribe 现配 2000，断言跟随 q.maxsize 不钉常数）
+            assert len(drained) == q.maxsize
             assert events_out[-1] == "agent.completed"
-            assert events_out.count("agent.token") == 499
+            assert events_out.count("agent.token") == q.maxsize - 1
             assert drained[0]["data"] == {"i": 1}
             assert drained[-1]["data"] == {"seq": 999}
         finally:
@@ -77,12 +78,12 @@ def test_full_must_deliver_queue_evicts_oldest_ordered():
             while not q.empty():
                 drained.append(q.get_nowait())
             events_out = [e["event"] for e in drained]
-            assert len(drained) == q.maxsize == 500
+            assert len(drained) == q.maxsize
             assert events_out[-1] == "agent.error"
             assert events_out.count("agent.error") == 1
-            # 最旧一条（i=0）被保序丢弃，其余 499 条 artifact.created 完整保留
+            # 最旧一条（i=0）被保序丢弃，其余 maxsize-1 条 artifact.created 完整保留
             assert drained[0]["data"] == {"i": 1}
-            assert events_out.count("artifact.created") == 499
+            assert events_out.count("artifact.created") == q.maxsize - 1
         finally:
             bus.unsubscribe(cid, q)
 

@@ -5,6 +5,7 @@ import { ChatView } from '@/components/ChatView'
 import { ChatHeader } from '@/components/ChatHeader'
 import { KnowledgeView } from '@/components/KnowledgeView'
 import { MaterialsLibraryView } from '@/components/MaterialsLibraryView'
+import { TemplatesView } from '@/components/TemplatesView'
 import { SettingsModal } from '@/components/SettingsModal'
 import { ArtifactPanel } from '@/components/ArtifactPanel'
 import { SidecarBanner } from '@/components/SidecarBanner'
@@ -25,13 +26,16 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   // 「新建会话」草稿页：主区展示欢迎页+输入框（convId=null），所属任务在输入框胶囊里选/建
   const [drafting, setDrafting] = useState(false)
-  // 主区形态：chat=对话工作台 / kb=知识库（全局资料层，与任务无关）
-  const [activeView, setActiveView] = useState<'chat' | 'kb' | 'library'>('chat')
+  // 主区形态：chat=对话工作台 / kb=知识库（全局资料层，与任务无关）/
+  // library=写作素材库（内容资产）/ templates=模板库（格式资产）
+  const [activeView, setActiveView] = useState<'chat' | 'kb' | 'library' | 'templates'>('chat')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [previewId, setPreviewId] = useState<string | null>(null)
   // 工作台文件（work/ 的 md 过程产物）查看器当前打开的相对路径
   const [workbenchPath, setWorkbenchPath] = useState<string | null>(null)
   const [workbenchAnchor, setWorkbenchAnchor] = useState<number | null>(null)
+  // 来源原件（sources/）预览当前打开的文件名（pdf/docx/图片，只读）
+  const [sourceFile, setSourceFile] = useState<string | null>(null)
   const [pendingSend, setPendingSend] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(LS_SIDEBAR) === '1')
   const [artifactsCollapsed, setArtifactsCollapsed] = useState(() => localStorage.getItem(LS_ARTIFACTS) === '1')
@@ -72,6 +76,7 @@ export default function App() {
   // anchorLine：来源追溯「查看原文上下文」定位（编辑器切源码栏滚到行）。
   const openWorkbenchFile = useCallback((path: string, anchorLine?: number) => {
     setPreviewId(null)
+    setSourceFile(null)
     setWorkbenchPath(path)
     setWorkbenchAnchor(anchorLine ?? null)
     setArtifactsCollapsed(false)
@@ -80,7 +85,16 @@ export default function App() {
   // 产物点击看似无响应（面板渲染是 workbenchPath ? WorkbenchViewer : ArtifactOpenHost）
   const openArtifact = useCallback((id: string) => {
     setWorkbenchPath(null)
+    setSourceFile(null)
     setPreviewId(id)
+    setArtifactsCollapsed(false)
+  }, [])
+  // 来源原件预览（sources/ 的 pdf/docx/图片，只读）：同一工作区单槽，互斥清理
+  const openSourceFile = useCallback((name: string) => {
+    setPreviewId(null)
+    setWorkbenchPath(null)
+    setWorkbenchAnchor(null)
+    setSourceFile(name)
     setArtifactsCollapsed(false)
   }, [])
 
@@ -131,6 +145,7 @@ export default function App() {
         }}
         onOpenKnowledge={() => setActiveView('kb')}
         onOpenLibrary={() => setActiveView('library')}
+        onOpenTemplates={() => setActiveView('templates')}
         activeView={activeView}
         onOpenSettings={() => setSettingsOpen(true)}
         theme={theme}
@@ -143,6 +158,8 @@ export default function App() {
           <KnowledgeView />
         ) : activeView === 'library' ? (
           <MaterialsLibraryView />
+        ) : activeView === 'templates' ? (
+          <TemplatesView />
         ) : (
           <>
             <ChatHeader task={currentTask} conversation={viewConv} />
@@ -177,12 +194,15 @@ export default function App() {
           previewId={previewId}
           workbenchPath={workbenchPath}
           workbenchAnchor={workbenchAnchor}
+          sourceFile={sourceFile}
           onOpen={openArtifact}
           onOpenWorkbench={openWorkbenchFile}
+          onOpenSource={openSourceFile}
           onClearPreview={() => {
             setPreviewId(null)
             setWorkbenchPath(null)
             setWorkbenchAnchor(null)
+            setSourceFile(null)
           }}
         />
       )}

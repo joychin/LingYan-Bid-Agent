@@ -21,6 +21,12 @@ class RunCtx:
 
 _ctx: contextvars.ContextVar[RunCtx | None] = contextvars.ContextVar("run_ctx", default=None)
 
+# 模型调用语境（main/sub）：与 RunCtx 的 run 级冻结不同，这是逐调用级——子代理
+# scope 中间件在 wrap_model_call 内置 sub、finally 复位，token_usage 据此给
+# per-turn 用量明细按主线程/子代理归因。默认 main（含 SummarizationMiddleware 等
+# 主线程语境的内部调用）。
+_scope: contextvars.ContextVar[str] = contextvars.ContextVar("agent_scope", default="main")
+
 
 def set_run(cid: str, rid: str, task_id: str | None = None, thinking: str = "low") -> None:
     _ctx.set(RunCtx(cid, rid, task_id, thinking))
@@ -37,3 +43,16 @@ def current_run() -> RunCtx | None:
 def current_thinking() -> str:
     ctx = _ctx.get()
     return ctx.thinking if ctx is not None else "low"
+
+
+def set_agent_scope(scope: str) -> contextvars.Token:
+    """置当前模型调用语境；返回 token 供 reset_agent_scope 复位。"""
+    return _scope.set(scope)
+
+
+def reset_agent_scope(token: contextvars.Token) -> None:
+    _scope.reset(token)
+
+
+def current_scope() -> str:
+    return _scope.get()

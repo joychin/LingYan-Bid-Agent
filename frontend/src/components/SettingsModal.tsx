@@ -55,7 +55,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
     if (!hasVision && !settings.ocr.configured) {
       notices.push({
         level: 'warn',
-        text: '未配置图片识别能力：图片、扫描版 PDF、.doc 均无法识别，仅存档原件——可配置文档解析（百度云），或为模型勾选「图片输入」',
+        text: '未配置图片识别能力：图片、扫描版 PDF、.doc 均无法识别，仅存档原件——可配置文档解析（百度云），或为模型开启「图片输入」',
       })
     } else if (hasVision && !settings.ocr.configured) {
       notices.push({
@@ -156,18 +156,21 @@ interface VendorPreset {
   models: { name: string; imageSupport: boolean; contextWindow?: number }[]
 }
 
-/** 上下文窗口预设档（值=token 数；null=自动/未知）。「自动」= 不干预压缩触发档位：
- *  langchain 注册表认识模型名（deepseek 系等）走窗口 85% 比例档，不认识的走保守固定线+超限自愈 */
+/** 上下文窗口预设档（值=token 数；null=自动/未知）。下限 256K（2026-09-08 用户拍板，
+ *  更小的档位在标书场景只有误配风险）。「自动」= 不干预压缩触发档位：langchain 注册表
+ *  认识模型名（deepseek 系等）走窗口 85% 比例档，不认识的走保守固定线（17 万 token）+超限自愈 */
 const CONTEXT_WINDOW_OPTIONS: { value: number | null; label: string }[] = [
   { value: null, label: '自动（默认）' },
-  { value: 32000, label: '32K' },
-  { value: 64000, label: '64K' },
-  { value: 128000, label: '128K' },
   { value: 256000, label: '256K' },
   { value: 512000, label: '512K' },
   { value: 1000000, label: '1M' },
   { value: 2000000, label: '2M' },
 ]
+
+/** 旧档案可能存有低于现行下限（256K）的窗口值：不在列表里时按数值格式化显示，不冒充「自动」 */
+function formatContextWindow(v: number): string {
+  return v >= 1000000 ? `${v / 1000000}M` : `${Math.round(v / 1000)}K`
+}
 
 const VENDOR_PRESETS: VendorPreset[] = [
   {
@@ -205,8 +208,8 @@ const VENDOR_PRESETS: VendorPreset[] = [
     color: '#FF6A00',
     models: [
       { name: 'qwen3-max', imageSupport: false, contextWindow: 256000 },
-      { name: 'qwen-plus', imageSupport: false, contextWindow: 128000 },
-      { name: 'qwen3-vl-plus', imageSupport: true, contextWindow: 128000 },
+      { name: 'qwen-plus', imageSupport: false },
+      { name: 'qwen3-vl-plus', imageSupport: true },
     ],
   },
   {
@@ -219,7 +222,7 @@ const VENDOR_PRESETS: VendorPreset[] = [
     models: [
       { name: 'glm-5.1', imageSupport: false, contextWindow: 256000 },
       { name: 'glm-5', imageSupport: false, contextWindow: 256000 },
-      { name: 'glm-4.6v', imageSupport: true, contextWindow: 128000 },
+      { name: 'glm-4.6v', imageSupport: true },
     ],
   },
   {
@@ -342,7 +345,9 @@ function SettingRow({
   )
 }
 
-/** 开关（替代原生 checkbox；off 态 line-2、on 态品牌蓝） */
+/** 开关（替代原生 checkbox）：off 中性墨系——ink 20% 轨道+1px 内描边（边界清晰、
+ *  白圆点不发虚），on 品牌色轨道（2026-09-08 用户拍板，推翻 09-07 的去彩色审计）；
+ *  焦点 = 1px 细描边（克制铁则，禁光晕） */
 function Switch({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
     <button
@@ -352,13 +357,16 @@ function Switch({ checked, onChange, label }: { checked: boolean; onChange: (v: 
       aria-label={label}
       onClick={() => onChange(!checked)}
       className={cn(
-        'relative h-[22px] w-10 shrink-0 rounded-full transition-colors',
-        checked ? 'bg-inverse' : 'bg-line-2',
+        'group relative h-[22px] w-10 shrink-0 rounded-full transition-colors',
+        'focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-ring',
+        checked
+          ? 'bg-primary hover:bg-primary-hover'
+          : 'bg-ink/20 hover:bg-ink/30 ring-1 ring-inset ring-line-2',
       )}
     >
       <span
         className={cn(
-          'absolute left-0.5 top-0.5 h-[18px] w-[18px] rounded-full bg-canvas shadow-sm transition-transform',
+          'absolute left-0.5 top-0.5 h-[18px] w-[18px] rounded-full bg-background shadow-sm transition-transform group-active:scale-90',
           checked && 'translate-x-[18px]',
         )}
       />
@@ -448,7 +456,7 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
         <SettingRow
           cardTitle
           title="本地配置"
-          desc="模型与 API Key 均保存在本机数据库，不上传；勾选「图片输入」的模型用于知识库图片 / 扫描件识别（已配置文档解析时优先走百度云，此处为兜底）。"
+          desc="模型与 API Key 均保存在本机数据库，不上传；开启「图片输入」的模型用于知识库图片 / 扫描件识别（已配置文档解析时优先走百度云，此处为兜底）。"
         >
           <Button size="sm" onClick={() => setEditing('new')}>
             <Plus className="mr-1 h-3.5 w-3.5" />
@@ -519,7 +527,7 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
             onChange={(pid) => void changeRole('extract', pid)}
           />
         </SettingRow>
-        <SettingRow title="知识库视觉转写" desc="图片 / 扫描页转文字（仅列已勾选「图片输入」的模型）">
+        <SettingRow title="知识库视觉转写" desc="图片 / 扫描页转文字（仅列已开启「图片输入」的模型）">
           <RoleSelect
             value={roles.vision}
             emptyLabel="自动（默认模型优先）"
@@ -818,7 +826,9 @@ function ModelNameSelect({
  *  top-full 面板；卡片无 overflow-hidden 是面板不被裁剪的前提，勿加） */
 function ContextWindowSelect({ value, onChange }: { value: number | null; onChange: (v: number | null) => void }) {
   const [open, setOpen] = useState(false)
-  const current = CONTEXT_WINDOW_OPTIONS.find((o) => o.value === value) ?? CONTEXT_WINDOW_OPTIONS[0]
+  const current =
+    CONTEXT_WINDOW_OPTIONS.find((o) => o.value === value) ??
+    (value != null ? { value, label: formatContextWindow(value) } : CONTEXT_WINDOW_OPTIONS[0])
 
   useEffect(() => {
     if (!open) return
@@ -1126,7 +1136,7 @@ function ModelDialog({
 
           <SettingRow
             title="图片输入"
-            desc="勾选后用于知识库图片 / 扫描件识别（已配置文档解析时优先走百度云，此处为兜底）"
+            desc="开启后用于知识库图片 / 扫描件识别（已配置文档解析时优先走百度云，此处为兜底）"
           >
             <Switch checked={imageSupport} onChange={setImageSupport} label="图片输入" />
           </SettingRow>
@@ -1148,7 +1158,7 @@ function ModelDialog({
                 <Field label="上下文窗口">
                   <ContextWindowSelect value={contextWindow} onChange={setContextWindow} />
                   <p className="text-xs leading-relaxed text-muted-foreground">
-                    模型单次能读入的最大 token 量，影响长会话自动压缩的触发时机。不清楚请保持「自动」；选大了会过早压缩上下文，选小了会依赖超限自动恢复。
+                    模型单次能读入的最大 token 量，影响长会话自动压缩的触发时机。不清楚请保持「自动」；选大了会晚于真实窗口、依赖超限自动恢复，选小了会过早压缩上下文。
                   </p>
                 </Field>
               </div>
@@ -1227,7 +1237,7 @@ function ParseSection() {
         <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
           用于扫描版 PDF、.doc 与图片的云端识别（任务文件区与知识库通用）。按量计费，
           文件内容将发送至百度智能云；数字版 PDF 与 .docx 始终本地解析、不受影响。
-          未配置时 .doc 仅能存档，图片与扫描件回退给勾选了「图片输入」的模型本地
+          未配置时 .doc 仅能存档，图片与扫描件回退给开启了「图片输入」的模型本地
           转写（两者都未配置才仅存档）。
         </p>
       </div>

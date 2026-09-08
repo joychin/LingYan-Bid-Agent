@@ -26,6 +26,9 @@ windowed = os.environ.get("SIDECAR_WINDOWED", "") == "1"
 
 datas = [
     ("app/skills", "app/skills"),
+    # 标书基准 docx 模板（docx_ops._new_document 按 __file__ 相对路径读，
+    # 漏了建节回落英文默认模板=版式退化，非崩溃）
+    ("app/resources", "app/resources"),
 ]
 datas += collect_data_files("trafilatura")
 # trafilatura 2.x 走 justext 剔除样板文本，stoplists 是包内数据文件（冻结冒烟实测抓漏）

@@ -29,11 +29,14 @@ import type {
   MtBlock,
   MtFile,
   MtOutlineNode,
+  RestyleReport,
+  RestyleResult,
   RunInfo,
   RunTraceSnapshot as RunTraceSnapshotDto,
   SendMessageResult,
   Settings,
   Task,
+  TemplateInfo,
   UploadResult,
 } from './dto.gen'
 
@@ -56,10 +59,13 @@ export type {
   MtBlock,
   MtFile,
   MtOutlineNode,
+  RestyleReport,
+  RestyleResult,
   RunInfo,
   SendMessageResult,
   Settings,
   Task,
+  TemplateInfo,
   UploadResult,
 }
 
@@ -141,12 +147,9 @@ export async function request<T>(
   return res.json() as Promise<T>
 }
 
-/** 消息行：基础字段来自 dto.gen；tools/todos 是 run_traces 快照（键序与 ToolStep 同构），
- *  sidecar 侧松散声明，前端用客户端 ToolStep 类型标注。 */
-export interface Message extends Omit<MessageDto, 'tools' | 'todos'> {
-  tools?: ToolStep[]
-  todos?: TodoItem[]
-}
+/** 消息行（过程快照瘦身 2026-09-08 reshape）：列表只带 traceSteps/tracePaused
+ *  摘要与 files/durationMs；完整 tools/todos/reasoning 走 fetchMessageTrace 按需取。 */
+export type Message = MessageDto
 
 /** HITL 裁决（与 sidecar/langchain 的 Decision 形状一致；edit 为 API 保留、UI 暂不提供）。 */
 export type HitlDecision =
@@ -207,11 +210,10 @@ export function deleteConversation(id: string): Promise<{ ok: boolean }> {
 }
 
 export async function listMessages(convId: string): Promise<{ messages: Message[] }> {
+  // 过程快照瘦身（2026-09-08）：列表不再带 tools/todos/reasoning（标书会话 11.4MB
+  // 随历史线性涨、每次 invalidate 全量重拉），历史过程区点开时按需取
   const res = await request<{ messages: Message[] }>(`/conversations/${convId}/messages`)
-  // 历史 trace 松散 dict 的防御归一（旧快照缺 children/text 等键不再打崩渲染层）
-  return {
-    messages: res.messages.map((m) => (m.tools ? { ...m, tools: normalizeToolSteps(m.tools) } : m)),
-  }
+  return { messages: res.messages }
 }
 
 /** 思考档位（标准 reasoning_effort 三档；模型默认开思考，无关闭项） */
@@ -246,6 +248,25 @@ export interface RunSnapshot extends Omit<RunTraceSnapshotDto, 'tools' | 'todos'
 export async function getRunSnapshot(rid: string): Promise<RunSnapshot> {
   const snap = await request<RunSnapshot>(`/runs/${rid}/snapshot`)
   return { ...snap, tools: normalizeToolSteps(snap.tools), todos: Array.isArray(snap.todos) ? snap.todos : [] }
+}
+
+/** 单条消息的完整执行过程（按需，2026-09-08 messages 瘦身）：历史过程区点开时取；
+ *  出口套与快照路径相同的防御归一（旧快照缺键不打崩渲染层）。 */
+export interface MessageTrace {
+  tools: ToolStep[]
+  todos: TodoItem[]
+  reasoning: string
+}
+
+export async function fetchMessageTrace(convId: string, messageId: string): Promise<MessageTrace> {
+  const res = await request<{ tools: unknown; todos: TodoItem[]; reasoning: string }>(
+    `/conversations/${convId}/messages/${messageId}/trace`,
+  )
+  return {
+    tools: normalizeToolSteps(res.tools),
+    todos: Array.isArray(res.todos) ? res.todos : [],
+    reasoning: res.reasoning ?? '',
+  }
 }
 
 /** HITL 裁决续跑：waiting_input 的 run 以 decisions 从 interrupt 处继续（202 后台执行）。 */
@@ -454,6 +475,7 @@ export function confirmKbMetadata(
   body: {
     doc_type: string
     statement?: string
+    questions?: string[]
     fields: Record<string, string>
     extra?: Record<string, string>
   },
@@ -487,12 +509,12 @@ export function uploadMtFile(
   return _uploadWithProgress('/api/materials/files', file, onProgress)
 }
 
-function _uploadWithProgress(
+function _uploadWithProgress<T = { id: string; file_name: string; size: number }>(
   path: string,
   file: File,
   onProgress?: (percent: number) => void,
-): Promise<{ id: string; file_name: string; size: number }> {
-  return new Promise((resolve, reject) => {
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
     void getSidecarInfo().then(({ baseURL, token }) => {
       const xhr = new XMLHttpRequest()
       xhr.open('POST', `${baseURL}${path}`)
@@ -526,6 +548,36 @@ function _uploadWithProgress(
   })
 }
 
+// ===== 文档模板库（格式资产：上传/激活/预览/任务换装）=====
+
+export function uploadTemplate(file: File): Promise<TemplateInfo> {
+  return _uploadWithProgress<TemplateInfo>('/api/templates', file)
+}
+
+export function listTemplates(): Promise<TemplateInfo[]> {
+  return request('/templates')
+}
+
+export function activateTemplate(key: string): Promise<{ ok: boolean }> {
+  return request(`/templates/${encodeURIComponent(key)}/activate`, { method: 'POST' })
+}
+
+export function deleteTemplate(key: string): Promise<{ ok: boolean }> {
+  return request(`/templates/${encodeURIComponent(key)}`, { method: 'DELETE' })
+}
+
+/** 模板原始字节（版式预览渲染用；同 workbench raw——rawFetch 无 15s 超时）。 */
+export async function fetchTemplateRaw(key: string): Promise<Blob> {
+  const res = await rawFetch(`/templates/${encodeURIComponent(key)}/raw`)
+  if (!res.ok) throw new Error(`模板拉取失败（${res.status}）`)
+  return res.blob()
+}
+
+/** 把当前生效模板应用到任务已有正文节（重建式换装；「整本-」派生物跳过）。 */
+export function applyTemplate(taskId: string): Promise<RestyleReport> {
+  return request('/templates/apply', { method: 'POST', body: JSON.stringify({ task_id: taskId }) })
+}
+
 export function listMtFiles(): Promise<{ files: MtFile[] }> {
   return request('/materials/files')
 }
@@ -540,8 +592,30 @@ export function deleteMtFile(id: string): Promise<{ ok: boolean }> {
   return request(`/materials/files/${id}`, { method: 'DELETE' })
 }
 
-export function listMtBlocks(): Promise<{ blocks: MtBlock[] }> {
-  return request('/materials/blocks')
+/** 重新解析（失败重试；ready 也可重触发，解析幂等）。 */
+export function reparseMtFile(id: string): Promise<{ ok: boolean }> {
+  return request(`/materials/files/${id}/reparse`, { method: 'POST' })
+}
+
+export function listMtBlocks(q?: string): Promise<{ blocks: MtBlock[] }> {
+  return request(`/materials/blocks${q && q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ''}`)
+}
+
+/** 块内容（预览用）：分节切片，节=区间标签+正文。 */
+export interface MtBlockSection {
+  start: number
+  end: number
+  text: string
+}
+export interface MtBlockContent {
+  id: string
+  title: string
+  chars: number
+  sections: MtBlockSection[]
+}
+
+export function getMtBlockContent(id: string): Promise<MtBlockContent> {
+  return request(`/materials/blocks/${id}/content`)
 }
 
 export function createMtBlock(
@@ -573,6 +647,7 @@ export async function fetchKbItemRaw(id: string): Promise<string> {
 
 export interface WorkbenchFile {
   path: string // 相对 work/ 的 posix 路径，如 "analysis/disqualification.md"
+  abs_path: string // 绝对路径（面板右键「打开文件夹」用）
   mtime: string
   size: number
   /** 首行头部注释含「修订=用户」：人工改过，模型重跑前会提示 */
@@ -642,6 +717,22 @@ export interface WorkbenchDocxView {
 export function getWorkbenchDocxView(taskId: string, path: string): Promise<WorkbenchDocxView> {
   const qs = new URLSearchParams({ task_id: taskId, path })
   return request(`/workbench/docx-view?${qs}`)
+}
+
+/** docx 原始字节（面板版式预览）：浏览器本地渲染、文件不出本机；本机回环传输，
+ *  不走 request() 的 15s 挂死防护（大合册可能明显更慢，rawFetch 无超时正合适）。 */
+export async function fetchWorkbenchRaw(taskId: string, path: string): Promise<Blob> {
+  const qs = new URLSearchParams({ task_id: taskId, path })
+  const res = await rawFetch(`/workbench/raw?${qs}`)
+  return res.blob()
+}
+
+/** 来源原件原始字节（pdf/docx/图片预览，前端按扩展名分流渲染器）。 */
+export async function fetchSourceRaw(taskId: string, name: string): Promise<Blob> {
+  const res = await rawFetch(
+    `/files/${encodeURIComponent(name)}/raw?task_id=${encodeURIComponent(taskId)}`,
+  )
+  return res.blob()
 }
 
 // ==== sidecar 进程监管（Tauri 壳命令；浏览器开发模式一律返回空值） ====

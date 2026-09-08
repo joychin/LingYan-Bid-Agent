@@ -11,7 +11,7 @@
 
 import sqlite3
 
-LATEST = 22
+LATEST = 26
 
 
 def _add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -133,6 +133,34 @@ MIGRATIONS: list[tuple[int, object]] = [
     (
         22,
         lambda c: _add_column(c, "runs", "token_usage", "ALTER TABLE runs ADD COLUMN token_usage TEXT"),
+    ),
+    (
+        23,
+        lambda c: (
+            _add_column(
+                c, "mt_blocks", "use_count",
+                "ALTER TABLE mt_blocks ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0",
+            ),
+            _add_column(
+                c, "mt_blocks", "last_used_at",
+                "ALTER TABLE mt_blocks ADD COLUMN last_used_at TEXT",
+            ),
+        ),
+    ),
+    (
+        24,
+        lambda c: _add_column(c, "runs", "error_code", "ALTER TABLE runs ADD COLUMN error_code TEXT"),
+    ),
+    (
+        25,
+        lambda c: _migrate_run_turn_usage_and_backfill(c),
+    ),
+    (
+        26,
+        lambda c: _add_column(
+            c, "kb_items", "check_result",
+            "ALTER TABLE kb_items ADD COLUMN check_result TEXT",
+        ),
     ),
 ]
 
@@ -259,6 +287,39 @@ def _migrate_kb_materials(conn: sqlite3.Connection) -> None:
             "body, item_id UNINDEXED, section_path UNINDEXED, material_id UNINDEXED, "
             "line_start UNINDEXED, line_end UNINDEXED, page_start UNINDEXED)"
         )
+
+
+def _migrate_run_turn_usage_and_backfill(conn: sqlite3.Connection) -> None:
+    """per-turn 用量明细表 + 历史孤儿 trace 回填（2026-09-08）。
+
+    回填治 error 收尾 bug 的历史存量：error 分支曾把 message_id 写死 None，
+    首段即 error 的 run 其 trace 永远挂不上任何消息（GET /messages 按
+    message_id 挂载，历史里过程全丢）。挂到同 run 最后一条 assistant 消息
+    （终态半截消息或暂停消息，取决于哪条在最后）；无 assistant 消息的 run
+    （秒挂无产出）不动。同 run 仅一行 trace（run_id 主键）、消息按 run 归属，
+    不存在跨行抢占。
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS run_turn_usage(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL,
+          scope TEXT NOT NULL DEFAULT 'main',
+          input INTEGER NOT NULL DEFAULT 0,
+          cached INTEGER NOT NULL DEFAULT 0,
+          output INTEGER NOT NULL DEFAULT 0,
+          reasoning INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL)"""
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_run_turn_usage_run ON run_turn_usage(run_id)")
+    conn.execute(
+        """
+        UPDATE run_traces SET message_id = (
+          SELECT m.id FROM messages m
+          WHERE m.run_id = run_traces.run_id AND m.role = 'assistant'
+          ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1)
+        WHERE (message_id IS NULL OR message_id = '')
+        """
+    )
 
 
 def apply(conn: sqlite3.Connection, current: int) -> None:

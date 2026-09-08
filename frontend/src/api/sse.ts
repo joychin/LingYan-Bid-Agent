@@ -9,6 +9,7 @@ import type {
   AgentCompleted,
   AgentError,
   AgentReasoning,
+  AgentRetry,
   AgentStarted,
   AgentToken,
   ArtifactCreated,
@@ -61,6 +62,7 @@ export interface AgentEventData
     AgentStarted &
       AgentToken &
       AgentReasoning &
+      AgentRetry &
       ToolCalled &
       ToolResult &
       TodoUpdated &

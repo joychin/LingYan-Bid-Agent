@@ -28,8 +28,8 @@ from ..parse import count_nodes, outline_with_lines, write_atomic
 from ..parse import image as parse_image
 from ..parse import pdf as parse_pdf
 from ..vlm import VlmUnavailable
+from . import autocheck, fts, store
 from . import extract as extract_mod
-from . import fts, store
 from . import images as images_mod
 from .segmenter import segments_from
 from .types import FIELD_LABELS, get_type
@@ -315,9 +315,22 @@ def statement_segment(statement: str) -> dict | None:
     }
 
 
+def questions_segment(questions) -> dict | None:
+    """检索问题 → 检索段（§questions；「用户会怎么问」的字面检索入口）。"""
+    qs = [q.strip() for q in (questions or []) if isinstance(q, str) and q.strip()]
+    if not qs:
+        return None
+    return {
+        "section_path": "§questions",
+        "line_start": None, "line_end": None, "page_start": None,
+        "raw": "\n".join(qs),
+    }
+
+
 def reindex_item(kid: str) -> None:
     """重建条目检索段（唯一重建入口）：outline 段 + 内容说明段（§statement）+
-    已确认元数据合成段。写作素材在独立素材库（materials_lib），知识库无章节块。"""
+    检索问题段（§questions）+ 已确认元数据合成段。写作素材在独立素材库
+    （materials_lib），知识库无章节块。"""
     item = db.kb_get_item(kid)
     if not item:
         return
@@ -328,12 +341,15 @@ def reindex_item(kid: str) -> None:
         outline = json.loads(outline_path.read_text(encoding="utf-8")) if outline_path.is_file() else []
         segs = segments_from(md_text, outline)
 
-    # 内容说明段（business 版优先）
+    # 内容说明段 + 检索问题段（business 版优先）
     basis = _loads(item.get("business_metadata")) or _loads(item.get("suggested_metadata"))
     if basis:
         st = statement_segment(basis.get("statement"))
         if st:
             segs.append(st)
+        qs = questions_segment(basis.get("questions"))
+        if qs:
+            segs.append(qs)
 
     # 确认版字段段（人工填的字段也要可检索）
     biz = _loads(item.get("business_metadata"))
@@ -356,9 +372,12 @@ def reindex_item(kid: str) -> None:
 
 
 def _extract(item: dict, md_text: str) -> None:
-    """三合一抽取（类型/内容说明/锚点字段）→ suggested_metadata。
+    """三合一抽取（类型/内容说明/锚点字段）→ suggested_metadata + 回文核对。
 
-    模型走 extract 角色（后台任务模型）；business 永不覆盖、已确认条目 doc_type 不回写。
+    两主人模型：机器守 suggested（每次抽取收尾跑锚点回文核对，全过自动确认、
+    有败留待确认点名原因）；人守 business（人工确认/编辑过的条目核对只更新
+    展示，永不改确认状态，doc_type 也不回写——既有语义）。自动确认的 business
+    副本带 confirmed_by="auto" 标记，人工保存后标记消失即转为人工所有。
     """
     kid = item["id"]
     if len((md_text or "").strip()) < _MIN_EXTRACT_CHARS:
@@ -378,21 +397,49 @@ def _extract(item: dict, md_text: str) -> None:
     if not suggested:
         db.kb_update_item(kid, extract_status="failed", error="信息抽取返回无法解析")
         return
-    if (db.kb_get_item(kid) or {}).get("review_status") == "confirmed":
+
+    cur = db.kb_get_item(kid) or {}
+    check = autocheck.run_anchor_check(
+        suggested, md_text, get_type(suggested.get("doc_type")),
+    )
+    check_json = json.dumps(check, ensure_ascii=False)
+    human_owned = (
+        cur.get("review_status") == "confirmed"
+        and (autocheck.loads_business(cur.get("business_metadata")) or {}).get("confirmed_by") != "auto"
+    )
+    if human_owned:
+        # 人工所有：维持现状（只更新 suggested），核对结果仅作展示
         db.kb_update_item(
             kid,
             extract_status="done",
             suggested_metadata=json.dumps(suggested, ensure_ascii=False),
+            check_result=check_json,
             error=None,
         )
         return
-    db.kb_update_item(
-        kid,
-        extract_status="done",
-        suggested_metadata=json.dumps(suggested, ensure_ascii=False),
-        doc_type=suggested.get("doc_type") if get_type(suggested.get("doc_type")) else "other",
-        error=None,
-    )
+    if check["status"] == "pass":
+        db.kb_update_item(
+            kid,
+            extract_status="done",
+            suggested_metadata=json.dumps(suggested, ensure_ascii=False),
+            doc_type=suggested.get("doc_type") if get_type(suggested.get("doc_type")) else "other",
+            review_status="confirmed",
+            business_metadata=json.dumps(autocheck.auto_business(suggested), ensure_ascii=False),
+            check_result=check_json,
+            error=None,
+        )
+    else:
+        # 有败：留待确认并清掉旧自动副本（防陈旧盖章；显示回落 suggested）
+        db.kb_update_item(
+            kid,
+            extract_status="done",
+            suggested_metadata=json.dumps(suggested, ensure_ascii=False),
+            doc_type=suggested.get("doc_type") if get_type(suggested.get("doc_type")) else "other",
+            review_status="pending_review",
+            business_metadata=None,
+            check_result=check_json,
+            error=None,
+        )
 
 
 def rebuild_kb_index() -> int:

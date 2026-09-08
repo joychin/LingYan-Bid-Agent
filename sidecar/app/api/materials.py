@@ -112,17 +112,46 @@ async def delete_file(fid: str):
     return {"ok": True}
 
 
+@router.post("/materials/files/{fid}/reparse", status_code=202)
+async def reparse_file(fid: str):
+    """重新解析（失败重试；ready 也可重触发，解析幂等）。"""
+    if not db.mt_get_file(fid):
+        raise HTTPException(status_code=404, detail="素材文件不存在")
+    if not mlib.schedule_parse(fid):
+        raise HTTPException(status_code=409, detail="该文件正在解析中，请稍候")
+    return {"ok": True}
+
+
 @router.get("/materials/blocks")
-async def list_blocks():
-    """全部素材块（跨文件；文件信息附带）。"""
+async def list_blocks(q: str | None = None):
+    """全部素材块（跨文件；文件信息附带）。
+
+    q 非空时过滤：正文 FTS 命中（标题+备注+正文都进了检索段）∪ 标题/备注
+    本地子串匹配（FTS 分词漏的直给兜底）。
+    """
     files = {f["id"]: f for f in db.mt_list_files()}
+    lq = (q or "").strip().lower()
+    matched = mlib.search_block_ids(q) if lq else None
     out = []
     for b in db.mt_list_blocks():
         f = files.get(b["file_id"])
         if not f:
             continue
+        if matched is not None:
+            hit = b["id"] in matched or lq in b["title"].lower() or lq in (b.get("note") or "").lower()
+            if not hit:
+                continue
         out.append({**b, "file_name": f["file_name"]})
     return {"blocks": out}
+
+
+@router.get("/materials/blocks/{bid}/content")
+async def get_block_content(bid: str):
+    """块内容预览：分节切片（区间标签 + 正文），卡片展开区数据源。"""
+    content = mlib.block_content(bid)
+    if not content:
+        raise HTTPException(status_code=404, detail="素材块不存在")
+    return content
 
 
 @router.post("/materials/files/{fid}/blocks", status_code=201)

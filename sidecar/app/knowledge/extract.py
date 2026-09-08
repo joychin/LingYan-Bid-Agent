@@ -6,8 +6,10 @@
   LLM 自由提取进「内容说明 statement」，每条事实带出处锚点（第N页/LN）。
 - 说明进检索索引（§statement 段）——事实类文件的正文常为表格/扫描，说明段是
   语义密度最高的可检索单元；命中标「AI 整理·数字须回原文核对」。
+- 检索问题（questions）进独立 §questions 段——用「用户会怎么问」的口吻补字面检索的
+  措辞缺口（正文印「医院」、用户问「医疗行业项目」）；归类词必须与内容真实对应。
 - 写法类（历史标书/模板/方案）说明退化为 2–3 句结构概览（写法价值在章节与素材，
-  不在说明）。
+  不在说明），不生成检索问题。
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ EXTRACT_SYSTEM = (
 )
 
 _MIN_STATEMENT_CHARS = 20
+_MAX_QUESTIONS = 8
+_MAX_QUESTION_CHARS = 30
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
 _JSON_RE = re.compile(r"\{.*\}", re.S)
@@ -41,11 +45,18 @@ _EXTRACT_TMPL = """请阅读以下资料文本，完成三件事：判断类型�
 - 其他类型：**逐条列出关键内容**（数字/金额/编号/范围/等级/意见/人数等），每条事实后
   跟（第N页）或（LN）出处；300–800 字；禁止评论、推测、编造——认不出或文中没有的不写
 
+## 检索问题（questions）
+- 若判定为写法类：questions 输出空数组，跳过本节
+- 其他类型：列 3–6 个「用户检索公司资料时会问的问题」短问句（每个 ≤20 字，如
+  「公司规模多大？」「持有哪些软件著作权？」「做过哪些医疗行业项目？」）——
+  覆盖这份资料能回答的主要维度；问句里的行业/规模/能力等归类词必须与文中内容
+  真实对应（项目是医院的才许写「医疗行业」），文中没有的不写；问句本身不带出处
+
 ## 规则
 1. 只依据文本真实出现的内容；文件名提示：{filename_hint}
 2. fields 键用英文 code；模板外有固定名称的关键属性放 extra（中文键，如「认证范围」）
 3. 只输出一个 JSON 对象，不要 markdown 代码块包裹，格式：
-{{"doc_type": "<code>", "confidence": <0~1>, "statement": "…",
+{{"doc_type": "<code>", "confidence": <0~1>, "statement": "…", "questions": ["…", …],
   "fields": {{"<code>": {{"value": "…", "source": "…"}}}},
   "extra": {{"<中文键>": {{"value": "…", "source": "…"}}}}}}
 
@@ -121,6 +132,18 @@ def validate_suggested(data: dict, filename: str) -> dict:
         elif len(statement) < _MIN_STATEMENT_CHARS:
             statement = ""
 
+    # 检索问题：写法类不生成（检索消费方是素材库）；去空/去重/超长丢弃，宁缺毋滥
+    questions: list[str] = []
+    if t.role != "writing" and isinstance(data.get("questions"), list):
+        for q in data["questions"]:
+            if not isinstance(q, str):
+                continue
+            q = q.strip()
+            if q and len(q) <= _MAX_QUESTION_CHARS and q not in questions:
+                questions.append(q)
+            if len(questions) >= _MAX_QUESTIONS:
+                break
+
     confidence = data.get("confidence")
     try:
         confidence = float(confidence) if confidence is not None else None
@@ -130,6 +153,8 @@ def validate_suggested(data: dict, filename: str) -> dict:
     out = {"doc_type": doc_type, "fields": fields, "extra": extra}
     if statement:
         out["statement"] = statement
+    if questions:
+        out["questions"] = questions
     if confidence is not None:
         out["confidence"] = confidence
     return out

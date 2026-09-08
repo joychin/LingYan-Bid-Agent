@@ -27,8 +27,13 @@ export interface RunState {
   done: number
   total: number
   error: string | null
-  /** 错误分类（agent.error/run.state additive code）：cancelled=用户主动停止，中性呈现 */
+  /** 错误分类（agent.error/run.state additive code）：cancelled=用户主动停止，中性呈现；
+   *  llm_unavailable=模型服务方过载/超时（ErrorCard 人话文案）、llm_auth=Key 未配置/
+   *  失效（附「去设置」）、internal=程序错误（2026-09-08 扩展取值域） */
   errorCode: string | null
+  /** LLM 瞬时错误自动重试等待期（agent.retry，2026-09-08 additive）：非空 = 输出区显示
+   *  「正在自动重试」shimmer；任何流增量（token/reasoning/tool）到达即清除（流已恢复）。 */
+  retrying: { attempt: number; total: number; waitSeconds: number } | null
   /** 最近一次普通用户指令：发送失败/任务失败时重试用。 */
   lastInstruction: string
   /** 本次 HITL respond 的回答：仅在续跑空窗期显示，纯审批不产生。 */
@@ -64,6 +69,7 @@ export const INITIAL_STATE: RunState = {
   total: 0,
   error: null,
   errorCode: null,
+  retrying: null,
   lastInstruction: '',
   continuationAnswer: '',
   pauseNarration: '',
@@ -82,6 +88,9 @@ export type Effect =
   | { kind: 'invalidate-messages' }
   /** 拉回落库消息之后才 dispatch action（保「先对齐消息、再撤流式气泡」的时序） */
   | { kind: 'settle-after-messages'; action: Action }
+  /** 过程对账（2026-09-08）：seq 缺口 = SSE 丢过事件（bus 积压丢弃/断连窗口），
+   *  拉运行快照把死步/丢步骤补齐；hook 层限频，缺口风暴不会连环拉。 */
+  | { kind: 'reconcile-trace'; runId: string }
 
 export type Action =
   | { type: 'sse'; event: string; data: AgentEventData; now: number }
@@ -112,12 +121,13 @@ export type Action =
   /** 流式高频事件（agent.token/agent.reasoning）的合并应用：useRun 把 200ms 窗口内的
    *  增量攒成一次 dispatch——逐 token 应用会让 ChatView 每 token 重渲染（reasoning
    *  还带整棵工具树的递归拷贝）。顺序语义不变：任何其他 action 之前先冲刷缓冲。
-   *  seq = 缓冲内最大序号（去重水位续接，无 seq 事件不携带）。 */
+   *  seq = 缓冲内最大序号（去重水位续接，无 seq 事件不携带）；seqFrom = 批次首帧
+   *  的 seq_from（SSE 微合批 additive）——连续性检查用，见 stream-batch 分支。 */
   | {
       type: 'stream-batch'
       tokens: string
       deltas: Array<{ agentId: string | null; text: string }>
-      seq?: { runId: string; seq: number }
+      seq?: { runId: string; seq: number; seqFrom?: number }
     }
 
 export interface ReducerResult {
@@ -213,6 +223,57 @@ function hasStepByCallId(steps: ToolStep[], toolCallId: string): boolean {
   )
 }
 
+function stepKey(s: ToolStep): string {
+  return s.toolCallId ?? s.id
+}
+
+const isFinal = (s: ToolStep) => s.status === 'done' || s.status === 'error'
+
+/** 单步骤合并：本地终态优先（事件已到达=权威，快照必然略旧，防拉取竞态盖回 running）；
+ *  本地非终态 + 快照终态 → 采用快照终态（SSE 丢了 tool.result 的死步修复）；
+ *  快照 paused 不参与（冻结职责归 run.state waiting_input 对账——续跑乐观 revive
+ *  不被旧快照打断）；双方都非终态保留本地（可能带更新的流式痕迹）。
+ *  text/reasoning 本地为空时补快照值（丢封段事件场景）。 */
+function mergeStep(local: ToolStep, snap: ToolStep): ToolStep {
+  const takeSnapFinal = !isFinal(local) && isFinal(snap)
+  // 本地 children 为空 = 子代理内部事件全丢（假「启动中」卡）：快照为准
+  const children =
+    local.children.length === 0 ? snap.children : mergeTraceTree(local.children, snap.children)
+  return {
+    ...local,
+    ...(takeSnapFinal
+      ? { status: snap.status, summary: snap.summary, error: snap.error ?? null, endedAt: snap.endedAt ?? null }
+      : {}),
+    text: local.text || snap.text || '',
+    reasoning: local.reasoning || snap.reasoning,
+    children,
+  }
+}
+
+/** 快照对本地树做字段级合并（过程对账，2026-09-08；与 sidecar _merge_trace_trees 同思想）：
+ *  以快照顺序为骨架——快照独有的步骤按快照位置补回（丢 tool.called），本地独有的步骤
+ *  尾部附加（拉取窗口内新事件创建，事件序单调故必在树尾）。不整树覆盖：拉取窗口内
+ *  新到的终态是权威，整树替换会把它盖回 running。 */
+function mergeTraceTree(local: ToolStep[], snap: ToolStep[]): ToolStep[] {
+  const byKey = new Map(local.map((s) => [stepKey(s), s]))
+  const seen = new Set<string>()
+  const merged: ToolStep[] = []
+  for (const snapStep of snap) {
+    const key = stepKey(snapStep)
+    const match = byKey.get(key)
+    if (match) {
+      seen.add(key)
+      merged.push(mergeStep(match, snapStep))
+    } else {
+      merged.push(snapStep)
+    }
+  }
+  for (const s of local) {
+    if (!seen.has(stepKey(s))) merged.push(s)
+  }
+  return merged
+}
+
 /** 把子代理 reasoning 增量累积到所属 task 步骤（不可变）。 */
 function appendReasoning(steps: ToolStep[], agentId: string, text: string): ToolStep[] {
   return steps.map((s) => {
@@ -247,8 +308,24 @@ const result = (state: RunState, effects: Effect[] = []): ReducerResult => ({ st
 
 export function runReducer(s: RunState, action: Action): ReducerResult {
   switch (action.type) {
-    case 'sse':
-      return reduceSse(s, action)
+    case 'sse': {
+      const r = reduceSse(s, action)
+      // seq 缺口（过程对账触发点之一）：以应用前的水位比对（reduceSse 内部已推进）。
+      // 缺口 = bus 积压丢弃或断连窗口丢过事件——可能正是某个 tool.result/子代理事件，
+      // 拉运行快照补齐（hook 层限频）。告警保留，缺口从「只告警」变「告警+自愈」。
+      // 连续性锚点用 seq_from（SSE 微合批 additive，2026-09-08）：服务端把窗口内
+      // 连续增量合并成一帧时 seq 跳号是常态，seq_from==水位+1 即无缺口；旧 sidecar
+      // 无此字段退回 seq（跳号=缺口，保守正确）。
+      const seq = action.data.seq
+      if (typeof seq === 'number') {
+        const seqFrom = action.data.seq_from ?? seq
+        if (s.lastSeq && s.lastSeq.runId === action.data.run_id && seqFrom > s.lastSeq.seq + 1) {
+          console.warn(`[sse] 事件缺口：期望 ${s.lastSeq.seq + 1}，收到 ${seqFrom}（run ${action.data.run_id}）`)
+          return { state: r.state, effects: [...r.effects, { kind: 'reconcile-trace', runId: action.data.run_id }] }
+        }
+      }
+      return r
+    }
     case 'started': {
       const sameRun = s.runId === action.runId && s.runId !== null
       const base = sameRun ? s : INITIAL_STATE
@@ -269,6 +346,7 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         tools: action.continuation ? revivePausedSteps(base.tools) : base.tools,
         error: null,
         errorCode: null,
+        retrying: null,
         interrupt: null,
         stopping: false,
         streamText: '',
@@ -283,6 +361,7 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         streamText: '',
         reasoningText: '',
         error: null,
+        retrying: null,
         continuationAnswer: '',
         pauseNarration: '',
         interrupt: null,
@@ -300,6 +379,7 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         reasoningText: '',
         error: action.error,
         errorCode: action.code,
+        retrying: null,
         continuationAnswer: '',
         pauseNarration: '',
         interrupt: null,
@@ -316,6 +396,7 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         running: false,
         stopping: false,
         streamText: '',
+        retrying: null,
         pauseNarration: s.streamText,
         tools: freezeRunningSteps(s.tools),
         continuationAnswer: '',
@@ -349,17 +430,26 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
             ? Math.max(s.lastSeq.seq, action.snapshotSeq)
             : action.snapshotSeq
           : null
+      // 本地已有过程树 = 不是重建而是过程对账（2026-09-08）：字段级 merge 补死步/丢
+      // 步骤，不做 revive/freeze（树空重建才有的恢复语义）、不动 streamText 等流式状态
+      const tools =
+        s.tools.length > 0
+          ? mergeTraceTree(s.tools, action.tools)
+          : s.continuation
+            ? revivePausedSteps(action.tools)
+            : action.status === 'waiting_input'
+              ? // 防御性冻结：等待态快照按契约已是 paused 终态树，混入 running 也不转圈
+                freezeRunningSteps(action.tools)
+              : action.tools
       return result({
         ...s,
         running: action.status === 'running' ? true : s.running,
         runId: action.runId,
-        tools: s.continuation
-          ? revivePausedSteps(action.tools)
-          : action.status === 'waiting_input'
-            ? // 防御性冻结：等待态快照按契约已是 paused 终态树，混入 running 也不转圈
-              freezeRunningSteps(action.tools)
-            : action.tools,
+        tools,
         todos: action.todos,
+        // 清单计数随快照重算（丢过 todo.updated 的场景 items 修好了计数不能烂着）
+        done: action.todos.filter((t) => t.status === 'completed').length,
+        total: action.todos.length,
         reasoningText: action.reasoningText,
         ...(snapSeq != null ? { lastSeq: { runId: action.runId, seq: snapSeq } } : {}),
       })
@@ -374,8 +464,16 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
       let lastSeq = s.lastSeq
       let changed = false
       const seq = action.seq
+      // 流式窗口内的 seq 跳号同样是丢过事件的信号（丢的可能不止 token）——同款对账
+      // 触发。连续性锚点用 seqFrom（SSE 微合批 additive，2026-09-08）：批次首帧的
+      // seq_from==水位+1 即服务端合并跳号、非缺口；缺 seqFrom（旧 sidecar）退回 seq。
+      const seqFrom = seq ? (seq.seqFrom ?? seq.seq) : 0
+      const gapEffects: Effect[] =
+        seq && s.lastSeq && s.lastSeq.runId === seq.runId && seqFrom > s.lastSeq.seq + 1
+          ? [{ kind: 'reconcile-trace', runId: seq.runId }]
+          : []
       if (seq && (!lastSeq || lastSeq.runId !== seq.runId || seq.seq > lastSeq.seq)) {
-        lastSeq = seq
+        lastSeq = { runId: seq.runId, seq: seq.seq }
         changed = true
       }
       if (action.tokens) {
@@ -387,7 +485,12 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         else reasoningText += d.text
         changed = true
       }
-      return changed ? result({ ...s, streamText, reasoningText, tools, lastSeq }) : result(s)
+      // 流增量到达 = 重试已成功（流恢复），撤下「正在自动重试」shimmer；仅 seq 推进
+      // （无 token/reasoning）不算恢复
+      const flowed = !!action.tokens || action.deltas.length > 0
+      return changed
+        ? result({ ...s, streamText, reasoningText, tools, lastSeq, ...(flowed ? { retrying: null } : {}) }, gapEffects)
+        : result(s, gapEffects)
     }
   }
 }
@@ -395,17 +498,15 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
 function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): ReducerResult {
   const { event, data, now } = action
   // seq 未推进前的原引用：no-op 分支返回它让 setState 同值 bail（避免每条杂项事件
-  // 白触发一次 ChatView 整树渲染；代价是这些事件的 seq 水位不前移，最坏多一条缺口告警）
+  // 白触发一次 ChatView 整树渲染；代价是这些 seq 水位不前移，最坏多一条缺口对账）
   const orig = s
-  // seq 去重（契约 additive 扩展）：双连接残留的重复投递直接丢弃（结构上终结重影）；
-  // 缺口告警不重放（MVP 断线策略仍是重拉 messages）。无 seq（旧 sidecar/连接级事件）照常接受。
+  // seq 去重（契约 additive 扩展）：双连接残留的重复投递直接丢弃（结构上终结重影）。
+  // 缺口检测/告警/对账 effect 统一在 runReducer 的 sse 入口包一层（含 effect 挂载），
+  // 这里只管去重与水位推进。无 seq（旧 sidecar/连接级事件）照常接受。
   if (typeof data.seq === 'number') {
     const last = s.lastSeq
     if (last && last.runId === data.run_id) {
       if (data.seq <= last.seq) return { state: s, effects: [] }
-      if (data.seq > last.seq + 1) {
-        console.warn(`[sse] 事件缺口：期望 ${last.seq + 1}，收到 ${data.seq}（run ${data.run_id}）`)
-      }
     }
     s = { ...s, lastSeq: { runId: data.run_id, seq: data.seq } }
   }
@@ -414,13 +515,26 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
     case 'agent.started':
       return runReducer(s, { type: 'started', runId: data.run_id, now })
     case 'agent.token':
-      return result({ ...s, streamText: s.streamText + (data.text ?? '') })
+      return result({ ...s, streamText: s.streamText + (data.text ?? ''), retrying: null })
+    case 'agent.retry':
+      // LLM 瞬时错误自动重试等待期（2026-09-08 additive）：清未封口正文（与 sidecar
+      // cur_text_parts.clear() 对齐——重试会完整重流出，不清则半截 token 拼重复），
+      // 正文气泡区改显示「正在自动重试」shimmer
+      return result({
+        ...s,
+        streamText: '',
+        retrying: {
+          attempt: data.attempt ?? 1,
+          total: data.total ?? 3,
+          waitSeconds: data.wait_seconds ?? 0,
+        },
+      })
     case 'agent.reasoning':
       // 推理模型的 chain-of-thought 增量；agent_id 非空时归属子代理（累积到 task 步骤）
       if (data.agent_id) {
-        return result({ ...s, tools: appendReasoning(s.tools, data.agent_id, data.text ?? '') })
+        return result({ ...s, tools: appendReasoning(s.tools, data.agent_id, data.text ?? ''), retrying: null })
       }
-      return result({ ...s, reasoningText: s.reasoningText + (data.text ?? '') })
+      return result({ ...s, reasoningText: s.reasoningText + (data.text ?? ''), retrying: null })
     case 'tool.called': {
       // 幂等兜底：双连接窗口内同一调用可能投递两次（单飞订阅已基本防住）
       const callId = data.tool_call_id ?? null
@@ -434,9 +548,9 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
         // 本就不透传，streamText 恒为空；reasoning 走 agent_id 归属追加）
         step.text = s.streamText
         step.reasoning = s.reasoningText
-        return result({ ...s, tools: attachStep(s.tools, step, data.agent_id), streamText: '', reasoningText: '' })
+        return result({ ...s, tools: attachStep(s.tools, step, data.agent_id), streamText: '', reasoningText: '', retrying: null })
       }
-      return result({ ...s, tools: attachStep(s.tools, step, data.agent_id) })
+      return result({ ...s, tools: attachStep(s.tools, step, data.agent_id), retrying: null })
     }
     case 'tool.result':
       return result({ ...s, tools: fillStep(s.tools, data, now) })
@@ -458,7 +572,8 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
       // 在跑则恢复 running（重连/新挂载错过 agent.started），已结束则收敛
       if (data.status === 'running') {
         if (s.terminalRuns.has(data.run_id)) return result(orig)
-        // 恢复 running 态：计时从恢复时刻重新起算（拿不到真实起点，近似）；
+        // 恢复 running 态：计时用事件携带的权威起点（runs.created_at，刷新/重连后
+        // 续算而非重算），旧 sidecar 无此字段时退回本地值（同 run 重连）再退回当前时刻；
         // 对账事件以 sidecar 权威 run_id 为准（本地旧值可能属于已结束的 run，
         // 保留会让停止钮 POST 到错误的 run）
         return result({
@@ -466,7 +581,7 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
           running: true,
           runId: data.run_id,
           error: null,
-          startedAt: s.startedAt ?? now,
+          startedAt: data.started_at ?? s.startedAt ?? now,
         })
       }
       if (data.status === 'waiting_input') {

@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import {
   BookOpen,
   Folder,
+  LayoutTemplate,
   Library,
   FolderOpen,
   MoreHorizontal,
@@ -44,10 +45,12 @@ export interface SidebarProps {
   onNewSession: () => void
   /** 打开写作素材库视图（素材跨文件浏览） */
   onOpenLibrary?: () => void
+  /** 打开模板库视图（文档模板=格式资产，与素材分离） */
+  onOpenTemplates?: () => void
   /** 打开知识库视图（全局资料层） */
   onOpenKnowledge: () => void
-  /** 主区形态：决定知识库入口的 active 态 */
-  activeView?: 'chat' | 'kb' | 'library'
+  /** 主区形态：决定知识库/素材库/模板库入口的 active 态 */
+  activeView?: 'chat' | 'kb' | 'library' | 'templates'
   onOpenSettings: () => void
   /** 当前主题（图标即状态）；切换由 App 落 localStorage + documentElement */
   theme: 'light' | 'dark'
@@ -97,6 +100,7 @@ export function Sidebar({
   onOpenKnowledge,
   activeView = 'chat',
   onOpenLibrary,
+  onOpenTemplates,
   onOpenSettings,
   theme,
   onToggleTheme,
@@ -300,6 +304,12 @@ export function Sidebar({
             label="写作素材库"
             active={activeView === 'library'}
             onClick={onOpenLibrary}
+          />
+          <NavRow
+            icon={<LayoutTemplate />}
+            label="模板库"
+            active={activeView === 'templates'}
+            onClick={onOpenTemplates}
           />
         </div>
 

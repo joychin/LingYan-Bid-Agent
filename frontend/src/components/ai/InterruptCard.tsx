@@ -85,7 +85,7 @@ function RecommendBadge() {
   )
 }
 
-/** 单选圆点（选中实心）或多选方框（选中打勾）。选中态走中性灰（ink 系），
+/** 单选圆点（外环+中心点）或多选方框（选中打勾）。选中态走中性灰（ink 系），
  *  与会话列表等 Workspace 组件的选中语言一致（用户拍板：选中态偏好中性灰非品牌蓝）。 */
 function OptionControl({ selected, multiple }: { selected: boolean; multiple: boolean }) {
   if (multiple) {
@@ -101,10 +101,12 @@ function OptionControl({ selected, multiple }: { selected: boolean; multiple: bo
   }
   return (
     <span
-      className={`h-4 w-4 shrink-0 rounded-full border-2 ${
-        selected ? 'border-ink bg-ink' : 'border-line-2 bg-background'
+      className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 ${
+        selected ? 'border-ink' : 'border-line-2'
       }`}
-    />
+    >
+      {selected && <span className="h-2 w-2 rounded-full bg-ink" />}
+    </span>
   )
 }
 

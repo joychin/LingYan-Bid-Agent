@@ -98,9 +98,10 @@ def test_tender_outline_unused_ids_disclosure():
 
 
 def test_tender_body_kickoff_and_material_first():
-    """tender-body 开工纪律锚点：指引确认门+承诺拍板、素材先行、并发派发必带清单。"""
+    """tender-body 开工纪律锚点：指引确认门+承诺拍板、素材先行、派发短名+系统自动补全
+    （2026-09-08 起模型罗列的必带清单改为程序拼装，见 dispatch_enrich）。"""
     text = (skills_source_dir() / "tender-body" / "SKILL.md").read_text(encoding="utf-8")
     for kw in ("写作指引", "关键事实与承诺", "素材先行", "block_ids", "待补", "待澄清",
                "validate_body", "guide_path", "tender-body-writer", "兄弟节开头摘要",
-               "不传就会编", "只重写我指定的章节", "共享\n  内容在前、节差异在后"):
+               "由系统在派发时自动补全", "只重写我指定的章节"):
         assert kw in text, f"tender-body/SKILL.md 缺少开工纪律关键词：{kw}"

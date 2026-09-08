@@ -75,7 +75,8 @@ def test_artifact_dto(client):
 
 
 def test_message_dto(client):
-    """assistant 消息 + run_traces 回填（tools/todos/durationMs/reasoning/files）过 Message 模型。"""
+    """messages 瘦身（2026-09-08 reshape）：列表不带 tools/todos/reasoning，只带
+    摘要（traceSteps/tracePaused）与 durationMs/files；完整过程走按需 trace 端点。"""
     _, conv = _task_conv()
     run = db.create_run(conv["id"])
     msg = db.append_assistant_message(conv["id"], "完成")
@@ -94,11 +95,52 @@ def test_message_dto(client):
     msgs = client.get(f"/api/conversations/{conv['id']}/messages").json()["messages"]
     target = next(m for m in msgs if m["id"] == msg["id"])
     parsed = dto.Message.model_validate(target)
+    # 大对象已瘦身：列表响应不含 tools/todos/reasoning
+    assert "tools" not in target and "todos" not in target and "reasoning" not in target
+    # 折叠头摘要 + 保留的轻量字段
+    assert parsed.traceSteps == 1
+    assert parsed.tracePaused is False
     assert parsed.durationMs == 1234
-    assert parsed.reasoning == "思考整段"
-    assert parsed.tools and parsed.tools[0]["text"] == "旁白"
     assert parsed.files and parsed.files[0].path == "analysis/structure.md"
     assert parsed.files[0].op == "created"
+
+
+def test_message_trace_endpoint(client):
+    """按需 trace 端点：完整过程（tools 树/旁白/思考）+ paused 摘要 + 归属校验。"""
+    from tests.util import create_conversation
+
+    _, conv = _task_conv()
+    run = db.create_run(conv["id"])
+    msg = db.append_assistant_message(conv["id"], "完成")
+    db.save_run_trace(
+        run["id"],
+        conv["id"],
+        msg["id"],
+        [{"id": "c1", "tool": "task", "args": {}, "status": "paused", "summary": "", "error": None,
+          "tool_call_id": "c1", "reasoning": "子代理思考", "text": "", "children": [],
+          "startedAt": 1, "endedAt": 2}],
+        [],
+        99,
+        "最终段思考",
+    )
+    # 完整过程
+    r = client.get(f"/api/conversations/{conv['id']}/messages/{msg['id']}/trace")
+    assert r.status_code == 200
+    body = r.json()
+    parsed = dto.MessageTrace.model_validate(body)
+    assert parsed.tools[0]["reasoning"] == "子代理思考"
+    assert parsed.reasoning == "最终段思考"
+    # 摘要：paused 递归判定（树内含 paused 步）
+    msgs = client.get(f"/api/conversations/{conv['id']}/messages").json()["messages"]
+    target = next(m for m in msgs if m["id"] == msg["id"])
+    assert target["traceSteps"] == 1
+    assert target["tracePaused"] is True
+
+    # 跨会话取数 404；无过程的消息 404
+    other = create_conversation(client)
+    assert client.get(f"/api/conversations/{other['id']}/messages/{msg['id']}/trace").status_code == 404
+    bare = db.append_assistant_message(conv["id"], "纯文本回复")
+    assert client.get(f"/api/conversations/{conv['id']}/messages/{bare['id']}/trace").status_code == 404
 
 
 def test_runinfo_dto(client):

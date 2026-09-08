@@ -21,8 +21,11 @@ def test_upload_list_delete(client):
     # 列表只列该任务
     r = client.get("/api/files", params={"task_id": tid})
     assert r.status_code == 200
-    names = [f["name"] for f in r.json()["files"]]
+    entries = r.json()["files"]
+    names = [f["name"] for f in entries]
     assert names == ["招标文件.docx"]
+    # abs_path：面板右键「打开文件夹」用（绝对路径，落在任务 sources/ 下）
+    assert entries[0]["abs_path"].endswith(f"workspace/{tid}/sources/招标文件.docx")
 
     # 删除
     r = client.delete("/api/files/招标文件.docx", params={"task_id": tid})
@@ -142,3 +145,27 @@ def test_oversize_overwrite_keeps_original(client, monkeypatch):
     # 原文件完好，且没有残留 .part 临时文件
     assert (files_dir / "keep.docx").read_bytes() == b"original-content"
     assert not list(files_dir.glob(".*.part"))
+
+
+def test_raw_roundtrip(client):
+    """来源原件字节端点（面板预览）：上传→取字节 roundtrip + content-type；
+    不存在 404；路径清洗与 containment 与 delete 同款。"""
+    from urllib.parse import quote
+
+    task = create_task(client)
+    tid = task["task"]["id"]
+    payload = b"%PDF-1.7 fake body"
+    upload_file(client, tid, "招标文件.pdf", payload)
+
+    r = client.get(f"/api/files/{quote('招标文件.pdf')}/raw", params={"task_id": tid})
+    assert r.status_code == 200
+    assert r.content == payload
+    assert r.headers["content-type"].startswith("application/pdf")
+
+    # 未知扩展名兜底 octet-stream；不存在/越界 404
+    upload_file(client, tid, "附件.dat", b"zz")
+    assert client.get(f"/api/files/{quote('附件.dat')}/raw", params={"task_id": tid}).headers[
+        "content-type"
+    ].startswith("application/octet-stream")
+    assert client.get("/api/files/nope.pdf/raw", params={"task_id": tid}).status_code == 404
+    assert client.get("/api/files/..%2Fsecret/raw", params={"task_id": tid}).status_code == 404

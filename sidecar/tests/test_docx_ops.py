@@ -133,7 +133,7 @@ def test_create_and_read(env):
     assert (work_dir(env["task"]["id"]) / "body" / "技术部分" / "3.1 需求分析.docx").is_file()
     view = docx_section_read.invoke({"path": "body/技术部分/3.1 需求分析.docx"})
     assert "[P1]（Heading 1）3.1 需求分析" in view
-    assert "[P2]（Normal）第一段。" in view
+    assert "[P2]（Tender Body）第一段。" in view
     assert "共 3 个段落" in view
 
 
@@ -160,7 +160,11 @@ def test_material_inject_full_chain(env):
     r = docx_material_inject.invoke({"block_id": env["block"]["id"], "dest": section})
     assert r.startswith("[已注入]"), r
     assert "表格 1 张" in r and "图片 1 张" in r
+    from app import db
     from app.artifact_store import work_dir
+
+    # 注入落盘成功 → AI 引用打点 +1
+    assert db.mt_get_block(env["block"]["id"])["use_count"] == 1
 
     dst = work_dir(env["task"]["id"]) / section
     chk = Document(str(dst))
@@ -204,6 +208,40 @@ def test_material_inject_missing_block(env):
 
 
 # ---------- 招标原件拷贝（docx_source_inject） ----------
+
+
+def test_material_inject_body_style_adoption(env):
+    """素材适配模板（2026-09-08 用户拍板：素材库拷贝归顺模板、招标格式件
+    保真）：无样式引用的素材正文段挂 Tender Body（标书缩进/行距，与 AI 正文
+    同观感——此前吃中性 Normal 不缩进是观感割裂主因）；表格整表与表内文字
+    不受影响；素材标题段引用内置 Heading 自动吃宿主（模板）定义；招标格式件
+    拷贝不挂样式（格式由招标文件定死）。"""
+    section = _make_section()
+    assert docx_material_inject.invoke(
+        {"block_id": env["block"]["id"], "dest": section}
+    ).startswith("[已注入]")
+    doc = Document(str(_abs(env, section)))
+    body = [p for p in doc.paragraphs if p.text.startswith("本项目由")]
+    assert body and all(p.style.name == "Tender Body" for p in body)
+    assert any(
+        p.text == "运维服务方案" and p.style.name == "Heading 1" for p in doc.paragraphs
+    )
+    # 表格整表保真：单元格段落不被挂样式（无显式引用，渲染吃 Normal）
+    cell_p = doc.tables[0].rows[0].cells[0].paragraphs[0]._p
+    cell_ppr = cell_p.find(qn("w:pPr"))
+    assert cell_ppr is None or cell_ppr.find(qn("w:pStyle")) is None
+
+    # 招标格式件：保真不挂（同款无样式正文段保持原样）
+    _tender_source(env)
+    section2 = _make_section("技术部分/投标函.docx")
+    assert docx_source_inject.invoke(
+        {"source": "招标文件.docx", "dest": section2}
+    ).startswith("[已注入]")
+    chk = Document(str(_abs(env, section2)))
+    zh = [p for p in chk.paragraphs if p.text == "致：______（招标人名称）"]
+    assert zh
+    zh_ppr = zh[0]._p.find(qn("w:pPr"))
+    assert zh_ppr is None or zh_ppr.find(qn("w:pStyle")) is None
 
 
 def test_source_inject_whole_file(env):
@@ -534,6 +572,285 @@ def test_material_inject_migrates_style_and_numbering(env):
     assert "77" in nums  # numId 连其 abstractNum 一并补拷
 
 
+# ---------- 编号定义冲突重映射（numbering id 只是文档内部门牌号） ----------
+
+
+def _add_cn_numbering(doc, num_id: str, abs_id: str) -> None:
+    """素材侧自定义中文编号：先替换模板自带的同 id 定义（素材内 id 唯一），
+    与节文件模板的同 id 形成跨文档冲突——模拟历史标书的独立编号空间。"""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    np = doc.part.numbering_part.element
+    for el in list(np.findall(qn("w:num"))):
+        if el.get(qn("w:numId")) == num_id:
+            np.remove(el)
+    for el in list(np.findall(qn("w:abstractNum"))):
+        if el.get(qn("w:abstractNumId")) == abs_id:
+            np.remove(el)
+    np.append(parse_xml(
+        f'<w:abstractNum {nsdecls("w")} w:abstractNumId="{abs_id}">'
+        f'<w:multiLevelType w:val="hybridMultilevel"/>'
+        f'<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="chineseCountingThousand"/>'
+        f'<w:lvlText w:val="一、"/><w:lvlJc w:val="left"/></w:lvl></w:abstractNum>'
+    ))
+    np.append(parse_xml(
+        f'<w:num {nsdecls("w")} w:numId="{num_id}"><w:abstractNumId w:val="{abs_id}"/></w:num>'
+    ))
+
+
+def _numbered_para(doc, text: str, num_id: str) -> None:
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    p = doc.add_paragraph(text)
+    p._p.get_or_add_pPr().append(parse_xml(
+        f'<w:numPr {nsdecls("w")}><w:ilvl w:val="0"/><w:numId w:val="{num_id}"/></w:numPr>'
+    ))
+
+
+def _numbering_root(chk):
+    return chk.part.numbering_part.element
+
+
+def _numbered_para_ids(chk) -> list[str]:
+    out = []
+    for p in chk.paragraphs:
+        ppr = p._p.find(qn("w:pPr"))
+        numpr = ppr.find(qn("w:numPr")) if ppr is not None else None
+        if numpr is not None and numpr.find(qn("w:numId")) is not None:
+            out.append(numpr.find(qn("w:numId")).get(qn("w:val")))
+    return out
+
+
+def _abs_ref_of(chk, num_id: str) -> str:
+    num = next(n for n in _numbering_root(chk).findall(qn("w:num"))
+               if n.get(qn("w:numId")) == num_id)
+    return num.find(qn("w:abstractNumId")).get(qn("w:val"))
+
+
+def _lvl_text_of_abs(chk, abs_id: str) -> str | None:
+    abs_el = next(a for a in _numbering_root(chk).findall(qn("w:abstractNum"))
+                  if a.get(qn("w:abstractNumId")) == abs_id)
+    lvl0 = abs_el.find(qn("w:lvl"))
+    return lvl0.find(qn("w:lvlText")).get(qn("w:val")) if lvl0 is not None else None
+
+
+def test_material_inject_numbering_conflict_remapped(env):
+    """numId 撞建节模板（模板自带 numId 1-9）：定义不同则重映射新 id、改写引用，
+    素材编号定义保真、模板原定义不动——修复「同 id 即沿用目标定义」的静默错配。"""
+    src = mlib.mt_files_dir() / "编号冲突素材.docx"
+    doc = Document()
+    doc.add_heading("人员配置", 1)
+    _add_cn_numbering(doc, "2", "2")  # numId 与 abstractNumId 双撞模板
+    _numbered_para(doc, "项目经理一名", "2")
+    doc.save(src)
+
+    from app import db
+
+    f = db.mt_insert_file("编号冲突素材.docx", "hash_numc_1")
+    mlib.run_parse(f["id"])
+    block = mlib.create_block(f["id"], "编号冲突章", "", ranges=[[1, 1000]])
+    section = _make_section()
+    r = docx_material_inject.invoke({"block_id": block["id"], "dest": section})
+    assert r.startswith("[已注入]") and "编号定义 1 组" in r, r
+
+    chk = Document(str(_abs(env, section)))  # 重新打开不炸 = 迁入 XML 可解析
+    used = _numbered_para_ids(chk)
+    assert used == [used[0]] and used[0] != "2"  # 引用已重映射，不再指向模板 numId 2
+    assert _lvl_text_of_abs(chk, _abs_ref_of(chk, used[0])) == "一、"  # 素材定义保真
+    assert _lvl_text_of_abs(chk, _abs_ref_of(chk, "2")) != "一、"  # 模板原定义未被改动
+
+
+def test_material_inject_numbering_sequence_semantics(env):
+    """同一块内的多段共享同一重映射（列表编号连续）；另一块再注入=独立序列
+    （跨调用不复用映射——不同素材的同定义列表不得被错误并接成连续编号）。"""
+    src = mlib.mt_files_dir() / "编号序列素材.docx"
+    doc = Document()
+    doc.add_heading("服务承诺", 1)
+    _add_cn_numbering(doc, "2", "2")
+    _numbered_para(doc, "七乘二十四小时响应", "2")
+    _numbered_para(doc, "两小时内到场", "2")
+    doc.add_heading("培训计划", 1)
+    _numbered_para(doc, "管理员培训一期", "2")
+    doc.save(src)
+
+    from app import db
+
+    f = db.mt_insert_file("编号序列素材.docx", "hash_nums_1")
+    mlib.run_parse(f["id"])
+    block1 = mlib.create_block(f["id"], "承诺章", "", ranges=[[1, 3]])
+    block2 = mlib.create_block(f["id"], "培训章", "", ranges=[[4, 1000]])
+    section = _make_section()
+    assert docx_material_inject.invoke({"block_id": block1["id"], "dest": section}).startswith("[已注入]")
+    chk = Document(str(_abs(env, section)))
+    first_two = _numbered_para_ids(chk)
+    assert len(first_two) == 2 and first_two[0] == first_two[1]  # 块内两段同一编号方案
+
+    assert docx_material_inject.invoke({"block_id": block2["id"], "dest": section}).startswith("[已注入]")
+    chk = Document(str(_abs(env, section)))
+    ids = _numbered_para_ids(chk)
+    assert len(ids) == 3
+    assert ids[2] != ids[0]  # 跨块独立序列（不被并接）
+    assert _lvl_text_of_abs(chk, _abs_ref_of(chk, ids[2])) == "一、"  # 定义仍保真
+
+
+def test_material_inject_numbering_abs_conflict_only(env):
+    """numId 不撞但 abstractNumId 撞模板：定义不同则 abstractNum 换新 id 迁入，
+    num 保留原 id 改指向——此前这条轴同样静默错配。"""
+    src = mlib.mt_files_dir() / "编号半撞素材.docx"
+    doc = Document()
+    doc.add_heading("售后条款", 1)
+    _add_cn_numbering(doc, "77", "3")  # numId 不撞；abstractNumId=3 撞模板且定义不同
+    _numbered_para(doc, "质保期三年", "77")
+    doc.save(src)
+
+    from app import db
+
+    f = db.mt_insert_file("编号半撞素材.docx", "hash_numh_1")
+    mlib.run_parse(f["id"])
+    block = mlib.create_block(f["id"], "编号半撞章", "", ranges=[[1, 1000]])
+    section = _make_section()
+    assert docx_material_inject.invoke({"block_id": block["id"], "dest": section}).startswith("[已注入]")
+
+    chk = Document(str(_abs(env, section)))
+    used = _numbered_para_ids(chk)
+    assert used == ["77"]  # numId 不撞 → 原 id 保留
+    new_abs = _abs_ref_of(chk, "77")
+    assert new_abs != "3"  # abstractNum 已换新 id（不指向模板的 3）
+    assert _lvl_text_of_abs(chk, new_abs) == "一、"  # 素材定义保真
+    assert _lvl_text_of_abs(chk, "3") != "一、"  # 模板 abstractNum 3 未被改动
+
+
+# ---------- 2026-09-08 机制修复：分节符/字体/丢图/锚定漂移/重复注入 ----------
+
+
+def test_material_inject_strips_inner_sectpr(env):
+    """素材段内分节符（横向页等版式设置）不得随元素拷贝进入节文件——否则
+    分节属性中途生效、版式突变（合册同引擎同防线）。"""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    src = mlib.mt_files_dir() / "分节素材.docx"
+    doc = Document()
+    doc.add_heading("带分节的章", 1)
+    p = doc.add_paragraph("章末段落")
+    p._p.get_or_add_pPr().append(parse_xml(
+        f'<w:sectPr {nsdecls("w")}><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/></w:sectPr>'
+    ))
+    doc.save(src)
+
+    from app import db
+
+    f = db.mt_insert_file("分节素材.docx", "hash_sect_1")
+    mlib.run_parse(f["id"])
+    block = mlib.create_block(f["id"], "分节章", "", ranges=[[1, 1000]])
+    section = _make_section()
+    assert docx_material_inject.invoke({"block_id": block["id"], "dest": section}).startswith("[已注入]")
+    chk = Document(str(_abs(env, section)))
+    assert len(chk.element.body.findall(".//" + qn("w:sectPr"))) == 1  # 仅节文件文末分节
+
+
+def _east(doc, style: str):
+    rpr = doc.styles[style].element.find(qn("w:rPr"))
+    fonts = rpr.find(qn("w:rFonts")) if rpr is not None else None
+    return fonts.get(qn("w:eastAsia")) if fonts is not None else None
+
+
+def test_base_template_layout_on_create_and_assemble(env):
+    """建节/合册从标书基准模板起建（格式与内容分离，模板由
+    scripts/make_base_template.py 维护）：中文 eastAsia 定死、正文段挂
+    Tender Body（1.5 倍行距+首行缩进 2 字符）、标题黑体加粗黑色（默认英文
+    模板的蓝色英文脸是「生成的 Word 难看」的根源）、A4+页脚页码域。"""
+    from docx.shared import Pt, RGBColor
+
+    from app import publish
+    from app.artifact_store import work_dir
+
+    section = _make_section("3.1 项目理解与需求分析.docx")
+    docx_section_create.invoke({  # 已存在 → 覆盖重写，带初始正文段
+        "path": section, "title": "3.1 项目理解与需求分析",
+        "paragraphs": "本项目团队对采购需求的理解如下。", "replace": True,
+    })
+    doc = Document(str(work_dir(env["task"]["id"]) / section))
+    assert _east(doc, "Normal") == "宋体"
+    assert _east(doc, "Heading 1") == "黑体"
+    h1 = doc.styles["Heading 1"]
+    assert h1.font.color.rgb == RGBColor(0, 0, 0) and h1.font.size == Pt(18)
+    body = doc.styles["Tender Body"]
+    assert body.paragraph_format.line_spacing == 1.5
+    ind = body.element.get_or_add_pPr().find(qn("w:ind"))
+    assert ind.get(qn("w:firstLineChars")) == "200"
+    assert doc.paragraphs[0].style.name == "Heading 1"
+    assert doc.paragraphs[1].style.name == "Tender Body"
+    # 模板带的样式示例段在建节产物中整段剥离（body 只留版面）
+    assert len(doc.paragraphs) == 2
+    assert "样式示例" not in "\n".join(p.text for p in doc.paragraphs)
+    pgsz = doc.element.body.find(qn("w:sectPr")).find(qn("w:pgSz"))
+    assert pgsz.get(qn("w:w")) == "11906"  # A4
+    footer = doc.sections[0].footer._element
+    assert any("PAGE" in (t.text or "") for t in footer.iter(qn("w:instrText")))
+
+    publish.publish_artifact(_KEY, _DIR_SINGLE, task_id=env["task"]["id"], conversation_id=env["conv"]["id"])
+    assert docx_assemble_volume.invoke({}).startswith("[已合册]")
+    vol = Document(str(work_dir(env["task"]["id"]) / "body" / "整本-技术部分.docx"))
+    assert _east(vol, "Normal") == "宋体"
+    # 模板页脚自带页码域，合册不再手拼（双重页码回归守卫）
+    n_fields = sum(
+        1 for t in vol.sections[0].footer._element.iter(qn("w:instrText"))
+        if "PAGE" in (t.text or "")
+    )
+    assert n_fields == 1
+
+
+def test_material_inject_image_only_para_survives(env):
+    """纯图片段落在「连续第 3 空行」位不再被空行折叠吃出元素映射——占位行
+    保命，图片可注入（2026-09-08 丢图实证的修复）。"""
+    src = mlib.mt_files_dir() / "空窗图片素材.docx"
+    png = src.parent / "_tiny.png"
+    _tiny_png(png)
+    doc = Document()
+    doc.add_heading("图集", 1)
+    doc.add_paragraph("")
+    doc.add_paragraph("")
+    doc.add_picture(str(png))  # 连续第 3 个空行位（原实现会折叠丢图）
+    doc.add_heading("收尾", 1)
+    doc.save(src)
+
+    from app import db
+
+    f = db.mt_insert_file("空窗图片素材.docx", "hash_imgwin_1")
+    mlib.run_parse(f["id"])
+    md = (mlib.mt_parse_dir("空窗图片素材.docx") / "空窗图片素材.docx.md").read_text(encoding="utf-8")
+    assert "![](图片)" in md  # 占位行可见（勾选界面/预览同见）
+    block = mlib.create_block(f["id"], "图集章", "", ranges=[[1, 1000]])
+    section = _make_section()
+    r = docx_material_inject.invoke({"block_id": block["id"], "dest": section})
+    assert r.startswith("[已注入]") and "图片 1 张" in r  # 图注入成功
+    chk = Document(str(_abs(env, section)))
+    assert chk.element.body.findall(".//" + qn("a:blip"))
+
+
+def test_material_inject_reparse_drift_rejected(env):
+    """补跑映射时 md 与盘上不一致（模拟解析代码升级重排）：拒绝注入点名重勾，
+    不静默按错位区间拷错元素。"""
+    md_path = mlib.mt_parse_dir("历史运维方案.docx") / "历史运维方案.docx.md"
+    md_path.write_text("被篡改的旧 md，行号与重解析产物必然不同。\n" * 3, encoding="utf-8")
+    (md_path.parent / "element_map.json").unlink()
+    section = _make_section()
+    r = docx_material_inject.invoke({"block_id": env["block"]["id"], "dest": section})
+    assert r.startswith("[注入失败]") and "勾选区间会错位" in r
+    assert "重新确认该文件的勾选" in r
+
+
+def test_material_inject_duplicate_blocked(env):
+    """同块二次注入同一节文件被拦：注入是追加语义，重复=内容翻倍，无正当场景。"""
+    section = _make_section()
+    assert docx_material_inject.invoke({"block_id": env["block"]["id"], "dest": section}).startswith("[已注入]")
+    r = docx_material_inject.invoke({"block_id": env["block"]["id"], "dest": section})
+    assert r.startswith("[注入失败]") and "已注入过" in r
+
+
 # ---------- 整本合册 ----------
 
 _KEY = "tender.directory/tender-response-docs@1"
@@ -767,9 +1084,12 @@ def test_revise_insert_after_keeps_submission_order(env):
     assert r.startswith("[已修订]") and "3 处" in r, r
     from app.tools.docx_ops import _accepted_text
 
-    texts = [_accepted_text(p._p) for p in Document(str(_abs(env, section))).paragraphs]
+    reopened = Document(str(_abs(env, section)))
+    texts = [_accepted_text(p._p) for p in reopened.paragraphs]
     i = texts.index("第一条")
     assert texts[i + 1] == "第二条" and texts[i + 2] == "第三条"
+    # 插入段挂模板正文样式（Tender Body：标书行距/缩进），不吃中性 Normal
+    assert reopened.paragraphs[i].style.name == "Tender Body"
 
 
 def test_assemble_keeps_mismatched_own_heading(env):

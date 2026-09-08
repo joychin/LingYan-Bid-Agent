@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
 import {
@@ -10,6 +10,8 @@ import {
   Search,
   Trash2,
   TriangleAlert,
+  X,
+  Zap,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -116,11 +118,13 @@ function FreshnessBar({ item }: { item: KbItem }) {
   )
 }
 
-/** 内容说明卡（v3）：AI 自由提取的带锚点要点——事实类文件的语义入口。 */
+/** 内容说明卡（v3）：AI 自由提取的带锚点要点——事实类文件的语义入口 +
+ * 检索问题 pills（用户会怎么问，进 §questions 检索段）。 */
 function StatementCard({ item }: { item: KbItem }) {
   const basis = item.business ?? item.suggested
   const statement = basis?.statement?.trim()
-  if (!statement) return null
+  const questions = (basis?.questions ?? []).filter((q) => q.trim())
+  if (!statement && questions.length === 0) return null
   const confirmed = Boolean(item.business?.statement?.trim())
   return (
     <div className="kb-statement">
@@ -131,7 +135,17 @@ function StatementCard({ item }: { item: KbItem }) {
           {confirmed ? '已确认' : 'AI 整理·数字须回原文核对'}
         </span>
       </div>
-      <p className="kb-statement-body">{statement}</p>
+      {statement && <p className="kb-statement-body">{statement}</p>}
+      {questions.length > 0 && (
+        <div className="kb-q-block">
+          <span className="kb-q-label">可回答的问题</span>
+          <div className="kb-q-pills">
+            {questions.map((q, i) => (
+              <span key={`${i}-${q}`} className="kb-q-pill">{q}</span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -447,6 +461,16 @@ function ItemDetail({
 
   const parsing = item.parse_status === 'pending' || item.parse_status === 'parsing'
   const extracting = item.extract_status === 'running'
+  const diff = useMemo(() => computeKbDiff(item, types), [item, types])
+
+  // 识别跑完给个明确反馈——确认版优先展示，此前主视图纹丝不动，只能猜成没成
+  const wasBusyRef = useRef(busy)
+  useEffect(() => {
+    if (wasBusyRef.current && !busy && item.extract_status === 'done') {
+      toast(diff ? `识别完成：${diffSummary(diff, types)}` : '识别完成', 'info')
+    }
+    wasBusyRef.current = busy
+  }, [busy]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="kb-detail">
@@ -511,6 +535,7 @@ function ItemDetail({
 
       {item.parse_status === 'failed' && <div className="kb-error-bar">解析失败：{item.error}</div>}
       <FreshnessBar item={item} />
+      <UpdateAdoption item={item} types={types} diff={diff} />
 
       <nav className="kb-tabs">
         <button type="button" className={cn('kb-tab', tab === 'content' && 'kb-tab--active')} onClick={() => onTab('content')}>
@@ -560,17 +585,223 @@ function ItemDetail({
   )
 }
 
-/** 信息确认表单：内容说明编辑 + 时间锚点字段 + 类型（按事实/写法分组）+ 自由字段。 */
+/** 重新识别后的采纳交互：更新条常驻亮差异，点开对比卡逐区「采纳建议 / 保留我的」，
+ * 保存才落确认版——守住「确认内容不被静默覆盖」，但把两边差了什么摆到明面上。 */
+function UpdateAdoption({
+  item,
+  types,
+  diff,
+}: {
+  item: KbItem
+  types: KbTypePayload[]
+  diff: KbDiff | null
+}) {
+  const confirm = useConfirmMetadata()
+  const { toast } = useToast()
+  const labels = useKbTypes().data?.field_labels ?? {}
+  const [dismissedStamp, setDismissedStamp] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [choices, setChoices] = useState<Record<AdoptSectionKey, AdoptChoice>>(() =>
+    defaultChoices(diff),
+  )
+  const busy =
+    item.parse_status === 'pending' ||
+    item.parse_status === 'parsing' ||
+    item.extract_status === 'running'
+
+  // 新一轮识别落地（updated_at 变化）→ 重置选择与展开态
+  useEffect(() => {
+    setOpen(false)
+    setChoices(defaultChoices(diff))
+  }, [item.id, item.updated_at]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (busy || !diff || dismissedStamp === item.updated_at) return null
+
+  const save = async () => {
+    try {
+      await confirm.mutateAsync({ id: item.id, body: buildAdoptBody(item, diff, choices) })
+      toast('已保存', 'success')
+      setOpen(false)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : '保存失败', 'error')
+    }
+  }
+
+  if (!open) {
+    return (
+      <div className="kb-update-bar">
+        <Zap className="h-3.5 w-3.5 shrink-0" />
+        <span className="kb-update-text">识别已更新：{diffSummary(diff, types)}</span>
+        <button type="button" className="kb-update-act" onClick={() => setOpen(true)}>
+          对比采纳
+        </button>
+        <button
+          type="button"
+          className="kb-update-act kb-update-act--ghost"
+          onClick={() => setDismissedStamp(item.updated_at)}
+        >
+          知道了
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="kb-adopt">
+      <div className="kb-adopt-head">
+        <span>识别更新——逐区选择，保存后生效</span>
+        <button
+          type="button"
+          className="kb-adopt-close"
+          title="收起"
+          onClick={() => setOpen(false)}
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {diff.questions && (
+        <AdoptSection
+          title="检索问题"
+          adoptLabel={`采纳建议（${diff.questions.neu.length} 条）`}
+          keepLabel={`保留我的（现为 ${diff.questions.old.length} 条）`}
+          choice={choices.questions}
+          onChoose={(c) => setChoices((s) => ({ ...s, questions: c }))}
+        >
+          <div className="kb-adopt-pills">
+            {diff.questions.neu.map((q) => (
+              <span key={q} className="kb-q-pill">
+                {q}
+              </span>
+            ))}
+          </div>
+        </AdoptSection>
+      )}
+
+      {diff.statement && (
+        <AdoptSection
+          title="内容说明"
+          adoptLabel="采纳新版"
+          keepLabel="保留我的"
+          choice={choices.statement}
+          onChoose={(c) => setChoices((s) => ({ ...s, statement: c }))}
+        >
+          <div className="kb-adopt-sides">
+            <div className="kb-adopt-side">
+              <span className="kb-adopt-side-tag">我的</span>
+              <p>{diff.statement.old || '（空）'}</p>
+            </div>
+            <div className="kb-adopt-side kb-adopt-side--new">
+              <span className="kb-adopt-side-tag">AI 新版</span>
+              <p>{diff.statement.neu}</p>
+            </div>
+          </div>
+        </AdoptSection>
+      )}
+
+      {diff.fields && diff.fields.length > 0 && (
+        <AdoptSection
+          title="锚点字段"
+          adoptLabel={`采纳（${diff.fields.length} 处变化）`}
+          keepLabel="保留我的"
+          choice={choices.fields}
+          onChoose={(c) => setChoices((s) => ({ ...s, fields: c }))}
+        >
+          {diff.fields.map((f) => (
+            <div key={f.key} className="kb-adopt-field">
+              <span className="kb-adopt-field-label">{labels[f.key] ?? f.key}</span>
+              <span className="kb-adopt-field-old">{f.old || '—'}</span>
+              <span className="kb-adopt-field-arrow">→</span>
+              <span className="kb-adopt-field-new">{f.neu}</span>
+            </div>
+          ))}
+        </AdoptSection>
+      )}
+
+      {diff.docType && (
+        <AdoptSection
+          title="资料类型"
+          adoptLabel={`改为「${typeNameOf(types, diff.docType.neu)}」`}
+          keepLabel={`保留「${typeNameOf(types, diff.docType.old)}」`}
+          choice={choices.docType}
+          onChoose={(c) => setChoices((s) => ({ ...s, docType: c }))}
+        >
+          <div className="kb-adopt-field">
+            <span className="kb-adopt-field-label">类型</span>
+            <span className="kb-adopt-field-old">{typeNameOf(types, diff.docType.old)}</span>
+            <span className="kb-adopt-field-arrow">→</span>
+            <span className="kb-adopt-field-new">{typeNameOf(types, diff.docType.neu)}</span>
+          </div>
+        </AdoptSection>
+      )}
+
+      <div className="kb-adopt-foot">
+        <Button size="sm" onClick={save} disabled={confirm.isPending}>
+          保存修改
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function AdoptSection({
+  title,
+  adoptLabel,
+  keepLabel,
+  choice,
+  onChoose,
+  children,
+}: {
+  title: string
+  adoptLabel: string
+  keepLabel: string
+  choice: AdoptChoice
+  onChoose: (c: AdoptChoice) => void
+  children?: ReactNode
+}) {
+  return (
+    <div className="kb-adopt-section">
+      <div className="kb-adopt-sec-head">
+        <span className="kb-adopt-sec-title">{title}</span>
+        <div className="kb-adopt-choices">
+          <label className={cn('kb-adopt-choice', choice === 'suggest' && 'kb-adopt-choice--on')}>
+            <input
+              type="radio"
+              name={`adopt-${title}`}
+              checked={choice === 'suggest'}
+              onChange={() => onChoose('suggest')}
+            />
+            {adoptLabel}
+          </label>
+          <label className={cn('kb-adopt-choice', choice === 'keep' && 'kb-adopt-choice--on')}>
+            <input
+              type="radio"
+              name={`adopt-${title}`}
+              checked={choice === 'keep'}
+              onChange={() => onChoose('keep')}
+            />
+            {keepLabel}
+          </label>
+        </div>
+      </div>
+      {children}
+    </div>
+  )
+}
+
+/** 信息确认表单：内容说明编辑 + 检索问题增删改 + 时间锚点字段 + 类型（按事实/写法分组）+ 自由字段。 */
 function InfoForm({ item, types }: { item: KbItem; types: KbTypePayload[] }) {
   const confirm = useConfirmMetadata()
   const { toast } = useToast()
   const basis = item.business ?? item.suggested
   const [docType, setDocType] = useState<string>(basis?.doc_type ?? item.doc_type ?? 'other')
   const [statement, setStatement] = useState(basis?.statement ?? '')
+  const [questions, setQuestions] = useState<string[]>(() => initQuestions(basis))
   const [values, setValues] = useState<Record<string, string>>(() => initValues(basis))
   useEffect(() => {
     setDocType(basis?.doc_type ?? item.doc_type ?? 'other')
     setStatement(basis?.statement ?? '')
+    setQuestions(initQuestions(basis))
     setValues(initValues(basis))
   }, [item.id, item.suggested, item.business]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -585,7 +816,12 @@ function InfoForm({ item, types }: { item: KbItem; types: KbTypePayload[] }) {
     try {
       await confirm.mutateAsync({
         id: item.id,
-        body: { doc_type: docType, statement: statement.trim() || undefined, fields: values },
+        body: {
+          doc_type: docType,
+          statement: statement.trim() || undefined,
+          questions: questions.map((q) => q.trim()).filter(Boolean),
+          fields: values,
+        },
       })
       toast('已确认', 'success')
     } catch (e) {
@@ -602,6 +838,7 @@ function InfoForm({ item, types }: { item: KbItem; types: KbTypePayload[] }) {
         {item.extract_status === 'failed' && (
           <p className="kb-info-warn">自动识别失败（{item.error}）——可点「重新识别」或直接手动填写</p>
         )}
+        <AutoCheckBar item={item} />
         <div className="space-y-1.5">
           <label className="text-xs font-medium text-muted-foreground">资料类型</label>
           <select className="kb-select" value={docType} onChange={(e) => setDocType(e.target.value)}>
@@ -621,6 +858,35 @@ function InfoForm({ item, types }: { item: KbItem; types: KbTypePayload[] }) {
             rows={5}
             placeholder="一份说明（关键数字/编号/范围逐条列出，附（第N页）出处）——留空则沿用 AI 整理版"
           />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">
+            检索问题（用户怎么问就怎么写，≤40 字/条、最多 10 条）
+          </label>
+          {questions.map((q, i) => (
+            <div key={i} className="kb-q-row">
+              <Input
+                value={q}
+                onChange={(e) => setQuestions((qs) => qs.map((v, j) => (j === i ? e.target.value : v)))}
+                placeholder="如：做过哪些医疗行业项目？"
+                maxLength={40}
+              />
+              <button
+                type="button"
+                className="kb-q-del"
+                title="删除该问题"
+                onClick={() => setQuestions((qs) => qs.filter((_, j) => j !== i))}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+          {questions.length < 10 && (
+            <button type="button" className="kb-q-add" onClick={() => setQuestions((qs) => [...qs, ''])}>
+              <Plus className="h-3.5 w-3.5" />
+              添加问题
+            </button>
+          )}
         </div>
         {fieldKeys.map((k) => (
           <div key={k} className="space-y-1">
@@ -643,9 +909,159 @@ function InfoForm({ item, types }: { item: KbItem; types: KbTypePayload[] }) {
   )
 }
 
+/** 锚点回文核对结果（程序机械层）：自动确认=核对全过（business 带 confirmed_by="auto"）；
+ * 人工确认过的条目不再显示——人已拍板。 */
+function AutoCheckBar({ item }: { item: KbItem }) {
+  const check = item.check_result
+  if (!check || (item.business && item.business.confirmed_by !== 'auto')) return null
+  const failed = (check.results ?? []).filter((r) => !r.ok)
+  const passed = (check.results ?? []).filter((r) => r.ok)
+  if (check.status === 'pass') {
+    return (
+      <div className="kb-check">
+        <span className="kb-check-tag">程序核对通过</span>
+        <span className="kb-check-note">
+          {passed.length > 0 ? `${passed.map((r) => r.label).join('、')} 均在原文命中` : '本类型无需核对锚点字段'}
+        </span>
+      </div>
+    )
+  }
+  return (
+    <div className="kb-check kb-check--fail">
+      {failed.map((r) => (
+        <div key={r.field} className="kb-check-row">
+          <TriangleAlert className="h-3 w-3 shrink-0" />
+          <span>
+            {r.label}：{r.detail}
+          </span>
+        </div>
+      ))}
+      {passed.length > 0 && (
+        <span className="kb-check-note">已在原文命中：{passed.map((r) => r.label).join('、')}</span>
+      )}
+    </div>
+  )
+}
+
+function initQuestions(basis: KbItem['suggested']): string[] {
+  return (basis?.questions ?? []).filter((q) => typeof q === 'string' && q.trim())
+}
+
 function initValues(basis: KbItem['suggested']): Record<string, string> {
   const init: Record<string, string> = {}
   for (const [k, v] of Object.entries(basis?.fields ?? {})) init[k] = v?.value ?? ''
   for (const [k, v] of Object.entries(basis?.extra ?? {})) init[k] = v?.value ?? ''
   return init
+}
+
+/* ===== 确认版 vs 建议版的差异计算（重新识别后的对比采纳） ===== */
+
+type AdoptChoice = 'suggest' | 'keep'
+type AdoptSectionKey = 'questions' | 'statement' | 'fields' | 'docType'
+
+interface FieldChange {
+  key: string
+  old: string
+  neu: string
+}
+
+interface KbDiff {
+  questions: { old: string[]; neu: string[] } | null
+  statement: { old: string; neu: string } | null
+  fields: FieldChange[] | null
+  docType: { old: string; neu: string } | null
+}
+
+function typeNameOf(types: KbTypePayload[], code: string): string {
+  return types.find((t) => t.code === code)?.name ?? code
+}
+
+/** 只列「可采纳」的差异：建议侧为空的更新没有采纳价值（采纳即丢数据）。 */
+function computeKbDiff(item: KbItem, types: KbTypePayload[]): KbDiff | null {
+  const biz = item.business
+  const sug = item.suggested
+  if (!biz || !sug) return null
+  const out: KbDiff = { questions: null, statement: null, fields: null, docType: null }
+
+  const oldQs = initQuestions(biz)
+  const neuQs = initQuestions(sug)
+  if (neuQs.length > 0 && neuQs.join('\n') !== oldQs.join('\n')) {
+    out.questions = { old: oldQs, neu: neuQs }
+  }
+
+  const oldSt = (biz.statement ?? '').trim()
+  const neuSt = (sug.statement ?? '').trim()
+  if (neuSt && neuSt !== oldSt) out.statement = { old: oldSt, neu: neuSt }
+
+  const a = initValues(biz)
+  const b = initValues(sug)
+  const changes: FieldChange[] = []
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    const neu = b[k] ?? ''
+    if (neu && neu !== (a[k] ?? '')) changes.push({ key: k, old: a[k] ?? '', neu })
+  }
+  out.fields = changes.length > 0 ? changes : null
+
+  const neuType = sug.doc_type
+  if (neuType && neuType !== biz.doc_type && types.some((t) => t.code === neuType)) {
+    out.docType = { old: biz.doc_type ?? 'other', neu: neuType }
+  }
+
+  return out.questions || out.statement || out.fields || out.docType ? out : null
+}
+
+function diffSummary(diff: KbDiff, types: KbTypePayload[]): string {
+  const parts: string[] = []
+  if (diff.questions) {
+    parts.push(
+      diff.questions.old.length === 0
+        ? `新增 ${diff.questions.neu.length} 个检索问题`
+        : `检索问题有更新（${diff.questions.old.length}→${diff.questions.neu.length} 条）`,
+    )
+  }
+  if (diff.statement) parts.push('内容说明有改动')
+  if (diff.fields) parts.push(`${diff.fields.length} 处字段变化`)
+  if (diff.docType) parts.push(`类型建议改为「${typeNameOf(types, diff.docType.neu)}」`)
+  return parts.join(' · ')
+}
+
+function defaultChoices(diff: KbDiff | null): Record<AdoptSectionKey, AdoptChoice> {
+  return {
+    // 纯新增（确认版为空）默认采纳——没有可损失的东西；有旧值的一律默认保留，逐区选择
+    questions: diff?.questions && diff.questions.old.length === 0 ? 'suggest' : 'keep',
+    statement: 'keep',
+    fields: 'keep',
+    docType: 'keep',
+  }
+}
+
+function buildAdoptBody(
+  item: KbItem,
+  diff: KbDiff,
+  choices: Record<AdoptSectionKey, AdoptChoice>,
+): {
+  doc_type: string
+  statement?: string
+  questions: string[]
+  fields: Record<string, string>
+} {
+  const biz = item.business!
+  const fields: Record<string, string> = {}
+  for (const [k, v] of Object.entries(initValues(biz))) {
+    if (v.trim()) fields[k] = v
+  }
+  if (choices.fields === 'suggest') {
+    for (const f of diff.fields ?? []) fields[f.key] = f.neu
+  }
+  const statement =
+    choices.statement === 'suggest' && diff.statement ? diff.statement.neu : (biz.statement ?? '')
+  const questions =
+    choices.questions === 'suggest' && diff.questions ? diff.questions.neu : initQuestions(biz)
+  return {
+    doc_type:
+      choices.docType === 'suggest' && diff.docType ? diff.docType.neu : (biz.doc_type ?? 'other'),
+    statement: statement.trim() || undefined,
+    questions,
+    fields,
+  }
 }

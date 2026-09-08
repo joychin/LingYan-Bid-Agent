@@ -6,12 +6,14 @@
 类型是否可解析由 parse_document 工具层裁决并报人话）。
 """
 
+import mimetypes
 import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 from .. import artifact_store, db
 
@@ -81,6 +83,8 @@ async def list_files(task_id: str):
                 files.append(
                     {
                         "name": p.name,
+                        # abs_path：面板右键「打开文件夹」直取（来源原件常需取去外部处理）
+                        "abs_path": str(p),
                         "size": st.st_size,
                         "modified_at": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(
                             timespec="seconds"
@@ -88,6 +92,23 @@ async def list_files(task_id: str):
                     }
                 )
     return {"files": files}
+
+
+@router.get("/files/{name}/raw")
+async def read_file_raw(name: str, task_id: str):
+    """来源原件原始字节：面板预览用（pdf/docx 在浏览器本地渲染，文件不出本机）。
+    containment 与 delete_file 同款；不设扩展白名单——读用户自己上传的文件
+    无风险，是否可渲染由前端按扩展名分流（与 kb items raw 同先例）。"""
+    _require_task(task_id)
+    clean = _clean_name(name)
+    if clean is None:
+        raise HTTPException(status_code=400, detail="文件名非法")
+    files_dir = artifact_store.sources_dir(task_id).resolve()
+    target = (files_dir / clean).resolve()
+    if not target.is_relative_to(files_dir) or not target.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return FileResponse(target, media_type=media_type)
 
 
 @router.delete("/files/{name}")

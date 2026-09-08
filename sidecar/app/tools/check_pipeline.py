@@ -18,6 +18,9 @@
   「整本-」合册文件是派生产物不算节；标题改版后失配在此报事实，重写范围由用户裁决。
   extra 侧按全部叶子对账（模板填充类产出的格式件文件是合法节文件），missing 侧
   只算需正文叶子（格式件未产出不算缺）
+- 均衡分波参考：指引已生成且待写节 ≥4 时，按「模式基数+素材块数」权重对**待写**节
+  做最少负载分桶（重节分散、波容量=并发上限；物理附件类不参与）——纯机械调度
+  参考（整本派发怎么用见 tender-body SKILL.md），已写节剔除、重写范围不在此裁
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from langchain_core.tools import tool
 from .. import runctx
 from ..artifact_store import sources_dir, work_dir
 from . import body_contract
+from .validate_body import _BLOCK_ID_RE, _parse_guide_rows
 
 # 八件固定清单（七节 + 待澄清汇总），[analysis] 的已有/缺失以此为准
 _SECTIONS = (
@@ -46,6 +50,39 @@ _SECTIONS = (
 
 _PARSE_EXTS = ("md", "outline.json", "meta.json")
 
+# 均衡分波（整本派发的调度参考，2026-09-08）：波容量与 agent 并发上限对齐
+# （app/agent._MAX_CONCURRENT_STEPS=8）——波 ≤ 上限 → 波内任务不排队；权重是粗
+# 启发式（模式基数+素材块数），只求重节分散、不求精确预估。
+_WAVE_CAPACITY = 8
+# 整本待写节 ≥ 该数才值得分波（再少直接一波派完）
+_WAVE_MIN_PENDING = 4
+_MODE_BASE = {"推理撰写": 3, "素材修订": 2, "格式跟随": 1}
+
+
+def _balanced_waves(
+    items: list[tuple[str, int]], capacity: int = _WAVE_CAPACITY
+) -> list[list[tuple[str, int]]]:
+    """按权重降序逐项放进「当前最轻且未满」的波（LPT 贪心，机械零结论）。
+
+    与蛇形折返同一意图但更均衡：重节先放、每步补最轻的波——2 波时权重 9..1
+    蛇形（奇偶交替）分成 25/20，LPT 分成 23/22；波数 = ceil(项数/容量)，容量
+    保证每波不超并发上限（波满后即使它最轻也不再进项）。并列取靠前波，确定性。
+    """
+    ordered = sorted(items, key=lambda kv: (-kv[1], kv[0]))
+    n_waves = max(1, -(-len(ordered) // capacity))
+    waves: list[list[tuple[str, int]]] = [[] for _ in range(n_waves)]
+    loads = [0] * n_waves
+    for item in ordered:
+        # 键序：未满的波优先（True 排后）→ 负载最小 → 序号最小；总容量 ≥ 项数，
+        # 故 min 恒能选中一个未满的波
+        idx = min(
+            range(n_waves),
+            key=lambda i: (len(waves[i]) >= capacity, loads[i], i),
+        )
+        waves[idx].append(item)
+        loads[idx] += item[1]
+    return [w for w in waves if w]
+
 
 def _list_files(directory) -> list[str]:
     """目录下非隐藏文件清单（目录不存在返回空）。"""
@@ -59,8 +96,9 @@ def check_pipeline_state() -> str:
     """汇总当前任务投标流水线的事实状态（来源/解析/要点/正文指引与已写节/新鲜度/未纳入文件）。
 
     确定性检查、只读、幂等：来源确认单与候选文件对账、解析三件套齐备性、要点产物
-    已有/缺失、写作指引与承诺清单存在性、正文文件与目录产物叶子的对账、来源/目录
-    是否晚于产物更新（新鲜度）、sources/ 下未纳入来源集合的文件。
+    已有/缺失、写作指引与承诺清单存在性、正文文件与目录产物叶子的对账、待写节的
+    均衡分波参考（整本派发的调度参考）、来源/目录是否晚于产物更新（新鲜度）、
+    sources/ 下未纳入来源集合的文件。
     只报事实不含裁决——先调用本工具，再按当前技能 SKILL.md 的规则决定怎么继续。
     """
     try:
@@ -274,6 +312,62 @@ def check_pipeline_state() -> str:
                         "[body] 目录产物更新晚于正文最后修改（可能基于旧目录，重写范围由用户裁决）："
                         + "、".join(str(p.relative_to(bdir)) for p in stale)
                     )
+                # 均衡分波参考（零结论的机械调度参考）：只覆盖**待写**节——重写范围
+                # 由用户裁决后按 SKILL 同口径自建；指引缺行的待写需正文叶子按权重 1
+                # 兜底补入并注明（validate_body 另有缺行警告）；物理附件类线下准备
+                # 不派子代理故不参与
+                if guide_ok:
+                    pending: dict[tuple[str, str], tuple[str, int]] = {}
+                    fallback: list[str] = []
+                    try:
+                        guide_text = (bdir / "写作指引.md").read_text(
+                            encoding="utf-8", errors="replace"
+                        )
+                    except OSError:
+                        guide_text = ""
+                    for _lineno, cells, cols in _parse_guide_rows(guide_text.splitlines()):
+                        title = cells[cols["节"]].strip()
+                        vol = ""
+                        if multi and "/" in title:
+                            head, _, tail = title.partition("/")
+                            vol, title = head.strip(), tail.strip()
+                        key = (
+                            body_contract.sanitize_name(vol) if multi else "",
+                            body_contract.sanitize_name(title),
+                        )
+                        if key not in known or key in actual:
+                            continue  # 指引行不在目录树（改版残留）或该节已写
+                        note_i = cols.get("缺口/备注", 4)
+                        note = cells[note_i] if note_i < len(cells) else ""
+                        if "物理附件" in note:
+                            continue
+                        mode_i = cols["模式"]
+                        mode = cells[mode_i] if mode_i < len(cells) else ""
+                        tokens = [t.strip() for t in mode.split("+") if t.strip()]
+                        base = max((_MODE_BASE.get(t, 1) for t in tokens), default=1)
+                        mat_i = cols.get("素材", 3)
+                        mat = cells[mat_i] if mat_i < len(cells) else ""
+                        label = f"{key[0]}/{key[1]}" if key[0] else key[1]
+                        pending[key] = (label, base + len(_BLOCK_ID_RE.findall(mat)))
+                    for key in sorted(missing - set(pending)):
+                        label = f"{key[0]}/{key[1]}" if key[0] else key[1]
+                        fallback.append(label)
+                        pending[key] = (label, 1)
+                    if len(pending) >= _WAVE_MIN_PENDING:
+                        lines.append(
+                            "[body] 均衡分波参考（按指引权重均衡分桶、重节分散；整本派发"
+                            "波内同消息并发、波间一句话汇报后派下一波；物理附件类不参与；"
+                            f"波容量与并发上限对齐={_WAVE_CAPACITY}）："
+                        )
+                        for i, wave in enumerate(_balanced_waves(list(pending.values())), 1):
+                            lines.append(
+                                f"  第{i}波（权重和 {sum(w for _n, w in wave)}）："
+                                + "、".join(n for n, _w in wave)
+                            )
+                        if fallback:
+                            lines.append(
+                                "  指引缺行、按权重 1 兜底补入：" + "、".join(fallback)
+                            )
 
         # [freshness] 来源解析晚于产物最后修改（mtime vs generated_at，均为程序可靠侧）
         if mtimes and not data:

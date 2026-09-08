@@ -29,15 +29,16 @@ import { SourceTraceDialog } from '@/components/processors/SourceTraceDialog'
 import { DirectoryEditor } from '@/components/processors/DirectoryEditor'
 import { structureSignature, type DirectoryData, type EditNode } from '@/components/processors/directoryTree'
 
-/** 来源徽章配色（token 派生，暗色自动跟随）：MAND=danger 红 TPL=info 蓝 REQ=brand 青 SCORE=warning 琥珀 */
-const BADGE_COLORS: Array<[prefix: string, color: string]> = [
+/** 来源徽章配色（token 派生，暗色自动跟随）：MAND=danger 红 TPL=info 蓝 REQ=brand 青 SCORE=warning 琥珀
+ *  （写作指引表格的依据 chips 同款配色，导出共用单源） */
+export const BADGE_COLORS: Array<[prefix: string, color: string]> = [
   ['MAND', 'var(--Color-danger)'],
   ['TPL', 'var(--Color-info)'],
   ['REQ', 'var(--Color-brand-primary)'],
   ['SCORE', 'var(--Color-warning)'],
 ]
 
-function badgeStyle(id: string): React.CSSProperties {
+export function badgeStyle(id: string): React.CSSProperties {
   const hit = BADGE_COLORS.find(([p]) => id.startsWith(p))
   const color = hit ? hit[1] : 'var(--Color-text-secondary)'
   return { color, background: `color-mix(in srgb, ${color} 12%, var(--Color-bg-canvas))` }

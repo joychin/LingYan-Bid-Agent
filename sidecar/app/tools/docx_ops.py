@@ -10,7 +10,8 @@ docx 翻译成文本世界（读视图/编号寻址），写入全由程序机�
 - docx_material_inject：素材块元素级注入——从素材 docx 原件把块区间对应的
   元素（段落/表格连合并单元格、图片连关系）整体拷进目标节文件，零转写保真；
   寻址 = 素材解析时落盘的 element_map（md 行号区间 → 原件 body 子元素）；
-  元素引用的样式与自动编号定义随迁（目标缺定义才拷，含 basedOn/link 链）
+  元素引用的样式与自动编号定义随迁（含 basedOn/link 链；编号定义按内容判定
+  沿用、id 冲突时重映射并改写引用——numbering id 只是文档内部门牌号）
 - docx_source_inject：招标原件拷贝——任务 sources/ 的 docx 按「整文件或 md
   行号区间」元素级拷进正文节；现场跑解析注册表拿 element_lines 定位（确定性、
   不依赖任务侧解析落盘）；格式跟随与格式件（投标函/一览表等模板填充类）场景，
@@ -39,6 +40,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from io import BytesIO
@@ -46,11 +48,10 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls, qn
 from langchain_core.tools import tool
+from lxml import etree
 
 from .. import db, runctx
 from ..artifact_store import sources_dir, work_dir
@@ -251,14 +252,16 @@ def _tracked_replace(para, old: str, new: str, rev_id: int) -> None:
     last_del.addnext(ins_el)
 
 
-def _tracked_insert_after(anchor_p_el, text: str, rev_id: int):
+def _tracked_insert_after(anchor_p_el, text: str, rev_id: int, style_id: str | None = None):
     """新段落插在锚段（lxml 元素）之后，段落标记与内容均为插入修订（拒绝修订=
     整段消失）。返回新段元素——同段连续 insert_after 以返回值为下一次的锚
-    （否则 addnext 紧跟定位段，同批多条会倒序）。"""
+    （否则 addnext 紧跟定位段，同批多条会倒序）。style_id 非空时挂正文样式
+    （Tender Body：标书正文行距/缩进），随锚段所在文档的模板有无自适应。"""
     date = _now_iso()
+    pstyle = f'<w:pStyle w:val="{style_id}"/>' if style_id else ""
     new_p = parse_xml(
         f'<w:p {nsdecls("w")}>'
-        f'<w:pPr><w:rPr><w:ins w:id="{rev_id}" w:author="{_AUTHOR}" w:date="{date}"/></w:rPr></w:pPr>'
+        f'<w:pPr>{pstyle}<w:rPr><w:ins w:id="{rev_id}" w:author="{_AUTHOR}" w:date="{date}"/></w:rPr></w:pPr>'
         f'<w:ins w:id="{rev_id + 1}" w:author="{_AUTHOR}" w:date="{date}">'
         f'<w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:ins></w:p>'
     )
@@ -430,10 +433,137 @@ def _migrate_images(src_doc: Document, dst_doc: Document, element) -> int:
         try:
             new_rid, _image = dst_doc.part.get_or_add_image(BytesIO(blob))
         except Exception:
-            new_rid = dst_doc.part.relate_to(image_part, RT.IMAGE)
+            continue  # 图片部件不可读：跳过（保留旧引用=裂图）——跨包挂外部 part 会损坏序列化
         blip.set(qn("r:embed"), new_rid)
         moved += 1
     return moved
+
+
+def _sig_shingles(text: str) -> set[str]:
+    """强归一化（只留中文与字母数字）的 10 字 shingle 集合：重复注入探测用，
+    格式符号（表格竖线/视图标签/列表前缀）不参与比对。"""
+    s = re.sub(r"[^\u4e00-\u9fffa-zA-Z0-9]", "", text)
+    return {s[i : i + 10] for i in range(max(0, len(s) - 9))}
+
+
+def _strip_inner_sectpr(el) -> None:
+    """剥段落 pPr 内的分节符：素材/节文件自带的分节属性（纸向/页边距/页码
+    重起）随元素拷贝会中途生效、突变节文件版式（2026-09-08 实证：横向页设置
+    进入节文件）。文档级分节只归节文件自身的文末 sectPr（不在拷贝面）。"""
+    ppr = el.find(qn("w:pPr"))
+    if ppr is None:
+        return
+    for sect in ppr.findall(qn("w:sectPr")):
+        ppr.remove(sect)
+
+
+_BASE_TEMPLATE = Path(__file__).resolve().parent.parent / "resources" / "tender_base_template.docx"
+_BODY_STYLE_NAME = "Tender Body"  # 模板自定义正文样式（1.5 倍行距+首行缩进 2 字符）
+TEMPLATE_SETTING_KEY = "docx_template"  # app_settings 键：当前生效的用户模板文件名
+
+
+def _active_template_path() -> Path:
+    """当前生效模板：app_settings 命中的用户模板（data/templates/）优先，
+    否则内置基准。用户模板文件被误删等异常静默回落内置（探测不报错——
+    模板缺失不该打断建节）。"""
+    try:
+        from .. import config, db
+
+        name = (db.get_setting(TEMPLATE_SETTING_KEY) or "").strip()
+        if name:
+            p = config.data_dir() / "templates" / name
+            if p.is_file():
+                return p
+    except Exception:
+        pass
+    return _BASE_TEMPLATE
+
+
+def _blank_from(template: Path) -> Document:
+    """从指定模板起建空白文档（剥离模板自带的样式示例段，只留 sectPr）。"""
+    doc = Document(str(template))
+    body = doc.element.body
+    for child in list(body):
+        if child.tag != qn("w:sectPr"):
+            body.remove(child)
+    return doc
+
+
+def _new_document() -> Document:
+    """从当前生效模板起建（格式与内容分离：版式全部活在模板 styles.xml；
+    生效位=app_settings 的用户模板，缺省内置基准，由 scripts/
+    make_base_template.py 生成维护；代码只挂样式名）。
+
+    模板 body 带样式示例段（打开模板可直观预览/改版式），起建时整段剥离
+    （body 只留 sectPr=版面/页脚），示例永不进入节文件与合册。模板缺失时
+    回落 python-docx 默认模板（英文版式，仅防打包漏带资源，不作为常态）。"""
+    tpl = _active_template_path()
+    if tpl.is_file():
+        return _blank_from(tpl)
+    return Document()
+
+
+def _body_style(doc: Document):
+    """Tender Body 样式对象，模板不带时返回 None（正文段回落 Normal，
+    建节不因换模板缺样式名而失败）。"""
+    try:
+        return doc.styles[_BODY_STYLE_NAME]
+    except KeyError:
+        return None
+
+
+def _ensure_body_style(p_el, style_id: str) -> None:
+    """无样式引用的素材正文段挂模板正文样式（素材适配模板，2026-09-08 用户
+    拍板：素材库拷贝归顺模板、招标格式件保真）：获得标书正文缩进/行距/对齐；
+    已带样式引用（内置标题自动吃宿主定义、自定义样式走保真迁移）与表格整表
+    保持原样——某段自定义素材该不该归顺是语义判断，归写作流程的改写适配
+    步骤，机械层不做。"""
+    ppr = p_el.find(qn("w:pPr"))
+    if ppr is None:
+        ppr = parse_xml(f'<w:pPr {nsdecls("w")}/>')
+        p_el.insert(0, ppr)
+    if ppr.find(qn("w:pStyle")) is None:
+        ppr.insert(0, parse_xml(f'<w:pStyle {nsdecls("w")} w:val="{style_id}"/>'))
+
+
+def restyle_docx(section_path: Path) -> dict:
+    """重建式换装：用当前生效模板重建节文件——原内容（含修订标记）整体搬迁
+    + 保真迁移（素材自定义样式/编号/图片，与素材注入同构引擎）。OOXML 样式=
+    引用-定义分离：内置样式段（Heading/Tender Body）引用名不变、自动吃新
+    模板定义；直接格式与自定义样式保真；旧版入恢复点栈（可反悔）。
+
+    供 api/templates.py「应用到已有章节」调用（用户显式操作+恢复点兜底，
+    无锁铁则）；不注册 LLM 工具——换装不是模型动作。返回迁移计数。"""
+    old = Document(str(section_path))
+    new = _new_document()
+    sect = new.element.body.find(qn("w:sectPr"))
+    elements: list = []
+    for el in old.element.body.iterchildren():
+        if el.tag.split("}")[-1] not in ("p", "tbl"):
+            continue
+        el2 = deepcopy(el)
+        _strip_inner_sectpr(el2)
+        elements.append(el2)
+        if sect is not None:
+            sect.addprevious(el2)
+        else:
+            new.element.body.append(el2)
+    if not elements:
+        return {"elements": 0, "styles": 0, "numbering": 0, "images": 0}
+    n_style = _merge_missing_styles(old, new, elements)
+    n_num = _merge_missing_numbering(old, new, elements)
+    n_img = sum(_migrate_images(old, new, el) for el in elements)
+    # 原子落盘：先写临时文件成功，再把旧版挪入恢复点、临时文件顶上。直接
+    # save 会留「旧文件已挪走、新文件写失败」窗口——节文件本体丢失只剩
+    # 恢复点（.restyle.tmp 不匹配 *.docx，不进面板列表与「本轮文件」）。
+    tmp = section_path.with_name(section_path.name + ".restyle.tmp")
+    try:
+        new.save(str(tmp))
+        _rotate_restore_point(section_path)
+        tmp.replace(section_path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return {"elements": len(elements), "styles": n_style, "numbering": n_num, "images": n_img}
 
 
 # ---------- 样式与自动编号定义迁移 ----------
@@ -446,43 +576,137 @@ def _find_by_id(root, tag: str, attr: str, val: str):
 
 
 def _merge_missing_numbering(src_doc: Document, dst_doc: Document, elements) -> int:
-    """把元素引用而目标缺定义的自动编号（w:num 连其 w:abstractNum）从源拷过来。
+    """编号定义迁移：按定义内容判定沿用，id 冲突时重映射——拷贝元素的编号引用
+    解析到与源文档相同的定义，并改写 elements 上的引用。
 
-    多级编号（1.1/1.1.1）定义在 numbering 部件；不迁则拷贝元素的编号消失。
-    abstractNum 必须排在全部 num 之前（schema 顺序）；目标已有同 numId 沿用
-    目标定义（节文件都出自同一默认模板，跨源冲突罕见）。
+    numbering id 只是文档内部门牌号：建节模板自带 numId 1-9/abstractNumId
+    0-8，素材（历史标书）的 id 同样从小数字分配——同 id 不代表同定义，沿用
+    目标定义会让中文编号静默变圆点、多级编号错位（2026-09-08 review 实证）。
+    迁移规则：
+    - dst 缺该 numId：原 id 迁入（abstractNumId 同缺则原 id 齐迁；abstractNumId
+      相撞且定义不同则 abstractNum 换新 id 迁入，num 改指向新 id）；
+    - dst 已有同 numId：定义内容等价才沿用；不同则分配未用的新 numId 迁入
+      源定义并改写引用；
+    - 同一次调用内同 numId 共享映射（块内列表编号连续）；跨调用不复用——
+      不同素材块的同定义列表保持独立序列（各自从 1 开始，贴近原文语义）；
+    - w:numStyleLink（num 链编号样式）不重映射，沿用目标定义——编号样式
+      多为内建、语义跨文档一致。
     """
     try:
         src_root = src_doc.part.numbering_part.element
         dst_root = dst_doc.part.numbering_part.element
     except Exception:
         return 0  # 任一侧无 numbering 部件 = 无编号可迁
-    pending = {
+    used = sorted({
         n.get(qn("w:val"))
         for el in elements
         for n in el.findall(".//" + qn("w:numId"))
         if n.get(qn("w:val"))
-    }
-    moved = 0
-    while pending:
-        nid = pending.pop()
-        if not nid or _find_by_id(dst_root, "w:num", "w:numId", nid) is not None:
-            continue
-        num = _find_by_id(src_root, "w:num", "w:numId", nid)
+    })
+    if not used:
+        return 0
+
+    def norm_num(num_el) -> bytes:
+        # 剥 numId 属性与 abstractNumId 引用（文档内部门牌，非定义内容）
+        e = deepcopy(num_el)
+        e.attrib.pop(qn("w:numId"), None)
+        ref = e.find(qn("w:abstractNumId"))
+        if ref is not None:
+            e.remove(ref)
+        return etree.tostring(e)
+
+    def norm_abs(abs_el) -> bytes:
+        # 剥 id 属性与 nsid/tmpl（Word 各文档独立生成的随机 GUID，比对噪音）
+        e = deepcopy(abs_el)
+        e.attrib.pop(qn("w:abstractNumId"), None)
+        for t in ("w:nsid", "w:tmpl"):
+            for x in e.findall(qn(t)):
+                e.remove(x)
+        return etree.tostring(e)
+
+    def def_key(root, nid: str) -> tuple[bytes, bytes] | None:
+        num = _find_by_id(root, "w:num", "w:numId", nid)
         if num is None:
+            return None
+        ref = num.find(qn("w:abstractNumId"))
+        abs_e = (
+            _find_by_id(root, "w:abstractNum", "w:abstractNumId", ref.get(qn("w:val")))
+            if ref is not None else None
+        )
+        return (norm_num(num), norm_abs(abs_e) if abs_e is not None else b"")
+
+    dst_nums = {n.get(qn("w:numId")): n for n in dst_root.findall(qn("w:num"))}
+    dst_abs = {a.get(qn("w:abstractNumId")): a for a in dst_root.findall(qn("w:abstractNum"))}
+
+    def _ints(ids) -> set[int]:
+        out = set()
+        for k in ids:
+            try:
+                out.add(int(k))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    free_num = max(_ints(dst_nums), default=0) + 1
+    free_abs = max(_ints(dst_abs), default=0) + 1
+
+    def add_abs(src_aid: str, new_aid: str | None = None) -> str:
+        """迁 abstractNum（new_aid 缺省保留原 id）；abstractNum 必须排在全部 num 之前。"""
+        a = deepcopy(_find_by_id(src_root, "w:abstractNum", "w:abstractNumId", src_aid))
+        aid = new_aid or src_aid
+        a.set(qn("w:abstractNumId"), aid)
+        first_num = dst_root.find(qn("w:num"))
+        if first_num is not None:
+            first_num.addprevious(a)
+        else:
+            dst_root.append(a)
+        dst_abs[aid] = a
+        return aid
+
+    remap: dict[str, str] = {}
+    moved = 0
+    for nid in used:
+        key = def_key(src_root, nid)
+        if key is None:
+            continue  # 源侧定义缺失（悬挂引用）——无从迁
+        src_num = _find_by_id(src_root, "w:num", "w:numId", nid)
+        if src_num.find(qn("w:numStyleLink")) is not None:
+            continue  # 编号样式链场景不重映射（见 docstring）
+        if nid in dst_nums and def_key(dst_root, nid) == key:
+            remap[nid] = nid  # id 相撞但定义等价：沿用目标
             continue
-        abs_ref = num.find(qn("w:abstractNumId"))
-        abs_id = abs_ref.get(qn("w:val")) if abs_ref is not None else None
-        if abs_id and _find_by_id(dst_root, "w:abstractNum", "w:abstractNumId", abs_id) is None:
-            absnum = _find_by_id(src_root, "w:abstractNum", "w:abstractNumId", abs_id)
-            if absnum is not None:
-                first_num = dst_root.find(qn("w:num"))
-                if first_num is not None:
-                    first_num.addprevious(deepcopy(absnum))
-                else:
-                    dst_root.append(deepcopy(absnum))
-        dst_root.append(deepcopy(num))
+        ref = src_num.find(qn("w:abstractNumId"))
+        src_aid = ref.get(qn("w:val")) if ref is not None else None
+        new_aid = src_aid
+        if src_aid:
+            existing = dst_abs.get(src_aid)
+            if existing is None:
+                add_abs(src_aid)
+            elif norm_abs(existing) != key[1]:
+                new_aid = add_abs(src_aid, str(free_abs))  # 相撞且定义不同 → 新 id 迁入
+                free_abs += 1
+            # 相撞但定义等价 → 复用目标既有 abstractNum
+        new_num = deepcopy(src_num)
+        new_nid = nid
+        if nid in dst_nums:
+            while str(free_num) in dst_nums:
+                free_num += 1
+            new_nid = str(free_num)
+            free_num += 1
+        new_num.set(qn("w:numId"), new_nid)
+        if src_aid and new_aid != src_aid:
+            new_num.find(qn("w:abstractNumId")).set(qn("w:val"), new_aid)
+        dst_root.append(new_num)
+        dst_nums[new_nid] = new_num
+        remap[nid] = new_nid
         moved += 1
+
+    # 改写拷贝元素上的引用（含迁入的样式定义里的 numPr——调用方传副本进来）
+    for el in elements:
+        for n in el.findall(".//" + qn("w:numId")):
+            v = n.get(qn("w:val"))
+            if v in remap and remap[v] != v:
+                n.set(qn("w:val"), remap[v])
     return moved
 
 
@@ -511,7 +735,8 @@ def _merge_missing_styles(src_doc: Document, dst_doc: Document, elements) -> int
         src_style = _find_by_id(src_root, "w:style", "w:styleId", sid)
         if src_style is None:
             continue
-        dst_root.append(deepcopy(src_style))
+        new_style = deepcopy(src_style)
+        dst_root.append(new_style)
         have.add(sid)
         moved += 1
         for tag in ("w:basedOn", "w:link", "w:next"):
@@ -519,7 +744,8 @@ def _merge_missing_styles(src_doc: Document, dst_doc: Document, elements) -> int
             val = ref.get(qn("w:val")) if ref is not None else None
             if val and val not in have:
                 pending.add(val)
-        _merge_missing_numbering(src_doc, dst_doc, [src_style])
+        # 传迁入副本：id 冲突重映射时样式定义里的 numPr 引用同步改写
+        _merge_missing_numbering(src_doc, dst_doc, [new_style])
     return moved
 
 
@@ -577,11 +803,12 @@ def docx_section_create(path: str, title: str, paragraphs: str = "", replace: bo
             )
         _rotate_restore_point(dst)
         replaced = True
-    doc = Document()
+    doc = _new_document()
     doc.add_heading(title.strip() or "未命名", 1)
+    body_style = _body_style(doc)
     for text in paragraphs.split("\n"):
         if text.strip():
-            doc.add_paragraph(text.strip())
+            doc.add_paragraph(text.strip(), style=body_style.name if body_style else None)
     dst.parent.mkdir(parents=True, exist_ok=True)
     doc.save(dst)
     n_init = sum(1 for t in paragraphs.split("\n") if t.strip())
@@ -643,11 +870,37 @@ def docx_material_inject(block_id: str, dest: str) -> str:
         return "[注入失败] 素材原件文件缺失（可能已被删除）"
     element_map = materials_lib.read_element_map(f["file_name"])
     if element_map is None:
-        # 旧解析未产映射：幂等重跑补产（同原件确定性解析，md 与既有块锚定不变）
+        # 旧解析未产映射：幂等重跑补产。补跑前后比对 md——「同原件确定性解析、
+        # 锚定不变」只在解析代码不变时成立，解析升级会使行号漂移、旧块勾选区间
+        # 错位（拷错元素而非报错），变了拒绝注入、点名重勾（探测+用户裁决）
+        md_path = materials_lib.mt_parse_paths(f["file_name"])[0]
+        old_md = md_path.read_text(encoding="utf-8") if md_path.is_file() else None
         materials_lib.run_parse(f["id"])
         element_map = materials_lib.read_element_map(f["file_name"])
+        if (
+            element_map is not None
+            and old_md is not None
+            and old_md != md_path.read_text(encoding="utf-8")
+        ):
+            return (
+                "[注入失败] 素材重新解析后内容行号已变化，现有素材块的勾选区间会错位"
+                "——请在写作素材库重新确认该文件的勾选（删除重建相关块）后再注入"
+            )
     if element_map is None:
         return "[注入失败] 素材元素映射不可用（解析未产出），请删除后重新上传该素材"
+    # 同块重复注入探测：注入是 append 语义，重复=内容翻倍。块特征 shingle 已大量
+    # 出现在节文件接受视角文本中=已注入过（硬拦；概率防线，注入后大幅改写会漏拦
+    # ——validate_body 的素材使用率另有兜底）
+    block_sections = (materials_lib.block_content(b["id"]) or {}).get("sections") or []
+    bs = _sig_shingles("\n".join(sec.get("text") or "" for sec in block_sections))
+    if len(bs) >= 5:
+        cur = "\n".join(section_text_lines(Document(str(dst))))
+        if len(bs & _sig_shingles(cur)) / len(bs) >= 0.6:
+            return (
+                f"[注入失败] 素材块《{b.get('title') or b['id']}》的内容已大量出现在 "
+                f"work/{rel}（已注入过）——注入是追加语义，重复注入会翻倍内容；"
+                "确需重新贴底稿请先重建节文件（docx_section_create 传 replace=true）"
+            )
     ranges = b.get("ranges") or []  # db 层已反序列化为 [[s,e],…]
     idx = sorted({
         el for el, s, e in element_map
@@ -660,6 +913,8 @@ def docx_material_inject(block_id: str, dest: str) -> str:
         return "[注入失败] 素材块区间未映射到任何 docx 元素（可能只勾选了空段落）"
     src = Document(str(src_path))
     dst_doc = Document(str(dst))
+    body_style = _body_style(dst_doc)
+    body_style_id = body_style.element.get(qn("w:styleId")) if body_style else None
     children = list(src.element.body.iterchildren())
     sect = dst_doc.element.body.find(qn("w:sectPr"))
     n_para = n_tbl = n_img = 0
@@ -671,6 +926,9 @@ def docx_material_inject(block_id: str, dest: str) -> str:
         if el.tag.split("}")[-1] not in ("p", "tbl"):
             continue
         new_el = deepcopy(el)
+        _strip_inner_sectpr(new_el)
+        if new_el.tag == qn("w:p") and body_style_id:
+            _ensure_body_style(new_el, body_style_id)
         n_img += _migrate_images(src, dst_doc, new_el)
         if sect is not None:
             sect.addprevious(new_el)
@@ -686,6 +944,11 @@ def docx_material_inject(block_id: str, dest: str) -> str:
     n_style = _merge_missing_styles(src, dst_doc, copied)
     n_num = _merge_missing_numbering(src, dst_doc, copied)
     dst_doc.save(dst)
+    # AI 引用打点：注入落盘成功才算一次引用（容错——打点失败不影响注入结果）
+    try:
+        db.mt_touch_blocks([b["id"]])
+    except Exception:
+        pass
     return (
         f"[已注入] 《{b.get('title') or '素材块'}》→ work/{rel}：段落 {n_para} 个、"
         f"表格 {n_tbl} 张、图片 {n_img} 张（内容与格式逐字节取自素材原件，样式引用沿用源文档）"
@@ -768,6 +1031,7 @@ def docx_source_inject(source: str, dest: str, lines: str = "") -> str:
         if el.tag.split("}")[-1] not in ("p", "tbl"):
             continue
         new_el = deepcopy(el)
+        _strip_inner_sectpr(new_el)
         n_img += _migrate_images(src, dst_doc, new_el)
         if sect is not None:
             sect.addprevious(new_el)
@@ -873,6 +1137,8 @@ def docx_section_revise(path: str, edits: str) -> str:
     paras = doc.paragraphs
     before = _flatten_rejected(doc)
     applied = 0
+    body_style = _body_style(doc)
+    body_style_id = body_style.element.get(qn("w:styleId")) if body_style else None
     # 段落从后往前：插入/删除改变段落数，先改大序号防位移；同段连续
     # insert_after 以「上次插入的新段」为锚保提交顺序（游标按段序号记）
     insert_anchors: dict[int, object] = {}
@@ -888,7 +1154,9 @@ def docx_section_revise(path: str, edits: str) -> str:
                 _tracked_replace(para, str(it["find"]), str(it["text"]), rev_id)
             elif act == "insert_after":
                 anchor = insert_anchors.get(i, para._p)
-                insert_anchors[i] = _tracked_insert_after(anchor, str(it["text"]), rev_id)
+                insert_anchors[i] = _tracked_insert_after(
+                    anchor, str(it["text"]), rev_id, style_id=body_style_id
+                )
             else:
                 _tracked_delete(para, rev_id)
         except ValueError as e:
@@ -993,6 +1261,26 @@ def section_text_lines(doc: Document) -> list[str]:
     return [text for _label, text in section_lines_labeled(doc)]
 
 
+def head_text(path: str | Path, max_chars: int = 200) -> str:
+    """docx 开头文本（接受修订视角）：前几段/表格行非空文本拼到 max_chars 截断。
+
+    派发拼装的兄弟节摘要用（dispatch_enrich）——给并发写手看兄弟节开头、
+    防跨节重复表达。文件损坏由调用方决定跳过（本函数不吞异常）。
+    """
+    doc = Document(str(path))
+    parts: list[str] = []
+    used = 0
+    for text in section_text_lines(doc):
+        t = text.strip()
+        if not t:
+            continue
+        parts.append(t)
+        used += len(t)
+        if used >= max_chars:
+            break
+    return "".join(parts)[:max_chars]
+
+
 @tool
 @_tool_guard("合册")
 def docx_assemble_volume() -> str:
@@ -1023,15 +1311,8 @@ def docx_assemble_volume() -> str:
     for doc in docs:
         vol = str(doc.get("name") or "").strip() or "主册"
         vol_dir = body_contract.sanitize_name(vol) if multi else ""
-        out = Document()
+        out = _new_document()  # 模板自带 A4 版面/页边距/页脚页码，无需再手拼
         out.add_heading(vol, 0)
-        fp = out.sections[0].footer.paragraphs[0]
-        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        fp._p.append(parse_xml(
-            f'<w:r {nsdecls("w")}><w:fldChar w:fldCharType="begin"/>'
-            f'<w:instrText xml:space="preserve"> PAGE </w:instrText>'
-            f'<w:fldChar w:fldCharType="end"/></w:r>'
-        ))
         merged = n_img = 0
         missing: list[str] = []
         unfilled: list[str] = []  # 模板填充类叶子未产出节文件（按附件对待）
@@ -1066,6 +1347,7 @@ def docx_assemble_volume() -> str:
             copied: list = []
             for el in children:
                 new_el = deepcopy(el)
+                _strip_inner_sectpr(new_el)
                 n_img += _migrate_images(src, out, new_el)
                 copied.append(new_el)
                 sect = out.element.body.find(qn("w:sectPr"))

@@ -74,6 +74,43 @@ def test_statement_segment_searchable(tmp_path, monkeypatch):
     assert hits and hits[0]["section_path"] == "§statement"
 
 
+def test_questions_segment_searchable(tmp_path, monkeypatch):
+    """检索问题进独立 §questions 段——正文只有「医院」、问句里的「医疗行业」可检中；
+    business 版优先；无 questions 不建段。"""
+    _setup(tmp_path, monkeypatch)
+    kid = _write_md(
+        "医院合同.md", "# 合同\n\nXX医院智慧后勤平台项目，金额 380 万元。",
+        doc_type="contract_case",
+        suggested={"doc_type": "contract_case",
+                   "statement": "XX 医院智慧后勤平台合同（第1页）。",
+                   "questions": ["做过哪些医疗行业项目？", "合同金额多大？"]},
+    )
+    # 问句独有的归类词命中 §questions 段
+    hits = db.kb_search_segments(fts.build_match_expr("医疗行业"), limit=5)
+    assert hits and hits[0]["section_path"] == "§questions"
+    # 确认版问题优先（business 覆盖 suggested）
+    db.kb_update_item(
+        kid, review_status="confirmed",
+        business_metadata=json.dumps(
+            {"doc_type": "contract_case",
+             "questions": ["做过哪些政务行业项目？"]},
+            ensure_ascii=False,
+        ),
+    )
+    reindex_item(kid)
+    hits2 = db.kb_search_segments(fts.build_match_expr("政务行业"), limit=5)
+    assert hits2 and hits2[0]["section_path"] == "§questions"
+    hits_old = db.kb_search_segments(fts.build_match_expr("医疗"), limit=5)
+    assert all(h["item_id"] != kid for h in hits_old)  # 建议版问句已被覆盖（医疗只出现在建议版）
+    # 无 questions 的条目不建段
+    kid2 = _write_md("证书.md", "# 证书\n\nISO9001 质量管理体系认证证书。",
+                     doc_type="qualification_certificate")
+    assert not [
+        h for h in db.kb_search_segments(fts.build_match_expr("质量体系"), limit=20)
+        if h["item_id"] == kid2 and h.get("section_path") == "§questions"
+    ]
+
+
 def test_reindex_no_material_segments(tmp_path, monkeypatch):
     """素材分离：知识库 reindex 只产 outline/说明/字段段，无任何块段/块表。"""
     _setup(tmp_path, monkeypatch)

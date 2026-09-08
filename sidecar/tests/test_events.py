@@ -1,14 +1,23 @@
 """iter_stream 对 todos 的提取与去重（todo.updated 只发变化），以及 reasoning 增量提取。"""
 
-from langchain_core.messages import AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, RemoveMessage, ToolMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from app.events import iter_stream
+
+REMOVE_ALL = REMOVE_ALL_MESSAGES
 
 
 def _updates(updates: list[dict]):
     """构造 agent.stream 的 ("updates", {node: update}) 片段。"""
     for u in updates:
         yield ("updates", {"model": u})
+
+
+def _node_updates(node: str, updates: list[dict]):
+    """构造指定节点的 updates 片段（测试中间件伪节点用）。"""
+    for u in updates:
+        yield ("updates", {node: u})
 
 
 def _messages(chunks: list[AIMessageChunk]):
@@ -141,3 +150,72 @@ def test_reasoning_content_list_of_blocks():
     )
     kinds = list(iter_stream(_messages([chunk])))
     assert kinds == [("reasoning", {"text": "推理片段", "agent_id": None})]
+
+
+# ---------- 中间件伪节点的历史重放不得翻译成工具事件（2026-09-08 跨 run 重放修复） ----------
+
+
+def _patch_update() -> dict:
+    """deepagents PatchToolCallsMiddleware.before_agent 的状态重写载荷：
+    [RemoveMessage(REMOVE_ALL), *整段历史消息原对象, *补插的取消 ToolMessage]——
+    上一 run 中断遗留悬空 tool_calls 时，新 run 开头会下发这份整段历史。"""
+    history = [
+        AIMessage(
+            content="查一下",
+            tool_calls=[{"name": "read_file", "args": {"file_path": "a.md"}, "id": "call_L1_A", "type": "tool_call"}],
+        ),
+        ToolMessage(content="文件内容", name="read_file", tool_call_id="call_L1_A"),
+    ]
+    cancelled = ToolMessage(
+        content="Tool call task with id call_L1_B was cancelled - another message came in before it could be completed.",
+        name="task",
+        tool_call_id="call_L1_B",
+    )
+    return {"messages": [RemoveMessage(id=REMOVE_ALL), *history, cancelled]}
+
+
+def test_patch_tool_calls_history_rewrite_not_translated():
+    """before_agent 补洞更新的整段历史重放：不得产出任何 tool_called/tool_result。"""
+    stream = _node_updates("PatchToolCallsMiddleware.before_agent", [_patch_update()])
+    assert [k for k, _ in iter_stream(stream)] == []
+
+
+def test_summarization_before_model_rewrite_not_translated():
+    """langchain 裸变体压缩的 before_model 状态重写（含保留消息原对象）同样跳过。"""
+    rewrite = {
+        "messages": [
+            RemoveMessage(id=REMOVE_ALL),
+            HumanMessage(content="Here is a summary of the conversation"),
+            AIMessage(
+                content="批",
+                tool_calls=[{"name": "task", "args": {}, "id": "call_X", "type": "tool_call"}],
+            ),
+            ToolMessage(content="ok", name="task", tool_call_id="call_X"),
+        ]
+    }
+    stream = _node_updates("SummarizationMiddleware.before_model", [rewrite])
+    assert [k for k, _ in iter_stream(stream)] == []
+
+
+def test_real_nodes_still_translated():
+    """白名单不伤正常链路：model 节点的新 AIMessage(tool_calls) 与 tools 节点的 ToolMessage 照常翻译。"""
+    ai = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"file_path": "b.md"}, "id": "call_new", "type": "tool_call"}],
+    )
+    tm = ToolMessage(content="done", name="read_file", tool_call_id="call_new")
+    stream = iter(
+        [
+            ("updates", {"model": {"messages": [ai]}}),
+            ("updates", {"tools": {"messages": [tm]}}),
+        ]
+    )
+    kinds = [k for k, _ in iter_stream(stream)]
+    assert kinds == ["tool_called", "tool_result"]
+
+
+def test_pseudo_node_todos_still_flow():
+    """todos 提取不 gated 白名单：伪节点更新携带 todos 时照常去重下发。"""
+    todos = [{"content": "a", "status": "pending"}]
+    stream = _node_updates("PatchToolCallsMiddleware.before_agent", [{"todos": todos, "messages": []}])
+    assert [k for k, _ in iter_stream(stream)] == ["todo_updated"]

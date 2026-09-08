@@ -45,8 +45,10 @@ class RunFilePayload(_ContractModel):
 
 
 class Message(_ContractModel):
-    """GET /messages 的 assistant 消息；tools/todos 是 run_traces 快照（嵌套树，松散 dict，
-    键序与前端 ToolStep 同构--前端用客户端类型标注，见 client.ts）。"""
+    """GET /messages 的消息行。过程快照瘦身（2026-09-08，reshape）：tools/todos/
+    reasoning 不再随列表下发（标书会话 11.4MB 随历史线性涨），改 GET
+    /conversations/{cid}/messages/{mid}/trace 按需取；列表只带折叠头所需的轻量
+    摘要（traceSteps/tracePaused）与 durationMs/files。"""
 
     id: str
     conversation_id: str
@@ -56,13 +58,22 @@ class Message(_ContractModel):
     # 所属 run（additive）：同一 run 的暂停段+续跑段消息共享，前端据此聚合成单回合；
     # 旧行/无 run 语境为 NULL
     run_id: str | None = None
-    tools: list[dict] | None = None
-    todos: list[TodoItemPayload] | None = None
+    # 过程摘要（assistant 且有 run_traces 行才有）
+    traceSteps: int | None = None
+    tracePaused: bool | None = None
     durationMs: int | None = None
-    reasoning: str | None = None
     # 本轮 work/ 变更（additive，SSE 零改动--completed 后前端重取消息获得）；
     # 旧 run 无探测，恒 []
     files: list[RunFilePayload] | None = None
+
+
+class MessageTrace(_ContractModel):
+    """GET /conversations/{cid}/messages/{mid}/trace：单条消息的完整执行过程
+    （点开过程区按需取；tools 是嵌套树松散 dict，键序与前端 ToolStep 同构）。"""
+
+    tools: list[dict]
+    todos: list[TodoItemPayload]
+    reasoning: str
 
 
 class SendMessageResult(_ContractModel):
@@ -81,6 +92,9 @@ class RunInfo(_ContractModel):
     # 本 run 模型用量快照（additive，2026-09-06）：JSON 文本 {input,output,cached,
     # reasoning}，旧 run / 进行中为 None；前端展示下一批接
     token_usage: str | None = None
+    # 错误定性（additive，2026-09-08，取值域同事件契约 AgentError.code）：error 终态
+    # 时非空；completed / 旧 run 为 None。前端错误卡据此选人话文案与操作入口
+    error_code: str | None = None
 
 
 class ActiveRun(_ContractModel):
@@ -149,6 +163,7 @@ class Settings(_ContractModel):
 
 class FileItem(_ContractModel):
     name: str
+    abs_path: str
     size: int
     modified_at: str
 
@@ -226,13 +241,35 @@ class KbFieldSource(_ContractModel):
 
 class KbMetadata(_ContractModel):
     """suggested（AI 建议）/ business（人工确认）共用形状：类型 + 内容说明
-    statement（带出处锚点，不预设内容字段）+ 锚点字段 + 自由字段。"""
+    statement（带出处锚点，不预设内容字段）+ 检索问题 questions（「用户会怎么问」
+    的短问句，独立 §questions 检索段）+ 锚点字段 + 自由字段。
+    business 侧另有 confirmed_by="auto"=程序核对自动确认（人工保存后标记消失）。"""
 
     doc_type: str
     statement: str | None = None
+    questions: list[str] | None = None
     confidence: float | None = None
     fields: dict[str, KbFieldSource] | None = None
     extra: dict[str, KbFieldSource] | None = None
+    confirmed_by: Literal["auto"] | None = None
+
+
+class KbAnchorCheckItem(_ContractModel):
+    """单项核对结果：field=注册字段 code 或伪字段（_consistency/_anchors），
+    detail 为后端拼好的中文依据/原因。"""
+
+    field: str
+    label: str
+    ok: bool
+    detail: str
+
+
+class KbAnchorCheck(_ContractModel):
+    """锚点回文核对结果（抽取收尾跑，LLM 抽出的锚点回原文验证）：
+    pass=全部命中可自动确认；fail=留待人工确认（results 点名原因）。"""
+
+    status: Literal["pass", "fail"]
+    results: list[KbAnchorCheckItem] = Field(default_factory=list)
 
 
 class KbFreshness(_ContractModel):
@@ -259,6 +296,7 @@ class KbItem(_ContractModel):
     progress: str | None = None
     suggested: KbMetadata | None = None
     business: KbMetadata | None = None
+    check_result: KbAnchorCheck | None = None
     freshness: list[KbFreshness] = Field(default_factory=list)
     error: str | None = None
     created_at: str
@@ -280,12 +318,13 @@ class MtFile(_ContractModel):
 
 
 class MtOutlineNode(_ContractModel):
-    """目录树节点（勾选界面数据源；children 递归）。"""
+    """目录树节点（勾选界面数据源；children 递归；chars=区间实算字数）。"""
 
     标题: str = ""
     start_line: int | None = None
     end_line: int | None = None
     level: int | None = None
+    chars: int | None = None
     children: list["MtOutlineNode"] = Field(default_factory=list)
 
 
@@ -301,6 +340,9 @@ class MtBlock(_ContractModel):
     created_at: str
     # 块列表端点附带来源文件名
     file_name: str | None = None
+    # AI 引用打点（search_references 命中 + docx_material_inject 注入各计一次）
+    use_count: int = 0
+    last_used_at: str | None = None
 
 
 class KbParseMeta(_ContractModel):
@@ -314,3 +356,33 @@ class KbParseMeta(_ContractModel):
     pages: int | None = None
     scanned_pages: list[int] | None = None
     top_sections: list[str]
+
+
+class TemplateInfo(_ContractModel):
+    """文档模板（格式资产，与素材=内容资产分离）：内置基准或用户上传 .docx，
+    全局一个生效位（active）。"""
+
+    name: str  # 显示名（文件名主干；内置=「内置标书基准模板」）
+    key: str  # 寻址键（用户模板=文件名；内置="__builtin__"）
+    builtin: bool = False
+    active: bool = False
+    size: int = 0
+    mtime: float = 0.0
+
+
+class RestyleResult(_ContractModel):
+    """换装单节结果（elements=搬迁的段落/表格数）。"""
+
+    file: str
+    ok: bool
+    elements: int = 0
+    error: str | None = None
+
+
+class RestyleReport(_ContractModel):
+    """任务换装报告（applied=成功节数；skipped_volumes=「整本-」派生物跳过数）。"""
+
+    applied: int = 0
+    failed: int = 0
+    skipped_volumes: int = 0
+    results: list[RestyleResult] = Field(default_factory=list)

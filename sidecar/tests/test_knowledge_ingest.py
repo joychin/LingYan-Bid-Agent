@@ -164,6 +164,40 @@ def test_extract_validation(tmp_path, monkeypatch):
     assert "共 8 章" in out2["statement"]  # 写法类保留结构概览
 
 
+def test_extract_questions_validation(tmp_path, monkeypatch):
+    """检索问题清洗：去空/去重/超长丢弃/上限 8 条；写法类整体丢弃。"""
+    from app.knowledge.extract import validate_suggested
+
+    qs = ["公司规模多大？", "  公司规模多大？  ", "", "持有哪些软件著作权？", "超" * 31,
+          None, 123, "做过哪些医疗行业项目？"]
+    qs += [f"问题{i}？" for i in range(8)]  # 凑过上限
+    out = validate_suggested(
+        {"doc_type": "contract_case",
+         "statement": "XX 医院智慧后勤平台合同，金额 380 万元（第1页）。",
+         "questions": qs},
+        "合同.docx",
+    )
+    got = out.get("questions")
+    assert got == ["公司规模多大？", "持有哪些软件著作权？", "做过哪些医疗行业项目？"] + [
+        f"问题{i}？" for i in range(8)
+    ][:8 - 3]  # 去空/去重/超长/非字符串丢弃后封顶 8 条
+
+    # 写法类不生成检索问题（检索消费方是素材库）
+    out2 = validate_suggested(
+        {"doc_type": "past_proposal", "statement": "技术标共 8 章。",
+         "questions": ["怎么写技术方案？"]},
+        "标书.docx",
+    )
+    assert "questions" not in out2
+
+    # 全无效时不落键（不产生空 questions）
+    out3 = validate_suggested(
+        {"doc_type": "financial_report", "statement": "净资产 8.2 亿元（第7页）。", "questions": ["", "  "]},
+        "财报.docx",
+    )
+    assert "questions" not in out3
+
+
 # ---------- 图片抽取（确定性零 LLM，仅供内容页查看） ----------
 
 def _make_docx_with_images(tmp_path, n_images=3) -> bytes:
@@ -259,3 +293,105 @@ def test_unfriendly_image_converted_to_png():
     # 友好格式原样透传
     data3, ext3 = images_mod.as_browser_friendly(b"\x89PNG-rest", ".png")
     assert data3 == b"\x89PNG-rest" and ext3 == ".png"
+
+
+# ---------- 锚点回文核对 + 自动确认（两主人模型） ----------
+
+_CERT_MD = (
+    "# 证书\n\nXX 建设银行数据中心项目 ISO9001 质量管理体系认证，证书编号 CN-001。\n"
+    "有效期自 2023-05-01 至 2028-06-30。\n" + "体系覆盖软件开发与信息系统集成服务。" * 6
+)
+
+
+def _seq_llm(*responses):
+    """按调用次序返回预设抽取 JSON（模拟重抽结果变化）；ChatDeepSeek 替身。
+    队列在多次实例化间共享（run_extract 每次调用新建模型实例）。"""
+    queue = list(responses)
+
+    class _SeqModel:
+        def __init__(self, **kwargs):
+            pass
+
+        def invoke(self, messages):
+            return _FakeResp(queue.pop(0))
+
+    return _SeqModel
+
+
+def test_autoconfirm_on_check_pass(tmp_path, monkeypatch):
+    """核对全过：自动确认 + business 副本带 auto 标记 + 确认版字段段可检索。"""
+    _setup(tmp_path, monkeypatch, llm=_seq_llm(_extract_json(
+        statement="ISO9001 质量管理体系认证，证书编号 CN-001（第1页），有效期至 2028-06-30（第1页）。",
+        fields={"valid_until": {"value": "2028-06-30", "source": "第1页"},
+                "client": {"value": "建设银行", "source": "第1页"}},
+    )))
+    kid = _upload("好证书.txt", _CERT_MD.encode())
+    item = run_ingest(kid)
+    assert item["review_status"] == "confirmed"
+    biz = json.loads(item["business_metadata"])
+    assert biz["confirmed_by"] == "auto"
+    assert biz["fields"]["valid_until"]["value"] == "2028-06-30"
+    assert json.loads(item["check_result"])["status"] == "pass"
+
+    from app.knowledge import fts
+
+    hits = db.kb_search_segments(fts.build_match_expr("2028"), limit=5)
+    assert any(h.get("section_path") == "条目信息（人工确认）" and h.get("item_id") == kid for h in hits)
+
+
+def test_check_fail_stays_pending(tmp_path, monkeypatch):
+    """核对有败（日期不在原文）：留待确认 + 无 business + check_result 点名原因。"""
+    _setup(tmp_path, monkeypatch, llm=_seq_llm(_extract_json(
+        statement="ISO9001 质量管理体系认证证书。",
+        fields={"valid_until": {"value": "2099-01-01", "source": "第1页"}},
+    )))
+    kid = _upload("坏证书.txt", _CERT_MD.encode())
+    item = run_ingest(kid)
+    assert item["review_status"] == "pending_review"
+    assert not item["business_metadata"]
+    results = json.loads(item["check_result"])["results"]
+    assert any(not r["ok"] and "未在原文找到该日期" in r["detail"] for r in results)
+
+
+def test_auto_demote_on_recheck(tmp_path, monkeypatch):
+    """自动确认后重抽变坏：回落待确认并清掉旧自动副本（防陈旧盖章）。"""
+    good = _extract_json(
+        statement="ISO9001 质量管理体系认证证书，证书编号 CN-001（第1页）。",
+        fields={"valid_until": {"value": "2028-06-30", "source": "第1页"}},
+    )
+    bad = _extract_json(
+        statement="ISO9001 质量管理体系认证证书。",
+        fields={"valid_until": {"value": "2099-01-01", "source": "第1页"}},
+    )
+    _setup(tmp_path, monkeypatch, llm=_seq_llm(good, bad))
+    kid = _upload("复检证书.txt", _CERT_MD.encode())
+    first = run_ingest(kid)
+    assert first["review_status"] == "confirmed"
+    second = run_ingest(kid)
+    assert second["review_status"] == "pending_review"
+    assert not second["business_metadata"]
+    assert json.loads(second["check_result"])["status"] == "fail"
+
+
+def test_human_confirm_immune_to_recheck(tmp_path, monkeypatch):
+    """人工确认过的条目：重抽只更新 suggested/check_result，business 与确认状态不动。"""
+    good = _extract_json(
+        statement="ISO9001 质量管理体系认证证书，证书编号 CN-001（第1页）。",
+        fields={"valid_until": {"value": "2028-06-30", "source": "第1页"}},
+    )
+    bad = _extract_json(
+        statement="ISO9001 质量管理体系认证证书。",
+        fields={"valid_until": {"value": "2099-01-01", "source": "第1页"}},
+    )
+    _setup(tmp_path, monkeypatch, llm=_seq_llm(good, bad))
+    kid = _upload("人工证书.txt", _CERT_MD.encode())
+    assert run_ingest(kid)["review_status"] == "confirmed"
+    # 模拟人工确认（PUT /metadata 的落库形状：business 无 auto 标记）
+    human_biz = {"doc_type": "qualification_certificate",
+                 "fields": {"valid_until": {"value": "2030-12-31"}}}
+    db.kb_update_item(kid, review_status="confirmed",
+                      business_metadata=json.dumps(human_biz, ensure_ascii=False))
+    item = run_ingest(kid)
+    assert item["review_status"] == "confirmed"
+    assert json.loads(item["business_metadata"]) == human_biz  # 人工值原样
+    assert json.loads(item["check_result"])["status"] == "fail"  # 核对仍更新展示

@@ -21,7 +21,7 @@ from langchain_core.tools import tool
 from .. import db
 from ..knowledge import fts, store
 from ..knowledge.freshness import freshness_warnings
-from ..knowledge.roles import derive_role, hit_header, item_meta, statement_of
+from ..knowledge.roles import derive_role, hit_header, item_meta, questions_of, statement_of
 from ..knowledge.types import role_of
 
 _SNIPPET_CHARS = 300
@@ -31,6 +31,9 @@ def _excerpt(item: dict, line_start, line_end, *, section_path=None) -> str:
     # 说明段行号为空——摘录直接取 statement 原文（AI 整理语义入口）
     if section_path == "§statement":
         return statement_of(item)[:_SNIPPET_CHARS]
+    # 检索问题段同样无行号——取问句清单（提示模型读原文拿答案）
+    if section_path == "§questions":
+        return "；".join(questions_of(item))[:_SNIPPET_CHARS]
     md_path, _, _, _ = store.kb_parse_paths(item["file_name"])
     if not md_path.is_file():
         return ""
@@ -67,6 +70,13 @@ def _mt_block_excerpt(file_name: str, ranges: list, limit: int = _SNIPPET_CHARS)
             parts.append(text)
     out = "\n".join(parts)
     return out[:limit] + ("…" if len(out) > limit else "")
+
+
+def _mt_image_count(file_name: str, ranges: list) -> int:
+    """素材块图片段数（占位行计数；旧解析无占位恒 0——重解析后可见）。"""
+    from ..knowledge import materials_lib as mlib
+
+    return mlib.block_image_count(file_name, ranges)
 
 
 def _mt_ranges_str(ranges: list) -> str:
@@ -179,12 +189,19 @@ def search_company_assets(query: str, doc_type: str | None = None) -> str:
         for _, h, item, role in hits_out:
             review = "" if item["review_status"] == "confirmed" else "（信息待确认）"
             header = hit_header(item, h, role, review_note=review.strip("（）") or "", freshness=_fresh(item))
-            section = f"，章节「{h['section_path']}」" if h.get("section_path") and h["section_path"] != "§statement" else (
-                "，内容说明" if h.get("section_path") == "§statement" else ""
-            )
-            ai_note = "（AI 整理·数字须回原文核对）" if h.get("section_path") == "§statement" else ""
+            sp = h.get("section_path")
+            if sp == "§statement":
+                section, ai_note = "，内容说明", "（AI 整理·数字须回原文核对）"
+                key = f"kb:{item['id']}:s"
+            elif sp == "§questions":
+                # 问句是检索入口不含事实，不加 AI 整理注；答案以原文为准
+                section, ai_note = "，检索问题", ""
+                key = f"kb:{item['id']}:q"
+            else:
+                section = f"，章节「{sp}」" if sp else ""
+                ai_note = ""
+                key = f"kb:{item['id']}:L{h.get('line_start')}"
             linked = _linked_evidence(item, items) if role == "fact-candidate" else ""
-            key = f"kb:{item['id']}:s" if h.get("section_path") == "§statement" else f"kb:{item['id']}:L{h.get('line_start')}"
             out.append(
                 f"- {item['file_name']}［{header}］{ai_note}{linked}{section}{_loc(h)}\n"
                 f"  摘录：{_excerpt(item, h.get('line_start'), h.get('line_end'), section_path=h.get('section_path'))}\n"
@@ -217,7 +234,9 @@ def _mt_skeleton(fid: str, max_lines: int = 40) -> list[str]:
     blocks = db.mt_list_blocks(fid)
     out = []
     for b in blocks:
-        out.append(f"- {b['title']}（{_mt_ranges_str(b.get('ranges'))}，约{b.get('chars') or 0:,}字）")
+        img = _mt_image_count(f["file_name"], b.get("ranges"))
+        img_bit = f"，含图 {img} 处" if img else ""
+        out.append(f"- {b['title']}（{_mt_ranges_str(b.get('ranges'))}，约{b.get('chars') or 0:,}字{img_bit}）")
         if b.get("note"):
             out.append(f"  备注：{b['note']}")
         if len(out) >= max_lines:
@@ -238,11 +257,11 @@ def search_references(query: str) -> str:
         query: 检索词（如「运维服务方案」「表单设计器」「培训计划」——也会命中用户备注）
 
     Returns:
-        素材块命中（标题+备注+来源文件+多区间行号+真实字数）与精读指引；命中文件
-        附全部块清单（该来源文件的能力全景）。**拷贝素材后必须调用 check_name_residue
-        扫描旧项目名/客户名残留（old_names 传来源文件名中的机构名）**。写正文节时
-        docx 原件的块优先 docx_material_inject 按块 id 整体保真注入（元素级拷贝），
-        纯文本参考才自行改写。
+        素材块命中（标题+备注+来源文件+多区间行号+真实字数；含图片段的块标「含图 N 处」）与
+        精读指引；命中文件附全部块清单（该来源文件的能力全景）。**拷贝素材后必须调用
+        check_name_residue 扫描旧项目名/客户名残留（old_names 传来源文件名中的机构名）**。
+        写正文节时 docx 原件的块必须 docx_material_inject 按块 id 整体保真注入（元素级拷贝，
+        图片只有注入能带进正文——自写即丢），纯文本参考才自行改写。
     """
     try:
         hits = _dedupe(_search_all(query, limit=24))
@@ -266,15 +285,19 @@ def search_references(query: str) -> str:
             "⚠ 素材仅供写法参考——其中数字、工期、承诺均须按本次招标重新核对，禁止直接沿用。",
         ]
         ev = []
+        touched: list[str] = []
         for h in selected:
             f = files.get(h["item_id"])
             b = blocks_by_id.get(h.get("material_id"))
             if not f or not b:
                 continue
+            touched.append(b["id"])
             key = f"mt:{f['id']}:b:{b['id']}"
             note = f"\n  备注：{b['note']}" if b.get("note") else ""
+            img = _mt_image_count(f["file_name"], b.get("ranges"))
+            img_bit = f"，含图 {img} 处" if img else ""
             out.append(
-                f"- 《{b['title']}》［素材块·拷贝修订候选，约 {b.get('chars') or 0:,} 字，"
+                f"- 《{b['title']}》［素材块·拷贝修订候选，约 {b.get('chars') or 0:,} 字{img_bit}，"
                 f"区间 {_mt_ranges_str(b.get('ranges'))}］｜来源文件：{f['file_name']}{note}\n"
                 f"  摘录：{_mt_block_excerpt(f['file_name'], b.get('ranges'))}\n"
                 f"  引用键：{key}（拷贝后必须用 check_name_residue 扫旧名残留）"
@@ -284,6 +307,9 @@ def search_references(query: str) -> str:
                 "material": b["id"], "title": b["title"],
                 "ranges": b.get("ranges"), "review": "user_curated",
             })
+        # AI 引用打点：检索命中即算一次引用（use_count/last_used_at；容错不抛）
+        if touched:
+            db.mt_touch_blocks(touched)
         # 块清单（该来源文件的能力全景——用户自建的挑选结果）
         seen_fids: dict[str, dict] = {}
         for h in selected:
@@ -302,6 +328,8 @@ def search_references(query: str) -> str:
             "精读指引：用 read_file 读 `materials/parse/<文件名去扩展名>/<原文件名>.md` 的对应行号区间"
             "（拷贝修订取块的全部区间）。写正文节时，docx 原件的块优先 docx_material_inject"
             " 按块 id 整体保真注入再定向修订（表格/图片/格式零转写）；非 docx 原件才按文本参考改写。"
+            "标注「含图 N 处」的块必须走 docx_material_inject——自行撰写无法带图，图片会全部丢失"
+            "（写作工具没有放置图片的通道，图片只能随注入拷贝）。"
         )
         out.append(_evidence_line(ev))
         return "\n".join(out)

@@ -1,4 +1,4 @@
-"""run 级 token 用量累计（2026-09-06：30M token 事故后补的观测层）。
+"""run 级 token 用量累计 + per-turn 明细（2026-09-06 观测层；2026-09-08 加明细）。
 
 捕获点在模型壳（_NoThinkingRetryCompletions.create 的返回）——主 agent 与全部
 子代理共享同一模型实例、runctx 的 contextvars 已随线程传播，这一层能看到本 run
@@ -11,15 +11,21 @@
   或 DeepSeek 非标的 prompt_cache_hit_tokens，两者都试）
 - reasoning：输出中的思考 token（usage.completion_tokens_details.reasoning_tokens）
 
-落库走 db.finish_run / interrupt_run 的 token_usage 参数（JSON 文本），take() 取走
-即清零——每个 run 只落一次。
+两层落库：
+- run 级聚合：db.finish_run / interrupt_run 的 token_usage 参数（JSON 文本），
+  take() 取走即清零——每个 run 只落一次；
+- per-turn 明细：run_turn_usage 每次调用一行，scope 取 runctx.current_scope()
+  （main/sub，子代理 scope 中间件打标），供「token 都花在哪」的归因查询。
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 
-from . import runctx
+from . import db, runctx
+
+logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _by_run: dict[str, dict[str, int]] = {}
@@ -63,6 +69,7 @@ def record_usage(usage) -> None:
 
     主入口：流式/非流式的 usage 都经这里。流式时 usage 取自流吐完后的最后一块
     （`stream_options.include_usage` 开启时服务端才回），取不到就什么都不记。
+    run 级聚合之外同步落 per-turn 明细行（归因用）。
     """
     ctx = runctx.current_run()
     if ctx is None:
@@ -74,6 +81,29 @@ def record_usage(usage) -> None:
         bucket = _by_run.setdefault(ctx.run_id, {})
         for k, v in fields.items():
             bucket[k] = bucket.get(k, 0) + v
+    _record_turn_detail(ctx.run_id, fields)
+
+
+def _record_turn_detail(rid: str, fields: dict[str, int]) -> None:
+    """per-turn 明细：run_turn_usage 一行 + INFO 日志（现场 tail 观察）。
+
+    明细失败不影响主流程（聚合与 run 终态落库照常）；日志恒发——它是唯一
+    实时可见的通道，库写挂了日志还在。
+    """
+    scope = runctx.current_scope()
+    try:
+        db.insert_run_turn_usage(rid, scope, fields)
+    except Exception:
+        logger.debug("token 明细落库失败（不影响主流程）", exc_info=True)
+    logger.info(
+        "llm 用量 rid=%s scope=%s in=%s cached=%s out=%s reasoning=%s",
+        rid,
+        scope,
+        fields.get("input", 0),
+        fields.get("cached", 0),
+        fields.get("output", 0),
+        fields.get("reasoning", 0),
+    )
 
 
 def record_from_response(resp) -> None:

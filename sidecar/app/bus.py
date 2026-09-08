@@ -27,7 +27,9 @@ _MUST_DELIVER = {
 
 
 def subscribe(conversation_id: str) -> asyncio.Queue:
-    q: asyncio.Queue = asyncio.Queue(maxsize=500)
+    # 2000：8 路子代理并发的 reasoning/token 洪峰会冲垮 500 的水位（2026-09-08
+    # 实测 tool.result 被静默挤掉→前端死步），扩容降低丢弃概率；丢了有前端过程对账兜底
+    q: asyncio.Queue = asyncio.Queue(maxsize=2000)
     _subscribers[conversation_id].append(q)
     return q
 
@@ -47,8 +49,9 @@ async def publish(conversation_id: str, event: dict[str, Any]) -> None:
             q.put_nowait(event)
         except asyncio.QueueFull:
             if event.get("event") not in _MUST_DELIVER:
-                # 可丢事件（token/todo/tool 等增量）：客户端靠终态事件+重连对账兜底
-                logger.debug("SSE 队列积压，丢弃事件 %s（cid=%s）", event.get("event"), conversation_id)
+                # 可丢事件（token/todo/tool 等增量）：客户端靠终态事件+重连对账兜底。
+                # info 级（2026-09-08 从 debug 升）：洪峰丢事件是已发生过的真事故，静默不可诊断
+                logger.info("SSE 队列积压，丢弃事件 %s（cid=%s）", event.get("event"), conversation_id)
                 continue
             # 必达事件：挤出最旧的**非必达**事件腾位。单事件循环内以下操作无并发，
             # 整队列重建一遍找得到可丢事件；若积压全是必达事件（消费者彻底停滞的

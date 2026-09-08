@@ -27,6 +27,19 @@ export interface AgentReasoning {
   text: string;
   agent_id?: string | null;
   seq: number;
+  seq_from?: number | null;
+}
+/**
+ * LLM 瞬时错误自动重试的等待期通知（additive 2026-09-08）：前端在输出区显示
+ * 「正在自动重试」shimmer 并清空未封口正文。attempt 从 1 起。
+ */
+export interface AgentRetry {
+  run_id: string;
+  conversation_id: string;
+  attempt: number;
+  total: number;
+  wait_seconds: number;
+  seq: number;
 }
 export interface AgentStarted {
   run_id: string;
@@ -38,6 +51,7 @@ export interface AgentToken {
   conversation_id: string;
   text: string;
   seq: number;
+  seq_from?: number | null;
 }
 /**
  * run 边界产物事件（events.artifact_created_payload；run_id 恒非空——
@@ -91,6 +105,7 @@ export interface RunState {
   error?: string | null;
   code?: string | null;
   requests?: InterruptRequestPayload[] | null;
+  started_at?: number | null;
 }
 export interface TodoItemPayload {
   content: string;

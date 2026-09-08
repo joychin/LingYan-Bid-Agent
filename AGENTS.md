@@ -264,6 +264,109 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    命中全部弱级→warning、指引「需正文节点模式=—」降为提示并给表格类出路
    （评标索引表/分项报价表被目录形态错标为需正文的兜底）；tender-outline
    annotation.md 补「表格/索引/清单/填表类节点交付形态=模板或附件填充」。
+   **契约 additive 扩展（2026-09-07 run.state 权威起点）**：run.state 载荷加
+   `started_at`（epoch ms，源自 runs.created_at，sse.py 下发）——客户端刷新/
+   切会话重挂后恢复 running 态，活卡「执行中 · Xs」计时按真实起点**续算**（此前
+   拿不到起点、从恢复时刻重算，是可见失真）。前端 runReducer 兜底链=事件权威值
+   >本地值>now（旧 sidecar 兼容）；waiting_input 对账不设起点（暂停不计时、
+   续跑段从回答时刻起算语义更准，维持原状）。
+   **契约 additive 扩展（2026-09-08 错误定性 code 值域 + agent.retry）**：动因=
+   网关流内错误原文（"Our servers are currently overloaded…"）原样透传成红卡，
+   用户分不清是模型服务的错还是程序的错；且自动重试退避期（3s/10s/30s）前端
+   毫无感知、看似卡死。①`agent.error`/`run.state` 的 `code` 取值域扩展（形状零
+   改动，code 本是自由字符串）：`llm_unavailable`=服务方过载/超时/断流（重试
+   耗尽，agent.py worker 内判定+人话文案）、`llm_auth`=模型未配置/Key 失效
+   （`AgentConfigError` 新异常类 + openai 401/403 分类）、`internal`=程序错误
+   兜底、`interrupted`=sidecar 重启中断（recover_stale_runs 补写，前端同
+   cancelled 中性灰「重新执行」）；cancelled 判定从「字符串相等」挪进 worker
+   产出（_run_agent_stream 返回值改五元组，多了 error_code）；error 文案 sidecar
+   单源拼好：**首行人话 + `\n` + 服务方/异常原文截 300 字**（前端 ErrorCard 按
+   \n 拆行渲染：首行主文案、原文小字灰）。②新事件 `agent.retry`（worker 重试
+   backoff 前 `_publish`，payload=attempt/total/wait_seconds）——前端 RunState
+   .retrying 在正文气泡区显示 TextShimmer「模型服务不稳，正在自动重试（第 N/3
+   次）…」并**清 streamText**（与 sidecar `cur_text_parts.clear()` 对齐，顺带
+   修掉 agent.py docstring 记录过的「重试半截 token 前端重复」已知局限）；任何
+   流增量（token/reasoning/tool）到达即清除。③runs 表加 `error_code` 列（迁移
+   24；finish_run/finish_run_if_running 随 error 同写、completed 写 NULL；RunInfo
+   DTO additive 透出），sse.py run.state code 优先读列、NULL 回退旧字符串判定
+   （迁移前数据兼容）。前端 ErrorCard 重构：props= message/code/onOpenSettings，
+   `llm_auth` 显示「去设置」按钮（重试救不了配置问题）、cancelled/interrupted
+   灰卡、其余红卡「重试」。
+   **内部修复+观测（2026-09-08 二批：error run 过程挂载 + per-turn 用量明细）**：
+   动因=DeepSeek 欠费 402 打断整本 run（31/32 节已完成）后历史里执行过程全丢
+   ——error 收尾分支创建「（任务中断）」半截消息但丢弃返回 id、`_save_merged_trace`
+   写死 None，首段 error 的 run `run_traces.message_id` 恒空，GET /messages 按
+   message_id 挂载查不到（DB 全部 error run 中招，含 39 分钟大 run；completed/
+   暂停分支一直是对的）。修复=error 分支+外层兜底两处接住消息 id 传入
+   （无新产出仍传 None=保留暂停消息挂载，续跑合并语义不变）；**迁移 25** 顺带
+   回填历史孤儿 trace 到同 run 最后一条 assistant 消息（无产出的 run 不动，
+   已挂载的不动；真实库副本验证：32 节 run 37 步全部挂回）。配套观测=新表
+   `run_turn_usage`（迁移 25 同建）：每次模型调用一行（scope/input/cached/
+   output/reasoning），scope 经 runctx 新增 agent_scope contextvar——
+   `_SubagentScopeMiddleware`（挂 SUBAGENTS 两条目，与罗盘并列）在
+   wrap_model_call 置 sub/finally 复位，主线程/SummarizationMiddleware 默认
+   main，general-purpose 子代理挂不上记 main（接受）；`token_usage.record_usage`
+   同步插行+INFO 日志「llm 用量 rid= scope= in= cached= out= reasoning=」
+   （tail -f 现场观察）；归因查询=`SELECT scope, COUNT(*), SUM(input), SUM(cached),
+   SUM(output), SUM(reasoning) FROM run_turn_usage WHERE run_id=? GROUP BY scope`。
+   动因背景=整本 run 输入 14.49M（93% 缓存命中）需要归因主线程 vs 子代理。
+   db.list_run_turn_usage(rid) 读侧；runs.token_usage 聚合零改动。
+   **过程对账（2026-09-08 三批，SSE 契约零改动）**：动因=8 路子代理并发的
+   reasoning/token 洪峰下 SSE 丢事件（bus 队列积压静默丢弃+断连窗口无订阅者），
+   实测整本 run 第一波 straggler 的 tool.result 被挤掉→卡永远「运行中」、第二波
+   7 张子代理卡零内部事件假「启动中」——sidecar 端一切正常（主代理 13:19:43
+   那轮=必须全部 task 返回才继续；节文件 mtime/用量行全在跑），纯前端失真。
+   修复=快照对账补「何时拉+怎么合」：①触发三处——`runReducer` seq 缺口
+   （reduceSse 之外包一层发 `reconcile-trace` effect，告警从「只 console.warn」
+   变「告警+自愈」；stream-batch 的跳号同款触发）+ SSE 重连 run.state +
+   onError reconcile，统一走 `restoreSnapshot`（**5s 限频**，缺口风暴不连环拉
+   全树快照；换会话复位）；②合并语义——`restoreSnapshot` 删「本地树非空不拉」
+   闸，`snapshot` action 树非空走新纯函数 `mergeTraceTree` 字段级合并（本地
+   done/error 终态优先=拉取竞态防盖回 running；本地 running+快照终态=死步修复；
+   **快照 paused 不覆盖任何本地状态**——冻结职责归 run.state waiting_input
+   对账，续跑乐观 revive 不被旧快照打断；children 本地空→整棵采用快照=假启动
+   卡修复；text/reasoning/summary 本地缺失才补；快照独有步骤按位置插入、本地
+   独有尾部附加——事件序单调）；todos/done/total 随快照重算（「任务清单 0/0」
+   同源修复）；树空路径原样（全量替换+continuation revive/waiting freeze）。
+   sidecar 基建零新增（`GET /runs/{rid}/snapshot`+`agent._LIVE_TRACES` 活树
+   注册表已在：worker 在 tool_called/tool_result/todo_updated 边界 deepcopy 写入）。
+   配套洪峰缓解：bus 队列 maxsize 500→2000、可丢事件丢弃日志 debug→info
+   （info 可见=下次可诊断）。测试：runReducer.test.ts「过程对账 merge」八例
+   +缺口 effect 两例；sidecar 零新测试（纯参数变更）。
+   **契约 additive 扩展（2026-09-08 SSE 微合批）**：`api/sse.py` 发送层把 100ms
+   窗口（`_COALESCE_WINDOW`，批次封顶 `_COALESCE_MAX=200` 条、洪峰即满即发）内的
+   流式增量**按段分组合并**——以非流式事件（tool/todo/边界帧）为界切段，段内
+   agent.token 归一组、agent.reasoning 按 (run, agent_id) 各归一组，text 拼接、
+   seq 取组内最大值、additive 字段 **`seq_from`**=组内首个 seq（单条未合并帧也带，
+   seq_from==seq）。段内跨流重排无害（token 与各子代理思考写互不依赖的缓冲），
+   封段语义由段边界保证（段内增量全属于上一个边界之前）——8 路并发的增量交错
+   到达，只合并「连续同类」几乎合不动，这是分组而非连续合并的原因；其余事件
+   原样透传、顺序不变，run.state 对账帧与 ping 语义不变，seq 赋值点不动
+   （agent.py `_publish` 每条一 seq、终态落 runs.last_seq——合批层只合并不赋号）。
+   动因=token 级高频事件（8 路并发实测 ~320 帧/s）每帧过 sse-starlette 编码+TCP 写+
+   WKWebView 网络进程逐帧跨进程转发+页面逐条 JSON.parse，四层成本与帧数成正比
+   （真实 run 期间网络进程 70-88% CPU 的主因）；合并后线上帧数 ~30 倍↓（行业标配，
+   AI SDK experimental_throttle 同思路）。
+   配套前端：runReducer 两处缺口检查（sse 入口/stream-batch）连续性锚点改用
+   `seq_from ?? seq`——**服务端合并跳号不再是缺口**（不触发过程对账），真丢事件
+   （bus 积压丢弃/断连）的 seq_from>水位+1 照旧告警+对账；useRun 缓冲记批次首帧
+   seqFrom 随 stream-batch 携带；去重水位（seq 单调）语义不变。首帧延迟上界
+   +100ms（低于前端 200ms 渲染节流，不可感）。测试：test_sse.py 合批纯函数四例
+   +生成器端到端一例；runReducer.test.ts seq_from 连续/真缺口两例。
+   **契约 reshape（2026-09-08 messages 瘦身，非 additive）**：GET /messages 的
+   assistant 消息**不再携带 tools/todos/reasoning**（标书会话实测 11.4MB、单条
+   最大 2.7MB，随历史线性涨，而每次 run 收尾/invalidate/重连都全量重拉+全量
+   JSON.parse+常驻缓存）；改带轻量摘要 `traceSteps`（顶层步数）/`tracePaused`
+   （树内含 paused 步，SQLite json_array_length/json_tree 库内 C 层算，不把 MB 级
+   JSON 拉回 Python）+ 保留 durationMs/files。完整过程新增按需端点
+   `GET /conversations/{cid}/messages/{mid}/trace`（tools/todos/reasoning，
+   cid 归属校验）。前端：历史过程区**点开时**才拉（ChatMessage 受控 open +
+   useQuery ['message-trace', mid] enabled:open、staleTime 永久/gcTime 30min、
+   加载行+失败重试），折叠头「已完成 · N 步/已暂停」改用摘要字段；运行中链路
+   （SSE 活卡/`/runs/{rid}/snapshot` 重建/过程对账/HITL 装配——旁白来自
+   splitMarker(content)）零改动（已审计：message.tools 全前端唯一消费点=
+   ChatMessage）。dto.gen.ts 已再生。首次点开历史过程多一次本地请求（有加载
+   指示），运行中显示与折叠态界面零变化。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。
@@ -314,17 +417,36 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   `app/publish.py`（**唯一登记入口**：契约存在→授权（stub：已注册契约全允许，模板待
   第二场景）→schema 校验→原子落盘）；`app/api/tasks.py`（任务 CRUD；POST 默认连带
   第一个会话，`with_conversation=false` 供输入区选择器就地新建）；`app/api/workbench.py`
-  （work/ 过程文件 API：列出/读取/编辑**只放行 .md**（json/隐藏文件不进列表，「面板
-  不是调试器」）、parse/ 只读（证据锚点手改=篡改原文）、base_hash 409 探测（拉取最新/
+  （work/ 过程文件 API：列出收 .md 与 .docx（json/隐藏文件不进列表，「面板
+  不是调试器」）、读取/编辑只放行 .md、`GET /workbench/raw` 出 docx 原始字节
+  （面板版式预览用，2026-09-07）、parse/ 只读（证据锚点手改=篡改原文）、
+  base_hash 409 探测（拉取最新/
   保留我的）、写前 .bak 恢复点（单一上一版、互换可再撤销）、「修订=用户」头标记；
   「存为笔记」已删（2026-09-04 用户拍板砍用户手工产出通道，产物只由 AI 发布））；
   `app/tools/publish.py`（LLM `publish_artifact`，草稿限当前任务
   `_meta/staging/`（containment 防注入），未知契约收拢 doc.note）；
   `app/tools/read.py`（`read_artifact`：同契约任务内唯一当前内容）；
   `app/tools/task_progress.py`（进度便签）；`app/runctx.py`（contextvars 传
-  cid/rid/task_id/thinking 思考档位）；`app/run_files.py`（「本轮文件」起止快照 diff，
+  cid/rid/task_id/thinking 思考档位）；`app/dispatch_enrich.py`（tender-body-writer
+  派发说明程序拼装，治「派发塌成节名五字→子代理开局自救烧 token」，见「派发
+  拼装机制」记录）；`app/run_files.py`（「本轮文件」起止快照 diff，
   见铁律 3 的 additive 记录）；`app/token_usage.py`（run 级模型用量累计，见铁律 3
   的 2026-09-06 修复批）。
+  **子代理路径罗盘 + 文件工具路径自愈（2026-09-08）**：动因=run_traces 全库
+  24 次子代理开局探测 path_not_found（主形态=ls work/body/… 缺任务前缀 ×14，
+  另有 /workspace 段、/t_x/skills 误套、真实根前缀三形态；写错前缀的 write
+  不报错自动建目录、glob/grep 静默空——事后检测接不住，故自愈层是**事前换算**）。
+  两层各治一半：①`_SubagentCompassMiddleware`（子代理 spec 的 `middleware` 字段
+  挂载，deepagents 原生支持；wrap_model_call 注入三行罗盘——任务前缀/全局目录
+  skills·materials·knowledge/根即工作区，run 内字节稳定遵守前缀缓存铁律；主代理
+  不吃罗盘，任务上下文块已含工作目录行）②`_PathRescueMiddleware`（wrap_tool_call
+  事前换算：目标不存在时按固定候选序——去 /workspace 段→去真实根前缀→加任务
+  前缀→全局目录剥任务前缀，规则可叠两层；ls/glob/grep 查目录、read/edit 查文件、
+  **write 特殊**=原父目录在=真新文件不动、原父缺候选父在才换算防散落；命中附
+  「路径已解析为…」注记；无命中时错误文案富化附罗盘让模型一步纠正。挂主代理
+  middleware 列表 + 两个 SUBAGENTS 条目双挂（子代理 ToolNode 独立不继承）。边界：
+  delete/execute 不参与（删除目标改写不可逆）；general-purpose 子代理（deepagents
+  自动补、spec 不归我们传）两层都挂不上，历史 1 次错误频率接受。
   `work/` 是**任务级**技能工作台（`<task>/work/`：parse→analysis→outline→body 的中间
   产物；2026-08-31 由 out/ 更名），跨任务互不串台；已知管线子目录同样预建
   （`_PROCESS_DIRS` = parse/analysis/outline/outline/fragments，任务创建 + run 启动
@@ -405,6 +527,15 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   （叶子有行/模式合法/blk 可解析），其余 body md 校验占位清点（清单非错误）+旧名残留
   （复用 check_residue 抽出的纯函数 scan_residue，行为零变化）+素材使用率（与选用块
   同款归一化后 10 字 shingle 重叠率，<10% 提示未实质使用——提示不是门禁）。
+  **素材跨节重复防线（2026-09-08，大地任务实测同一 625 段素材块全文进两节后加）**：
+  指引校验加「同块多派=issue」（同块注入两节即逐字重复，无正当场景；文案带拆块/
+  改推理撰写出路）与「不同块 id 同素材文件区间重叠派不同节=弱级提示」（治历史
+  马甲块——同区间两个块名不同，失效检查发现不了）；全局模式加「节间两两查重」
+  （归一化 10 字 shingle 交集/较小方 ≥50% 点名，短节 <5 shingle 跳过；重构后
+  独立于承诺清单跑——清单缺失也照查）。建块侧防线在前端（materialsBlocks.ts
+  overlappingBlocks + 建块弹窗 exact/partial 提示，提示不阻断），后端不做（建块
+  唯一入口是用户 UI，模型无建块工具）。guide-format.md 素材列「一块只派一节」、
+  SKILL.md 第 3 步全局行同步接线。
   `_PROCESS_DIRS` 加 body/（骨架自愈）；agent.py 主 prompt 路由句加 tender-body。
   本批**串行写节**（并发子代理+兄弟摘要、全局跨节审计、语义审阅、字数校准留后续
   批次）；联网检索模式=枚举预留未实现。
@@ -443,6 +574,169 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   视图互查，修掉表格行被标越界 P 号的隐患。SKILL/section-writing/guide-format
   /tender-body-writer prompt 同批接线（格式跟随扩拷原件支路、模板填充执行期
   二分：格式表格类拷+填空产出 vs 物理附件类维持待填清单）。
+- **docx 注入机制修复批（2026-09-08 review 实证，七项全修）**：①`_merge_missing_numbering`
+  原「目标已有同 numId 即沿用目标定义」在素材（历史标书，Word 的 numbering id
+  从小数字分配）撞上建节模板自带的 numId 1-9/abstractNumId 0-8 时**静默错配**
+  （中文编号变圆点/多级错位；read 视图与 validate 均不可见，注释「跨源冲突罕见」
+  漏了素材 vs 模板这条轴）。重写为**按定义内容判定 + 冲突 id 重映射**：id 相撞且
+  定义不同→分配未用新 id 迁入源定义并**改写拷贝元素上的引用**（含迁入样式副本里
+  的 numPr——_merge_missing_styles 随之改传迁入副本而非源元素）；同一次调用内同
+  numId 共享映射（块内列表编号连续）、跨调用各自独立序列（不同素材的同定义列表
+  不得被错误并接成连续编号）；内容比对剥 id 属性与 nsid/tmpl 随机 GUID；
+  w:numStyleLink 场景不重映射（内建编号样式语义跨文档一致）。合册用同一对迁移
+  函数，节间 id 冲突同批修复。②**段内分节符剥离**（`_strip_inner_sectpr`，
+  素材注入/招标件拷贝/合册三循环同接）：素材的横向页/分节属性随段落拷贝会中途
+  生效突变版式。③**默认字体定死**（`_apply_default_fonts`，建节+合册）：Normal
+  eastAsia=宋体、Heading*/Title=黑体、拉丁 Times New Roman——默认模板无 eastAsia
+  声明=中文显示随打开端兜底不可控；只管程序生成内容（素材 run 级字体照旧保真）。
+  ④**纯图片段 md 占位行**（parse/docx.py `![](图片)`）：图片段=空行会被「连续
+  3+ 空行只留 2」折叠吃出 element_map→该图永远注入不进（静默丢图），占位行保命
+  且勾选界面可见有图；已上传素材需重新上传才生效（无重解析端点）。⑤**锚定漂移
+  探测**（inject 补跑映射路径）：补跑前后比对 md，「同原件确定性解析=锚定不变」
+  只在解析代码不变时成立，变了拒绝注入点名重勾（探测+用户裁决）；run_parse 仍
+  不 reindex（md 变了块本来就要废）。⑥**同块重复注入拦截**（强归一化只留中文+
+  字母数字的 10 字 shingle，块特征在节文件终稿文本出现 ≥60% 即拒——append 语义
+  下重复=翻倍无正当场景；概率防线，大幅改写后漏拦可接受）。⑦**素材使用率归一化
+  强化**（validate_body._normalize 剥 md 表格竖线/分隔行/列表标题前缀、去行内
+  空白）：表格为主的块不再被 md/视图格式差稀释误报「未实质使用」。附：
+  _migrate_images fallback 删跨包 relate_to（外部 part 序列化损坏）改跳过；
+  RT import 随之删除。历史已产出节文件不自动纠正（重注入/重写节才走新逻辑）。
+  明确不做：素材库旧名元数据（零 LLM 是拍板设计，残留扫描弱级+显式名单兜底）、
+  素材交叉引用跨块死链（跨文档引用无完美解，纸面无感，记录在案）。
+- **标书基准 docx 模板（2026-09-08，格式与内容分离）**：动因=用户反馈
+  「生成的 Word 格式难看」——建节/合册原从 python-docx 默认**英文**模板起建
+  （Heading 蓝色 Calibri Light、正文不缩进、单倍行距），_apply_default_fonts
+  只补字体不管版式。行业调研共识（pandoc reference-doc / python-docx 官方 /
+  Anthropic docx skill / 中文标书工具链一致）：**版式全部活在一份模板的
+  styles.xml，代码只挂样式名**，LLM 零参与。落地=`app/resources/
+  tender_base_template.docx`（由 `sidecar/scripts/make_base_template.py`
+  生成维护，改版式=改脚本重跑，37KB 入库随包分发）+ docx_ops `_new_document()`
+  （建节/合册两处 Document() 换模板起建；**模板 body 带样式示例段**——打开模板
+  即可直观预览/改版式（Title/H1-4/正文各一行），起建时整段剥离只留 sectPr，
+  示例永不进入业务产物；模板缺失回落默认模板防打包漏带）。
+  版式档=标书通行惯例（非公文 GB/T 9704 档，政采标走格式跟随拷招标件）：
+  A4 上下 2.54/左右 3.18、页脚居中页码域、标题黑体分级加粗**黑色**
+  （H1 小二~H4 小四）、Normal 中性（宋体小四单倍无缩进——素材拷贝的无样式
+  段落与表格单元格吃它，**标书正文格式不进 Normal 防缩进/行距泄漏进表格**）、
+  自定义样式 **Tender Body** 承载 AI 正文段（1.5 倍行距+首行缩进 2 字符，
+  firstLineChars=200 与 firstLine=480 并写双保险——「字符」单位随字号自适应，
+  twips 兜底非 Word 渲染器）。接线三处：建节初始段 add_paragraph(style=
+  "Tender Body")、修订插段 _tracked_insert_after 加 style_id 参数挂 pStyle
+  （_body_style(doc) 探测，模板缺样式名回落 Normal——将来用户换自带模板
+  建节不失败）、合册 out 同模板起建并**删手动页码域三件套**（模板页脚自带，
+  留着=双重页码）。_apply_default_fonts 删除（字体进模板）。spec datas 加
+  ("app/resources", "app/resources")。测试：test_base_template_layout_on_
+  create_and_assemble（字体/样式/缩进/行距/A4/页脚域/合册页码唯一）+
+  insert_after 挂样式断言+视图标签 Normal→Tender Body 三处更新，572 全绿。
+  界面化（用户上传自定义模板替换单槽）**明确后置**——先验证内置版式，
+  用户拍板后再做（预案：设置页上传口，模板在建节时生效、换模板只影响新节）。
+  **拷贝内容的模板策略（2026-09-08 用户拍板：素材库归顺、招标件保真）**：
+  docx_material_inject 拷贝循环给**无样式引用的素材正文段**挂 Tender Body
+  （`_ensure_body_style`——获得标书缩进/行距，与 AI 正文段同观感；此前吃
+  中性 Normal 不缩进是观感割裂主因）；边界=带样式引用的段落不动（内置
+  Heading 同名自动吃模板黑体分级、自定义样式走保真迁移——某段该不该归顺
+  是语义判断归写作流程改写适配）、表格整表不动（单元格段落不加缩进）、
+  段落 direct 格式不动（run 级字体/对齐覆盖样式，居中落款等不受影响）；
+  docx_source_inject（招标格式件）**零改动全保真**（格式由招标文件定死）。
+  测试 test_material_inject_body_style_adoption（归顺/表格不挂/招标件不挂
+  三断言），573 全绿。
+  **模板库独立入口（2026-09-08 拆库拍板：素材=内容资产/模板=格式资产分离）**：
+  侧栏新入口「模板库」（Sidebar NavRow LayoutTemplate；activeView 加
+  'templates'）+ `components/TemplatesView.tsx`（左列表=内置基准+用户上传
+  .docx、右=docx-preview 版式预览复用 raw 字节端点；上传=入库不自动激活、
+  显式「设为当前」生效——语义分离防误传即全局生效；删除两步确认 3s 复位
+  （素材库教训）；「应用到任务」弹窗选任务）。sidecar `app/api/templates.py`：
+  GET /templates（列表）/ POST 上传（20MB 上限、可打开校验拒损坏件、同名
+  覆盖=新版语义）/ DELETE（内置不可删；删激活位回落内置）/ {key}/activate /
+  {key}/raw（FileResponse 不进 dto）/ POST /templates/apply（task_id）。
+  存储=data/templates/；生效位=app_settings `docx_template`（缺省=内置），
+  docx_ops `_active_template_path()`（建节/合册每次现读，改模板即时生效无
+  重启；用户模板无 Tender Body 样式时 `_body_style` 返回 None 正文段降级
+  Normal 不失败）。**换装=`docx_ops.restyle_docx` 重建式**：当前生效模板
+  起建+原内容（含修订标记）整体搬迁+`_merge_missing_styles/numbering/
+  _migrate_images` 保真迁移（与素材注入同构引擎）——OOXML 引用-定义分离：
+  内置样式段自动吃新模板定义、直接格式与自定义样式保真、旧版入恢复点栈；
+  apply 端点 409 活跃 run 守卫（任务下任一会话）、「整本-」派生物跳过计数、
+  单节失败不中断进报告（RestyleReport DTO）；**换装落盘原子化（review 批）**：
+  先写 `.restyle.tmp` 成功→旧版入恢复点→replace 顶上（直接 save 留「旧已挪
+  走、新写失败」窗口=节文件本体丢失）；apply 端点同步 def（磁盘密集循环丢
+  线程池，不阻塞事件循环上的 SSE 心跳）；list_templates stat 竞态跳行不 500。
+  前端：TemplatesView 复用 useTasks 的 ['tasks'] 全局缓存（**同 queryKey 换
+  queryFn 会互相污染缓存形状**——Sidebar 任务树会拿到 {tasks} 对象崩掉）；
+  上传/删除后连带 invalidate ['template-raw']（同名覆盖后预览防旧缓存 5min）。
+  记录在案不修：超链接外部关系（w:hyperlink rel）不随元素迁移——存量注入
+  引擎同病、换装全节搬迁暴露面更大，正文超链接罕见（政采标书），后续批与
+  注入引擎一起修；换装换新 sectPr=节文件的自定义页眉页脚丢（模板页眉是
+  预期行为，恢复点兜底）；空节文件 apply 计入 applied 未实际动（语义小偏差）。dto.gen.ts 已再生入库
+  （TemplateInfo/RestyleResult/RestyleReport）。测试 tests/test_templates.py
+  四例（CRUD+激活即生效+apply 换装/恢复点/409/404），576 全绿。前端门禁
+  tsc+oxlint 绿；vite build/vitest 在本机 node 20.12 撞 rolldown styleText
+  数组不兼容（存量环境问题，与本次无关，打包用常用构建环境验证）。
+- **tender-body 调度优化批（2026-09-08，straggler/串行检索治理；背景=整本 40min
+  解剖：批被最慢节钉死 813s、先完成子代理均空等 ~400s、批间主线程轮 1.3-2min×5、
+  指引检索 32 节=32 轮串行）**：①**整本派发按「均衡分波」不再按一级章节分批**——
+  check_pipeline_state `[body]` 新增分波参考：指引已生成且待写节 ≥4 时，按
+  「模式基数（推理撰写3/素材修订2/格式跟随1，「+」取最高）+素材列 blk 块数」权重
+  做**最少负载分桶**（LPT 贪心：降序逐项补当前最轻且未满的波，重节分散；比蛇形
+  折返更均衡——2 波时 9..1 权重 LPT 分 23/22 vs 蛇形 25/20）；物理附件类不参与、
+  已写节剔除、指引缺行的待写需正文叶子按权重 1 兜底补入并注明；纯机械零结论，
+  「全部重写」时分波参考不含已写节、SKILL 指引模型按同口径自建。SKILL 整本分支
+  同步改「一波返回、一句话汇报、再派下一波」，保留不做一次几十节齐发红线。
+  ②**并发步数封顶**：`_MAX_CONCURRENT_STEPS=8` 经 stream config 顶层
+  `max_concurrency` 注入（langgraph 原生语义：封顶同 superstep 并行任务，经
+  ensure_config 的 ContextVar 拷贝自动传入子代理图、各图自建 executor 无死锁；
+  三条执行路径——初次/HITL resume/瞬时重试——共用该 stream 调用点一处生效）；
+  行业标配（Claude Code 20/OpenAI SDK/LangGraph），波容量与它**刻意对齐**=波内
+  任务不排队。③**指引生成检索并行化**：SKILL 第 1 步硬纪律——同一消息并发多个
+  search_references（每轮 ≤8）、按表顺序分轮，禁止一节一轮串行（线程安全已核实：
+  每 db 调用私有连接+sqlite3 serialized+WAL，无需加锁）。测试：
+  test_check_pipeline.py `_balanced_waves` 纯函数三例 + 分波集成三例（权重算术/
+  物理附件排除/缺行兜底/已写剔除/多册键/<4 不出参考）。
+- **派发契约：内部编号退出写手语境（2026-09-08，REQ 泄漏根治）**：动因=run_traces
+  实证 134 条 tender-body-writer 派发里 106 条带「覆盖REQ-42至REQ-47」式编号，
+  6/30 docx 正文首句与之**逐字镜像**（同句式派发 4 泄 3 净=写手侧随机，但零编号
+  派发零泄漏；SKILL 清单原要求带「依据 ID」=制度化泄漏入口；「行号区段」项
+  0/134 从未真实执行过）。修复=派发差异块以**要求清单**取代编号——每条=要求
+  原文片段或要点＋出处（招标条款号+L 行号区间），派发前主代理按指引依据列 ID
+  从目录产物 registry 解析一次（text=招标原文片段、出处照抄，机械零损耗）；
+  **REQ/MAND/SCORE/TPL 编号禁止出现在派发说明**。编号保留在 analysis/目录/指引
+  （机器对账货币，消费方=程序与主代理）；outline 来源标注协议不动。写手 prompt
+  加防御性禁令（从指引/目录读到编号也不写进正文），正文呼应招标要求用要求内容
+  或招标文件真实印着的章节/条款号（评标人可对照；内部编号他们对不上）。四文件：
+  tender-body SKILL.md 派发清单/agent.py 写手 prompt/section-writing.md 通用纪律
+  与格式跟随注记/guide-format.md 依据列。不加机器检查（validate_body 用户否决），
+  历史 6 个泄漏 docx 不自动改。
+- **派发拼装机制 + 写手开局瘦身（2026-09-08 token 治理批）**：动因=DeepSeek 实测
+  整本 32 节 14.5M 输入（¥10/标书）的六成来自派发契约塌方——主代理派发说明只有
+  7~10 字节名（SKILL「必带清单缺一不派」纪律管不住模型方差），32 个子代理开局
+  自救 521 次 ls/grep/read 重建上下文（读回 写作指引**全文**/承诺清单/分析表/
+  check_pipeline_state×32），读入的全文再被此后 ~26 轮逐轮重发。修法=派发契约
+  **从纪律升机制**：`app/dispatch_enrich.py` 纯函数 `build_enriched_description`
+  （瘦描述→程序拼共享上下文块；节名对账目录叶子=精确>包含>近似（SequenceMatcher
+  ≥0.55 且头两名分差 ≥0.10）**唯一命中才拼**，0/多义放行不猜；产出文本零
+  REQ/MAND/SCORE/TPL 编号——依据列 ID 经目录产物 `content["registry"]` 解析为
+  「要求原文+出处」后即弃；块=模型原话首行（UI 卡标题）+任务前缀/输出路径/
+  指引行（`_parse_guide_rows`）/素材块/承诺清单全部值（`_iter_tables`）/兄弟节
+  摘要（同册 mtime 降序 ≤3 个 × 前 200 字，`docx_ops.head_text`）；无时间戳、
+  同子代理 run 内字节稳定=前缀缓存铁律无伤；整体异常放行原文绝不打断 run）。
+  接线=agent.py `_DispatchEnrichMiddleware`（wrap_tool_call 三层过滤：工具名=
+  task → `subagent_type == _BODY_WRITER_NAME`（SUBAGENTS spec 与中间件同一常量）
+  → runctx 有 task_id；挂 build_agent middleware 栈 `_PATH_RESCUE_MW` 同层；
+  改写用 `request.override`，tool.called 事件仍带模型原始 args——UI 卡标题不受
+  影响，拼装块由任务文件确定性推导无需事件侧同步）。配套瘦身四文件：写手
+  prompt 开局纪律（只读 section-writing.md 且同一条消息并发读完、禁
+  check_pipeline_state、禁读 写作指引/关键事实与承诺 全文、docx 视图 create 后
+  通读一次此后按标签定位）+SKILL.md 派发段改「只写短名+特殊意图，共享上下文
+  系统自动补全」（主代理每波 8 条×2-3K 字的派发输出同步省掉）+section-writing.md
+  子代理段/排序句 +guide-format.md 依据列注（主代理无需手工解析 registry）。
+  测试：test_dispatch_enrich.py 九例（含缩写命中实测形态「低代码产品方案」、
+  零编号回归断言）+ test_agent.py 接线/禁令源码守卫。同批：error run 的 trace
+  挂载修复（agent.py error 分支接住 `error_msg_id`——此前写死 None 首段 error 的
+  trace 永远挂不上消息，历史过程全丢）+ 孤儿 trace 一次性回填（3 行，含 32 节
+  run）。预期整本输入 14.5M→~5M、¥10→¥3~4、轮数 26/节→≤15；基线与验收口径=
+  run_turn_usage 按 scope 聚合（45 万 token/节、~0.3 元/节 → ≤20 万、~0.1 元）。
+  已知取舍：拼装只认 tender-body-writer（其他子代理零接触）；模型已写富文本
+  （>200 字符）或含幂等标记「〔系统附」时放行原文。
 - **投标流水线 Phase 2（2026-08-25；多册并发 2026-08-26）**：skill `tender-outline`
   （SKILL.md + 6 references）：
   R1 响应文件分解（首个 LLM 裁量确认点=两问测试，多方案 ask_human）→ R2 初稿 +
@@ -482,6 +776,14 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   `_shared/response-guidelines.md`），去除中文文本的 AI 写作痕迹（夸大的象征意义/宣传语/
   模糊归因/破折号/三段式/AI 词汇/否定式排比等，基于维基百科 Signs of AI writing）；正文
   草稿润色等场景用，主 prompt 路由句已登记，deepagents 启动自动发现加载。
+  **tender-body 接入（2026-09-07）**：section-writing.md 加「语言纪律（生成文字去
+  AI 腔）」节——humanizer 规则按标书场景**裁剪重写**为 7 条（填充语/夸大修辞/模糊
+  归因/强行三段式/句尾肤浅分析/空洞承诺结尾/否定式排比，各带正反例；「注入个性」
+  等半数规则对标书有害不取），**作用域只管模型自己生成的文字**——素材底稿与拷贝的
+  招标格式件原样保留（为去腔重写素材会掉 validate_body 素材使用率重叠率）；SKILL.md
+  注意事项一行指向。主线程与 tender-body-writer 子代理经 section-writing.md 引用链
+  自动覆盖，humanizer-zh 本体不动（显式润色场景仍走全量规则）。validate_body AI 词表
+  弱级扫描已提议未采纳。
 - **frontend**：`src/artifacts/registry.ts`（kind/schema@version → Processor 注册表 + 启动契约对账）；
   `components/processors/`（DirectoryProcessor 目录树编辑 / NoteProcessor 通用笔记）；
   `components/ArtifactOpenHost.tsx`（通用容器，未命中契约明确报不支持，**无 JSON 兜底预览**）；
@@ -490,6 +792,57 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   工作表/fragments 与产物同夹并排靠图标徽章区分；
   `work/` 过程文件经 `WorkbenchViewer` 查看/编辑——409 探测/恢复点栈/修订标记/
   行数漂移确认）+ 任务进度便签编辑；
+  产物面板**行级右键菜单**（2026-09-07）：打开/打开文件夹（reveal_in_folder，仅
+  Tauri 显示）/复制路径（`<task_id>/work/…`、来源行 `<task_id>/sources/…` 前缀=
+  任务上下文里模型的引用口径，粘贴即可寻址）/md 另存为（前端拉全文 blob 副本
+  下载，不动本体；revoke 延迟 10s——WKWebView 同步回收会吞下载）/产物恢复上一版（有恢复点才显示，复用处理器内范式）——菜单项按行类型
+  差异化，通用壳 `components/ui/ContextMenu.tsx`（目录树 TreeContextMenu 抽出，
+  Escape 捕获段阻断防与工作区编辑器 Esc 互触）。配套 additive：workbench 与
+  files 列表行带 `abs_path`（FileItem 进契约、dto 已再生；WorkbenchFile 是前端
+  手写接口直改不走 dto）。拍板缓做：docx 下载端点（打开文件夹已覆盖取文件
+  诉求；版式预览的字节端点 2026-09-07 已先行落地，见下条）、「添加到对话框」（文件本就在任务工作区、agent 可直接读，价值打折）、
+  产物转 md 导出；
+  产物面板**docx/pdf 版式预览**（2026-09-07）：纯浏览器本地渲染、文件不出本机
+  （隐私卖点）。docx=docx-preview 0.4（MIT）、pdf=pdfjs-dist 6（裸引擎自写薄层，
+  不引 react-pdf 封装）；渲染体 `components/preview/{DocxPreviewBody,PdfPreviewBody}`
+  经 React.lazy 分包（**项目首个代码分割先例**：docx 171K/pdf 432K+worker 1.2M
+  均不进主包）。后端两 additive 字节端点（FileResponse，不进 dto）：
+  `GET /workbench/raw`（限 .docx，`_resolve` 同口径含唯一后缀兜底）+
+  `GET /files/{name}/raw`（sources 原件，containment 照抄 delete，无扩展白名单）；
+  前端 `fetchWorkbenchRaw/fetchSourceRaw` 走 rawFetch→blob（不带 request() 的
+  15s 超时，大合册传输慢）。宿主接线：`DocxView` 双模式（版式默认/文本序列化
+  兜底，头部小切换；版式渲染失败自动落文本+提示一行）、新 `SourceView`
+  （sources 行按扩展分流 pdf/docx/图片直出/.doc 提示另存 docx 重传）、App 第三
+  预览槽 `sourceFile`（与 previewId/workbenchPath 单槽互斥）。**实测结论**：
+  docx-preview 修订呈现=**接受视角**（w:ins 显示为正文、w:del 隐藏——与
+  docx_ops view_lines 同口径，面板预览=接受后效果，审阅修订仍归 Word）；
+  中文字体靠 workspace.css 六组 `@font-face local()` 别名（宋体→Songti SC、
+  仿宋→STFangsong、黑体/楷体/微软雅黑等，Windows 同名直接命中）；
+  pdf.js **必须传 `cMapUrl`+`standardFontDataUrl`**（`public/pdfjs/` 静态资源
+  ~2.4MB 随 build 进 dist）——缺 cMap 中文直接画不出来（translateFont failed）；
+  pdf 逐页 canvas 懒渲染（IntersectionObserver 进视口前 400px）+ fit 宽
+  ResizeObserver 防抖重算 + sticky 页码胶囊。pdfjs 6.x 的 `PDFWorker`
+  构造器 port 参数 .d.ts 类型写坏（null|undefined），走
+  `GlobalWorkerOptions.workerPort` 模块级单例（多文档共享线程）绕开。
+  Tauri/WKWebView 真壳层验证留用户前台验收。
+  **写作指引/承诺清单结构化表格界面（2026-09-08）**：产物面板按**文件名分发**
+  （basename=`写作指引.md`/`关键事实与承诺.md`，容忍模型 guide_path 前缀变体）
+  到 `components/workbench/` 的专用视图（GuideFileView 五列表 / PromiseFileView
+  三列表），其余照旧 WorkbenchViewer/DocxView。核心原则=**文件仍是唯一真值，
+  界面只是另一个编辑器**：`useTableFile` 在 useAutoSave 之上包「rows↔md」双向
+  （保存仍走 PUT /workbench/content，base_hash 冲突/恢复点/修订=用户标记全沿用）；
+  前端**解析宽容**（`lib/workbenchTable.ts`，表头按名取列与 _iter_tables 同规则）
+  **序列化唯一**（标准五列/三列表、空单元格「—」、`|`/换行清洗防拆表）；解析
+  失败（无表/多表）自动落源码模式+头部手动切换（DocxView 逃生口同款）。指引表
+  能力：依据 id 四色 chips 点开=SourceTraceDialog（目录产物 registry，「查看原文
+  上下文」跳 parse/ 定位）；素材块 chips 显示标题、点开=块内容弹窗（素材库现有
+  接口零后端改动）、失效块/同块多派/【缺】警示；状态列已写（点击直达节 docx，
+  writtenSections=check_pipeline 对账规则的 TS 移植，**文件侧根级册键=空串 vs
+  行侧无斜杠册键=未命名**两侧键规则不同须分开）；编辑=模式 inline toggle、节列
+  锁定（须与目录逐字一致）、按目录叶子**选择器**加行（非手输）、删行两步确认。
+  跨语言契约锁=`sidecar/tests/test_workbench_table_contract.py` 金样例（与
+  `lib/workbenchTable.test.ts` 逐字节同源，双侧任一漂移即红）+ validate_body
+  全绿断言（用户界面保存的格式=AI 自查放行的格式）。sidecar 应用代码零改动。
   `context/FileUpload.tsx` 带任务 scope（taskScope/setTaskScope，ChatView 按会话/选择器写入），
   文件 chips 只显示当前任务的文件、无任务禁传。
 - **产物查看/编辑重做（2026-09-04，方案真值 `docs/artifact-view-edit-redesign.md`）**：
@@ -569,66 +922,123 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   （原 HITL 全链路测试载体 ai-news-research 技能及其 news-researcher 子代理已于
   2026-08-27 删除；HITL 机制由 ask_human/task 门禁本身及 tender 流水线持续使用。）
 
-## 知识库（v3 内容角色模型，2026-09-03 全量重建；废两桶）
+## 知识库与写作素材库（双域手工模型，2026-09-04 定稿；v3 自动拆分已废）
 
-跨任务共享资料层。**v3 断言：事实/写法的区分存在于"问"与"用"的一侧，不存在于"存"的一侧**
-——上传零分类（废除 bucket 列），类型判定唯一语义点，信任边界挂命中级「内容角色」。
-复用三形态：**整章拷贝**（chapter-copy，拷贝修订候选）/ **素材块**（writing-reference·usage
-四档）/ **图片块**（image）；写作两模式：拷贝修订（专业写手主路径）与重写参考。
+跨任务共享资料层，两个彻底分离的域：**知识库（事实层）**——公司有什么/做过什么
+（资质证书、合同案例、人员证书、财报、业绩、公司介绍），LLM 轻抽取+事实纪律；
+**写作素材库（素材层）**——用户从历史标书/范文里**手工勾选**的章节块+备注，零 LLM
+裁定（块的价值判断归用户，程序只做机械）。2026-09-03 的 v3 内容角色模型（chapter-copy
+三形态/decompose 自动拆分/topics 词表）实施后次日在 09-04 被用户拍板简化取代；检索侧
+search_references 只查素材块一种形态。
 
-- **能力状态机（派生不落库）**：`stored → searchable → typed → enriched`——每步完成即
-  对外生效（②解析落盘+切段后即可检索，不等慢工序），失败逐层降级不阻塞。进度列
-  `kb_items.progress`（"素材拆分中 N/M 批"/"图片识别中 N/M 页"；云端只写状态不编数字）。
-  预算口径：**数字文档 ≤1 分钟 searchable；扫描件 ≤1 分钟给出明确进度**（不承诺可检索）。
-- **类型注册表=唯一策略源**（`knowledge/types.py`，12 类，每类带 role=fact/writing +
-  decompose=never/auto/manual + extract_images + time_fields + hint）：fact 类 9 个全
-  never（证书/合同/财报…价值在字段），past_proposal/reference_doc=auto、technical_doc=
-  manual；auto 且 md<3 万字自动拆、否则素材 tab「拆分整份」按钮（POST decompose 只跑④）。
-  **改类型即时生效**：reindex 按**当前类型策略**决定素材段/行是否纳入（materials.json
-  真值永不清，纠错可逆）。机器消费锚点字段：时间四字段 + project_name/client（来源
-  标注/关联核对/残留扫描依赖）；其余内容**不预设字段**。
-- **工序③=三合一抽取**（`knowledge/extract.py`，一次 LLM 调用）：类型 + 时间/身份锚点 +
-  **内容说明 statement**（事实类=逐条关键内容带（第N页）锚点 300–800 字；写法类=2–3 句
-  结构概览）→ 进 §statement 检索段（命中标「AI 整理·数字须回原文核对」）。
-- **工序④=增强（两独立子工序）**：④a 素材拆分（`decompose.py`：分批边界对齐 outline
-  二级节不腰斩、8k 预算、3 并发、单批超时 90s 跳过；混合纪律=证书/清单/资信/扫描章节
-  不成块；程序校验=行号夹紧/碎块丢弃/重叠去重/topics 受控词表 24 词/usage 兜底；
-  materials.json version 2 真值，重拆=新 ID=旧引用失效可探测）；④b 图片抽取
-  （`images.py`，确定性零 LLM：docx 解包 media/PDF 逐页提取，短边<200px 与页面占比
-  <10% 过滤装饰图，限额 100；**文字块与图片块共存 materials.json，拆分只重写文字块
-  保留图片块**——bug 修复先例）。
-- **角色派生（`knowledge/roles.py`，命中级纯计算）**：fact 类命中=fact-verified；素材
-  data 档 / **章节标题命中业绩词表**（业绩/案例/成功/客户/合同/验收/项目经验/实施案例，
-  启发式会漏会错，漏的走 unknown+纪律兜底）=fact-candidate；素材 structure/wording/
-  method=writing-reference；写法类顶层章（section_path 链长 1）=chapter-copy。
-- **双检索工具（`tools/search_knowledge.py`，意图路由+角色加权，无文件级硬过滤）**：
-  `search_company_assets`（问事实：全库召回，verified 排前/candidate 附带标「业绩候选·
-  须核对」+项目名 LIKE 关联证明材料/纯写法素材排除；纪律=拟投入承诺不是现状事实、
-  数字一律重核、过期证书不得写有效）；`search_references`（问写法/拷贝：**整章（拷贝
-  修订候选+真实字数+check_name_residue 指引）>素材块>整文件段**三形态并列，fact 排除，
-  范文警示常驻）。统一命中头（角色｜类型｜状态｜时效）+ evidence key + [evidence] JSON
-  行（含 role，validator 消费格式已冻结）。
+- **知识库管线（`knowledge/ingest.py`）**：上传 → 解析（数字版本地；扫描件/.doc 已配
+  百度 OCR 路由云端、未配降级仅存档）→ 切段即 searchable → 三合一抽取
+  （`extract.py` 一次 LLM：类型+时间/身份锚点+内容说明 statement——事实类=逐条关键
+  内容带（第N页）锚点，写法类=2–3 句结构概览；说明进 §statement 检索段，命中标
+  「AI 整理·数字须回原文核对」）→ 图片抽取（`images.py` 确定性零 LLM，2026-09-04
+  降级重构：仅供内容页「本文档图片」折叠区核实证书红章/签名，不进检索、与素材库
+  脱钩）。能力状态机 stored→searchable→typed→enriched 派生不落库，每步完成即对外
+  生效，失败逐层降级不阻塞。
+  **检索问题 questions（2026-09-08，WeKnora 生成问题思路的文件级落地）**：抽取同批
+  生成 3–6 个「用户会怎么问」短问句（≤20 字；归类词必须与文中内容真实对应——项目
+  是医院的才许写「医疗行业」，防编造的唯一防线；写法类不生成），独立 `§questions`
+  检索段（与 §statement 同构：行号空、business 版优先、留空沿用建议版）——纯字面
+  检索下补「用户问法↔资料写法」措辞缺口（正文印「医院」、用户问「医疗行业项目」）。
+  命中渲染=「检索问题」标注+引用键 `kb:<id>:q`+摘录取问句清单，**不加 AI 整理注**
+  （问句不含事实，答案以原文为准）。PUT /metadata 可选收 questions（≤10 条、单条
+  ≤40 字、坏形状 422）；前端信息页增删改（StatementCard 显 pills）。**已确认条目的
+  采纳交互（2026-09-08 重做，取代信息页单字段「换用 AI 建议」按钮）**：识别完成
+  toast + 详情页顶部常驻更新条（摘要=新增 N 个检索问题/说明有改动/N 处字段变化/
+  类型建议），点「对比采纳」展开逐区卡片（检索问题 pills/说明双栏预览/字段 旧→新/
+  类型），各区独立「采纳建议/保留我的」（纯新增默认采纳、有旧值默认保留），保存才
+  落确认版——守住「确认不被静默覆盖」同时把差值亮到明面上；diff=`computeKbDiff`
+  纯函数（只列可采纳差异：建议侧为空不列），识别中隐藏、「知道了」按 updated_at
+  会话级消隐（新一轮识别落地自动回来）。重新生成走既有 retrigger 整条重抽。
+  KbMetadata DTO
+  additive 加 questions（dto.gen.ts 已再生）。
+  **锚点回文核对+自动确认（2026-09-08，WeKnora 调研产物「两主人模型」）**：动因=
+  待确认清单=没人处理的欠账单（确认非门禁——未确认照常检索/时效/关联消费，确认
+  只改徽章/排序/合成段），同 09-04 砍产物确认按钮的「有承诺没机制」病。不做 LLM
+  自报置信度（无机制数字），做 `knowledge/autocheck.py` 纯函数核对：身份锚点
+  （project_name/client）归一化（NFKC+去空白）回 md 子串命中抓编造；时间锚点四格式
+  解析（YYYY-M-D/年月日/./・/含全角，日可缺）任一规范化形态命中；period 年份命中；
+  valid_until≥valid_from 一致性；**事实类 time_fields 非空却零时间锚点=可疑**
+  （时效全瞎），company_profile/other/写法类零锚点平凡通过。两主人：机器守
+  suggested——`_extract` 收尾跑核对（retrigger 同路径=每次重抽重核对，无陈旧盖章
+  漏洞），全过→review_status=confirmed+**business=suggested 副本带
+  `confirmed_by:"auto"` 标记**（写副本是必须的：reindex「条目信息（人工确认）」
+  合成段与前端全部确认展示挂 business 存在性，自动=人工同显；顶层标记不进合成段）；
+  有败→pending_review+business 清 None+check_result 点名原因（「未在原文找到该
+  日期——疑似抽取有误」）。人守 business——人工确认/编辑过（business 无 auto 标记）
+  重抽只更新 suggested/check_result 展示，确认状态与 business 永不动。安全性=核对
+  过≠语义对（日期语义错位抓不住），但此类错误现状同样消费，自动确认只改标签排序
+  不改机器消费行为，风险面零变化；语义防线依旧在检索纪律层。kb_items 新列
+  check_result（迁移 26；`_KB_ITEM_COLS`/`kb_update_item` 白名单/business+check
+  可置空三处同步），KbItem DTO additive 加 check_result（KbAnchorCheck{status,
+  results[{field,label,ok,detail}]}，中文结果串后端拼好仿 freshness）+
+  KbMetadata.confirmed_by，dto.gen.ts 已再生。启动回扫 `autocheck_sweep()`
+  （main.py lifespan，rebuild_kb_index 之前——存量 pending+extract done+无 business
+  +**从未核对过**的条目补跑，检索段由随后的全量重建收口；范围排除已核对项=幂等）
+  上线当场清欠账。前端 InfoForm 顶部 AutoCheckBar：显示条件=有 check_result 且
+  非人工所有（`!business || business.confirmed_by==='auto'`，人已拍板不再显示）；
+  pass=success 胶囊「程序核对通过」+命中项一行、fail=逐条警示行（`.kb-check*`
+  样式语义 token）；StatusDot/详情头/胶囊/StatementCard 零改动（全挂
+  review_status/business 存在性）。检索侧零改动（徽章只看 review_status）。
+  测试 test_knowledge_autocheck.py（纯函数+回扫幂等）+test_knowledge_ingest.py
+  四例（自动确认/败留待/重抽降级/人工免疫），595 全绿。
+- **类型注册表（`knowledge/types.py`，12 类，role=fact/writing）**：机器消费锚点字段=
+  时间四字段+project_name/client（freshness/来源标注/关联核对/残留扫描依赖）；其余
+  内容不预设字段。
+- **角色派生（`knowledge/roles.py`，命中级纯计算）**：fact 类命中=fact-verified；写法
+  类文件**章节标题命中业绩词表**（业绩/案例/成功/客户/合同/验收/项目经验/实施案例，
+  启发式会漏会错，漏的走 unknown+纪律兜底）=fact-candidate；写法类其余段=
+  writing-reference。
+- **素材库（`knowledge/materials_lib.py` + `api/materials.py`）**：自己的文件区
+  （materials/files/）+ 解析产物（materials/parse/<stem>/{md, outline.json, blocks.json}；
+  docx 另产 **element_map.json**=「body 元素全序索引+起止行号」，是 docx_material_inject
+  元素级注入的映射真值，旧解析幂等重跑补产；**重解析收尾同步块索引/检索段并探测
+  行号漂移**——`POST /materials/files/{fid}/reparse`（前端有按钮）重跑 run_parse，
+  有块且 md 行数变化时 ready+error 提示复核勾选区间、行数不变则区间安全（blank→
+  占位行 1:1）。**图片可见性批（2026-09-08）**：动因=云枢素材 87 图、正文 run 25 条
+  注入调用 0 次=整本 0 图——docx 纯图片段占位行 `![](图片)`（一段一行）是图的唯一
+  md 可见形态，块级含图数=区间内占位行计数（`block_image_count`，段内嵌图/一段多图
+  不可见、旧解析无占位恒 0 须重解析）；search_references 命中行/块骨架 N>0 标
+  「含图 N 处」+硬话「必须注入——自写无法带图」（docx 直出管线无放图通道，图片只
+  随 docx_material_inject 元素拷贝进正文；SKILL/section-writing/写手 prompt 同步
+  「禁止跳过注入直接自写」+修订不删〔图×N〕段）。流程=上传（.docx/.pdf/.txt/.md/.doc
+  ≤100MB）→ 后台纯机械解析（无抽取无图片）→ 用户目录树勾选章节区间建块（多区间+
+  备注；行号夹紧/嵌套区间去重叠归程序）→ 块进检索（复用 kb_segments，item_id=mt_
+  前缀；事实检索按 kb_items 映射过滤天然隔离）。**块 id 只在 blocks.json 生命周期内
+  稳定**（删块=引用失效，模型侧报「素材块不存在」引导重新检索）。引用打点
+  use_count/last_used_at（检索命中+注入落盘都算）。
+- **双检索工具（`tools/search_knowledge.py`）**：`search_company_assets`（问事实：全库
+  召回，verified 排前/candidate 附标「业绩候选·须核对」+项目名匹配关联证明材料/纯
+  写法段排除；纪律=拟投入承诺不是现状事实、数字一律重核、过期证书不得写有效）；
+  `search_references`（问写法/拷贝：查素材库块——标题+用户备注+多区间行号+真实字数+
+  摘录+引用键 `mt:<fid>:b:<块id>`，命中文件的块全景骨架附后；**docx 原件块优先
+  docx_material_inject 元素级注入再定向修订**，非 docx 原件按文本参考改写；范文警示
+  常驻）。统一命中头（角色｜类型｜状态｜时效）+ evidence key + [evidence] JSON 行
+  （含 role，validator 消费格式已冻结）。
 - **`tools/check_residue.py`（check_name_residue）**：拷贝修订第一道防线——来源条目
   project_name/client/文件名主干自动入扫描表+显式名单，机械扫残留行号（行业第一大
   事故=提交稿残留旧机构名）。
-- **API（`api/knowledge.py`）**：上传无分类参数；列表 role/capability/freshness/
-  material_count/progress；materials 端点（text 块 excerpt/chars 服务端实算）；decompose
-  手动端点（never/未就绪 422、在跑 409）；PUT metadata（statement/fields 确认，改到
-  auto 类自动补拆）；素材库全局 `GET /kb/materials`（topic/kind/q 过滤+来源信息）与
-  `GET /kb/topics`（词表+计数）；图片经 `GET /kb/items/{id}/images/{name}`（路径防穿越）。
-- **迁移 18**：三表整组 DROP 重建（用户明令旧数据可清；v2 两桶结构作废）。
-- **frontend**：`KnowledgeView.tsx`（左栏**事实类/写法类**分组+跨组待确认；行内素材数/
-  过期徽标/进度小字；详情三 tab——内容 tab 含**说明卡**（AI 整理标签+锚点文本）、
-  素材 tab 含拆分按钮/进度/素材卡、信息 tab=说明编辑+锚点字段+类型 fact/writing
-  optgroup）；`MaterialsLibraryView.tsx`（**侧栏「写作素材库」一等入口**：主题 chips+
-  形态筛选+文字卡/图片卡跨文件聚合，图片经鉴权 fetch blob）+ `KnowledgeMaterials.tsx`
-  （素材卡复用）+ hooks（useKbLibraryMaterials/useKbTopics/useDecomposeKbItem）。
-- **agent 注入**：`_kb_summary_line` 角色口径（事实 N 份待确认 M+写法 K 份+素材 L 块；
-  指引双工具+整章拷贝后残留扫描）。
-- **检索技术**：FTS5 jieba+bigram 同源分词、无向量（段 ID 稳定，混合检索留纯增量）；
-  语义层=agent 迭代查询。
-- **有意不做**（v3 复评清单见 docs）：任务成果自动回流、版本替换机制（删旧传新）、
-  VL 图片描述打标（M3）、向量检索（M3 视召回评估）、用户目录机制、素材块级编辑。
+- **API**：`api/knowledge.py`（/kb/types、/kb/badge、上传、items 列表/详情/内容/raw/
+  图片、PUT metadata（statement/锚点字段确认）、retrigger、delete）；`api/materials.py`
+  （/materials/files 上传/列表/删除+outline 目录树、/files/{fid}/reparse 重解析
+  （2026-09-08 失败重试入口，照抄 KB retrigger 单飞语义；配套 db.recover_stale_mt
+  启动对账把残留 pending/parsing 置 failed，失败行前端有「重试」钮）、
+  /materials/blocks CRUD+content——建块=勾选区间+标题+备注）。
+- **迁移 18**：v3 三表 DROP 重建历史；素材库是 mt_ 前缀新表族，v3 的 materials.json
+  decompose 真值已随模型更换作废。
+- **frontend**：`KnowledgeView.tsx`（左栏**平铺+类型下拉+待确认胶囊筛选**——五轮收敛
+  2026-09-04，分组头已删；详情三 tab——内容 tab 含说明卡（AI 整理标签+锚点文本）、
+  信息 tab=说明编辑+锚点字段+类型下拉）；`MaterialsLibraryView.tsx`（侧栏「写作素材库」
+  **一等入口**：文件/块浏览）。
+- **agent 注入**：`_kb_summary_line` 双域口径（事实层按 role 分类计数+待确认数+素材库
+  文件数块数；指引双工具+拷贝素材后残留扫描）。
+- **检索技术**：FTS5 jieba+bigram 同源分词、无向量；语义层=agent 迭代查询。
+- **有意不做**：任务成果自动回流、版本替换机制（删旧传新）、向量检索（视召回评估）、
+  素材块级编辑、素材自动拆分（decompose 已废——用户明令块的价值判断归人）。
 
 ## 命令
 
@@ -665,6 +1075,14 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
 
 - **sidecar**（Python ≥3.12，uv 管理）：
   - `app/events.py` 是 LangGraph 流 → §5.5 事件的**唯一适配层**；库 API 变化只改这里。
+    **updates 只翻译真实执行节点（2026-09-08）**：工具事件（tool.called/tool.result）
+    只从 node∈{model, tools} 的更新产出——中间件钩子伪节点（deepagents
+    `PatchToolCallsMiddleware.before_agent`、langchain `SummarizationMiddleware.
+    before_model`）的 messages 是**状态重写不是新工作**：新 run 开头发现上一 run
+    中断遗留的悬空 tool_calls 时，before_agent 会把整段历史消息原对象+补插的取消
+    ToolMessage 一并写进 updates，照译会把上一轮全部工具步骤重放进本轮的 SSE/trace
+    （实测中断 run 的下一轮 trace 混入 12~64 个外来 tool_call_id）。todos 提取不受
+    白名单影响。加新中间件若在伪节点写 messages，天然被跳过（正是期望行为）。
   - SSE 事件 data 必须合法 JSON：在 `app/api/sse.py` 里 `json.dumps(data, ensure_ascii=False)`，
     因为 sse-starlette 对 dict data 会输出 Python repr（单引号，非法 JSON）。
   - agent 运行在 `asyncio.to_thread` 的 worker 线程，逐事件用 `run_coroutine_threadsafe`
@@ -674,6 +1092,15 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
     该连接进程存活期**只开一条、永不关闭**（rebuild 只换 agent 对象复用同一 conn/saver），
     否则运行中 PUT /settings 会让正在跑的旧流 checkpoint 崩溃。
   - 新增工具：在 `app/tools/` 里 `@tool` + zod（或 docstring schema），并加入 `tools/__init__.TOOLS`；
+  - **工具/子代理失败纪律（2026-09-07）**：工具抛异常会打死整个 run（langgraph 工具节点
+    对非参数校验异常一律 re-raise）——自家工具失败必须返回「[xxx失败] …」错误字符串；
+    deepagents 内置 task（子代理派发）不守此纪律，经
+    `ToolErrorMiddleware(on_error=_task_failure_content, tools=["task"])` 收敛：瞬时错误
+    返回 None 上抛走 checkpoint 断点重试，其余转错误字符串回模型自裁决重派。瞬时分类器
+    `_is_llm_transient`：网关流内错误事件=openai SDK 抛**裸基类 `APIError`**（openai
+    `_streaming.py` 对流中 `{"error":…}` 无论带不带 code 都构造裸基类；类型化子类只在
+    建连前非 2xx 路径产生，401/400/404 全是子类），精确类型 `type(exc) is APIError`
+    判瞬时；断流关键词兜底；重试预算 3 次（3s/10s/30s，等待期响应停止）。
   - **前缀缓存铁律（2026-09-06 30M token 事故的教训）**：进 system/请求前缀的任何内容
     必须整个 run 内字节稳定——每次调用现算的易变项（时间戳/便签/产物清单）一律 run
     冻结（`_task_context_block_frozen` 先例）或挪请求末尾；模型供应商前缀缓存按字节

@@ -63,6 +63,39 @@ def test_record_accumulates_and_take_clears(env):
     assert token_usage.take("r_u1") == {}  # 取走即清零
 
 
+def test_record_usage_turn_detail_main_scope(env):
+    """per-turn 明细：默认 main scope 落 run_turn_usage 一行，run 级聚合行为不变。"""
+    task, conv = env
+    runctx.set_run(conv["id"], "r_turn1", task["id"])
+    token_usage.record_usage(_usage(prompt_tokens=100, completion_tokens=10))
+    rows = db.list_run_turn_usage("r_turn1")
+    assert len(rows) == 1
+    assert rows[0]["scope"] == "main"
+    assert rows[0]["input"] == 100 and rows[0]["output"] == 10
+    assert token_usage.peek("r_turn1") == {"input": 100, "output": 10}
+
+
+def test_record_usage_turn_detail_sub_scope(env):
+    """子代理 scope 中间件打标路径：set sub → 明细行 scope=sub，finally 复位回 main。"""
+    task, conv = env
+    runctx.set_run(conv["id"], "r_turn2", task["id"])
+    token = runctx.set_agent_scope("sub")
+    token_usage.record_usage(
+        _usage(
+            prompt_tokens=50,
+            completion_tokens=5,
+            prompt_cache_hit_tokens=30,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=3),
+        )
+    )
+    runctx.reset_agent_scope(token)
+    rows = db.list_run_turn_usage("r_turn2")
+    assert len(rows) == 1
+    assert rows[0]["scope"] == "sub"
+    assert rows[0]["cached"] == 30 and rows[0]["reasoning"] == 3
+    assert runctx.current_scope() == "main"
+
+
 def test_finish_run_persists_usage(env):
     task, conv = env
     rid = db.create_run(conv["id"])["id"]

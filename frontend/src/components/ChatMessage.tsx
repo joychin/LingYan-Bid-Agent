@@ -1,6 +1,9 @@
-import { memo, useEffect, useRef } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Brain, Check, Copy } from 'lucide-react'
 import type { Message } from '@/api/client'
+import { fetchMessageTrace } from '@/api/client'
+import { Loader } from '@/components/ai/Loader'
 import { MessageAction, MessageActions, useCopyToClipboard } from '@/components/ai/MessageActions'
 import { MemoMarkdown, markdownComponents } from '@/components/ai/MemoMarkdown'
 import { NarrationLine } from '@/components/ai/RunTrace'
@@ -10,15 +13,9 @@ import { RunTrace } from '@/components/ai/RunTrace'
 import { TextShimmer } from '@/components/ai/TextShimmer'
 import { Message as WMessage } from '@/components/workspace/Message'
 import { splitMarker, MARKER_CHIP, type PauseMarker } from '@/lib/hitlMessage'
+import { capStreamingText } from '@/lib/streamTextCap'
 
-const ASSISTANT_NAME = 'Tender Agent'
-
-/** 树里是否有 paused 步骤（HITL 中断快照）——trace 折叠头区分「已暂停/已完成」。 */
-function anyPaused(steps: readonly { status?: string; children?: unknown[] }[] | undefined | null): boolean {
-  return !!steps?.some(
-    (s) => s.status === 'paused' || anyPaused(s.children as { status?: string; children?: unknown[] }[]),
-  )
-}
+const ASSISTANT_NAME = 'Swift Agent'
 
 /** 复制按钮（copied 2s 反馈：Copy→Check）。align 随所在行位置防 tooltip 溢出。 */
 function CopyAction({ content, align }: { content: string; align: 'start' | 'end' }) {
@@ -58,7 +55,7 @@ function AssistantFrame({
     <WMessage
       role="assistant"
       name={attach ? undefined : ASSISTANT_NAME}
-      avatar={attach ? <div className="msg-spacer" aria-hidden /> : <div className="msg-avatar">T</div>}
+      avatar={attach ? <div className="msg-spacer" aria-hidden /> : <div className="msg-avatar" aria-hidden />}
       status={status}
     >
       {children}
@@ -101,6 +98,9 @@ export function DeepThinking({
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [text, autoFollow])
+  // 流式期间只渲染尾部（2026-09-08 内存暴涨修复，同 StepReasoning）；autoFollow
+  // 贴底仍按全文长度触发（尾部也在长），终态/历史渲染全文
+  const display = isStreaming ? capStreamingText(text).text : text
   return (
     <Reasoning isStreaming={isStreaming} className="mb-1.5">
       <ReasoningTrigger className="text-sm text-muted-foreground">
@@ -111,7 +111,7 @@ export function DeepThinking({
       </ReasoningTrigger>
       <ReasoningContent contentClassName="border-l-2 border-line pl-3">
         <div ref={scrollRef} className="max-h-72 overflow-y-auto pr-1 text-[13px] leading-relaxed">
-          <MemoMarkdown text={text} />
+          <MemoMarkdown text={display} />
         </div>
       </ReasoningContent>
     </Reasoning>
@@ -127,55 +127,74 @@ export function DeepThinking({
  *  pauseNarration/pauseMarker：同回合被吸收的暂停段上提的旁白与标记（MessageList
  *  装配，见 ChatView）——全回合只渲染一张过程卡。 */
 export function AssistantMessage({
-  content,
-  tools,
-  todos,
-  reasoning,
-  files,
+  message,
   attach,
   pauseNarration,
   pauseMarker,
   onOpenWorkbench,
 }: {
-  content: string
-  tools?: Message['tools']
-  todos?: Message['todos']
-  reasoning?: string | null
-  files?: Message['files']
+  message: Message
   attach?: boolean
   pauseNarration?: string
   pauseMarker?: PauseMarker
   /** 「本轮文件」chip -> 工作台面板编辑 */
   onOpenWorkbench?: (path: string) => void
 }) {
-  const done = tools?.filter((t) => t.status !== 'running').length ?? 0
-  const { body, marker } = splitMarker(content)
+  const [open, setOpen] = useState(false)
+  // 过程快照按需取（2026-09-08 messages 瘦身）：列表只带步数/暂停摘要，点开过程区
+  // 才拉完整 tools/todos/reasoning。run 终态后快照不再变——staleTime 永久、缓存
+  // 保留 30 分钟，长会话翻旧消息不反复拉。
+  const traceQuery = useQuery({
+    queryKey: ['message-trace', message.id],
+    queryFn: () => fetchMessageTrace(message.conversation_id, message.id),
+    enabled: open,
+    staleTime: Infinity,
+    gcTime: 30 * 60_000,
+    retry: 1,
+  })
+  const trace = traceQuery.data
+  const { body, marker } = splitMarker(message.content)
   const isMarked = marker !== null
   const chipMarker = marker ?? (pauseMarker ?? null)
+  // traceSteps 非 null = 有 run_traces 行（steps 可为 0：纯思考无工具的 run）
   const hasProcess =
-    isMarked ||
-    !!chipMarker ||
-    !!pauseNarration?.trim() ||
-    Boolean(reasoning?.trim()) ||
-    Boolean(tools?.length) ||
-    Boolean(todos?.length)
+    isMarked || !!chipMarker || !!pauseNarration?.trim() || message.traceSteps != null
   return (
     <AssistantFrame attach={attach}>
       {hasProcess && (
-        <Reasoning isStreaming={false} className="mb-1.5">
+        <Reasoning isStreaming={false} className="mb-1.5" open={open} onOpenChange={setOpen}>
           <ReasoningTrigger className="text-sm text-muted-foreground">
-            {anyPaused(tools) || marker === 'pause' ? '已暂停' : marker === 'interrupted' ? '已中断' : '已完成'}
-            {tools?.length ? ` · ${tools.length} 步` : ''}
+            {(message.tracePaused || marker === 'pause') ? '已暂停' : marker === 'interrupted' ? '已中断' : '已完成'}
+            {message.traceSteps ? ` · ${message.traceSteps} 步` : ''}
           </ReasoningTrigger>
           <ReasoningContent contentClassName="mt-2 space-y-2">
             {isMarked && body.trim() && <NarrationLine text={body} />}
             {pauseNarration?.trim() && <NarrationLine text={pauseNarration} />}
-            {tools && tools.length > 0 && (
-              <RunTrace tools={tools} todos={todos ?? []} done={done} total={tools.length} />
+            {open && traceQuery.isPending && (
+              <div className="flex items-center gap-1.5 py-0.5 text-[13px] text-muted-foreground/70">
+                <Loader variant="dots" size="xs" /> 正在载入执行过程…
+              </div>
+            )}
+            {open && traceQuery.isError && (
+              <button
+                type="button"
+                className="cursor-pointer py-0.5 text-left text-[13px] text-muted-foreground/70 transition-colors hover:text-foreground"
+                onClick={() => void traceQuery.refetch()}
+              >
+                执行过程载入失败，点击重试
+              </button>
+            )}
+            {trace && trace.tools.length > 0 && (
+              <RunTrace
+                tools={trace.tools}
+                todos={trace.todos}
+                done={trace.tools.filter((t) => t.status !== 'running').length}
+                total={trace.tools.length}
+              />
             )}
             {/* 历史思考块：新数据=最终回复前的未封口段（逐段思考已沉入步骤行），
                 旧 trace 快照=整段累积（位置移到步骤区之后，内容不丢） */}
-            {reasoning?.trim() && <DeepThinking text={reasoning} />}
+            {trace?.reasoning.trim() && <DeepThinking text={trace.reasoning} />}
             {chipMarker && <div className="turn-chip">{MARKER_CHIP[chipMarker]}</div>}
           </ReasoningContent>
         </Reasoning>
@@ -185,8 +204,8 @@ export function AssistantMessage({
           <MemoMarkdown text={body} components={markdownComponents} />
         </div>
       )}
-      <RunFiles files={files} onOpen={onOpenWorkbench} />
-      {content.trim() && (
+      <RunFiles files={message.files} onOpen={onOpenWorkbench} />
+      {message.content.trim() && (
         <HoverActions>
           <CopyAction content={body} align="start" />
         </HoverActions>
@@ -213,11 +232,7 @@ export const ChatMessage = memo(
       <UserBubble content={message.content} />
     ) : (
       <AssistantMessage
-        content={message.content}
-        tools={message.tools}
-        todos={message.todos}
-        reasoning={message.reasoning}
-        files={message.files}
+        message={message}
         attach={attach}
         pauseNarration={pauseNarration}
         pauseMarker={pauseMarker}

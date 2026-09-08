@@ -54,3 +54,15 @@ export function formatDuration(ms: number): string {
   const rest = Math.floor(s % 60)
   return `${m}m ${String(rest).padStart(2, '0')}s`
 }
+
+/** 文本导出为本地文件（右键「另存为」副本下载；Tauri webview 同走 a[download]）。 */
+export function downloadText(filename: string, text: string, mime = 'text/markdown') {
+  const blob = new Blob([text], { type: `${mime};charset=utf-8` })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  // 同步 revoke 在 WKWebView（Tauri/macOS）会与下载启动竞态吞掉下载——延迟回收
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}

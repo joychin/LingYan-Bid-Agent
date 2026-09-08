@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document
+from docx.oxml.ns import qn
 
 from . import ParseResult, register
 from .numbering import numbered_heading_level
@@ -93,7 +94,17 @@ def convert(path: Path) -> ParseResult:
                 lines.append("#" * min(lvl, 6) + " " + text)
             else:
                 plain_at.append((len(lines), text))
-                lines.append(("- " + text) if _is_numbered(p) else (text if text else ""))
+                if text:
+                    lines.append(("- " + text) if _is_numbered(p) else text)
+                elif child.findall(".//" + qn("a:blip")) or child.findall(
+                    ".//{urn:schemas-microsoft-com:vml}imagedata"
+                ):
+                    # 纯图片段占位行：行非空才不会被空行折叠吃出 element_lines
+                    # （否则该图永远无法元素级注入=静默丢图，2026-09-08 实证）；
+                    # 勾选界面与 md 预览亦可见此处有图（v:imagedata=VML 老图）
+                    lines.append("![](图片)")
+                else:
+                    lines.append("")
             el_lines.append([el_idx, start, len(lines)])
         elif tag == "tbl":
             from docx.table import Table

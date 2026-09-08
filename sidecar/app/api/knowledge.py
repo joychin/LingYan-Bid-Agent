@@ -157,6 +157,7 @@ def _item_out(item: dict) -> dict:
         "capability": _capability(item),
         "suggested": suggested,
         "business": business,
+        "check_result": _parse_meta_col(item, "check_result"),
         "freshness": freshness_warnings({"business_metadata": business, "suggested_metadata": suggested}),
         "md_ready": md_path.is_file(),
     }
@@ -284,7 +285,7 @@ def _convert_unfriendly_image(path_str: str, mtime_ns: int) -> bytes:
 
 @router.put("/kb/items/{kid}/metadata")
 async def confirm_metadata(kid: str, body: dict):
-    """确认保存：body = {doc_type, statement?, fields?, extra?} → business_metadata +
+    """确认保存：body = {doc_type, statement?, questions?, fields?, extra?} → business_metadata +
     confirmed + 重建检索段（人工字段与说明可检索）。改到 auto 类且就绪且无素材
     时自动补拆。"""
     item = db.kb_get_item(kid)
@@ -300,9 +301,29 @@ async def confirm_metadata(kid: str, body: dict):
     extra_raw = body.get("extra") or {}
     extra = {k: {"value": v} for k, v in extra_raw.items() if isinstance(v, str) and v.strip()} if isinstance(extra_raw, dict) else {}
     statement = body.get("statement")
+    # 检索问题：可选字符串数组；去空去重，≤10 条、单条 ≤40 字（留空/缺省=沿用建议版）
+    questions_raw = body.get("questions")
+    if questions_raw is not None and not isinstance(questions_raw, list):
+        raise HTTPException(status_code=422, detail="questions 须为字符串数组")
+    questions: list[str] = []
+    if isinstance(questions_raw, list):
+        for q in questions_raw:
+            if not isinstance(q, str):
+                raise HTTPException(status_code=422, detail="questions 须为字符串数组")
+            q = q.strip()
+            if not q:
+                continue
+            if len(q) > 40:
+                raise HTTPException(status_code=422, detail=f"检索问题过长（≤40 字）：{q[:20]}…")
+            if q not in questions:
+                questions.append(q)
+        if len(questions) > 10:
+            raise HTTPException(status_code=422, detail="检索问题最多 10 条")
     biz = {"doc_type": doc_type, "fields": fields, "extra": extra}
     if isinstance(statement, str) and statement.strip():
         biz["statement"] = statement.strip()
+    if questions:
+        biz["questions"] = questions
     db.kb_update_item(
         kid,
         doc_type=doc_type,

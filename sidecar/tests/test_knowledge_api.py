@@ -161,6 +161,58 @@ def test_materials_files_api_flow(client):
     assert hashlib.sha256(b"gone")  # 保持 import 使用
 
 
+def test_materials_reparse_file(client):
+    """reparse 端点：失败文件重试恢复 + 404 不存在 + 409 正在解析（单飞）。"""
+    import time
+
+    from app import db
+    from app.knowledge import materials_lib as mlib
+
+    body = "# 一、方案\n\n" + "素材重试路径内容补充。" * 10
+    r = client.post(
+        "/api/materials/files",
+        files={"file": ("重试标书.md", body.encode(), "application/octet-stream")},
+    )
+    fid = r.json()["id"]
+
+    def _wait_terminal(left: str | None = None) -> dict:
+        """等后台解析收敛；left=须先观察到离开的旧状态（防 reparse 任务未启动
+        就读到重跑前的终态快照）。"""
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            f = db.mt_get_file(fid)
+            if left is not None:
+                if f["parse_status"] == left:
+                    time.sleep(0.05)
+                    continue
+                left = None
+            if f["parse_status"] in ("ready", "failed"):
+                return f
+            time.sleep(0.05)
+        raise AssertionError("解析 5s 内未收敛")
+
+    assert _wait_terminal()["parse_status"] == "ready"
+
+    # 模拟历史失败（如解析程序 bug）→ reparse 恢复
+    db.mt_update_file(fid, parse_status="failed", error="解析失败：name 'qn' is not defined")
+    rr = client.post(f"/api/materials/files/{fid}/reparse")
+    assert rr.status_code == 202 and rr.json() == {"ok": True}
+    f = _wait_terminal(left="failed")
+    assert f["parse_status"] == "ready" and f["error"] is None
+
+    # 404 不存在；409 单飞——真实形态=parse_status=parsing + in-flight 标记双条件
+    # （只剩标记而状态已终态=收尾调度窗口的陈旧标记，schedule_parse 自愈放行；
+    #  2026-09-08 全量套件负载下实测该窗口曾致本测试偶发 409/202 竞态）
+    assert client.post("/api/materials/files/mt_nope/reparse").status_code == 404
+    db.mt_update_file(fid, parse_status="parsing", error=None)
+    mlib._inflight.add(fid)
+    try:
+        assert client.post(f"/api/materials/files/{fid}/reparse").status_code == 409
+    finally:
+        mlib._inflight.discard(fid)
+        db.mt_update_file(fid, parse_status="ready", error=None)
+
+
 def test_item_images_listing(client):
     """图片清单端点：内容页折叠区数据源（图片仅供查看，与素材无关）。"""
     from app.knowledge import store
@@ -200,9 +252,123 @@ def test_metadata_confirm_with_statement(client):
     assert data["business"]["statement"] == "共 3 章技术标。"
 
 
+def test_metadata_confirm_with_questions(client):
+    """PUT 检索问题：落 business + §questions 段可检中；坏形状/超长/超条数 422。"""
+    from app import db
+    from app.knowledge import fts
+
+    r = _upload(client, "医院合同.txt", "# 合同\n\nXX医院智慧后勤平台项目，金额 380 万元。".encode("utf-8"))
+    kid = r.json()["id"]
+    _wait_ready(client, kid)
+    db.kb_update_item(kid, parse_status="ready", doc_type="contract_case")
+
+    ok = client.put(
+        f"/api/kb/items/{kid}/metadata",
+        json={"doc_type": "contract_case",
+              "statement": "XX 医院智慧后勤平台合同（第1页）。",
+              "questions": ["做过哪些医疗行业项目？", " 合同金额多大？ ", ""]},
+    )
+    assert ok.status_code == 200
+    data = ok.json()
+    assert data["business"]["questions"] == ["做过哪些医疗行业项目？", "合同金额多大？"]
+    hits = db.kb_search_segments(fts.build_match_expr("医疗行业"), limit=5)
+    assert any(h["item_id"] == kid and h.get("section_path") == "§questions" for h in hits)
+
+    assert client.put(
+        f"/api/kb/items/{kid}/metadata",
+        json={"doc_type": "contract_case", "questions": "不是数组"},
+    ).status_code == 422
+    assert client.put(
+        f"/api/kb/items/{kid}/metadata",
+        json={"doc_type": "contract_case", "questions": ["超" * 41]},
+    ).status_code == 422
+    assert client.put(
+        f"/api/kb/items/{kid}/metadata",
+        json={"doc_type": "contract_case", "questions": [f"问题{i}" for i in range(11)]},
+    ).status_code == 422
+
+
 def test_delete_and_badge(client):
     r = _upload(client, "gone.txt", b"# g\n\ndel")
     kid = r.json()["id"]
     assert client.delete(f"/api/kb/items/{kid}").status_code == 200
     assert client.get(f"/api/kb/items/{kid}").status_code == 404
     assert client.get("/api/kb/badge").json() == {"pending": 0}
+
+
+def test_materials_content_search_usage_flow(client):
+    """完善批端点：块内容分节 / ?q= 正文检索 / outline 字数 / 引用打点透出。"""
+    import time
+
+    body = "# 一、方案\n\n" + "\n".join(f"等保合规建设内容第{i}行补充。" for i in range(20))
+    fid = client.post(
+        "/api/materials/files",
+        files={"file": ("完善标书.md", body.encode(), "application/octet-stream")},
+    ).json()["id"]
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        outline = client.get(f"/api/materials/files/{fid}/outline").json()
+        if outline["parse_status"] in ("ready", "failed"):
+            break
+        time.sleep(0.05)
+    assert outline["parse_status"] == "ready"
+    assert outline["outline"][0]["chars"] > 0
+
+    bid = client.post(
+        f"/api/materials/files/{fid}/blocks",
+        json={"title": "等保块", "note": "安全写法", "ranges": [[1, 6]]},
+    ).json()["id"]
+
+    # 块内容：分节区间 + 正文；不存在 404
+    content = client.get(f"/api/materials/blocks/{bid}/content").json()
+    assert content["sections"][0]["start"] == 1
+    assert "等保合规建设内容" in content["sections"][0]["text"]
+    assert client.get("/api/materials/blocks/blk_none/content").status_code == 404
+
+    # ?q=：正文 FTS 命中（「建设内容」只在正文里）∪ 标题命中；无命中空表
+    assert [b["id"] for b in client.get("/api/materials/blocks?q=建设内容").json()["blocks"]] == [bid]
+    assert [b["id"] for b in client.get("/api/materials/blocks?q=等保块").json()["blocks"]] == [bid]
+    assert client.get("/api/materials/blocks?q=绝不存在的词xyzzy").json()["blocks"] == []
+
+    # 引用打点透出
+    from app import db
+
+    db.mt_touch_blocks([bid])
+    row = next(b for b in client.get("/api/materials/blocks").json()["blocks"] if b["id"] == bid)
+    assert row["use_count"] == 1 and row["last_used_at"]
+
+    assert client.delete(f"/api/materials/files/{fid}").status_code == 200
+
+
+def test_check_result_passthrough_and_human_confirm_marker(client):
+    """核对结果随条目下发（解析后的 JSON）；PUT 人工确认后 business 无 auto 标记。"""
+    from app import db
+
+    r = _upload(client, "核对证书.txt", b"# c\n\ncontent")
+    kid = r.json()["id"]
+    _wait_ready(client, kid)
+    db.kb_update_item(
+        kid, parse_status="ready", extract_status="done",
+        doc_type="qualification_certificate",
+        suggested_metadata=json.dumps({
+            "doc_type": "qualification_certificate",
+            "fields": {"valid_until": {"value": "2099-01-01"}},
+        }, ensure_ascii=False),
+        check_result=json.dumps({
+            "status": "fail",
+            "results": [{"field": "valid_until", "label": "有效期至",
+                         "ok": False, "detail": "未在原文找到该日期——疑似抽取有误，请核对"}],
+        }, ensure_ascii=False),
+    )
+    item = next(it for it in client.get("/api/kb/items").json()["items"] if it["id"] == kid)
+    assert item["review_status"] == "pending_review"
+    assert item["check_result"]["status"] == "fail"
+    assert "未在原文找到该日期" in item["check_result"]["results"][0]["detail"]
+
+    ok = client.put(f"/api/kb/items/{kid}/metadata",
+                    json={"doc_type": "qualification_certificate",
+                          "fields": {"valid_until": "2028-06-30"}})
+    assert ok.status_code == 200
+    data = ok.json()
+    assert data["review_status"] == "confirmed"
+    assert data["business"].get("confirmed_by") is None  # 人工语义：无 auto 标记

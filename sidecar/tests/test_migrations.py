@@ -286,3 +286,77 @@ def test_migration_18_kb_v3_rebuild(monkeypatch, tmp_path):
         assert {"mt_files", "mt_blocks"} <= tables
     finally:
         c.close()
+
+
+def test_migration_25_run_turn_usage_and_trace_backfill(monkeypatch, tmp_path):
+    """迁移 25：run_turn_usage 明细表就位 + error 收尾 bug 期间落库的孤儿 trace
+    回填挂到同 run 最后一条 assistant 消息（无产出的 run 不动、已挂载的不动）。"""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    db.init_db()
+    c = _conn()
+    c.executescript(
+        """
+        INSERT INTO tasks(id, title, progress_note, created_at) VALUES('t1', '任务', '', '2026-01-01');
+        INSERT INTO conversations(id, task_id, title, created_at) VALUES('c1', 't1', '会话', '2026-01-01');
+        INSERT INTO runs(id, conversation_id, status, created_at) VALUES('r1', 'c1', 'error', '2026-01-01');
+        INSERT INTO runs(id, conversation_id, status, created_at) VALUES('r2', 'c1', 'error', '2026-01-02');
+        INSERT INTO runs(id, conversation_id, status, created_at) VALUES('r3', 'c1', 'completed', '2026-01-03');
+        -- r1：暂停消息在早、（任务中断）半截在后 → 孤儿 trace 应回填到最后一条
+        INSERT INTO messages(id, conversation_id, role, content, created_at, run_id)
+          VALUES('m_pause', 'c1', 'assistant', '（等待你的输入…）', '2026-01-01 08:00:00', 'r1');
+        INSERT INTO messages(id, conversation_id, role, content, created_at, run_id)
+          VALUES('m_err', 'c1', 'assistant', '写到一半\n\n（任务中断）', '2026-01-01 09:00:00', 'r1');
+        -- r2：秒挂无产出（无 assistant 消息）→ 保持空
+        -- r3：已挂载的行不被改写
+        INSERT INTO messages(id, conversation_id, role, content, created_at, run_id)
+          VALUES('m_final', 'c1', 'assistant', '完成', '2026-01-03 09:00:00', 'r3');
+        INSERT INTO run_traces(run_id, conversation_id, message_id, tools, todos, created_at)
+          VALUES('r1', 'c1', NULL, '[]', '[]', '2026-01-01');
+        INSERT INTO run_traces(run_id, conversation_id, message_id, tools, todos, created_at)
+          VALUES('r2', 'c1', '', '[]', '[]', '2026-01-02');
+        INSERT INTO run_traces(run_id, conversation_id, message_id, tools, todos, created_at)
+          VALUES('r3', 'c1', 'm_final', '[]', '[]', '2026-01-03');
+        """
+    )
+    # 降级回 v24：删掉新表、退版本号，模拟修复上线前的库
+    c.execute("DROP TABLE run_turn_usage")
+    c.execute("PRAGMA user_version = 24")
+    c.commit()
+    c.close()
+
+    db.init_db()  # 触发迁移 25
+
+    c = _conn()
+    try:
+        assert c.execute("PRAGMA user_version").fetchone()[0] == LATEST
+        assert c.execute("SELECT message_id FROM run_traces WHERE run_id='r1'").fetchone()["message_id"] == "m_err"
+        assert c.execute("SELECT message_id FROM run_traces WHERE run_id='r2'").fetchone()["message_id"] in (None, "")
+        assert c.execute("SELECT message_id FROM run_traces WHERE run_id='r3'").fetchone()["message_id"] == "m_final"
+        # 明细表就位（_SCHEMA 同款形状）
+        tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "run_turn_usage" in tables
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(run_turn_usage)").fetchall()}
+        assert {"run_id", "scope", "input", "cached", "output", "reasoning"} <= cols
+    finally:
+        c.close()
+
+
+def test_migration_26_kb_check_result(monkeypatch, tmp_path):
+    """迁移 26：kb_items.check_result 列（锚点回文核对结果）就位。"""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    db.init_db()
+    c = _conn()
+    try:
+        c.execute("ALTER TABLE kb_items DROP COLUMN check_result")  # 模拟 v25 旧库
+        c.execute("PRAGMA user_version = 25")
+        c.commit()
+    finally:
+        c.close()
+    db.init_db()
+    c = _conn()
+    try:
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(kb_items)")}
+        assert "check_result" in cols
+        assert c.execute("PRAGMA user_version").fetchone()[0] == LATEST
+    finally:
+        c.close()

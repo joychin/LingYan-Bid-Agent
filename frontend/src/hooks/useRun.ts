@@ -12,6 +12,10 @@ export type { RunState }
  *  与渲染层 useThrottledValue 的节流档一致。 */
 const STREAM_BATCH_MS = 200
 
+/** 过程对账拉取的限频间隔（ms）：seq 缺口在洪峰下会连环触发（连环跳号），
+ *  全树快照不便宜，5s 内只拉一次。 */
+const TRACE_PULL_MIN_INTERVAL = 5000
+
 /** 合并窗口内攒下的流式增量（tokens=正文；mainReasoning=主 agent 思考；
  *  byAgent=各子代理思考，键=task 的 tool_call_id）。 */
 interface StreamBatch {
@@ -21,6 +25,9 @@ interface StreamBatch {
   /** 缓冲事件的最高 seq（flush 时续接去重水位） */
   maxSeq: number
   seqRunId: string | null
+  /** 本批首帧的 seq_from（SSE 微合批 additive）：连续性锚点，flush 交给 reducer
+   *  区分「服务端合并跳号」与「真丢事件」（后者才触发过程对账） */
+  seqFrom: number | null
 }
 
 /** 订阅会话事件流并驱动一个正在进行的 run（agent.started -> token… -> completed）。
@@ -37,11 +44,15 @@ export function useRun(convId: string | null) {
   const stateRef = useRef<RunState>(INITIAL_STATE)
   // SSE 断线对账的限频记号（2s 内只查一次最新 run）
   const lastReconcileRef = useRef(0)
+  // 过程对账快照拉取的限频记号（5s，见 TRACE_PULL_MIN_INTERVAL）
+  const lastTracePullRef = useRef(0)
   // 流式合并缓冲与窗口定时器（见 dispatch 内说明）
   const batchRef = useRef<StreamBatch | null>(null)
   const batchTimerRef = useRef<number | null>(null)
 
   const dispatchRef = useRef<(a: Action) => void>(() => {})
+  // 过程对账拉取的转发：effect 执行（applyAction）先于 restoreSnapshot 定义，照 dispatchRef 先例
+  const restoreSnapshotRef = useRef<(runId: string) => void>(() => {})
 
   /** reducer 应用层（原 dispatch 主体）：同步算下一状态 + 执行 Effect。 */
   const applyAction = useCallback(
@@ -55,6 +66,9 @@ export function useRun(convId: string | null) {
           void queryClient.invalidateQueries({ queryKey: e.queryKey })
         } else if (e.kind === 'invalidate-messages') {
           void queryClient.invalidateQueries({ queryKey: ['messages', convId] })
+        } else if (e.kind === 'reconcile-trace') {
+          // seq 缺口 = SSE 丢过事件：拉运行快照补死步（限频在 restoreSnapshot 内）
+          restoreSnapshotRef.current(e.runId)
         } else {
           void queryClient
             .invalidateQueries({ queryKey: ['messages', convId] })
@@ -82,7 +96,9 @@ export function useRun(convId: string | null) {
       type: 'stream-batch',
       tokens: b.tokens,
       deltas,
-      ...(b.seqRunId && b.maxSeq > 0 ? { seq: { runId: b.seqRunId, seq: b.maxSeq } } : {}),
+      ...(b.seqRunId && b.maxSeq > 0
+        ? { seq: { runId: b.seqRunId, seq: b.maxSeq, seqFrom: b.seqFrom ?? b.maxSeq } }
+        : {}),
     })
   }, [applyAction])
 
@@ -113,10 +129,18 @@ export function useRun(convId: string | null) {
           }, STREAM_BATCH_MS)
           return
         }
-        const b = (batchRef.current ??= { tokens: '', mainReasoning: '', byAgent: new Map(), maxSeq: 0, seqRunId: null })
+        const b = (batchRef.current ??= {
+          tokens: '',
+          mainReasoning: '',
+          byAgent: new Map(),
+          maxSeq: 0,
+          seqRunId: null,
+          seqFrom: null,
+        })
         if (typeof data.seq === 'number') {
           b.maxSeq = Math.max(b.maxSeq, data.seq)
           b.seqRunId = data.run_id
+          if (b.seqFrom == null) b.seqFrom = data.seq_from ?? data.seq
         }
         if (event === 'agent.token') {
           b.tokens += data.text ?? ''
@@ -134,21 +158,25 @@ export function useRun(convId: string | null) {
   )
   dispatchRef.current = dispatch
 
+  /** 过程对账拉取（5s 限频）：本地树空 = 重挂/刷新恢复（reducer 全量替换，含 waiting_input
+   *  冻结）；树非空 = SSE 丢过事件的死步/丢步骤补齐（reducer 字段级 merge，2026-09-08
+   *  过程对账——此前「树非空不拉」的闸让洪峰/断连丢事件后的假「运行中/启动中」卡永远
+   *  无法自愈）。触发：重连对账（run.state/reconcile）与 seq 缺口 effect。 */
   const restoreSnapshot = useCallback(
     (runId: string) => {
+      if (Date.now() - lastTracePullRef.current < TRACE_PULL_MIN_INTERVAL) return
+      lastTracePullRef.current = Date.now()
       void getRunSnapshot(runId)
         .then((snapshot) => {
           const current = stateRef.current
-          // 调用侧守卫（reducer 内还有同口径第二道闸）：已切到别的 run 不应用；
-          // 已收到实时事件（tools 非空）不覆盖。running 恢复执行卡，waiting_input
-          // 恢复冻结卡（等待期刷新/重连）。runId 为 null 允许--断线重挂时
-          // run.state 可能还没到，快照本身带权威 runId。
+          // 调用侧守卫（reducer 内还有同口径第二道闸）：已切到别的 run 不应用。
+          // running 恢复执行卡，waiting_input 恢复冻结卡（等待期刷新/重连）。
+          // runId 为 null 允许--断线重挂时 run.state 可能还没到，快照本身带权威 runId。
           if (
             (snapshot.status !== 'running' && snapshot.status !== 'waiting_input') ||
             (current.runId && current.runId !== runId)
           )
             return
-          if (current.tools.length > 0) return
           dispatch({
             type: 'snapshot',
             runId,
@@ -165,6 +193,7 @@ export function useRun(convId: string | null) {
     },
     [dispatch],
   )
+  restoreSnapshotRef.current = restoreSnapshot
 
   /** 限频 best-effort 对账：查最新 run，确认已结束才收敛本地状态。
    *  SSE onError（断线对账）与 cancel 的 404/409（run 已结束/收尾竞态窗口）共用——
@@ -177,7 +206,8 @@ export function useRun(convId: string | null) {
     try {
       const { run } = await getLatestRun(convId)
       if (run && (run.status === 'running' || run.status === 'waiting_input')) {
-        if (!stateRef.current.tools.length) restoreSnapshot(run.id)
+        // 树空=恢复活卡；树非空=对账补死步（断连窗口丢过事件的场景，2026-09-08）
+        restoreSnapshot(run.id)
         return
       }
       const err = run && run.status === 'error' ? (run.error ?? '任务已中断') : null
@@ -194,18 +224,14 @@ export function useRun(convId: string | null) {
     stateRef.current = INITIAL_STATE
     setState(INITIAL_STATE)
     lastReconcileRef.current = 0
+    lastTracePullRef.current = 0
     const ctrl = subscribeSSE(convId, {
       onEvent: (event, data) => {
         if (data.conversation_id !== convId) return
         dispatch({ type: 'sse', event, data, now: Date.now() })
-        // 断线/重挂对账：run.state=running（恢复执行卡）或 waiting_input（恢复冻结卡，
-        // 等待期刷新后活卡不靠转录里的暂停消息拼装）且本地过程树为空时拉一次运行快照
-        // （SSE 不补发历史 tool.called）。
-        if (
-          event === 'run.state' &&
-          (data.status === 'running' || data.status === 'waiting_input') &&
-          !stateRef.current.tools.length
-        ) {
+        // 断线/重挂对账：run.state=running（恢复执行卡）或 waiting_input（恢复冻结卡）
+        // 即拉一次运行快照——树空走全量恢复，树非空走 merge 补死步（断连窗口丢过事件）。
+        if (event === 'run.state' && (data.status === 'running' || data.status === 'waiting_input')) {
           restoreSnapshot(data.run_id)
         }
       },

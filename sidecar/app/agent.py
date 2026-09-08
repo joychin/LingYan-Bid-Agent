@@ -18,24 +18,28 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import httpx
 from deepagents import create_deep_agent
-from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
+from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware, ToolErrorMiddleware
 from langchain_core.exceptions import ContextOverflowError, ModelConnectionError, ModelRateLimitError, ModelTimeoutError
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
-from openai import BadRequestError
+from openai import APIError, APIStatusError, BadRequestError, InternalServerError
 
-from . import artifact_store, db, events, run_files, runctx, token_usage
+from . import artifact_store, db, dispatch_enrich, events, run_files, runctx, token_usage
 from . import config as cfg
 from .bus import publish
 from .fs_guard import GuardedBackend
 from .tools import TOOLS
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from langchain.agents.middleware import ToolCallRequest
 
 # HITL：这些工具的调用先 interrupt 暂停、等用户裁决后 resume。ask_human 只允许
 # respond（回答代替执行）。task 派发审批门禁已于 2026-09-06 删除（用户拍板：
@@ -45,11 +49,20 @@ INTERRUPT_ON: dict = {
     "ask_human": {"allowed_decisions": ["respond"]},
 }
 
+# 图执行的并发步数上限：langgraph RunnableConfig 顶层键（_run_agent_stream 的
+# stream config 设置），封顶同一 superstep 的并行任务——含同一消息并发派发的多个
+# task 子代理，并经 ensure_config 的 ContextVar 拷贝自动传入子代理图（各图自建
+# executor/semaphore，无共享无死锁）。行业标配（Claude Code 20 / OpenAI SDK
+# max_function_tool_concurrency / LangGraph 原生）；8 = lfans 网关实测稳定并发，
+# 且与 tender-body 均衡分波的波容量对齐（波 ≤ 上限 → 波内任务不排队，
+# 见 tools/check_pipeline._WAVE_CAPACITY）。
+_MAX_CONCURRENT_STEPS = 8
+
 # LLM 流式调用的瞬时错误（连接断开/超时/限流）：可从 checkpoint 断点自动重试——
 # 失败节点的写入未提交 checkpoint，以 input=None 重拉 graph 只重跑该节点，代价 ≈ 一次
 # 模型调用（见 _run_agent_stream）。认证/参数类永久错误不走重试，直接失败。
 _LLM_RETRYABLE_ERRORS = (ModelConnectionError, ModelRateLimitError, ModelTimeoutError)
-_LLM_RETRY_BACKOFFS = (3.0, 10.0)  # 两次重试的等待秒数（等待期间尊重停止请求）
+_LLM_RETRY_BACKOFFS = (3.0, 10.0, 30.0)  # 三次重试的等待秒数（等待期间尊重停止请求）
 # SSE 流迭代期断连（"peer closed connection ... incomplete chunked read"）以裸
 # httpx.RemoteProtocolError 逸出：openai SDK 只在建连阶段包装 httpx 异常，流路径不包；
 # langchain_openai 也只在 openai.APIError 路径包装成 ModelConnectionError。类型匹配
@@ -58,6 +71,9 @@ _LLM_TRANSIENT_MARKERS = (
     "peer closed connection",
     "incomplete chunked read",
     "connection reset by peer",
+    # 网关过载（2026-09-07 实测 lfans 流内 "Our servers are currently overloaded"）；
+    # 不收 "try again later"——配额类永久错误常带此措辞
+    "overloaded",
 )
 
 
@@ -67,8 +83,320 @@ def _is_llm_transient(exc: BaseException) -> bool:
         return True
     if isinstance(exc, httpx.RemoteProtocolError):
         return True
+    # 网关流内错误事件：openai _streaming.py 对数据流中途的 {"error":...} 无论错误体
+    # 带不带 code/status 一律构造裸基类 APIError（类型化子类只存在于建连前非 2xx
+    # 响应路径），langchain_openai 对裸基类也原样 re-raise。精确类型匹配（type is，
+    # 非 isinstance）恰好只命中这一形态——401/400/404 全是子类，不会误伤。
+    if type(exc) is APIError:
+        return True
+    # 请求级 5xx（langchain 包装后的混合类仍继承 openai.InternalServerError）：
+    # SDK 自身重试已耗尽，图级断点再给一次机会，错杀代价 = 重跑一个节点
+    if isinstance(exc, InternalServerError):
+        return True
     msg = str(exc).lower()
     return any(m in msg for m in _LLM_TRANSIENT_MARKERS)
+
+
+class AgentConfigError(RuntimeError):
+    """模型配置缺失/失效（未配置模型、未配置 Key）：归类 llm_auth，
+    前端给「去设置」入口而非让用户干等重试。"""
+
+
+def _classify_error(exc: BaseException) -> tuple[str, str]:
+    """错误定性 → (code, 人话文案)。code 取值域（agent.error/run.state 契约 additive
+    2026-09-08）：llm_auth=模型未配置/Key 失效；llm_unavailable=服务方过载/超时/断流；
+    internal=程序自身错误（兜底）。文案首行给人话、次行起原样保留服务方/异常原文
+    （前端按 \\n 拆行渲染：首行主文案、其余小字），原文截 300 字符防超长。"""
+    if isinstance(exc, AgentConfigError):
+        return "llm_auth", str(exc)
+    # 建连阶段非 2xx 的 401/403 是类型化子类（流内错误是裸基类 APIError，见
+    # _is_llm_transient 注释）——Key 无效/额度被封在这里暴露
+    if isinstance(exc, APIStatusError) and exc.status_code in (401, 403):
+        return (
+            "llm_auth",
+            f"模型 API Key 无效或已失效，请在 设置 → 模型 中检查。\n服务方返回：{str(exc)[:300]}",
+        )
+    if _is_llm_transient(exc):
+        # 正常不该到这（内层重试循环已消化瞬时错误），留作外层兜底路径的保险
+        return (
+            "llm_unavailable",
+            f"模型服务暂时不可用。\n服务方返回：{str(exc)[:300]}",
+        )
+    return "internal", f"程序内部错误：{exc}"
+
+
+def _task_failure_content(exc: Exception, request: "ToolCallRequest") -> str | None:
+    """task（子代理派发）工具的异常收敛（ToolErrorMiddleware.on_error）。
+
+    瞬时错误返回 None 上抛：异常经工具节点穿出主图，由 _run_agent_stream 的断点
+    重试循环接手（_retire_broken_steps 负责 UI 收尾）——全自动重试语义不变。
+    其余异常转错误字符串回给模型：langgraph 工具节点默认对非参数校验异常一律
+    re-raise，deepagents 的 task 工具无 try/except，子代理内一个永久错误原本会
+    打死整个主 run（2026-09-07 实测）。错误字符串带重派指引，模型据此自裁决。
+    """
+    if _is_llm_transient(exc):
+        return None
+    logger.exception(
+        "task 子代理执行失败（tool_call_id=%s）", request.tool_call.get("id")
+    )
+    msg = str(exc) or exc.__class__.__name__
+    return (
+        f"[子代理执行失败] {exc.__class__.__name__}: {msg[:500]}\n"
+        "可重派一次（必要时缩小范围或先核对输入）；"
+        "仍失败则在最终回复向用户说明该部分未完成。"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 子代理路径罗盘 + 文件工具路径自愈（2026-09-08）
+#
+# 动因（run_traces 全库 24 次 path_not_found 类红错，全部发生在子代理开局探测）：
+# 任务上下文只注入主 agent，子代理对虚拟文件系统布局全靠猜，而技能参考文档里的
+# 路径示例全部按主 agent 视角书写（不带任务前缀），照抄即错。两层各治一半：
+# ①罗盘（治"不知道"）——给子代理每次模型调用注入三行工作区布局事实；
+# ②自愈（治"知道仍写错"）——文件工具事前发现目标不存在时按固定规则换算重写。
+# general-purpose 子代理（deepagents 自动补）两件都挂不上（spec 不归我们传），
+# 历史上它只贡献 1 次错误，接受；主代理不吃罗盘（任务上下文块已含工作目录行）。
+# ---------------------------------------------------------------------------
+
+
+def _path_compass_block(task_id: str) -> str:
+    """子代理路径罗盘（run 内字节稳定：只依赖 task_id，前缀缓存铁律）。"""
+    return (
+        "【路径罗盘】文件系统的根就是工作区本身：没有 /workspace 这一层，"
+        "也不要拼接本机绝对路径。\n"
+        f"当前任务目录前缀：{task_id}/——work/、sources/ 下的一切读写路径都必须带"
+        f"此前缀（例：{task_id}/work/body/…）。\n"
+        "全局共享目录不带任务前缀：skills/、materials/、knowledge/。"
+    )
+
+
+class _SubagentCompassMiddleware(AgentMiddleware):
+    """把路径罗盘追加到子代理每次模型调用的 system message（不落 checkpoint）。
+
+    task_id 经 runctx（contextvars）在子代理工作线程里可取——与
+    _RunAwareChatDeepSeek 的思考档位同一条传播链。无任务上下文时不注入。
+    """
+
+    def wrap_model_call(self, request, handler):
+        ctx = runctx.current_run()
+        if ctx is None or not ctx.task_id:
+            return handler(request)
+        compass = _path_compass_block(ctx.task_id)
+        base = request.system_message.content if request.system_message is not None else ""
+        request = dataclasses.replace(
+            request,
+            system_message=SystemMessage(content=f"{base}\n\n{compass}" if base else compass),
+        )
+        return handler(request)
+
+
+class _SubagentScopeMiddleware(AgentMiddleware):
+    """子代理用量打标：模型调用语境置 sub，per-turn 用量明细按 main/sub 归因。
+
+    wrap_model_call 包住调用执行，记账点（模型壳 create 返回处 →
+    token_usage.record_usage）在同一线程同一份 context 里，读到的 scope 即 sub；
+    finally 复位防泄漏。嵌套子代理同标 sub（二元归因够用）。deepagents 自动补的
+    general-purpose 子代理 spec 不归我们传、挂不上（记 main，历史频率极低，接受）。
+    """
+
+    def wrap_model_call(self, request, handler):
+        token = runctx.set_agent_scope("sub")
+        try:
+            return handler(request)
+        finally:
+            runctx.reset_agent_scope(token)
+
+
+# 参与自愈的文件工具（deepagents FilesystemMiddleware 内置）→ 路径参数名。
+# delete 不参与：改写删除目标不可逆；execute 与 docx_ops 等自有工具各有自己的
+# 路径解析约定，不碰。
+_FS_PATH_TOOLS: dict[str, str] = {
+    "ls": "path",
+    "glob": "path",
+    "grep": "path",
+    "read_file": "file_path",
+    "write_file": "file_path",
+    "edit_file": "file_path",
+}
+_GLOBAL_DIR_NAMES = ("skills", "materials", "knowledge")
+
+
+def _norm_vpath(path: str) -> str | None:
+    """模型给的路径归一为虚拟绝对路径（"/x/y"）；带穿越段/家目录则 None（不碰）。"""
+    p = "/" + path.strip().lstrip("/")
+    segments = p.split("/")
+    if ".." in segments or "~" in segments:
+        return None
+    return p
+
+
+def _path_rescue_candidates(path: str, task_id: str, workspace_root: str) -> list[str]:
+    """坏路径的换算候选（确定性、按序、去重、规则可叠两层）。
+
+    覆盖实测四类猜错形态：①多余 /workspace 段；②拼了本机真实根前缀；③缺任务
+    前缀（主形态，14 次）；④任务前缀误套在全局目录前。两层叠加处理复合形态
+    （/真实根/work/x → /work/x → /t_x/work/x；/workspace/t_x/skills/ → → /skills/）。
+    """
+    norm = _norm_vpath(path)
+    if norm is None:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def push(cand: str | None) -> None:
+        if cand and cand not in seen:
+            seen.add(cand)
+            out.append(cand)
+
+    def rules(p: str) -> list[str]:
+        results: list[str] = []
+        if p.startswith("/workspace/"):
+            results.append(p[len("/workspace"):])
+        if workspace_root and p.startswith(workspace_root):
+            results.append(p[len(workspace_root):] or "/")
+        if task_id and not p.startswith(f"/{task_id}/"):
+            results.append(f"/{task_id}{p}")
+        if task_id:
+            parts = p.lstrip("/").split("/", 1)
+            if (
+                len(parts) == 2
+                and parts[0] == task_id
+                and parts[1].split("/", 1)[0] in _GLOBAL_DIR_NAMES
+            ):
+                results.append("/" + parts[1])
+        return results
+
+    for first in rules(norm):
+        push(first)
+        for second in rules(first):
+            push(second)
+    return out
+
+
+def _is_path_miss_error(tool: str, content: str) -> bool:
+    """工具错误文案是否为「路径不存在」类（用于终态错误富化；grep 的
+    "No matches found" 是空命中不是坏路径，明确不匹配）。"""
+    if tool == "ls":
+        return ": path_not_found" in content
+    if tool in ("read_file", "edit_file"):
+        return "File '" in content and "not found" in content
+    return False
+
+
+class _PathRescueMiddleware(AgentMiddleware):
+    """文件工具路径自愈：调工具前发现目标不存在时，按固定规则换算到存在的候选。
+
+    事前换算而非事后看错误重试——glob/grep 对坏路径静默返回空结果、write_file
+    自动建父目录（写错不报错直接散落），事后检测接不住这两类。只做字符串换算
+    后交给原工具执行，containment 语义不变（候选仍在工作区虚拟根内）。
+    """
+
+    def _plan_rewrite(self, tool: str, args: dict, task_id: str) -> tuple[str, str] | None:
+        """目标不存在且存在可用候选时返回 (arg_key, 新路径)，否则 None。"""
+        arg_key = _FS_PATH_TOOLS.get(tool)
+        raw = args.get(arg_key) if arg_key else None
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        norm = _norm_vpath(raw)
+        if norm is None:
+            return None
+        root = cfg.workspace_dir()
+        target = root / norm.lstrip("/")
+        candidates = _path_rescue_candidates(norm, task_id, str(root))
+        if tool == "write_file":
+            # 原父目录存在 = 真要写新文件，不动；仅当原父目录缺失而候选父目录
+            # 存在才换算（模型本来就想写进那棵树）。两边都缺 = 真新区域，维持
+            # 现状自动建目录。
+            if target.parent.is_dir():
+                return None
+            for cand in candidates:
+                if (root / cand.lstrip("/")).parent.is_dir():
+                    return arg_key, cand
+            return None
+        want_dir = tool in ("ls", "glob", "grep")
+        pred = (lambda t: t.is_dir()) if want_dir else (lambda t: t.is_file())
+        if pred(target):
+            return None
+        for cand in candidates:
+            if pred(root / cand.lstrip("/")):
+                return arg_key, cand
+        return None
+
+    def _annotate(self, result, note: str):
+        if isinstance(result, ToolMessage) and isinstance(result.content, str):
+            return result.model_copy(update={"content": f"{result.content}\n{note}"})
+        return result
+
+    def wrap_tool_call(self, request: "ToolCallRequest", handler):
+        call = request.tool_call
+        tool = call.get("name")
+        if tool not in _FS_PATH_TOOLS:
+            return handler(request)
+        ctx = runctx.current_run()
+        if ctx is None or not ctx.task_id:
+            return handler(request)
+        args = call.get("args") or {}
+        plan = self._plan_rewrite(tool, args, ctx.task_id)
+        if plan is not None:
+            arg_key, new_path = plan
+            old_path = args.get(arg_key)
+            request = request.override(
+                tool_call={**call, "args": {**args, arg_key: new_path}}
+            )
+            result = handler(request)
+            return self._annotate(
+                result, f"（路径已按任务上下文解析为 {new_path}；原请求路径 {old_path} 不存在）"
+            )
+        result = handler(request)
+        if (
+            isinstance(result, ToolMessage)
+            and result.status == "error"
+            and isinstance(result.content, str)
+            and _is_path_miss_error(tool, result.content)
+        ):
+            # 终态错误富化：错误文案自带罗盘，模型一步纠正而非盲猜 2–3 轮
+            return self._annotate(result, _path_compass_block(ctx.task_id))
+        return result
+
+
+# tender-body 正文写手子代理名：派发拼装中间件的过滤目标（SUBAGENTS spec 与
+# 中间件引用同一常量，改名单点生效）
+_BODY_WRITER_NAME = "tender-body-writer"
+
+
+class _DispatchEnrichMiddleware(AgentMiddleware):
+    """tender-body-writer 派发说明程序拼装（机制与动因见 dispatch_enrich 模块头）。
+
+    三层过滤（工具名=task / subagent_type=正文写手 / runctx 有任务）外全部放行；
+    拼装函数自身的任何异常也放行原文——增强逻辑绝不打断 run。改写发生在工具
+    执行前（request.override），tool.called 事件仍带模型原始 args——UI 卡标题
+    =模型短名不受影响；完整拼装块由任务文件确定性推导（无需事件侧同步）。
+    """
+
+    def wrap_tool_call(self, request: "ToolCallRequest", handler):
+        call = request.tool_call
+        if call.get("name") != "task":
+            return handler(request)
+        args = call.get("args") or {}
+        if args.get("subagent_type") != _BODY_WRITER_NAME:
+            return handler(request)
+        ctx = runctx.current_run()
+        if ctx is None or not ctx.task_id:
+            return handler(request)
+        enriched = dispatch_enrich.build_enriched_description(args.get("description"), ctx.task_id)
+        if enriched is None:
+            return handler(request)
+        request = request.override(
+            tool_call={**call, "args": {**args, "description": enriched}}
+        )
+        return handler(request)
+
+
+_SUBAGENT_COMPASS_MW = _SubagentCompassMiddleware()
+_SUBAGENT_SCOPE_MW = _SubagentScopeMiddleware()
+_PATH_RESCUE_MW = _PathRescueMiddleware()
+_DISPATCH_ENRICH_MW = _DispatchEnrichMiddleware()
 
 # 显式注册的子代理（deepagents 还会自动补 general-purpose）。tools 不指定 → 继承主
 # agent 全部工具；interrupt_on={} 整体替换继承：子代理不直接向用户提问（问答统一由
@@ -76,8 +404,8 @@ def _is_llm_transient(exc: BaseException) -> bool:
 SUBAGENTS: list[dict] = [
     {
         # 投标目录编写子代理：单册 R2 初稿 + 三道清理的执行单元（tender-outline 多册并发）。
-        # 注意：任务目录前缀经 _TaskContextMiddleware 只注入主 agent，不会出现在子代理的
-        # 模型调用里——派发 description 必须自带全部路径（SKILL.md 第 2 步有清单）。
+        # 任务目录前缀不随任务上下文注入子代理——派发 description 自带全部路径
+        # （SKILL.md 第 2 步有清单），罗盘中间件兜底注入三行布局事实。
         "name": "tender-outline-writer",
         "description": (
             "为单个响应文件生成投标目录（R2 初稿+三道清理），输出 fragment"
@@ -100,21 +428,32 @@ SUBAGENTS: list[dict] = [
             "完成后返回简短中文摘要：目录节点数、来源标注数、跳过的清理道及原因、待澄清项。"
         ),
         "interrupt_on": {},
+        "middleware": [_SUBAGENT_COMPASS_MW, _SUBAGENT_SCOPE_MW, _PATH_RESCUE_MW],
     },
     {
         # 正文编写子代理：单节生成的执行单元（tender-body 多节并发）。同 outline-writer：
-        # 任务目录前缀只注入主 agent——派发 description 必须自带全部路径与承诺清单值
-        # （承诺值不传，子代理拿不到就会编）。
-        "name": "tender-body-writer",
+        # 任务目录前缀不注入子代理。派发说明由 _DispatchEnrichMiddleware 程序拼装
+        # （模型只写节短名+意图，共享上下文机械补全——2026-09-08 实测模型派发塌成
+        # 五字节名、32 个子代理开局自救烧掉整本六成输入 token，纪律清单管不住故升机制）；
+        # 要求以「内容+出处」形式传达，REQ 等内部编号不进派发（子代理会把「覆盖REQ-xx」
+        # 镜像进正文首句），罗盘中间件兜底注入三行布局事实。
+        "name": _BODY_WRITER_NAME,
         "description": (
             "按写作指引写单个目录节的响应文件正文（tender-body 技能多节并发时的执行单元）"
         ),
         "system_prompt": (
-            "你是响应文件正文编写子代理，只负责一个目录节的正文。任务描述会给出："
-            "任务目录前缀（读写路径都必须带该前缀）、节文件输出路径（.docx）、该节的"
-            "写作模式与依据来源 ID、可用素材块 id、要求出处的行号区段（格式跟随/格式件"
-            "节另带来源文件名）、承诺清单的全部值、兄弟节开头摘要。\n"
-            "开工前先 read_file skills/tender-body/references/section-writing.md，"
+            "你是响应文件正文编写子代理，只负责一个目录节的正文。任务描述=首行节名与"
+            "主代理意图，其后系统自动附上本节派发上下文：任务目录前缀（读写路径都必须"
+            "带该前缀）、节文件输出路径（.docx）、写作模式、要求清单（每条=要求内容+"
+            "出处，随时可按出处读招标原文核对）、可用素材块 id（格式跟随/格式件节另带"
+            "拷原件指引）、承诺清单的全部值、兄弟节开头摘要——已含你所需的全部共享"
+            "信息。\n"
+            "开局纪律：只 read_file skills/tender-body/references/section-writing.md"
+            "（要读的文件在同一条消息里并发读完，禁止逐个串行）；禁止调用"
+            " check_pipeline_state（流水线状态归主线程）；禁止读 写作指引.md 与 "
+            "关键事实与承诺.md 全文（你的指引行与全部承诺值已在任务描述）；"
+            "docx_section_create 后 docx_section_read 通读一次，此后修订按段落/表格"
+            "标签定位，不再整读全文。\n"
             "严格按素材先行五步执行（docx 直出，模型不直接写 docx 二进制）：检索"
             "（search_references）→ 列使用计划 → docx_section_create 建节 + "
             "docx_material_inject 素材块保真贴底稿（非 docx 素材才自行撰写）→ "
@@ -125,8 +464,13 @@ SUBAGENTS: list[dict] = [
             "拷进节文件，再 revise 填空——表格空格子 fill、旧值 replace（表格按 "
             "table/row/col 格坐标寻址）；pdf 原件无可拷元素，按解析文本自行成形。\n"
             "硬纪律：承诺类数字只能使用任务描述给出的承诺清单值，清单没有的一律写"
-            "【待澄清：…】不得编造；缺料写【待补：…】继续写不阻塞；正文是干净文本，"
-            "不带任何头部/元信息；兄弟节已覆盖的要点参考摘要避免重复展开；只写自己"
+            "【待澄清：…】不得编造；缺料写【待补：…】继续写不阻塞；docx 素材块必须先"
+            " docx_material_inject 注入贴底稿再 revise 适配，禁止跳过注入直接自写——"
+            "图片只有注入能带进正文（自写=图全丢，写作工具没有放图通道）；正文是干净文本，"
+            "不带任何头部/元信息，且 REQ/MAND/SCORE/TPL-xx 内部对账编号（无论从任务"
+            "描述还是指引等文件里看到）一个都不写进正文——呼应招标要求用要求内容或"
+            "招标文件真实印着的章节/条款号（如「按第三章 2.3 条」，评标人可对照原文，"
+            "内部编号他们对不上）；兄弟节已覆盖的要点参考摘要避免重复展开；只写自己"
             "名分的节文件（已存在的节重建传 replace=true），不动任何其他文件。\n"
             "禁止调用 ask_human（无人应答）：需要用户裁决的写【待澄清：…】带回。\n"
             "禁止改写写作指引与关键事实与承诺清单（共享文件只归主线程维护）。\n"
@@ -134,6 +478,7 @@ SUBAGENTS: list[dict] = [
             "待补/待澄清清单。"
         ),
         "interrupt_on": {},
+        "middleware": [_SUBAGENT_COMPASS_MW, _SUBAGENT_SCOPE_MW, _PATH_RESCUE_MW],
     },
 ]
 
@@ -446,12 +791,11 @@ def build_agent(profile: cfg.ModelProfile | None = None):
     if p is None:
         # 模型列表为空（用户删光）：给出人话错误；agent 缓存不落空值，
         # 下次带 profile 的调用还会重试（settings 改回即自愈）
-        raise RuntimeError("未配置任何模型（设置 → 模型 → 添加模型）")
+        raise AgentConfigError("未配置任何模型（设置 → 模型 → 添加模型）")
     api_key = cfg.model_key(p.id)
     if not api_key:
-        raise RuntimeError(
-            f"模型「{p.name}」未配置 API Key（sidecar 只能通过环境变量拿到 key；"
-            "Tauri 设置里保存后自动重启生效）"
+        raise AgentConfigError(
+            f"模型「{p.name}」未配置 API Key（设置 → 模型 → 填写并保存即生效）"
         )
 
     # ChatDeepSeek 会提取 DeepSeek 的 reasoning_content 到 additional_kwargs，
@@ -486,8 +830,20 @@ def build_agent(profile: cfg.ModelProfile | None = None):
         tools=TOOLS,
         subagents=SUBAGENTS,
         skills=["skills/"],  # 未加载时在 main 启动日志提示换写法（见 README）
-        # 子代理归属插桩；todos 工具；任务上下文按 run 注入
-        middleware=[_SubagentTagMiddleware(), TodoListMiddleware(), _TaskContextMiddleware()],
+        # 子代理归属插桩；todos 工具；任务上下文按 run 注入；task 子代理异常收敛
+        # （deepagents 内置工具不守「失败返回错误字符串」纪律，无此层时子代理
+        # 永久错误会打死整个主 run——见 _task_failure_content）；文件工具路径自愈
+        # （子代理各自 ToolNode 独立，故 SUBAGENTS 条目里还挂了一份）；tender-body-writer
+        # 派发说明程序拼装（治「派发塌成节名五字→子代理开局自救烧 token」，
+        # 见 dispatch_enrich 模块头）
+        middleware=[
+            _SubagentTagMiddleware(),
+            TodoListMiddleware(),
+            _TaskContextMiddleware(),
+            ToolErrorMiddleware(on_error=_task_failure_content, tools=["task"]),
+            _PATH_RESCUE_MW,
+            _DISPATCH_ENRICH_MW,
+        ],
         system_prompt=(
             "你是标书助理，在一个投标任务下的会话里工作。产物归任务、单一当前版本："
             "同契约在任务内只有一份当前内容，重跑覆盖前系统自动留恢复点，"
@@ -517,6 +873,8 @@ def build_agent(profile: cfg.ModelProfile | None = None):
                 "概括该子代理的任务（如「检索中石化 dify 相关招标」），不要以「你是……」"
                 "之类的角色自述开头，并发派发时各卡短名要能相互区分；详细任务说明从"
                 "第二行开始。"
+                "task 返回失败（子代理执行错误）时重派一次；仍失败则在最终回复"
+                "向用户说明哪部分未完成，不要静默跳过。"
                 "面向用户的回复用用户语言：内部路径（sources/、work/、任务目录前缀）与"
                 "实现名词（工具名、文件名如 sources.json、子代理、run）不进回复，"
                 "它们是你操作用的知识、不是用户的操作入口；汇报进度与状态按业务阶段"
@@ -721,14 +1079,16 @@ def _run_agent_stream(
     agent, cid: str, rid: str, task_id: str | None, _publish, user_text: str | None, resume_decisions: list | None,
     cancel_event: threading.Event | None = None, thinking: str = "low",
     resume_payload: dict | None = None,
-) -> tuple[str, str | None, dict, dict | None]:
+) -> tuple[str, str | None, str | None, dict, dict | None]:
     """worker 线程里跑完整流，逐块实时回调 _publish(event, data)。
 
     首段（user_text）与续段（resume_decisions，Command(resume=...) 从 checkpoint
-    的 interrupt 处续跑）共用本函数。返回 (assistant_text, error, trace, interrupt)：
-    assistant_text 是**最终回复**（最后一段未被 tool.called 跟随的正文）；此前各轮的
-    正文旁白在 tool_called 到达时封段挂到对应 trace 步骤的 text 字段（过程/结果分通道，
-    前端 useRun 用同一条封段规则，SSE 契约零改动）。
+    的 interrupt 处续跑）共用本函数。返回 (assistant_text, error, error_code, trace,
+    interrupt)：assistant_text 是**最终回复**（最后一段未被 tool.called 跟随的正文）；
+    此前各轮的正文旁白在 tool_called 到达时封段挂到对应 trace 步骤的 text 字段
+    （过程/结果分通道，前端 useRun 用同一条封段规则，SSE 契约零改动）。
+    error_code 是错误定性（llm_unavailable/llm_auth/internal/cancelled，2026-09-08
+    契约 additive——前端据此区分「模型服务的错」与「程序的错」并给人话文案）。
     interrupt 非空 = HITL 暂停（events 归一化的 {"requests": [...]}），本段流到此
     结束、run 转入 waiting_input，等用户裁决后由 run_stream 再开一段续流。
     trace 是本次 run 的执行过程快照：顶层工具步骤树（task 步骤含子代理 children
@@ -737,15 +1097,15 @@ def _run_agent_stream(
 
     cancel_event 非空且被置位 = 用户请求停止：在每个流事件边界协作式退出
     （LLM 流式调用期间 token 事件持续到达，停止会在下一个事件处生效；
-    长工具执行中则等待工具返回），退出走 error 路径（半截回复落库 + run 标 error）。
+    长工具执行中则等工具返回），退出走 error 路径（半截回复落库 + run 标 error）。
 
     瞬时 LLM 错误（_is_llm_transient：langchain 包装的连接断开/超时/限流 + 流式断连的
     裸 httpx.RemoteProtocolError 与消息关键词兜底）自动从 checkpoint 断点
     重试（最多 _LLM_RETRY_BACKOFFS 次）：重试时 input=None，langgraph 恢复 pending
-    任务只重跑失败节点；失败那轮的半截正文清空（重试会完整重流出）；残留 running
-    步骤收尾为 error；每次重试在 trace 里留 llm_retry 伪步骤。重试额度用尽仍失败才
-    走 error 路径（文案注明已重试次数）。已知轻微显示局限：失败那轮已流出的 token
-    在前端当前旁白段可能重复出现一次（DB 最终回复与 trace 不受影响）。
+    任务只重跑失败节点；失败那轮的半截正文清空（重试会完整重流出）并先发 agent.retry
+    事件（前端同样清空未封口正文、显示「正在自动重试」shimmer——半截 token 不再
+    重复出现）；残留 running 步骤收尾为 error；每次重试在 trace 里留 llm_retry 伪
+    步骤。重试额度用尽仍失败才走 error 路径（llm_unavailable + 人话文案带原文）。
     """
     # run 上下文随 context 拷贝进入本线程：工具据此记录产物来源与作用域，
     # _TaskContextMiddleware 据此注入任务上下文，模型壳据此注入思考档位（同线程同一份 context）
@@ -769,6 +1129,7 @@ def _run_agent_stream(
     cur_reasoning: list[str] = []
     sub_reasoning_bufs: dict[str, list[str]] = {}
     error = None
+    error_code: str | None = None
     top_steps: list[dict] = []
     last_todos: list = []
     interrupt: dict | None = None
@@ -779,13 +1140,17 @@ def _run_agent_stream(
             try:
                 stream = agent.stream(
                     attempt_input,
-                    config={"configurable": {"thread_id": cid}},
+                    config={
+                        "configurable": {"thread_id": cid},
+                        "max_concurrency": _MAX_CONCURRENT_STEPS,
+                    },
                     stream_mode=["messages", "updates"],
                     subgraphs=True,  # 子代理内部事件浮现父流；events.iter_stream 按 ns 归属
                 )
                 for kind, payload in events.iter_stream(stream, rid):
                     if cancel_event is not None and cancel_event.is_set():
                         error = events.CANCELLED_MESSAGE
+                        error_code = "cancelled"
                         break
                     if kind == "reasoning":
                         # DeepSeek 推理模型的 chain-of-thought 增量；agent_id 非空时归属子代理
@@ -897,15 +1262,28 @@ def _run_agent_stream(
                 # 的写入已提交，只重跑失败的那个节点）
                 if cancel_event is not None and cancel_event.is_set():
                     error = events.CANCELLED_MESSAGE
+                    error_code = "cancelled"
                     break
                 if n_retries >= len(_LLM_RETRY_BACKOFFS):
-                    error = f"{e}（已自动重试 {n_retries} 次仍失败）"
+                    error = (
+                        f"模型服务暂时不可用，已自动重试 {n_retries} 次仍失败，请稍后重试。\n"
+                        f"服务方返回：{str(e)[:300]}"
+                    )
+                    error_code = "llm_unavailable"
+                    logger.error("agent 流重试耗尽（cid=%s rid=%s）：%s", cid, rid, e)
                     break
                 backoff = _LLM_RETRY_BACKOFFS[n_retries]
                 n_retries += 1
                 logger.warning(
                     "agent 流瞬时错误，%.0fs 后从 checkpoint 断点重试（第 %d 次）：%s",
                     backoff, n_retries, e,
+                )
+                # 重试可见（契约 additive 2026-09-08）：等待期前端在输出区显示
+                # 「正在自动重试」shimmer，并同时清空未封口正文（与本函数
+                # cur_text_parts.clear() 对齐，重流出后半截 token 不重复）
+                _publish(
+                    events.EVENT_AGENT_RETRY,
+                    events.retry_payload(rid, cid, n_retries, len(_LLM_RETRY_BACKOFFS), backoff),
                 )
                 # 失败那轮的半截正文清空（重试会完整重流出，保留会拼进最终回复）；
                 # reasoning 不清（跨轮累积，只可能尾部多一小段重复，展示层瑕疵无害）
@@ -914,11 +1292,15 @@ def _run_agent_stream(
                 top_steps.append(_llm_retry_step(n_retries, str(e), backoff))
                 if cancel_event is not None and cancel_event.wait(timeout=backoff):
                     error = events.CANCELLED_MESSAGE
+                    error_code = "cancelled"
                     break
                 attempt_input = None
+        # cancelled 判定在 worker 内完成（error_code 直接产出），run_stream 不再做
+        # 字符串比对
     except Exception as e:  # 永久错误（认证/参数）与其他意外错误：不重试
         logger.exception("agent stream failed")
-        error = error or str(e)
+        if not error:
+            error_code, error = _classify_error(e)
     finally:
         clear_live_trace(rid)
         runctx.clear_run()
@@ -928,6 +1310,7 @@ def _run_agent_stream(
     return (
         "".join(cur_text_parts),
         error,
+        error_code,
         {"tools": top_steps, "todos": last_todos, "reasoning": "".join(cur_reasoning)},
         interrupt,
     )
@@ -1175,6 +1558,7 @@ async def run_stream(
     # 半截消息/trace 落库，兜底路径据此防双写
     text: str = ""
     error: str | None = None
+    error_code: str | None = None
     trace: dict = {"tools": [], "todos": []}
     interrupt: dict | None = None
     segment_saved = False
@@ -1220,7 +1604,7 @@ async def run_stream(
         except Exception:
             logger.exception("本轮文件起点快照失败（cid=%s rid=%s）", cid, rid)
             start_files = None
-        text, error, trace, interrupt = await asyncio.to_thread(
+        text, error, error_code, trace, interrupt = await asyncio.to_thread(
             _run_agent_stream, agent, cid, rid, task_id, _publish, user_text, resume_decisions,
             cancel_event, thinking, resume_payload,
         )
@@ -1251,21 +1635,27 @@ async def run_stream(
         if error:
             # 半截回复快照：优先最终回复段，空则用最后一段旁白兜底（并从 trace 步骤去重）
             snapshot_text, tools_snapshot = _pause_snapshot(text, trace["tools"])
+            error_msg_id = None
             if snapshot_text.strip():
                 # 中断 run 的半截回复落库：checkpoint 里模型"说过"这些话（或 dangling 修复后
                 # 仍残留半截上下文），messages 表同步记一份（带中断标记），UI 与模型记忆对齐
-                db.append_assistant_message(cid, snapshot_text.rstrip() + "\n\n（任务中断）", rid=rid)
+                error_msg_id = db.append_assistant_message(
+                    cid, snapshot_text.rstrip() + "\n\n（任务中断）", rid=rid
+                )["id"]
             else:
                 # 续跑段终止且无任何新产出：改写暂停消息的「等待你的输入…」标记，
                 # 否则对话最后一句永远宣称在等输入、与已终止的 run 矛盾
                 db.retire_pause_marker((db.get_run(rid) or {}).get("pause_msg_id"))
-            # 中断 run 的执行过程也落 trace（与暂停段合并；message_id 空则保留暂停消息挂载）
-            _save_merged_trace(rid, cid, None, {**trace, "tools": tools_snapshot}, duration_ms, files=segment_files)
+            # 中断 run 的执行过程也落 trace（与暂停段合并）：本段有新产出消息则挂新消息
+            # （GET /messages 按 message_id 挂载——2026-09-08 前写死 None，首段 error 的
+            # trace 永远挂不上任何消息，历史里过程全丢）；无新消息传 None=保留暂停消息挂载
+            _save_merged_trace(rid, cid, error_msg_id, {**trace, "tools": tools_snapshot}, duration_ms, files=segment_files)
             segment_saved = True
             # 先落库后发事件（与 completed 分支一致）：客户端收到终态事件即可立即对账
             seq = next_seq()
-            db.finish_run(rid, "error", error, last_seq=seq, token_usage_json=_usage_json_final(rid))
-            # code（契约 additive）：cancelled=用户主动停止，前端据此中性呈现（非红色错误卡）
+            db.finish_run(rid, "error", error, last_seq=seq, token_usage_json=_usage_json_final(rid), error_code=error_code)
+            # code（契约 additive）：错误定性（cancelled/llm_unavailable/llm_auth/internal，
+            # 2026-09-08 扩展取值域），前端据此选人话文案与操作入口
             await publish(
                 cid,
                 {
@@ -1274,7 +1664,7 @@ async def run_stream(
                         rid,
                         cid,
                         error,
-                        "cancelled" if error == events.CANCELLED_MESSAGE else None,
+                        error_code,
                         seq,
                     ),
                 },
@@ -1334,25 +1724,33 @@ async def run_stream(
         if not segment_saved:
             try:
                 snapshot_text, tools_snapshot = _pause_snapshot(text, trace["tools"])
+                fallback_msg_id = None
                 if snapshot_text.strip() or trace["tools"]:
                     if snapshot_text.strip():
-                        db.append_assistant_message(cid, snapshot_text.rstrip() + "\n\n（任务中断）", rid=rid)
+                        fallback_msg_id = db.append_assistant_message(
+                            cid, snapshot_text.rstrip() + "\n\n（任务中断）", rid=rid
+                        )["id"]
                     else:
                         db.retire_pause_marker((db.get_run(rid) or {}).get("pause_msg_id"))
-                    _save_merged_trace(rid, cid, None, {**trace, "tools": tools_snapshot}, None, files=segment_files)
+                    # 同 error 分支：有新产出消息则挂载（过程在历史可见），None=保留旧挂载
+                    _save_merged_trace(rid, cid, fallback_msg_id, {**trace, "tools": tools_snapshot}, None, files=segment_files)
                 else:
                     db.retire_pause_marker((db.get_run(rid) or {}).get("pause_msg_id"))
             except Exception:
                 logger.exception("run_stream 异常收尾落库失败（cid=%s rid=%s）", cid, rid)
         try:
             seq = next_seq()
+            outer_code, outer_error = _classify_error(e)
             # 终态守卫：worker 分支已落的终态不被覆盖——error 分支写入的原始错误
             # 文案不被内部异常顶掉、completed 不被翻成 error（error 事件照发）
-            db.finish_run_if_running(rid, "error", str(e), last_seq=seq, token_usage_json=_usage_json_final(rid))
+            db.finish_run_if_running(
+                rid, "error", outer_error, last_seq=seq,
+                token_usage_json=_usage_json_final(rid), error_code=outer_code,
+            )
             # code 恒有键（契约 2026-08-27 additive）：此前此处漏发 code，靠前端 ?? null 兜住
             await publish(
                 cid,
-                {"event": events.EVENT_ERROR, "data": events.error_payload(rid, cid, str(e), None, seq)},
+                {"event": events.EVENT_ERROR, "data": events.error_payload(rid, cid, outer_error, outer_code, seq)},
             )
         except Exception:
             logger.exception("run_stream 终态落库/事件发布失败（cid=%s rid=%s）", cid, rid)

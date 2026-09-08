@@ -68,6 +68,7 @@ export interface Conversation {
 }
 export interface FileItem {
   name: string;
+  abs_path: string;
   size: number;
   modified_at: string;
 }
@@ -82,6 +83,24 @@ export interface InterruptRequestPayload {
   description?: string;
   allowed?: string[];
   interrupt_id?: string;
+}
+/**
+ * 锚点回文核对结果（抽取收尾跑，LLM 抽出的锚点回原文验证）：
+ * pass=全部命中可自动确认；fail=留待人工确认（results 点名原因）。
+ */
+export interface KbAnchorCheck {
+  status: "pass" | "fail";
+  results?: KbAnchorCheckItem[];
+}
+/**
+ * 单项核对结果：field=注册字段 code 或伪字段（_consistency/_anchors），
+ * detail 为后端拼好的中文依据/原因。
+ */
+export interface KbAnchorCheckItem {
+  field: string;
+  label: string;
+  ok: boolean;
+  detail: string;
 }
 export interface KbFieldSource {
   value: string;
@@ -111,6 +130,7 @@ export interface KbItem {
   progress?: string | null;
   suggested?: KbMetadata | null;
   business?: KbMetadata | null;
+  check_result?: KbAnchorCheck | null;
   freshness?: KbFreshness[];
   error?: string | null;
   created_at: string;
@@ -119,11 +139,14 @@ export interface KbItem {
 }
 /**
  * suggested（AI 建议）/ business（人工确认）共用形状：类型 + 内容说明
- * statement（带出处锚点，不预设内容字段）+ 锚点字段 + 自由字段。
+ * statement（带出处锚点，不预设内容字段）+ 检索问题 questions（「用户会怎么问」
+ * 的短问句，独立 §questions 检索段）+ 锚点字段 + 自由字段。
+ * business 侧另有 confirmed_by="auto"=程序核对自动确认（人工保存后标记消失）。
  */
 export interface KbMetadata {
   doc_type: string;
   statement?: string | null;
+  questions?: string[] | null;
   confidence?: number | null;
   fields?: {
     [k: string]: KbFieldSource;
@@ -131,6 +154,7 @@ export interface KbMetadata {
   extra?: {
     [k: string]: KbFieldSource;
   } | null;
+  confirmed_by?: "auto" | null;
 }
 export interface KbParseMeta {
   conversion: string;
@@ -155,8 +179,10 @@ export interface KbTypePayload {
   time_fields?: string[];
 }
 /**
- * GET /messages 的 assistant 消息；tools/todos 是 run_traces 快照（嵌套树，松散 dict，
- * 键序与前端 ToolStep 同构--前端用客户端类型标注，见 client.ts）。
+ * GET /messages 的消息行。过程快照瘦身（2026-09-08，reshape）：tools/todos/
+ * reasoning 不再随列表下发（标书会话 11.4MB 随历史线性涨），改 GET
+ * /conversations/{cid}/messages/{mid}/trace 按需取；列表只带折叠头所需的轻量
+ * 摘要（traceSteps/tracePaused）与 durationMs/files。
  */
 export interface Message {
   id: string;
@@ -165,19 +191,10 @@ export interface Message {
   content: string;
   created_at: string;
   run_id?: string | null;
-  tools?:
-    | {
-        [k: string]: unknown;
-      }[]
-    | null;
-  todos?: TodoItemPayload[] | null;
+  traceSteps?: number | null;
+  tracePaused?: boolean | null;
   durationMs?: number | null;
-  reasoning?: string | null;
   files?: RunFilePayload[] | null;
-}
-export interface TodoItemPayload {
-  content: string;
-  status: "pending" | "in_progress" | "completed";
 }
 /**
  * 本轮文件（run_files 起止 diff）：path 相对 <task>/work/（WorkbenchFile.path
@@ -186,6 +203,21 @@ export interface TodoItemPayload {
 export interface RunFilePayload {
   path: string;
   op: "created" | "modified";
+}
+/**
+ * GET /conversations/{cid}/messages/{mid}/trace：单条消息的完整执行过程
+ * （点开过程区按需取；tools 是嵌套树松散 dict，键序与前端 ToolStep 同构）。
+ */
+export interface MessageTrace {
+  tools: {
+    [k: string]: unknown;
+  }[];
+  todos: TodoItemPayload[];
+  reasoning: string;
+}
+export interface TodoItemPayload {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
 }
 /**
  * 一个已配置的模型接入（多 profile：任意供应商任意个；key 只回布尔）。
@@ -211,6 +243,8 @@ export interface MtBlock {
   chars?: number;
   created_at: string;
   file_name?: string | null;
+  use_count?: number;
+  last_used_at?: string | null;
 }
 /**
  * 素材库文件（用户上传、后台纯机械解析出目录树；无 LLM）。
@@ -226,13 +260,14 @@ export interface MtFile {
   block_count?: number | null;
 }
 /**
- * 目录树节点（勾选界面数据源；children 递归）。
+ * 目录树节点（勾选界面数据源；children 递归；chars=区间实算字数）。
  */
 export interface MtOutlineNode {
   标题?: string;
   start_line?: number | null;
   end_line?: number | null;
   level?: number | null;
+  chars?: number | null;
   children?: MtOutlineNode[];
 }
 /**
@@ -240,6 +275,24 @@ export interface MtOutlineNode {
  */
 export interface OcrSettings {
   configured: boolean;
+}
+/**
+ * 任务换装报告（applied=成功节数；skipped_volumes=「整本-」派生物跳过数）。
+ */
+export interface RestyleReport {
+  applied?: number;
+  failed?: number;
+  skipped_volumes?: number;
+  results?: RestyleResult[];
+}
+/**
+ * 换装单节结果（elements=搬迁的段落/表格数）。
+ */
+export interface RestyleResult {
+  file: string;
+  ok: boolean;
+  elements?: number;
+  error?: string | null;
 }
 export interface RunInfo {
   id: string;
@@ -250,6 +303,7 @@ export interface RunInfo {
   requests?: InterruptRequestPayload[] | null;
   last_seq?: number | null;
   token_usage?: string | null;
+  error_code?: string | null;
 }
 /**
  * GET /runs/{rid}/snapshot：运行中过程快照（SSE 断线/页面重挂对账用）。
@@ -289,6 +343,18 @@ export interface Task {
   title: string;
   progress_note: string;
   created_at: string;
+}
+/**
+ * 文档模板（格式资产，与素材=内容资产分离）：内置基准或用户上传 .docx，
+ * 全局一个生效位（active）。
+ */
+export interface TemplateInfo {
+  name: string;
+  key: string;
+  builtin?: boolean;
+  active?: boolean;
+  size?: number;
+  mtime?: number;
 }
 export interface UploadResult {
   name: string;

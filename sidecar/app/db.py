@@ -14,11 +14,14 @@ artifact_index 是类型化 Artifact 的可重建索引 + 运行态（content_se
 """
 
 import json
+import logging
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 
 from .config import app_db_path
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks(
@@ -40,7 +43,8 @@ CREATE TABLE IF NOT EXISTS runs(
   pause_msg_id TEXT,
   thinking TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL DEFAULT '',
-  token_usage TEXT);
+  token_usage TEXT,
+  error_code TEXT);
 CREATE TABLE IF NOT EXISTS app_settings(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL);
@@ -56,8 +60,8 @@ CREATE TABLE IF NOT EXISTS artifact_index(
   last_run_id TEXT, last_thread_id TEXT,
   emitted INTEGER NOT NULL DEFAULT 0);
 -- run 执行过程快照（工具步骤树 + todos + 主 agent 思考流）：run 结束落一份，
--- message_id 关联 assistant 消息（error 中断的 run 无 message_id），
--- 历史会话/刷新后执行过程与「深度思考」仍可见
+-- message_id 关联 assistant 消息（终态消息：最终回复/暂停/中断半截，GET /messages
+-- 据此挂载），历史会话/刷新后执行过程与「深度思考」仍可见
 CREATE TABLE IF NOT EXISTS run_traces(
   run_id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
@@ -67,6 +71,17 @@ CREATE TABLE IF NOT EXISTS run_traces(
   duration_ms INTEGER,
   reasoning TEXT NOT NULL DEFAULT '',
   files TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL);
+-- 每次模型调用的用量明细（2026-09-08）：run 级聚合在 runs.token_usage，本表
+-- per-turn 落行、scope 区分主线程/子代理，供「token 都花在哪」的归因查询
+CREATE TABLE IF NOT EXISTS run_turn_usage(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'main',
+  input INTEGER NOT NULL DEFAULT 0,
+  cached INTEGER NOT NULL DEFAULT 0,
+  output INTEGER NOT NULL DEFAULT 0,
+  reasoning INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL);
 -- 知识库条目（v3 内容角色模型，2026-09-03 全量重建：一个上传文件一条；
 -- suggested=AI 建议（doc_type/内容说明 statement/时间字段）、business=确认后真值，
@@ -84,6 +99,7 @@ CREATE TABLE IF NOT EXISTS kb_items(
   review_status TEXT NOT NULL DEFAULT 'pending_review',
   suggested_metadata TEXT,
   business_metadata TEXT,
+  check_result TEXT,
   progress TEXT,
   error TEXT,
   created_at TEXT NOT NULL,
@@ -112,7 +128,9 @@ CREATE TABLE IF NOT EXISTS mt_blocks(
   note TEXT NOT NULL DEFAULT '',
   ranges TEXT NOT NULL,
   chars INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL);
+  created_at TEXT NOT NULL,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT);
 """
 
 # 索引与建表分两步：旧库先建表→探测补列→再建索引（索引引用新列，顺序不能反）
@@ -120,6 +138,7 @@ _SCHEMA_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_conv ON runs(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_run_traces_message ON run_traces(message_id);
+CREATE INDEX IF NOT EXISTS idx_run_turn_usage_run ON run_turn_usage(run_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_index_scope
   ON artifact_index(task_id, conversation_id, kind, schema_id, schema_version);
 -- run 边界 pending_emit（WHERE last_run_id=? AND emitted=0）：每次 run 收尾一次
@@ -450,6 +469,119 @@ def get_traces_for_messages(message_ids: list[str]) -> dict[str, dict]:
     return out
 
 
+def get_message(message_id: str) -> dict | None:
+    """单条消息行（cid 归属校验用）。"""
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT id, conversation_id, role FROM messages WHERE id=?", (message_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def get_trace_by_message(message_id: str) -> dict | None:
+    """单条消息的完整执行过程快照（按需端点数据源，2026-09-08 messages 瘦身）。"""
+    conn = _conn()
+    try:
+        r = conn.execute(
+            "SELECT tools, todos, duration_ms, reasoning, files FROM run_traces WHERE message_id=?",
+            (message_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if r is None:
+        return None
+    try:
+        return {
+            "tools": json.loads(r["tools"]),
+            "todos": json.loads(r["todos"]),
+            "durationMs": r["duration_ms"],
+            "reasoning": r["reasoning"] or "",
+            "files": json.loads(r["files"] or "[]"),
+        }
+    except ValueError:
+        return None  # 快照损坏：按无过程处理（端点 404）
+
+
+def get_message_trace_summaries(message_ids: list[str]) -> dict[str, dict]:
+    """消息过程摘要（步数/是否含暂停步 + durationMs/files）：折叠头所需的轻量字段。
+
+    步数与 paused 用 SQLite JSON 函数在库内走树（C 层），不把 MB 级 tools JSON
+    拉回 Python 解析——messages 瘦身（2026-09-08）后这是列表端点唯一要碰
+    run_traces 的地方，标书会话实测 11.4MB 全量解析不可接受。
+    """
+    if not message_ids:
+        return {}
+    ph = ",".join("?" * len(message_ids))
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT message_id, duration_ms, files,
+                   json_array_length(tools) AS steps,
+                   EXISTS(SELECT 1 FROM json_tree(tools) WHERE key='status' AND value='paused') AS paused
+            FROM run_traces WHERE message_id IN ({ph})
+            """,
+            message_ids,
+        ).fetchall()
+    finally:
+        conn.close()
+    out: dict[str, dict] = {}
+    for r in rows:
+        try:
+            steps = int(r["steps"] or 0)
+        except (TypeError, ValueError):
+            steps = 0
+        try:
+            files = json.loads(r["files"] or "[]")
+        except ValueError:
+            files = []
+        out[r["message_id"]] = {
+            "steps": steps,
+            "paused": bool(r["paused"]),
+            "durationMs": r["duration_ms"],
+            "files": files,
+        }
+    return out
+
+
+def insert_run_turn_usage(rid: str, scope: str, usage: dict[str, int]) -> None:
+    """单次模型调用的用量明细一行（token_usage.record_usage 调；异常由调用方吞）。"""
+    conn = _conn()
+    try:
+        conn.execute(
+            "INSERT INTO run_turn_usage(run_id, scope, input, cached, output, reasoning, created_at)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (
+                rid,
+                scope,
+                usage.get("input", 0),
+                usage.get("cached", 0),
+                usage.get("output", 0),
+                usage.get("reasoning", 0),
+                _now(),
+            ),
+        )
+    finally:
+        conn.close()
+
+
+def list_run_turn_usage(rid: str) -> list[dict]:
+    """按 run 取全部 per-turn 用量明细（id 升序=调用顺序；归因/测试用）。"""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, scope, input, cached, output, reasoning, created_at"
+            " FROM run_turn_usage WHERE run_id=? ORDER BY id",
+            (rid,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
 def create_user_message(cid: str, content: str, rid: str | None = None) -> dict:
     mid = f"m_{uuid.uuid4().hex[:12]}"
     conn = _conn()
@@ -556,14 +688,16 @@ def create_run(cid: str, thinking: str = "low", model: str = "") -> dict:
 
 def finish_run(
     rid: str, status: str, error: str | None = None, last_seq: int | None = None,
-    token_usage_json: str | None = None,
+    token_usage_json: str | None = None, error_code: str | None = None,
 ) -> None:
     """run 收尾。last_seq 回写终态事件序号（此前只有 interrupt_run 写过——续跑完成后
     runs.last_seq 永远停在暂停值，对账/排查拿到的是错数）。token_usage_json 是本 run
     的模型用量快照（input/output/cached/reasoning，agent 层 take 出来的 JSON 文本，
-    None=保留旧值——HITL 分段落库时首段已写，续段无新增时不覆盖）。"""
-    sets = ["status=?", "error=?"]
-    args: list = [status, error]
+    None=保留旧值——HITL 分段落库时首段已写，续段无新增时不覆盖）。error_code 是
+    错误定性（cancelled/llm_unavailable/llm_auth/internal，2026-09-08 契约 additive；
+    completed 时随 error 一并写 NULL）。"""
+    sets = ["status=?", "error=?", "error_code=?"]
+    args: list = [status, error, error_code]
     if last_seq is not None:
         sets.append("last_seq=?")
         args.append(last_seq)
@@ -580,14 +714,14 @@ def finish_run(
 
 def finish_run_if_running(
     rid: str, status: str, error: str | None = None, last_seq: int | None = None,
-    token_usage_json: str | None = None,
+    token_usage_json: str | None = None, error_code: str | None = None,
 ) -> bool:
     """终态守卫版收尾：仅当 run 仍处 running 时写入，返回是否落库。
 
     供 agent 外层异常兜底使用——worker 分支已落的终态不被覆盖：原始 error 文案
     不被内部异常文案顶掉、completed 不被翻成 error（error 事件照发，DB 真值不动）。"""
-    sets = ["status=?", "error=?"]
-    args: list = [status, error]
+    sets = ["status=?", "error=?", "error_code=?"]
+    args: list = [status, error, error_code]
     if last_seq is not None:
         sets.append("last_seq=?")
         args.append(last_seq)
@@ -609,7 +743,7 @@ def get_run(rid: str) -> dict | None:
     conn = _conn()
     try:
         row = conn.execute(
-            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq, pause_msg_id, thinking, model, token_usage"
+            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq, pause_msg_id, thinking, model, token_usage, error_code"
             " FROM runs WHERE id=?",
             (rid,),
         ).fetchone()
@@ -693,11 +827,13 @@ def recover_stale_runs() -> int:
 
     否则该会话会一直命中 409「已有进行中的任务」，永久无法再发消息。
     waiting_input 不翻：interrupt 存活于 agent.db checkpoint，重启后用户仍可裁决续跑。
+    error_code='interrupted'（2026-09-08 契约 additive）：前端中性呈现，不与真实错误
+    共用红色（同 cancelled 视觉语义——环境重启不是模型的错也不是用户的错）。
     """
     conn = _conn()
     try:
         cur = conn.execute(
-            "UPDATE runs SET status='error', error=? WHERE status='running'",
+            "UPDATE runs SET status='error', error=?, error_code='interrupted' WHERE status='running'",
             ("sidecar 重启，任务中断",),
         )
         return cur.rowcount
@@ -741,7 +877,7 @@ def get_latest_run(cid: str) -> dict | None:
     conn = _conn()
     try:
         row = conn.execute(
-            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq, token_usage"
+            "SELECT id, conversation_id, status, error, created_at, interrupt, last_seq, token_usage, error_code"
             " FROM runs WHERE conversation_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (cid,),
         ).fetchone()
@@ -932,7 +1068,7 @@ def rebuild_artifact_index(manifests: list[dict], content_path_of) -> int:
 _KB_ITEM_COLS = (
     "id, file_name, file_hash, title, ext, doc_type, "
     "parse_status, extract_status, review_status, "
-    "suggested_metadata, business_metadata, progress, error, created_at, updated_at"
+    "suggested_metadata, business_metadata, check_result, progress, error, created_at, updated_at"
 )
 
 
@@ -1005,11 +1141,12 @@ def kb_update_item(kid: str, **fields) -> None:
     """更新 kb_items 指定列（仅白名单列）+ updated_at。"""
     allowed = {
         "title", "doc_type", "parse_status", "extract_status", "review_status",
-        "suggested_metadata", "business_metadata", "progress", "error",
+        "suggested_metadata", "business_metadata", "check_result", "progress", "error",
     }
     keys = [
         k for k in fields
-        if k in allowed and (fields[k] is not None or k in ("error", "progress"))  # 允许置空清除
+        # business/check_result 可显式置空（自动核对降级清 business 副本）
+        if k in allowed and (fields[k] is not None or k in ("error", "progress", "business_metadata", "check_result"))
     ]
     if not keys:
         return
@@ -1170,19 +1307,33 @@ def mt_replace_blocks(file_id: str, rows: list[dict]) -> None:
     """重建某素材文件的块行（先 DELETE 后 INSERT，幂等；与知识库段重建同款事务纪律）。
 
     rows dict：{id, title, note, ranges(JSON 字符串 [[s,e],…]), chars}。
+    块 id 在 blocks.json 生命周期内稳定——重建时按 id 回填 created_at/use_count/
+    last_used_at（引用打点不随同步丢失，created_at 也不再被刷成 now）。
     """
     now = _now()
     conn = _conn()
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            keep: dict[str, tuple[str, int, str | None]] = {
+                r["id"]: (r["created_at"], r["use_count"], r["last_used_at"])
+                for r in conn.execute(
+                    "SELECT id, created_at, use_count, last_used_at FROM mt_blocks WHERE file_id=?",
+                    (file_id,),
+                ).fetchall()
+            }
             conn.execute("DELETE FROM mt_blocks WHERE file_id=?", (file_id,))
             conn.executemany(
-                "INSERT INTO mt_blocks(id, file_id, title, note, ranges, chars, created_at)"
-                " VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO mt_blocks(id, file_id, title, note, ranges, chars, created_at,"
+                " use_count, last_used_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 [
-                    (r["id"], file_id, r["title"], r.get("note") or "",
-                     r["ranges"], r.get("chars") or 0, now)
+                    (
+                        r["id"], file_id, r["title"], r.get("note") or "",
+                        r["ranges"], r.get("chars") or 0,
+                        keep.get(r["id"], (now, 0, None))[0],
+                        keep.get(r["id"], (now, 0, None))[1],
+                        keep.get(r["id"], (now, 0, None))[2],
+                    )
                     for r in rows
                 ],
             )
@@ -1194,9 +1345,30 @@ def mt_replace_blocks(file_id: str, rows: list[dict]) -> None:
         conn.close()
 
 
+def mt_touch_blocks(bids: list[str]) -> None:
+    """素材块 AI 引用打点（use_count+1 / last_used_at=now；容错不抛）。"""
+    ids = [b for b in bids if b]
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    conn = _conn()
+    try:
+        conn.execute(
+            f"UPDATE mt_blocks SET use_count=use_count+1, last_used_at=? WHERE id IN ({placeholders})",
+            [_now(), *ids],
+        )
+    except Exception:
+        logger.exception("素材块引用打点失败：%s", ids)
+    finally:
+        conn.close()
+
+
 def mt_list_blocks(file_id: str | None = None) -> list[dict]:
     """块列表（可按文件过滤；ranges 反序列化为 [[s,e],…]；按创建时间倒序）。"""
-    sql = "SELECT id, file_id, title, note, ranges, chars, created_at FROM mt_blocks"
+    sql = (
+        "SELECT id, file_id, title, note, ranges, chars, created_at, use_count, last_used_at"
+        " FROM mt_blocks"
+    )
     args: tuple = ()
     if file_id:
         sql += " WHERE file_id=?"
@@ -1222,7 +1394,8 @@ def mt_get_block(bid: str) -> dict | None:
     conn = _conn()
     try:
         row = conn.execute(
-            "SELECT id, file_id, title, note, ranges, chars, created_at FROM mt_blocks WHERE id=?",
+            "SELECT id, file_id, title, note, ranges, chars, created_at, use_count, last_used_at"
+            " FROM mt_blocks WHERE id=?",
             (bid,),
         ).fetchone()
     finally:
@@ -1292,3 +1465,19 @@ def recover_stale_kb() -> int:
     finally:
         conn.close()
     return n1 + n2
+
+
+def recover_stale_mt() -> int:
+    """启动对账：素材文件残留 pending/parsing 置 failed（失败行有重试入口）。"""
+    conn = _conn()
+    try:
+        cur = conn.execute(
+            "UPDATE mt_files SET parse_status='failed',"
+            " error=COALESCE(error, '解析中断，请重试'), updated_at=?"
+            " WHERE parse_status IN ('pending','parsing')",
+            (_now(),),
+        )
+        n = cur.rowcount
+    finally:
+        conn.close()
+    return n

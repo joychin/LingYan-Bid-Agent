@@ -14,6 +14,7 @@ import type { ToolStep } from '@/api/sse'
 import { useAutoCollapse } from '@/hooks/useAutoCollapse'
 import { useThrottledValue } from '@/hooks/useThrottledValue'
 import { humanizeError } from '@/lib/errorText'
+import { capStreamingText } from '@/lib/streamTextCap'
 import { cn } from '@/lib/utils'
 
 /** 子代理内部工具步骤行：图标 + 名称 + 状态，点击看结果。 */
@@ -72,16 +73,19 @@ function ChildStep({ step }: { step: ToolStep }) {
 }
 
 /** 子代理思考块：reasoning 是流式 token 热路径（多册并发派发时的主 token 通道），
- *  节流（渲染层合并）+ 分块 memo（只重解析最后一块）双重降本。 */
+ *  节流（渲染层合并）+ 分块 memo（只重解析最后一块）双重降本。
+ *  流式期间只渲染尾部（capStreamingText）：活卡思考 DOM 与重解析成本不随 run
+ *  无界增长（2026-09-08 内存暴涨修复）；终态渲染全文（数据源已是服务端快照）。 */
 function StepReasoning({ text, isStreaming }: { text: string; isStreaming: boolean }) {
   const shown = useThrottledValue(text)
+  const display = isStreaming ? capStreamingText(shown).text : shown
   return (
     <Reasoning isStreaming={isStreaming}>
       <ReasoningTrigger className="text-xs text-muted-foreground">
         {isStreaming ? <TextShimmer>思考过程</TextShimmer> : '思考过程'}
       </ReasoningTrigger>
       <ReasoningContent contentClassName="mt-1 text-[12px] leading-relaxed">
-        <MemoMarkdown text={shown} />
+        <MemoMarkdown text={display} />
       </ReasoningContent>
     </Reasoning>
   )
@@ -111,7 +115,7 @@ export const SubagentCard = memo(function SubagentCard({ step }: { step: ToolSte
   const awaitingApproval = isPaused && step.children.length === 0 && !step.reasoning
 
   return (
-    <Collapsible className="group" open={open} onOpenChange={setOpen}>
+    <Collapsible className="group cv-step" open={open} onOpenChange={setOpen}>
       {step.text ? (
         <p className="whitespace-pre-wrap py-0.5 text-[13px] leading-relaxed text-muted-foreground">
           {step.text}
@@ -192,10 +196,11 @@ export const SubagentCard = memo(function SubagentCard({ step }: { step: ToolSte
               <p className="art-result break-all text-xs text-muted-foreground/70">{step.error}</p>
             </>
           ) : isRunning ? (
-            <p className="flex items-center gap-1 text-[13px] text-muted-foreground/70">
+            // div 非 p：内嵌 Loader 渲染 div，p>div 是非法 HTML 嵌套（控制台报错）
+            <div className="flex items-center gap-1 text-[13px] text-muted-foreground/70">
               <Loader variant="loading-dots" text={isStarting ? '子代理启动中' : '子代理执行中'} size="sm" />
               结果回传后显示在这里
-            </p>
+            </div>
           ) : step.summary ? (
             <p className="art-result">{step.summary}</p>
           ) : null}

@@ -35,7 +35,7 @@ import { useConversations } from '@/hooks/useConversations'
 import { useCreateTask, useTasks } from '@/hooks/useTasks'
 import { useFileUpload } from '@/context/FileUpload'
 import { useToast } from '@/context/Toast'
-import { formatDay } from '@/lib/utils'
+import { formatDay, cn } from '@/lib/utils'
 import { isLivePauseMessage, isRespondAnswer, lastInstructionText, splitMarker } from '@/lib/hitlMessage'
 import { computeWindowStart } from '@/lib/messageWindow'
 import type { Artifact, Message, ThinkingLevel } from '@/api/client'
@@ -101,6 +101,7 @@ export function ChatView({
     total,
     error,
     errorCode,
+    retrying,
     lastInstruction,
     continuationAnswer,
     pauseNarration,
@@ -125,7 +126,7 @@ export function ChatView({
   const { data: conversations = [] } = useConversations()
   const createTask = useCreateTask()
   const { toast } = useToast()
-  const { openFilePicker, setTaskScope, uploads, taskScope, acknowledgeUploads } = useFileUpload()
+  const { setTaskScope, uploads, taskScope, acknowledgeUploads } = useFileUpload()
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottom = useRef(true)
   const [showJump, setShowJump] = useState(false)
@@ -406,8 +407,6 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialSend, convId])
 
-  const fillPrompt = (text: string) => setPrompt(text)
-
   /** 选择器就地新建任务：只建任务不建会话（首发消息时再建），保住已输入的文本。 */
   const handlePickerCreateTask = async (title: string): Promise<string> => {
     const body = await createTask.mutateAsync({ title, withConversation: false })
@@ -452,25 +451,24 @@ export function ChatView({
     <UploadDropzone>
       {/* min-h-0：本层与 UploadDropzone 层都是 .main（flex column，上邻 50px chat-head）里的
           h-full flex item，缺 min-h-0 时依赖默认 shrink 被压缩，异常场景会把 composer
-          连同底栏推出视口下缘被 overflow:hidden 裁掉（表现为发送钮/文件 chip 点不到） */}
-      <div className="relative flex h-full min-h-0 w-full flex-col">
-        <div className="relative min-h-0 flex-1">
+          连同底栏推出视口下缘被 overflow:hidden 裁掉（表现为发送钮/文件 chip 点不到）。
+          空会话（欢迎态）：欢迎文案 + 输入框整体垂直居中（内容区 flex-none + justify-center），
+          不再是「文案顶上、输入框贴底」。 */}
+      <div className={cn('relative flex h-full min-h-0 w-full flex-col', empty && 'justify-center gap-6')}>
+        <div className={cn('relative min-h-0', empty ? 'flex-none' : 'flex-1')}>
           <div ref={scrollRef} onScroll={handleScroll} className="chat-scroll h-full">
             <div className="chat">
               {isLoading && <MessageSkeletons />}
               {isError && (
                 <ErrorCard
                   message={`消息加载失败：${messagesError instanceof Error ? messagesError.message : String(messagesError)}`}
+                  code={null}
                   retryText="重试"
                   onRetry={() => void refetchMessages()}
                 />
               )}
               {empty && (
-                <WelcomeScreen
-                  hasTask={!!convId || !!pickedTaskId}
-                  onPickFile={openFilePicker}
-                  onPrompt={fillPrompt}
-                />
+                <WelcomeScreen hasTask={!!convId || !!pickedTaskId} />
               )}
               {/* 子树边界：一条坏历史数据只降级消息区占位卡，不再打到根级整窗错误页 */}
               <ErrorBoundary compact resetKey={convId ?? 'root'}>
@@ -504,6 +502,7 @@ export function ChatView({
                   total={total}
                   text={streamText}
                   reasoningText={reasoningText}
+                  retrying={retrying}
                   pauseNarration={pauseNarration}
                   continuation={continuation}
                   continuationKind={continuationKind}
@@ -538,9 +537,10 @@ export function ChatView({
               {error && (
                 <ErrorCard
                   message={error}
-                  cancelled={errorCode === 'cancelled'}
+                  code={errorCode}
                   retryText={retryText}
                   onRetry={() => void doSend(retryText).catch(() => {})}
+                  onOpenSettings={onOpenSettings}
                 />
               )}
             </div>
@@ -589,32 +589,29 @@ export function ChatView({
 }
 
 /** 运行中主气泡的状态行文案：随实际活动切换（此前恒「正在思考…」——子代理长跑
- *  4 分钟期间主表面纹丝不动，读起来像卡死）。子代理在跑=带完成计数；普通工具
- *  在跑=工具中文名；都没有时按 startingSubagents 区分「子代理启动中」（审批续跑
- *  已批准、首个子代理事件未达）与「正在思考」。 */
+ *  4 分钟期间主表面纹丝不动，读起来像卡死）。子代理在跑=「子代理执行中」（完成
+ *  计数 2026-09-08 删——数字只统计活跃子代理内部步骤、随其完成回落/波间归零，
+ *  非累计进度，读起来无规律误导，勿回加）；普通工具在跑=工具中文名；都没有时按
+ *  startingSubagents 区分「子代理启动中」（审批续跑已批准、首个子代理事件未达）
+ *  与「正在思考」。 */
 function hasTaskStep(steps: RunState['tools']): boolean {
   return steps.some((step) => step.tool === 'task' || hasTaskStep(step.children))
 }
 
 function activeStatusLabel(tools: RunState['tools'], startingSubagents = false): string {
-  let subDone = 0
   let subActive = false
   let plainTool: string | null = null
   const walk = (steps: RunState['tools']) => {
     for (const s of steps) {
       if (s.status === 'running') {
-        if (s.tool === 'task') {
-          subActive = true
-          for (const c of s.children) if (c.status !== 'running') subDone++
-        } else if (!plainTool) {
-          plainTool = s.tool
-        }
+        if (s.tool === 'task') subActive = true
+        else if (!plainTool) plainTool = s.tool
       }
       if (s.children.length > 0) walk(s.children)
     }
   }
   walk(tools)
-  if (subActive) return `子代理执行中 · 已完成 ${subDone} 项`
+  if (subActive) return '子代理执行中'
   if (plainTool) return `正在执行 · ${toolDisplayName(plainTool)}`
   return startingSubagents ? '子代理启动中…' : '正在思考…'
 }
@@ -636,6 +633,7 @@ function RunMessage({
   total,
   text,
   reasoningText,
+  retrying,
   pauseNarration,
   continuation,
   continuationKind,
@@ -651,6 +649,9 @@ function RunMessage({
   total: number
   text: string
   reasoningText: string
+  /** LLM 瞬时错误自动重试等待期（agent.retry）：正文区显示「正在自动重试」shimmer，
+   *  正文已同步清空（与 sidecar cur_text_parts.clear() 对齐）。流恢复即清除。 */
+  retrying: RunState['retrying']
   /** 暂停时未封口的正文（settle-interrupt 移入）：冻结/续跑期间渲染为过程区顶部旁白行 */
   pauseNarration: string
   continuation: boolean
@@ -674,8 +675,8 @@ function RunMessage({
   return (
     <WMessage
       role="assistant"
-      name="Tender Agent"
-      avatar={<div className="msg-avatar">T</div>}
+      name="Swift Agent"
+      avatar={<div className="msg-avatar" aria-hidden />}
       status={
         paused ? (
           <span className="inline-flex items-center gap-1.5">
@@ -723,6 +724,12 @@ function RunMessage({
               <MemoMarkdown text={shownText} components={markdownComponents} />
               <span className="caret-blink ml-0.5 inline-block h-[1.15em] w-0.5 translate-y-[0.2em] bg-primary" />
             </>
+          ) : retrying ? (
+            // 自动重试等待期（agent.retry）：后台在退避等待（最长 30s/次），不显示成
+            // 卡死——服务方不稳的事实直接说给人听
+            <TextShimmer className="text-sm">
+              {`模型服务不稳，正在自动重试（第 ${retrying.attempt}/${retrying.total} 次）…`}
+            </TextShimmer>
           ) : (
             <ThinkingBar text={label} />
           )}
@@ -850,19 +857,29 @@ const MessageList = memo(function MessageList({
   return <>{nodes}</>
 })
 
-/** 错误卡。cancelled=true（用户主动停止，契约 additive code）：中性灰呈现 +
- *  「重新执行」——自己停的不算出错，不与真实错误共用红色。 */
+/** 错误卡。按 code（契约 additive，2026-09-08 取值域扩展）分形态：
+ *  - cancelled/interrupted（用户主动停止/sidecar 重启中断）：中性灰 +「重新执行」——
+ *    自己停的不算出错，不与真实错误共用红色；
+ *  - llm_auth（模型未配置/Key 失效）：红卡 +「去设置」——重试救不了配置问题；
+ *  - 其余（llm_unavailable/internal/旧 sidecar 无 code）：红卡 +「重试」。
+ *  message 由 sidecar 拼好：首行人话、次行起为服务方/异常原文——按首行换行拆开渲染，
+ *  原文降为小字灰（一眼人话、原文可查可复制）。 */
 function ErrorCard({
   message,
-  cancelled = false,
+  code,
   retryText,
   onRetry,
+  onOpenSettings,
 }: {
   message: string
-  cancelled?: boolean
+  code: string | null
   retryText: string
   onRetry: () => void
+  /** llm_auth 的「去设置」入口（ChatView 已有设置窗开关回调；可缺省=浏览器无入口场景） */
+  onOpenSettings?: () => void
 }) {
+  const cancelled = code === 'cancelled' || code === 'interrupted'
+  const [headline, ...detailLines] = message.split('\n')
   return (
     <div
       className={
@@ -871,12 +888,26 @@ function ErrorCard({
           : 'rounded-lg border border-error/50 bg-error/5 px-3 py-2 text-sm text-error'
       }
     >
-      {message}
-      {retryText.trim() && (
-        <button type="button" className="ml-2 hover:underline" onClick={onRetry}>
-          {cancelled ? '重新执行' : '重试'}
-        </button>
+      {headline}
+      {detailLines.length > 0 && (
+        <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          {detailLines.map((line, i) => (
+            <div key={i}>{line}</div>
+          ))}
+        </div>
       )}
+      <span className="ml-2 inline-flex gap-2">
+        {code === 'llm_auth' && onOpenSettings && (
+          <button type="button" className="hover:underline" onClick={onOpenSettings}>
+            去设置
+          </button>
+        )}
+        {retryText.trim() && (
+          <button type="button" className="hover:underline" onClick={onRetry}>
+            {cancelled ? '重新执行' : '重试'}
+          </button>
+        )}
+      </span>
     </div>
   )
 }

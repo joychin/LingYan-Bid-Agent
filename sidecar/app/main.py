@@ -20,7 +20,18 @@ from fastapi.responses import JSONResponse
 
 from . import config as cfg
 from . import db
-from .api import artifacts, conversations, files, knowledge, materials, runs, sse, tasks, workbench
+from .api import (
+    artifacts,
+    conversations,
+    files,
+    knowledge,
+    materials,
+    runs,
+    sse,
+    tasks,
+    templates,
+    workbench,
+)
 from .api import settings as settings_api
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -110,8 +121,14 @@ async def lifespan(_app: FastAPI):
     stale_kb = db.recover_stale_kb()
     if stale_kb:
         logger.warning("启动时标记 %d 条崩溃残留的知识库条目为 failed", stale_kb)
+    stale_mt = db.recover_stale_mt()
+    if stale_mt:
+        logger.warning("启动时标记 %d 条崩溃残留的素材文件为 failed", stale_mt)
+    from .knowledge.autocheck import autocheck_sweep
     from .knowledge.ingest import rebuild_kb_index
 
+    # 存量待确认条目补跑锚点回文核对（在检索段全量重建之前，改库即被重建收口）
+    autocheck_sweep()
     rebuild_kb_index()
     # checkpoint 是记忆真值，messages 表是恢复源：agent.db 丢失/损坏的会话在此重建记忆
     from .agent import recover_agent_memory
@@ -170,6 +187,7 @@ app.include_router(files.router, prefix="/api")
 app.include_router(artifacts.router, prefix="/api")
 app.include_router(knowledge.router, prefix="/api")
 app.include_router(materials.router, prefix="/api")
+app.include_router(templates.router, prefix="/api")
 app.include_router(workbench.router, prefix="/api")
 
 

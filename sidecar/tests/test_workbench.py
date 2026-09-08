@@ -38,6 +38,10 @@ def test_list_filters_and_flags(client):
     assert files["analysis/disqualification.md"]["editable"] is True
     assert files["analysis/disqualification.md"]["revised"] is False
     assert "mtime" in files["analysis/structure.md"] and "size" in files["analysis/structure.md"]
+    # abs_path：面板右键「打开文件夹」用（绝对路径，落在任务 work/ 下）
+    assert files["analysis/structure.md"]["abs_path"].endswith(
+        f"workspace/{tid}/work/analysis/structure.md"
+    )
 
 
 def test_read_and_containment(client):
@@ -58,6 +62,36 @@ def test_read_and_containment(client):
     for bad in ("../files/a.md", "analysis/../../x.md", "analysis/x.json", "nope.md"):
         rr = client.get("/api/workbench/content", params={"task_id": tid, "path": bad})
         assert rr.status_code == 404, bad
+
+
+def test_path_fuzzy_resolution(client):
+    """唯一后缀兜底（2026-09-07 guide_path 事故回归）：模型给的路径少前缀
+    （body/ 下相对）/多前缀（work/、<task_id>/）时仍能打开同一真实文件；
+    歧义（多处同结尾）与无命中维持 404；路径边界不误中（asub/x ≠ sub/x）。
+    """
+    task = create_task(client)["task"]
+    tid = task["id"]
+    name = "_new样例/申报001-对项目的理解.md"
+    _seed_out(tid, f"body/{name}", "# 范样")
+    for given in (name, f"work/body/{name}", f"{tid}/work/body/{name}"):
+        r = client.get("/api/workbench/content", params={"task_id": tid, "path": given})
+        assert r.status_code == 200, given
+        assert r.json()["content"] == "# 范样"
+
+    # 歧义：另一目录出现同结尾文件 → 不猜，维持 404
+    _seed_out(tid, f"outline/{name}", "dup")
+    r = client.get("/api/workbench/content", params={"task_id": tid, "path": name})
+    assert r.status_code == 404
+
+    # 无命中 / 边界不误中
+    for bad in ("nope/x.md", "sub/x.md"):
+        rr = client.get("/api/workbench/content", params={"task_id": tid, "path": bad})
+        assert rr.status_code == 404, bad
+    _seed_out(tid, "asub/x.md", "a")
+    assert (
+        client.get("/api/workbench/content", params={"task_id": tid, "path": "sub/x.md"}).status_code
+        == 404
+    )
 
 
 def test_write_stamps_revised_and_conflict(client):
@@ -255,3 +289,25 @@ def test_docx_rejected_on_md_endpoints(client):
     body = {"task_id": tid, "path": "body/3.1 需求分析.docx", "content": "x", "base_hash": "", "force": True}
     assert "Word" in client.put("/api/workbench/content", json=body).json()["detail"]
     assert client.post("/api/workbench/restore", json={"task_id": tid, "path": qs["path"]}).status_code == 400
+
+
+def test_raw_endpoint(client):
+    """docx 原始字节（面板版式预览）：字节 roundtrip + docx content-type；
+    md 拒 400（走 content 文本端点）；越界 404。"""
+    task = create_task(client)["task"]
+    tid = task["id"]
+    _seed_docx(tid, "body/3.1 需求分析.docx", paragraphs="正文第一段。")
+    disk = (artifact_store.work_dir(tid) / "body/3.1 需求分析.docx").read_bytes()
+
+    r = client.get("/api/workbench/raw", params={"task_id": tid, "path": "body/3.1 需求分析.docx"})
+    assert r.status_code == 200
+    assert r.content == disk
+    assert "wordprocessingml" in r.headers["content-type"]
+
+    # 唯一后缀兜底与读写端点同口径（模型少写 body/ 前缀的路径也能取到字节）
+    r = client.get("/api/workbench/raw", params={"task_id": tid, "path": "3.1 需求分析.docx"})
+    assert r.status_code == 200 and r.content == disk
+
+    _seed_out(tid, "analysis/evaluation.md", "内容")
+    assert client.get("/api/workbench/raw", params={"task_id": tid, "path": "analysis/evaluation.md"}).status_code == 400
+    assert client.get("/api/workbench/raw", params={"task_id": tid, "path": "../sources/a.docx"}).status_code == 404
