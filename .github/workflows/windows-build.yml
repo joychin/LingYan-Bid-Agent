@@ -86,17 +86,19 @@ jobs:
           git fetch --tags --quiet
           PREV_TAG="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
           if [ -n "$PREV_TAG" ]; then
-            git log --pretty=format:"- %s" "${PREV_TAG}..${GITHUB_REF_NAME}" > /tmp/CHANGELOG.md
+            git log --pretty=format:"- %s" "${PREV_TAG}..${GITHUB_REF_NAME}" > CHANGELOG_CI.md
             echo "==> changelog 基于 ${PREV_TAG}..${GITHUB_REF_NAME}"
           else
-            echo "首次发布（无先前 tag 对比）。" > /tmp/CHANGELOG.md
+            echo "首次发布（无先前 tag 对比）。" > CHANGELOG_CI.md
             echo "==> 首次发布，changelog 为空说明"
           fi
 
       - name: 上传安装包到 Release
         uses: softprops/action-gh-release@v2
         with:
-          body_path: /tmp/CHANGELOG.md
+          # 工作区相对路径：Git Bash 的 /tmp（C 盘用户临时目录）与 Node（softprops）
+          # 的 /tmp（工作盘根）解析不一致，绝对路径会静默读不到、body 落空
+          body_path: CHANGELOG_CI.md
           files: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/msi/*.msi
