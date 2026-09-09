@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Tender Agent</title>
+    <script src="/splash-theme.js"></script>
+    <style>
+      /* 启动画面（独立于主前端构建，色值手抄自 styles/tokens.css 双 mode）。
+       * 任务：sidecar 冷启动期（Windows 首启可达数十秒）给用户品牌反馈，
+       * 代替主窗口里语义错位的「连接中断，正在重连…」。Rust 侧探活成功/熔断时关本窗。 */
+      :root {
+        color-scheme: light;
+        --bg: #ffffff;
+        --ink: #1a1d21;
+        --ink-2: #5b616b;
+        --ink-3: #8a8f98;
+      }
+      :root[data-theme='dark'] {
+        color-scheme: dark;
+        --bg: #1c1b1a;
+        --ink: #e6e8ec;
+        --ink-2: #9aa1ab;
+        --ink-3: #6b7280;
+      }
+      * {
+        margin: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background: var(--bg);
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+          'Microsoft YaHei', sans-serif;
+        user-select: none;
+        -webkit-user-select: none;
+        overflow: hidden;
+      }
+      /* 燕子 logo：SVG 本体是深墨填充，深色模式会隐身——CSS mask 换色（聊天头像同款方案） */
+      .logo {
+        width: 72px;
+        height: 72px;
+        background-color: var(--ink);
+        -webkit-mask: url('/logo.svg') center / contain no-repeat;
+        mask: url('/logo.svg') center / contain no-repeat;
+        animation: breathe 1.8s ease-in-out infinite;
+      }
+      .name {
+        font-size: 19px;
+        font-weight: 650;
+        letter-spacing: 0.2px;
+        color: var(--ink);
+      }
+      .status {
+        font-size: 13px;
+        color: var(--ink-2);
+      }
+      .hint {
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--ink-3);
+      }
+      @keyframes breathe {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.55;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="logo"></div>
+    <div class="name">Tender Agent</div>
+    <div class="status">正在启动…</div>
+    <div class="hint">首次启动需要解压组件，约半分钟</div>
+  </body>
+</html>

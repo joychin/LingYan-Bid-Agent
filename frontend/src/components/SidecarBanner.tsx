@@ -4,16 +4,17 @@ import { useToast } from '@/context/Toast'
 import { exportDiagnostics, isTauri, revealSidecarLogs } from '@/api/client'
 import { sidecarFailureTitle } from '@/lib/sidecarFailure'
 
-/** §11 sidecar 三色状态条：黄=重连中，绿=已恢复（2s 消失），红=失败（真重启/日志/诊断）。 */
+/** §11 sidecar 状态条：booting=启动中（中性）、黄=重连中，绿=已恢复（2s 消失），红=失败（真重启/日志/诊断）。 */
 export function SidecarBanner() {
   const { status, retry, failure } = useSidecarHealth()
   const { toast } = useToast()
   const [restored, setRestored] = useState(false)
   const [busy, setBusy] = useState(false)
-  const prev = useRef<ReturnType<typeof useSidecarHealth>['status']>('ok')
+  const prev = useRef<ReturnType<typeof useSidecarHealth>['status']>('booting')
 
   useEffect(() => {
-    if (prev.current !== 'ok' && status === 'ok') {
+    // 仅从中断态（reconnecting/failed）恢复才显示绿条；booting→ok 是首次就绪，谈不上「恢复」
+    if (prev.current !== 'ok' && prev.current !== 'booting' && status === 'ok') {
       setRestored(true)
       const t = setTimeout(() => setRestored(false), 2000)
       return () => clearTimeout(t)
@@ -21,6 +22,14 @@ export function SidecarBanner() {
     prev.current = status
   }, [status])
 
+  if (status === 'booting') {
+    return (
+      <div className="sidecar-banner flex items-center gap-2 border-b bg-muted/40 px-4 py-1.5 text-xs text-ink-2">
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ink-3" />
+        正在启动…首次启动需要解压组件，约半分钟
+      </div>
+    )
+  }
   if (status === 'reconnecting') {
     return (
       <div className="sidecar-banner flex items-center gap-2 border-b bg-warning/10 px-4 py-1.5 text-xs text-warning">

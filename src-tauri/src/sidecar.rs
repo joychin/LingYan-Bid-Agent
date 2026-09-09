@@ -499,6 +499,30 @@ fn emit(app: &AppHandle, state: SidecarState, detail: &str) {
     );
 }
 
+/// 启动序列是否已收尾（splash 已关、主窗已亮）——只在首次就绪/熔断时收尾一次，
+/// 运行中崩溃重启不再抢焦点。
+static SPLASH_DISMISSED: AtomicBool = AtomicBool::new(false);
+
+/// 启动序列收尾：关 splash 窗、首次显示主窗（tauri.conf.json 里主窗 visible=false）。
+/// 幂等：splash 不存在/已关、主窗已可见均 no-op；single-instance 回调也调它，
+/// 防启动期二次双击把 splash 卡成死窗。熔断路径同样收尾——主窗红条（重试/日志/诊断）
+/// 接管失败展示，不在 splash 里重复造。
+pub fn reveal_main_from_splash(app: &AppHandle) {
+    if SPLASH_DISMISSED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(w) = app.get_webview_window("splash") {
+        let _ = w.close();
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        if !w.is_visible().unwrap_or(true) {
+            let _ = w.show();
+        }
+        let _ = w.set_focus();
+    }
+    log::info!("启动序列收尾：splash 关闭、主窗显示");
+}
+
 /// 杀进程树并回收；同时清空 child/info（供 healthz 失败、restart、退出共用）。
 fn kill_and_reap(mgr: &SidecarManager) {
     let mut guard = mgr.child.lock().unwrap();
@@ -549,6 +573,7 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
                         mgr.restart_requested.store(false, Ordering::SeqCst);
                         *mgr.state.lock().unwrap() = SidecarState::Running;
                         emit(&app, SidecarState::Running, "ok");
+                        reveal_main_from_splash(&app);
                         log::info!("sidecar running on 127.0.0.1:{port}");
                     } else {
                         if mgr.stopping.load(Ordering::SeqCst) {
@@ -572,7 +597,9 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
 
                         if failed >= MAX_RESTARTS {
                             emit(&app, SidecarState::Failed, "已达重启上限，停止自动重启");
+                            // 熔断也收尾启动序列：关 splash 亮主窗，红条（重试/日志/诊断）接管
                             log::error!("sidecar healthz 连续失败达上限（{failed} 次），停止自动重启，等待手动触发");
+                            reveal_main_from_splash(&app);
                             // 等待手动触发（restart_sidecar 会置 restart_requested）
                             while !mgr.restart_requested.swap(false, Ordering::SeqCst) {
                                 if mgr.stopping.load(Ordering::SeqCst) {
@@ -606,9 +633,10 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
 
                     if failed >= MAX_RESTARTS {
                         emit(&app, SidecarState::Failed, "已达重启上限，停止自动重启");
-                        log::error!(
-                            "sidecar spawn 连续失败达上限（{failed} 次），停止自动重启，等待手动触发"
-                        );
+                            log::error!(
+                                "sidecar spawn 连续失败达上限（{failed} 次），停止自动重启，等待手动触发"
+                            );
+                            reveal_main_from_splash(&app);
                         while !mgr.restart_requested.swap(false, Ordering::SeqCst) {
                             if mgr.stopping.load(Ordering::SeqCst) {
                                 break 'outer;
@@ -683,6 +711,7 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
                     if failed >= MAX_RESTARTS {
                         emit(&app, SidecarState::Failed, "已达重启上限，停止自动重启");
                         log::error!("sidecar 连续意外退出达上限（{failed} 次），停止自动重启，等待手动触发");
+                        reveal_main_from_splash(&app);
                         while !mgr.restart_requested.swap(false, Ordering::SeqCst) {
                             if mgr.stopping.load(Ordering::SeqCst) {
                                 break 'outer;

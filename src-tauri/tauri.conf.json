@@ -19,7 +19,20 @@
         "fullscreen": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 13, "y": 27 }
+        "trafficLightPosition": { "x": 13, "y": 27 },
+        "visible": false
+      },
+      {
+        "label": "splash",
+        "title": "Tender Agent",
+        "url": "splash.html",
+        "width": 420,
+        "height": 300,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "center": true,
+        "skipTaskbar": true
       }
     ],
     "security": {

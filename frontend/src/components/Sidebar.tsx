@@ -62,11 +62,13 @@ const SIDE_MIN_W = 200
 const SIDE_MAX_W = 400
 
 const STATUS_DOT: Record<string, string> = {
+  booting: 'bg-ink-3',
   ok: 'bg-success',
   reconnecting: 'bg-warning',
   failed: 'bg-error',
 }
 const STATUS_LABEL: Record<string, string> = {
+  booting: '启动中',
   ok: '正常',
   reconnecting: '重连中',
   failed: '失败',

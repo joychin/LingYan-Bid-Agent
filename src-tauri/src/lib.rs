@@ -184,6 +184,9 @@ pub fn run() {
         // single-instance 必须第一个注册。agent.db 是单文件 SQLite + SqliteSaver 常驻连接，
         // GUI 双开会撞 checkpoint——单实例守卫是用户不可见的最简防线，不做任何互斥协调。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 启动期（splash 尚在）二次双击：先收尾启动序列把主窗亮出来，否则主窗
+            // visible=false 会被直接 show 出半成品；正常运行期该调用幂等直通。
+            sidecar::reveal_main_from_splash(app);
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();
                 let _ = w.show();
