@@ -105,6 +105,15 @@ def _smoke() -> int:
 
 
 if __name__ == "__main__":
+    # Windows 的 stdout/stderr 默认走 locale 编码（cp1252），冒烟门的 json 中文
+    # 输出在冻结环境必炸（mac/Linux 默认 UTF-8 无此问题）——统一切 UTF-8，
+    # errors=replace 兜底个别库写出的极端字符。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass  # 无 reconfigure 的极旧 Python 维持原状
+
     if "--smoke" in sys.argv:
         sys.exit(_smoke())
     from app.main import main
