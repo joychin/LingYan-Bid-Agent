@@ -4,6 +4,8 @@
 产出文本零 REQ/MAND/SCORE/TPL 编号（派发契约，编号会被写手镜像进正文）。
 """
 
+import re
+
 import pytest
 
 from app import artifact_store, runctx
@@ -100,6 +102,7 @@ def test_thin_dispatch_enriched_with_all_blocks(env):
     assert out.startswith("写 3.1 项目理解\n〔系统附")
     assert f"任务目录前缀：{tid}/" in out
     assert f"输出路径：{tid}/work/body/3.1 项目理解与需求分析.docx" in out
+    assert re.search(r"今天日期：\d{4}-\d{2}-\d{2}$", out, re.MULTILINE)  # 天级（写手拿不到任务上下文块）
     assert "写作模式：推理撰写" in out
     # 要求清单=registry 解析的原文+出处，编号解析后即弃
     assert "- 投标人须具备低代码开发能力（出处：第三章 3.1，L100-L110）" in out

@@ -57,7 +57,11 @@ export function formatDuration(ms: number): string {
 
 /** 文本导出为本地文件（右键「另存为」副本下载；Tauri webview 同走 a[download]）。 */
 export function downloadText(filename: string, text: string, mime = 'text/markdown') {
-  const blob = new Blob([text], { type: `${mime};charset=utf-8` })
+  downloadBlob(filename, new Blob([text], { type: `${mime};charset=utf-8` }))
+}
+
+/** 二进制副本下载（docx/pdf 原件等；Tauri webview 同走 a[download]）。 */
+export function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url

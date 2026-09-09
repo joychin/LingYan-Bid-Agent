@@ -32,6 +32,7 @@ export default function DocxPreviewBody({
       breakPages: true,
       experimental: true,
       useBase64URL: true,
+      renderComments: true, // 待办批注高亮可见（docx_comment_add 落的缺口标记）
     }).catch((e: unknown) => {
       if (!cancelled) onErrorRef.current?.(e)
     })

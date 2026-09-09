@@ -20,8 +20,9 @@ coverage/
 
 # ─── sidecar/：Python 3.12 + uv + FastAPI + pytest ───────
 .venv/
-# PyInstaller 冻结用的独立构建环境（uv 管的 python-build-standalone，见 build_sidecar.sh）
-.build-venv/
+# PyInstaller 冻结用的独立构建环境（uv 管的 python-build-standalone，见 build_sidecar.sh；
+# .build-venv=本机平台，.build-venv-<arch>=同 OS 跨架构构建用）
+.build-venv*/
 __pycache__/
 *.py[cod]
 *$py.class

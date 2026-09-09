@@ -1,8 +1,8 @@
 """生成标书基准 docx 模板（app/resources/tender_base_template.docx）。
 
 行业共识「格式与内容分离」的载体：所有版式定义（字体/标题分级/正文行距缩进/
-页边距/页码）活在本模板的 styles.xml 里，docx_ops 建节与合册从它起建、只挂
-样式名。改版式=改本脚本重跑（等价于在 Word 里改样式后另存），不是改业务代码。
+封面两档/页边距/页码）活在本模板的 styles.xml 里，docx_ops 建节与合册从它起建、
+只挂样式名。改版式=改本脚本重跑（等价于在 Word 里改样式后另存），不是改业务代码。
 
 版式档=标书通行惯例（非公文 GB/T 9704 档）：正文宋体小四 1.5 倍行距首行缩进
 2 字符、标题黑体分级加粗黑色（默认模板的蓝色英文脸是「生成的 Word 难看」根源）、
@@ -91,6 +91,29 @@ def main() -> None:
     ind.set(qn("w:firstLineChars"), "200")
     ind.set(qn("w:firstLine"), "480")
 
+    # Tender Cover / Tender Cover Sub：封面两档——大字行（项目名/「投标文件·册名」）
+    # 黑体二号，落款行（投标人/日期）小三不加粗，均居中无缩进。
+    cover = doc.styles.add_style("Tender Cover", WD_STYLE_TYPE.PARAGRAPH)
+    cover.element.set(qn("w:styleId"), "TenderCover")
+    cover.base_style = normal
+    cover.quick_style = True
+    cover.font.size = Pt(22)
+    _set_east_asia(cover, "黑体")
+    cpf = cover.paragraph_format
+    cpf.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    cpf.line_spacing = 1.5
+    cpf.space_before = Pt(0)
+    cpf.space_after = Pt(18)
+    cover_sub = doc.styles.add_style("Tender Cover Sub", WD_STYLE_TYPE.PARAGRAPH)
+    cover_sub.element.set(qn("w:styleId"), "TenderCoverSub")
+    cover_sub.base_style = cover
+    cover_sub.quick_style = True
+    cover_sub.font.size = Pt(15)
+    cover_sub.font.bold = False
+    csf = cover_sub.paragraph_format
+    csf.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    csf.space_after = Pt(6)
+
     # 标题：黑体分级加粗黑色，去默认模板的英文蓝
     for name, east, size, bold in HEADINGS:
         st = doc.styles[name]
@@ -138,6 +161,9 @@ def main() -> None:
         "本页全部内容在程序建节时自动清空，仅作版式预览。",
         style=body_name,
     )
+    doc.add_paragraph("XX 项目投标文件（封面大字示例）", style="Tender Cover")
+    doc.add_paragraph("投标人：XX 有限公司", style="Tender Cover Sub")
+    doc.add_paragraph("日期：2026 年 9 月", style="Tender Cover Sub")
 
     # 清掉默认模板自带的空段（模板首行直接是 Title 示例）
     for p in doc.element.body.findall(qn("w:p")):
@@ -158,6 +184,14 @@ def main() -> None:
     assert b.paragraph_format.line_spacing == 1.5
     h1 = chk.styles["Heading 1"]
     assert h1.font.color.rgb == BLACK and h1.font.size == Pt(18)
+    cov = chk.styles["Tender Cover"]
+    assert cov.font.size == Pt(22)
+    assert cov.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    cov_fonts = cov.element.get_or_add_rPr().get_or_add_rFonts()
+    assert cov_fonts.get(qn("w:eastAsia")) == "黑体"
+    sub = chk.styles["Tender Cover Sub"]
+    assert sub.font.size == Pt(15) and sub.font.bold is False
+    assert sub.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.CENTER
     fonts = chk.styles["Normal"].element.get_or_add_rPr().get_or_add_rFonts()
     assert fonts.get(qn("w:eastAsia")) == "宋体"
     # twips↔EMU 换算有取整漂移，按毫米级容差断言

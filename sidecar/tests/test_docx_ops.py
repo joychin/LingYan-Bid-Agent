@@ -18,12 +18,17 @@ from docx.oxml.ns import qn
 from app import runctx
 from app.knowledge import materials_lib as mlib
 from app.tools.docx_ops import (
+    _accepted_text,
+    _flatten_rejected,
     docx_assemble_volume,
+    docx_comment_add,
+    docx_image_insert,
     docx_material_inject,
     docx_section_create,
     docx_section_read,
     docx_section_revise,
     docx_source_inject,
+    section_text_lines,
 )
 from tests.util import init_env
 
@@ -761,7 +766,9 @@ def test_base_template_layout_on_create_and_assemble(env):
     """建节/合册从标书基准模板起建（格式与内容分离，模板由
     scripts/make_base_template.py 维护）：中文 eastAsia 定死、正文段挂
     Tender Body（1.5 倍行距+首行缩进 2 字符）、标题黑体加粗黑色（默认英文
-    模板的蓝色英文脸是「生成的 Word 难看」的根源）、A4+页脚页码域。"""
+    模板的蓝色英文脸是「生成的 Word 难看」的根源）、封面两档居中、A4+页脚
+    页码域。"""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt, RGBColor
 
     from app import publish
@@ -781,6 +788,13 @@ def test_base_template_layout_on_create_and_assemble(env):
     assert body.paragraph_format.line_spacing == 1.5
     ind = body.element.get_or_add_pPr().find(qn("w:ind"))
     assert ind.get(qn("w:firstLineChars")) == "200"
+    cover = doc.styles["Tender Cover"]
+    assert _east(doc, "Tender Cover") == "黑体"
+    assert cover.font.size == Pt(22)
+    assert cover.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    sub = doc.styles["Tender Cover Sub"]
+    assert sub.font.size == Pt(15) and sub.font.bold is False
+    assert sub.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.CENTER
     assert doc.paragraphs[0].style.name == "Heading 1"
     assert doc.paragraphs[1].style.name == "Tender Body"
     # 模板带的样式示例段在建节产物中整段剥离（body 只留版面）
@@ -913,6 +927,105 @@ def test_assemble_tree_order_headings_and_missing(env):
     assert "个节文件未并入" not in r2
 
 
+_DIR_COVER = {
+    "response_documents": [
+        {
+            "name": "技术部分",
+            "scope": "",
+            "directory": [
+                {"目录名称": "封面", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+                {"目录名称": "第三章 技术方案", "level": 1, "children": [
+                    {"目录名称": "3.1 项目理解与需求分析", "level": 2, "children": [],
+                     "交付形态": "正文编写", "来源位置": ["REQ-01"]},
+                ]},
+            ],
+        }
+    ]
+}
+
+
+def test_revise_insert_with_style(env):
+    """insert_after 可带 style 字段挂指定版式（封面行）；样式不存在回落正文
+    样式且返回注记——用户自定义版式缺封面样式名不失败。"""
+    section = _make_section()
+    edits = json.dumps([
+        {"para": 1, "action": "insert_after", "text": "XX 项目投标文件",
+         "style": "Tender Cover"},
+        {"para": 1, "action": "insert_after", "text": "投标人：XX 有限公司",
+         "style": "Tender Cover Sub"},
+        {"para": 1, "action": "insert_after", "text": "未知样式行",
+         "style": "不存在的样式"},
+    ], ensure_ascii=False)
+    r = docx_section_revise.invoke({"path": section, "edits": edits})
+    assert r.startswith("[已修订]")
+    assert "不存在的样式" in r and "正文样式" in r
+    chk = Document(str(_abs(env, section)))
+    # 插入段在 w:ins 修订包裹里，p.text 读不到——按接受视角取文本
+    by_text = {_accepted_text(p._p): p.style.name for p in chk.paragraphs}
+    assert by_text["XX 项目投标文件"] == "Tender Cover"
+    assert by_text["投标人：XX 有限公司"] == "Tender Cover Sub"
+    assert by_text["未知样式行"] == "Tender Body"  # 回落正文样式
+
+
+def test_assemble_cover_node(env):
+    """封面=树首一级叶子（名「封面」）：整本首页即封面页——无册名 Title、
+    无「封面」标题行（节文件标题段照旧剥）、封面行挂 Tender Cover、开
+    「首页不同」（封面页无页眉页脚）、第一章分页让封面独占一页。"""
+    _seed_dir_artifact(env, _DIR_COVER)
+    docx_section_create.invoke({"path": "body/封面", "title": "封面"})
+    docx_section_revise.invoke({"path": "body/封面", "edits": json.dumps([
+        {"para": 1, "action": "insert_after", "text": "XX 项目投标文件（技术部分）",
+         "style": "Tender Cover"},
+        {"para": 1, "action": "insert_after", "text": "投标人：XX 有限公司",
+         "style": "Tender Cover Sub"},
+    ], ensure_ascii=False)})
+    docx_section_create.invoke(
+        {"path": "body/3.1 项目理解与需求分析", "title": "3.1 项目理解与需求分析",
+         "paragraphs": "3.1 正文第一段。"}
+    )
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]") and "缺失" not in r and "未产出" not in r
+
+    chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    paras = chk.paragraphs
+    # 封面行是修订插入（run 在 w:ins 里），文本按接受视角取
+    texts = [_accepted_text(p._p) for p in paras]
+    assert paras[0].style.name == "Tender Cover" and texts[0] == "XX 项目投标文件（技术部分）"
+    assert not any(p.style.name == "Title" for p in paras)  # 册名大标题被跳过
+    assert "封面" not in texts  # 封面节点自身标题不发、节文件标题段被剥
+    chapter = next(p for t, p in zip(texts, paras) if t == "第三章 技术方案")
+    assert chapter.paragraph_format.page_break_before is True  # 封面独占首页
+    assert chk.sections[0].different_first_page_header_footer is True
+    assert "PAGE" in chk.sections[0].footer.paragraphs[0]._p.xml  # 默认页脚仍在
+
+
+def test_assemble_cover_missing_reported(env):
+    """封面缺节文件的两种形态照旧点名（正文编写→缺失正文节；模板或附件填充→
+    按附件对待），册名 Title 同样跳过（封面位由树决定，不因缺文件回退双标题）。"""
+    _seed_dir_artifact(env, _DIR_COVER)
+    docx_section_create.invoke(
+        {"path": "body/3.1 项目理解与需求分析", "title": "3.1 项目理解与需求分析",
+         "paragraphs": "3.1 正文第一段。"}
+    )
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    assert "缺失 1 节未并入：封面" in r
+    chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    assert chk.paragraphs[0].style.name == "Heading 1"  # 无 Title，直接进第一章
+
+    import copy
+
+    non_prose = copy.deepcopy(_DIR_COVER)
+    non_prose["response_documents"][0]["directory"][0]["交付形态"] = "模板或附件填充"
+    _seed_dir_artifact(env, non_prose)
+    r2 = docx_assemble_volume.invoke({})
+    assert r2.startswith("[已合册]")
+    assert "模板填充类未产出 1 节（按附件对待，不占整本位）：封面" in r2
+    chk2 = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    assert chk2.paragraphs[0].style.name == "Heading 1"
+
+
 def test_assemble_includes_produced_format_node(env):
     """模板填充叶子产出节文件即按树序并进整本（格式件是标书组成部分）。"""
     _seed_dir_artifact(env, _DIR_SINGLE)
@@ -959,6 +1072,39 @@ def test_assemble_preserves_revision_marks_and_images(env):
     assert chk.element.body.find(".//" + qn("w:del")) is not None
     for blip in chk.element.body.findall(".//" + qn("a:blip")):
         assert blip.get(qn("r:embed")) in chk.part.related_parts  # 图片关系完好
+
+
+def test_assemble_migrates_comments_and_warns_inline(env):
+    """节内待办批注迁入整本（id 重映射、标记不悬空）；内联占位兜底扫描点名。"""
+    _seed_dir_artifact(env, _DIR_SINGLE)
+    docx_section_create.invoke(
+        {"path": "body/3.1 项目理解与需求分析", "title": "3.1 项目理解与需求分析",
+         "paragraphs": "3.1 正文第一段。"}
+    )
+    assert docx_comment_add.invoke({
+        "path": "body/3.1 项目理解与需求分析.docx", "after": "2",
+        "text": "3.1 缺项目批复文件编号，待用户确认",
+    }).startswith("[已加批注]")
+    docx_section_create.invoke(
+        {"path": "body/3.2 总体设计方案", "title": "3.2 总体设计方案",
+         "paragraphs": "3.2 方案正文。\n【待补：分项报价表金额】"}
+    )
+    assert docx_comment_add.invoke({
+        "path": "body/3.2 总体设计方案.docx",
+        "text": "分项报价表金额缺口径，待澄清",
+    }).startswith("[已加批注]")
+
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]") and "含批注 2 条待处理" in r, r
+    assert "正文含 1 处内联占位" in r
+    assert "3.2 总体设计方案(P3)：【待补：分项报价表金额】" in r
+
+    chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    cmts = list(chk.comments)
+    assert {c.text for c in cmts} == {"3.1 缺项目批复文件编号，待用户确认", "分项报价表金额缺口径，待澄清"}
+    # 正文标记 id 已重映射、各自指向存在的批注（不悬空、不串号）
+    starts = chk.element.body.findall(".//" + qn("w:commentRangeStart"))
+    assert {s.get(qn("w:id")) for s in starts} == {str(c.comment_id) for c in cmts}
 
 
 def test_assemble_multi_volume_and_orphans(env):
@@ -1114,3 +1260,165 @@ def test_assemble_keeps_mismatched_own_heading(env):
     assert "3.1 运维方案" in texts  # 树标题照发
     assert "运维方案" in texts  # 节自带标题不被吞
     assert "运维服务方案" in texts  # 素材章标题内容保留
+
+
+# ---------- 单图插入（docx_image_insert：独立图片进正文的放图通道） ----------
+
+
+def _kb_image(file_name: str = "ISO27001证书.pdf") -> str:
+    """知识库抽取图：造进 knowledge/parse/<stem>/images/，返回工作区相对路径。"""
+    from app.knowledge import store as kb_store
+
+    img_dir = kb_store.kb_images_dir(file_name)
+    img_dir.mkdir(parents=True, exist_ok=True)
+    _tiny_png(img_dir / "img_001.png")
+    return f"knowledge/parse/{Path(file_name).stem}/images/img_001.png"
+
+
+def test_image_insert_after_paragraph(env):
+    """知识库图插在指定段之后：位置/双修订标记/居中/全宽/拒绝视角不漂移/视图可见。"""
+    rel = "body/技术部分/3.2 公司资质.docx"
+    r = docx_section_create.invoke({
+        "path": rel, "title": "3.2 公司资质",
+        "paragraphs": "公司持有 ISO27001 信息安全管理体系认证证书。\n证书复印件见下图。",
+    })
+    assert r.startswith("[已创建]"), r
+    r = docx_image_insert.invoke({"dest": rel, "image": _kb_image(), "after": "1"})
+    assert r.startswith("[已插图]") and "P1 之后" in r, r
+
+    doc = Document(str(_abs(env, rel)))
+    paras = doc.paragraphs  # P1 标题、P2 图片、P3/P4 正文
+    img_p = paras[1]._p
+    assert len(img_p.findall(".//" + qn("a:blip"))) == 1
+    # 段落标记修订（拒绝修订=整段含图消失）+ 内容修订（w:ins 包含图片 run）
+    ppr = img_p.find(qn("w:pPr"))
+    assert ppr.find(qn("w:rPr")).find(qn("w:ins")) is not None
+    ins = img_p.find(qn("w:ins"))
+    assert ins is not None and ins.find(".//" + qn("a:blip")) is not None
+    # 居中、不挂正文样式（Tender Body 首行缩进会推偏图片）
+    assert ppr.find(qn("w:jc")).get(qn("w:val")) == "center"
+    assert ppr.find(qn("w:pStyle")) is None
+    # 全宽适配：图片宽 = 页宽 − 左右边距（直取 wp:extent——python-docx 的
+    # inline_shapes 视图只认 w:p 直接挂 w:r 的形态，修订包裹后匹配不到）
+    sec = doc.sections[-1]
+    cx = int(img_p.find(".//" + qn("wp:extent")).get("cx"))
+    assert cx == int(sec.page_width - sec.left_margin - sec.right_margin)
+    # 拒绝视角无空行漂移（工具内自校验的同款断言）
+    assert _flatten_rejected(doc) == "3.2 公司资质\n公司持有 ISO27001 信息安全管理体系认证证书。\n证书复印件见下图。"
+    # 读视图图片标签可见（模型后续按标签定位）
+    assert "〔图×1〕" in docx_section_read.invoke({"path": rel})
+
+
+def test_image_insert_append_at_end(env):
+    """after 留空=追加到节末（sectPr 前）。"""
+    rel = _make_section("技术部分/附图.docx")
+    r = docx_image_insert.invoke({"dest": rel, "image": _kb_image()})
+    assert r.startswith("[已插图]") and "节末" in r, r
+    doc = Document(str(_abs(env, rel)))
+    assert doc.paragraphs[-1]._p.findall(".//" + qn("a:blip"))
+
+
+def test_image_insert_pdf_page_render(env):
+    """PDF 原件按页现场渲染（抽取缺图的兜底）；任务前缀形态归一；页号越界人话报错。"""
+    import pymupdf
+
+    from app.artifact_store import sources_dir
+
+    pdf = sources_dir(env["task"]["id"]) / "证书扫描件.pdf"
+    pdf.parent.mkdir(parents=True, exist_ok=True)
+    pd = pymupdf.open()
+    pd.new_page().insert_text((72, 72), "ISO27001 CERTIFICATE")
+    pd.save(str(pdf))
+    pd.close()
+
+    rel = _make_section("技术部分/3.2 公司资质.docx")
+    r = docx_image_insert.invoke({"dest": rel, "image": "sources/证书扫描件.pdf", "page": 1})
+    assert r.startswith("[已插图]") and "第 1 页" in r, r
+    assert any(p._p.findall(".//" + qn("a:blip")) for p in Document(str(_abs(env, rel))).paragraphs)
+
+    # 任务前缀形态（模型引用任务文件常带前缀）同样可插
+    r = docx_image_insert.invoke({
+        "dest": rel, "image": f"{env['task']['id']}/sources/证书扫描件.pdf", "after": "P1",
+    })
+    assert r.startswith("[已插图]"), r
+    doc = Document(str(_abs(env, rel)))
+    assert sum(len(p._p.findall(".//" + qn("a:blip"))) for p in doc.paragraphs) == 2
+
+    # 页号超范围
+    r = docx_image_insert.invoke({"dest": rel, "image": "sources/证书扫描件.pdf", "page": 5})
+    assert r.startswith("[插图失败]") and "共 1 页" in r
+
+
+def test_image_insert_rejects(env):
+    """容错：越界/不存在/坏格式图源/段落号超范围/目标节缺失，全部人话报错。"""
+    rel = _make_section("技术部分/附图.docx")
+    assert docx_image_insert.invoke({"dest": rel, "image": "/etc/passwd"}).startswith("[插图失败]")
+    assert "不存在" in docx_image_insert.invoke(
+        {"dest": rel, "image": "knowledge/parse/无此文件/images/img_001.png"})
+    # webp：python-docx 不识别，人话提示换格式
+    from app.knowledge import store as kb_store
+
+    webp_dir = kb_store.kb_images_dir("证书.webp")
+    webp_dir.mkdir(parents=True, exist_ok=True)
+    (webp_dir / "img_001.webp").write_bytes(b"fake-webp")
+    out = docx_image_insert.invoke({"dest": rel, "image": "knowledge/parse/证书/images/img_001.webp"})
+    assert out.startswith("[插图失败]") and "webp" in out
+    # docx 原件不作图源
+    _tender_source(env)
+    out = docx_image_insert.invoke({"dest": rel, "image": "sources/招标文件.docx"})
+    assert out.startswith("[插图失败]") and "docx" in out
+    # 段落号超范围
+    assert "超范围" in docx_image_insert.invoke(
+        {"dest": rel, "image": _kb_image(), "after": "99"})
+    # 目标节未创建
+    assert "不存在" in docx_image_insert.invoke(
+        {"dest": "body/没有建过.docx", "image": _kb_image()})
+
+
+def test_image_insert_into_revised_section(env):
+    """已有修订标记的节里插图：rev_id 续号、自校验（拒绝视角不变）依旧通过。"""
+    rel = _make_section("技术部分/3.3 业绩.docx")
+    r = docx_section_revise.invoke({"path": rel, "edits": json.dumps([
+        {"para": 1, "action": "insert_after", "text": "公司近三年业绩一览。"},
+    ])})
+    assert r.startswith("[已修订]"), r
+    r = docx_image_insert.invoke({"dest": rel, "image": _kb_image(), "after": "2"})
+    assert r.startswith("[已插图]"), r
+    # 修订过的节拒绝视角：文本段保留（w:ins 插段整段消失）、图片段消失，无空行
+    assert _flatten_rejected(Document(str(_abs(env, rel)))) == "3.1 运维方案"
+
+
+# ---------- 待办批注（docx_comment_add：缺料/待澄清的正规落点） ----------
+
+
+def test_comment_add_anchor_view_and_errors(env):
+    """批注锚定指定段/默认节末；读视图行尾可见、终稿投影干净；错误路径人话。"""
+    rel = "body/技术部分/3.3 项目团队.docx"
+    docx_section_create.invoke({
+        "path": rel, "title": "3.3 项目团队",
+        "paragraphs": "团队拟投入 5 人。\n项目经理持一级建造师证书。",
+    })
+    r = docx_comment_add.invoke({
+        "path": rel, "after": "2", "text": "项目经理证书编号缺失，需向用户确认后回填",
+    })
+    assert r.startswith("[已加批注]") and "P2" in r and "共 1 条" in r, r
+    r2 = docx_comment_add.invoke({"path": rel, "text": "驻场人数是否含后台待澄清"})
+    assert r2.startswith("[已加批注]") and "P3" in r2 and "共 2 条" in r2, r2
+
+    view = docx_section_read.invoke({"path": rel})
+    assert "待办批注 2 条" in view
+    assert "〔批注：项目经理证书编号缺失，需向用户确认后回填〕" in view
+    # 终稿视角（接受修订后评委看到的文本）不含批注内容——批注不是正文
+    doc = Document(str(_abs(env, rel)))
+    assert not any("证书编号缺失" in t or "待澄清" in t for t in section_text_lines(doc))
+    # 加批注后再修订：自校验（拒绝视角）不漂移、批注保留
+    assert docx_section_revise.invoke({"path": rel, "edits": json.dumps([
+        {"para": 2, "action": "insert_after", "text": "证书编号见附件。"},
+    ])}).startswith("[已修订]")
+    assert "待办批注 2 条" in docx_section_read.invoke({"path": rel})
+
+    # 错误路径
+    assert docx_comment_add.invoke({"path": rel, "text": ""}).startswith("[批注失败]")
+    assert "段落号超范围" in docx_comment_add.invoke({"path": rel, "after": "99", "text": "x"})
+    assert "after 须为段落号" in docx_comment_add.invoke({"path": rel, "after": "P", "text": "x"})
+    assert "文件不存在" in docx_comment_add.invoke({"path": "body/无此节.docx", "text": "x"})

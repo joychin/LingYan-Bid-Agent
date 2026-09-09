@@ -35,6 +35,7 @@ export function SidecarHealthProvider({ children }: { children: React.ReactNode 
   const queryClient = useQueryClient()
 
   const probe = useCallback(async () => {
+    if (document.hidden) return // 隐藏期不探测（省空转唤醒；回到可见下一次 tick 即恢复）
     const ok = await checkHealth()
     if (ok) {
       // 从非 ok 恢复：递增 reconnectSeq 并复位，同时重拉所有查询（会话/文件/产物/消息）

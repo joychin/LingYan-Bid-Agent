@@ -1,27 +1,27 @@
 /**
- * 模板库：文档模板管理（格式资产，与素材=内容资产分离，2026-09-08 拆库拍板）。
- * 内置基准 + 用户上传 .docx；上传=入库、显式「设为当前」生效（之后新建节与
- * 合册即用新版式，改动即时无重启）；「应用到任务」=把当前生效模板换装到
- * 已有正文节（重建式，旧版自动入恢复点可反悔；「整本-」派生物跳过）。
+ * 版式库：版式文件管理（格式资产，与素材=内容资产分离，2026-09-08 拆库拍板）。
+ * 内置基准 + 用户上传 .docx；全局一个「默认版式」（2026-09-08 用户定名，原
+ * 「设为当前/当前生效」）：设为默认后新建节与合册即用新版式，改动即时无重启。
+ * 定名沿革：2026-09-09 用户拍板「模板库」改名「版式库」（模板二字三义歧义：
+ * 版式资产/招标格式件/旧标书，界面一律用「版式」；代码标识符保留 templates）。
+ * 右栏按钮恒显示（选中项即默认时禁用态「已是默认」——按钮只出现在非默认项上
+ * 会让默认项无任何入口，用户点名缺陷）。「应用到任务」换装已于 2026-09-08
+ * 整链移除（用户拍板没有业务意义）——版式只管新节外观，已写内容不动。
  */
 import { lazy, Suspense, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, FileText, Trash2, Upload, Wand2 } from 'lucide-react'
-import type { RestyleReport, Task } from '@/api/client'
+import { Download, FileText, Trash2, Upload } from 'lucide-react'
 import {
   activateTemplate,
-  applyTemplate,
   deleteTemplate,
   fetchTemplateRaw,
   listTemplates,
   uploadTemplate,
 } from '@/api/client'
-import { useTasks } from '@/hooks/useTasks'
 import { Button } from '@/components/ui/button'
-import { ModalShell } from '@/components/ui/ModalShell'
 import { Loader } from '@/components/ai/Loader'
 import { useToast } from '@/context/Toast'
-import { cn, formatRelativeTime } from '@/lib/utils'
+import { cn, downloadBlob, formatRelativeTime } from '@/lib/utils'
 
 const DocxPreviewBody = lazy(() => import('./preview/DocxPreviewBody'))
 
@@ -31,76 +31,16 @@ function sizeStr(n: number): string {
   return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`
 }
 
-/** 应用到任务弹窗（作用于当前生效模板）。 */
-function ApplyDialog({
-  tasks,
-  busy,
-  onClose,
-  onApply,
-}: {
-  tasks: Task[]
-  busy: boolean
-  onClose: () => void
-  onApply: (taskId: string) => void
-}) {
-  const [tid, setTid] = useState<string | null>(null)
-  return (
-    <ModalShell onClose={onClose} cardClassName="max-w-md">
-      <div className="flex flex-col gap-3 p-5">
-        <div>
-          <h3 className="text-sm font-semibold">应用到任务</h3>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            把当前生效模板换装到任务已有正文节（新版式即刻生效，每节旧版自动存
-            恢复点可反悔；「整本」文件是派生物会跳过，需要时重新合册）。
-          </p>
-        </div>
-        <div className="flex max-h-64 flex-col gap-1 overflow-y-auto">
-          {tasks.length === 0 && (
-            <p className="px-1 py-2 text-xs text-muted-foreground">还没有任务</p>
-          )}
-          {tasks.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => setTid(t.id)}
-              className={cn(
-                'flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm',
-                tid === t.id ? 'bg-accent-soft text-primary' : 'hover:bg-secondary',
-              )}
-            >
-              <span className="flex h-4 w-4 flex-none items-center justify-center">
-                {tid === t.id && <Check className="h-3.5 w-3.5 text-primary" />}
-              </span>
-              <span className="truncate">{t.title}</span>
-            </button>
-          ))}
-        </div>
-        <div className="flex justify-end gap-2 pt-1">
-          <Button variant="ghost" size="sm" onClick={onClose}>
-            取消
-          </Button>
-          <Button size="sm" disabled={!tid || busy} onClick={() => tid && onApply(tid)}>
-            {busy ? '换装中…' : '应用'}
-          </Button>
-        </div>
-      </div>
-    </ModalShell>
-  )
-}
-
 export function TemplatesView() {
   const { toast } = useToast()
   const qc = useQueryClient()
   const [selectedKey, setSelectedKey] = useState<string | null>(BUILTIN_KEY)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-  const [applyOpen, setApplyOpen] = useState(false)
+  const [downloading, setDownloading] = useState(false)
   const [previewError, setPreviewError] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
 
   const list = useQuery({ queryKey: ['templates'], queryFn: listTemplates })
-  // 复用全局 ['tasks'] 缓存（useTasks 的 queryFn 返回 Task[]——同 key 不同
-  // queryFn 会互相污染缓存形状，Sidebar 任务树会拿到错误形状）
-  const tasksQuery = useTasks()
   const selected =
     list.data?.find((t) => t.key === selectedKey) ?? list.data?.[0] ?? null
 
@@ -122,7 +62,7 @@ export function TemplatesView() {
     onSuccess: (info) => {
       invalidate()
       setSelectedKey(info.key)
-      toast(`已上传「${info.name}」，点「设为当前」后生效`, 'success')
+      toast(`已上传「${info.name}」，点「设为默认版式」后生效`, 'success')
     },
     onError: (e: Error) => toast(e.message, 'error'),
   })
@@ -130,7 +70,7 @@ export function TemplatesView() {
     mutationFn: activateTemplate,
     onSuccess: () => {
       invalidate()
-      toast('已设为当前模板：之后新建的正文节即用此版式', 'success')
+      toast('已设为默认版式：之后新建的正文节与合册即用此版式', 'success')
     },
     onError: (e: Error) => toast(e.message, 'error'),
   })
@@ -140,21 +80,23 @@ export function TemplatesView() {
       invalidate()
       if (selectedKey === key) setSelectedKey(BUILTIN_KEY)
       setConfirmDelete(null)
-      toast('模板已删除', 'success')
+      toast('版式已删除', 'success')
     },
     onError: (e: Error) => toast(e.message, 'error'),
   })
-  const applyMut = useMutation({
-    mutationFn: applyTemplate,
-    onSuccess: (rep: RestyleReport) => {
-      setApplyOpen(false)
-      const parts = [`已换装 ${rep.applied} 节`]
-      if (rep.failed) parts.push(`失败 ${rep.failed} 节`)
-      if (rep.skipped_volumes) parts.push(`整本 ${rep.skipped_volumes} 册跳过（重新合册即可）`)
-      toast(`${parts.join('，')}；原版已存恢复点`, rep.failed ? 'error' : 'success')
-    },
-    onError: (e: Error) => toast(e.message, 'error'),
-  })
+
+  // 下载版式文件副本到本机（拉当前字节，不走 5min 预览缓存——同名覆盖后下载要拿到新版）
+  const download = async () => {
+    if (!selected || downloading) return
+    setDownloading(true)
+    try {
+      downloadBlob(`${selected.name}.docx`, await fetchTemplateRaw(selected.key))
+    } catch {
+      toast('下载失败，请重试', 'error')
+    } finally {
+      setDownloading(false)
+    }
+  }
 
   return (
     <div className="kb-view">
@@ -170,25 +112,14 @@ export function TemplatesView() {
         }}
       />
 
-      {/* 左栏：模板列表 */}
+      {/* 左栏：版式列表 */}
       <aside className="kb-side">
         <div className="kb-side-head" data-tauri-drag-region>
-          <span className="kb-title" data-tauri-drag-region>
-            模板库
-          </span>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => fileInput.current?.click()}
-            disabled={upMut.isPending}
-          >
-            {upMut.isPending ? <Loader variant="classic" size="sm" /> : <Upload className="h-4 w-4" />}
-            上传
-          </Button>
+          <span className="kb-title" data-tauri-drag-region>版式库</span>
         </div>
         <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-2">
           <p className="px-2 pb-1 text-xs leading-5 text-muted-foreground">
-            模板决定新章节的版式（样式/页面/页眉页脚）；模板文件里的示例内容不会进入正文。可上传公司的 Word 模板（仅支持 DOCX 格式）。
+            版式决定新章节的外观（样式/页面/页眉页脚）；版式文件里的示例内容不会进入正文。可上传公司的 Word 版式文件（仅支持 DOCX 格式）。
           </p>
           {list.isLoading && (
             <div className="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
@@ -222,7 +153,7 @@ export function TemplatesView() {
                   )}
                   {t.active && (
                     <span className="flex-none rounded bg-accent-soft px-1.5 py-px text-[10px] text-primary">
-                      当前
+                      默认
                     </span>
                   )}
                 </div>
@@ -235,10 +166,19 @@ export function TemplatesView() {
           ))}
           {list.data && list.data.length > 1 && (
             <p className="px-2 pt-2 text-xs leading-5 text-muted-foreground">
-              「当前」=新建节与合册实际使用的模板；换模板不影响已写内容，
-              需要时用「应用到任务」换装。
+              「默认」=新建节与合册实际使用的版式；换默认版式只影响之后
+              新建的节，已写内容不变。
             </p>
           )}
+        </div>
+
+        {/* 上传入口与知识库/写作素材库同款：列表底部通栏主按钮 + 格式提示 */}
+        <div className="kb-side-foot">
+          <Button size="sm" className="kb-upload-btn" disabled={upMut.isPending} onClick={() => fileInput.current?.click()}>
+            {upMut.isPending ? <Loader variant="classic" size="sm" /> : <Upload className="h-3.5 w-3.5" />}
+            上传文件
+          </Button>
+          <div className="kb-foot-hint">仅支持 .docx（Word 版式文件），单个不超过 20MB</div>
         </div>
       </aside>
 
@@ -248,50 +188,45 @@ export function TemplatesView() {
           <>
             <div className="flex items-center gap-2 border-b px-4 py-2.5">
               <span className="truncate text-sm font-medium">{selected.name}</span>
-              {selected.active ? (
-                <span className="flex-none rounded bg-accent-soft px-2 py-0.5 text-xs text-primary">
-                  当前生效
-                </span>
-              ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="flex-none"
-                  disabled={actMut.isPending}
-                  onClick={() => actMut.mutate(selected.key)}
-                >
-                  设为当前
-                </Button>
-              )}
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-none"
+                disabled={selected.active || actMut.isPending}
+                title={selected.active ? '此版式已是默认版式' : '设为默认后，之后新建的正文节与合册即用此版式'}
+                onClick={() => actMut.mutate(selected.key)}
+              >
+                {selected.active ? '已是默认' : '设为默认版式'}
+              </Button>
               <div className="flex-1" />
               <Button
                 variant="ghost"
                 size="sm"
                 className="flex-none"
-                title="把当前生效模板换装到任务已有正文节"
-                onClick={() => setApplyOpen(true)}
+                disabled={downloading}
+                title="下载版式文件到本机"
+                onClick={download}
               >
-                <Wand2 className="h-4 w-4" />
-                应用到任务…
+                {downloading ? <Loader variant="classic" size="sm" /> : <Download className="h-4 w-4" />}
+                {downloading ? '下载中…' : '下载'}
               </Button>
-              {!selected.builtin && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className={cn('flex-none', confirmDelete === selected.key && 'text-destructive')}
-                  disabled={delMut.isPending}
-                  onClick={() => {
-                    if (confirmDelete === selected.key) delMut.mutate(selected.key)
-                    else {
-                      setConfirmDelete(selected.key)
-                      window.setTimeout(() => setConfirmDelete(null), 3000)
-                    }
-                  }}
-                >
-                  <Trash2 className="h-4 w-4" />
-                  {confirmDelete === selected.key ? '确认删除' : '删除'}
-                </Button>
-              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn('flex-none', confirmDelete === selected.key && 'text-destructive')}
+                disabled={selected.builtin || delMut.isPending}
+                title={selected.builtin ? '内置版式不可删除' : undefined}
+                onClick={() => {
+                  if (confirmDelete === selected.key) delMut.mutate(selected.key)
+                  else {
+                    setConfirmDelete(selected.key)
+                    window.setTimeout(() => setConfirmDelete(null), 3000)
+                  }
+                }}
+              >
+                <Trash2 className="h-4 w-4" />
+                {confirmDelete === selected.key ? '确认删除' : '删除'}
+              </Button>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto bg-background p-6">
               {raw.isLoading && (
@@ -300,11 +235,11 @@ export function TemplatesView() {
                 </div>
               )}
               {raw.isError && (
-                <p className="text-xs text-muted-foreground">模板拉取失败，请重试或重新上传。</p>
+                <p className="text-xs text-muted-foreground">版式文件拉取失败，请重试或重新上传。</p>
               )}
               {raw.data && previewError && (
                 <p className="text-xs text-muted-foreground">
-                  浏览器内预览渲染失败（模板样式较复杂时可能发生）；内容不受影响，
+                  浏览器内预览渲染失败（版式较复杂时可能发生）；内容不受影响，
                   可上传后在 Word 中打开确认。
                 </p>
               )}
@@ -323,19 +258,10 @@ export function TemplatesView() {
           </>
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-            选择左侧模板查看版式
+            选择左侧版式查看预览
           </div>
         )}
       </section>
-
-      {applyOpen && (
-        <ApplyDialog
-          tasks={tasksQuery.data ?? []}
-          busy={applyMut.isPending}
-          onClose={() => setApplyOpen(false)}
-          onApply={(tid) => applyMut.mutate(tid)}
-        />
-      )}
     </div>
   )
 }

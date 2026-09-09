@@ -59,7 +59,8 @@ description: 生成投标文件目录（章节规划、响应文件拆分）时�
 ### 第 2 步：R2 目录初稿（references/generate.md + references/annotation.md）
 
 按第 1 步骨架的响应文件数量走两条路径之一。两条路径共用同一条铁律：来源 ID 只引用
-analysis 产物里已有的 MAND/TPL/REQ/SCORE 编号，**不要自己发明编号**。
+analysis 产物里已有的 MAND/TPL/REQ/SCORE 编号，**不要自己发明编号**。每册目录树
+首节点固定 `- 封面`（合册按名识别做封面页；交付形态按样例定，见 generate.md 规则 10）。
 
 **单册**（骨架只有一个响应文件）：就地补全三段：`## 目录`（树，格式见下方红线）、
 `## 来源标注`、`## 目录说明`（两段格式见 annotation.md）；随后第 3 步三道清理

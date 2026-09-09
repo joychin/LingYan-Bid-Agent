@@ -21,11 +21,16 @@ export interface CappedStreamText {
   omitted: number
 }
 
-export function capStreamingText(text: string, cap: number = STREAM_TEXT_CAP): CappedStreamText {
+export function capStreamingText(
+  text: string,
+  cap: number = STREAM_TEXT_CAP,
+  /** 提示行里的内容名词（思考/正文），默认沿用思考流 */
+  noun: string = '思考',
+): CappedStreamText {
   if (text.length <= cap) return { text, omitted: 0 }
   const omitted = text.length - cap
   return {
-    text: `⋯已折叠前 ${omitted} 字的思考，结束后可查看完整内容\n\n${text.slice(-cap)}`,
+    text: `⋯已折叠前 ${omitted} 字的${noun}，结束后可查看完整内容\n\n${text.slice(-cap)}`,
     omitted,
   }
 }

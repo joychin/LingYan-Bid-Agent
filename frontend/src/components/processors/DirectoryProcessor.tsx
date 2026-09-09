@@ -20,7 +20,7 @@ import {
   History,
 } from 'lucide-react'
 import type { ProcessorProps } from '@/artifacts/registry'
-import { getArtifactContent, getArtifactMeta, listWorkbench, restoreArtifact, updateArtifactContent } from '@/api/client'
+import { getArtifactContent, getArtifactMeta, restoreArtifact, updateArtifactContent } from '@/api/client'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/context/Toast'
 import { useAutoSave } from '@/hooks/useAutoSave'
@@ -42,6 +42,34 @@ export function badgeStyle(id: string): React.CSSProperties {
   const hit = BADGE_COLORS.find(([p]) => id.startsWith(p))
   const color = hit ? hit[1] : 'var(--Color-text-secondary)'
   return { color, background: `color-mix(in srgb, ${color} 12%, var(--Color-bg-canvas))` }
+}
+
+/** 四类来源的业务含义（图例用；前缀是系统内部对账编号，不解释用户认不出） */
+export const BADGE_LABELS: Record<string, string> = {
+  MAND: '资格/强制条款',
+  TPL: '格式件（招标方给定）',
+  REQ: '商务技术要求',
+  SCORE: '评分项',
+}
+
+/** 四色徽章图例：目录查看态头部与写作指引说明段共用（点击徽章=看登记原文与出处） */
+export function BadgeLegend() {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+      <span>来源标注（点徽章看原文与出处）：</span>
+      {BADGE_COLORS.map(([prefix, color]) => (
+        <span key={prefix} className="inline-flex items-center gap-1">
+          <span
+            className="rounded px-1 py-px text-[10px] font-medium"
+            style={{ color, background: `color-mix(in srgb, ${color} 12%, var(--Color-bg-canvas))` }}
+          >
+            {prefix}
+          </span>
+          {BADGE_LABELS[prefix]}
+        </span>
+      ))}
+    </div>
+  )
 }
 
 function parse(raw: string): DirectoryData | null {
@@ -86,7 +114,7 @@ function stripIds(data: DirectoryData): DirectoryData {
 
 // ---------- 主组件 ----------
 
-export function DirectoryProcessor({ artifact, content, onOpenWorkbench }: ProcessorProps) {
+export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
   const data = useMemo(() => parse(content), [content])
   const { toast } = useToast()
   const queryClient = useQueryClient()
@@ -200,26 +228,8 @@ export function DirectoryProcessor({ artifact, content, onOpenWorkbench }: Proce
     void auto.saveNow()
   }
 
-  /** 来源追溯「查看原文上下文」：出处锚点（章节名（L412-L430，第23页））的行号
-   *  指向招标文件解析 md（parse/ 下首个 .md——单主文件场景；多补充文件时用户
-   *  在面板自行切换），打开工作台只读定位视图。 */
-  const openSourceContext = async (_id: string, entry: { 出处?: string }) => {
-    if (!onOpenWorkbench || !artifact.task_id) return
-    const m = entry.出处?.match(/L(\d+)/)
-    const line = m ? Number(m[1]) : undefined
-    try {
-      const { files } = await listWorkbench(artifact.task_id)
-      const parseFile = files.find((f) => f.path.startsWith('parse/'))
-      if (!parseFile) {
-        toast('未找到已解析的原文（work/parse/ 为空）', 'error')
-        return
-      }
-      setTraceId(null)
-      onOpenWorkbench(parseFile.path, line)
-    } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), 'error')
-    }
-  }
+  // 来源追溯的「查看原文上下文」已改为条目内嵌切片（SourceEntryCard→
+  // ParseContextBlock，2026-09-09 用户拍板就地展示替代跳转）——旧跳转链删除。
 
   const handleRestore = async () => {
     try {
@@ -372,6 +382,7 @@ export function DirectoryProcessor({ artifact, content, onOpenWorkbench }: Proce
           ))}
         </div>
       )}
+      {!editing && <BadgeLegend />}
 
       {editing && docs && (
         <DirectoryEditor
@@ -413,7 +424,7 @@ export function DirectoryProcessor({ artifact, content, onOpenWorkbench }: Proce
         traceId={traceId}
         entry={traceId ? (data.registry ?? {})[traceId] : undefined}
         onClose={() => setTraceId(null)}
-        onOpenSource={onOpenWorkbench ? openSourceContext : undefined}
+        taskId={artifact.task_id ?? null}
       />
     </div>
   )

@@ -188,3 +188,27 @@ def test_check_residue_hard_and_soft_tiers_together(tmp_path, monkeypatch):
     assert "疑似残留提示" in out and "旧档案库" in out  # 文件名主干分段词≥4字入弱级
     # 硬级与弱级分段：弱级名不作为独立残留条目进「必须替换」段（行上下文引文除外）
     assert "残留「旧档案库」" not in out.split("疑似残留提示")[0]
+
+
+def test_company_assets_image_hint(tmp_path, monkeypatch):
+    """命中条目含抽取图时附「含图 N 张」提示与 docx_image_insert 指引；无图条目不带。"""
+    _setup(tmp_path, monkeypatch)
+    _seed("# 证书\n\n信息安全管理体系认证证书 ISO27001，编号 CN-001。", "ISO证书.txt",
+          "qualification_certificate")
+    _seed("# 证书\n\n张三持有 PMP 项目管理专业人士资格认证证书。", "pm.txt",
+          "personnel_certificate")
+    # 造抽取图（清单=listdir，无 DB 记录）
+    img_dir = store.kb_images_dir("ISO证书.txt")
+    img_dir.mkdir(parents=True, exist_ok=True)
+    (img_dir / "img_001.png").write_bytes(b"\x89PNG-fake")
+
+    out = search_company_assets.invoke({"query": "ISO27001"})
+    assert "公司资料命中" in out
+    assert "含图 1 张" in out
+    assert "docx_image_insert" in out
+    assert "knowledge/parse/ISO证书/images/img_001.png" in out
+
+    # 无图条目命中不带图片提示
+    out2 = search_company_assets.invoke({"query": "PMP"})
+    assert "公司资料命中" in out2
+    assert "含图" not in out2

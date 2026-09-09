@@ -42,6 +42,10 @@ export function SourceView({
     queryKey: ['source-raw', taskId, name],
     queryFn: async () => await fetchSourceRaw(taskId!, name!),
     enabled: !!taskId && !!name && (isDoc || isPdf),
+    // 原件不可变（同名重传经上传/删除点显式失效）：Infinity 防重开整份重拉
+    // （标书 PDF 数十 MB，默认 1s staleTime 每次重开都重下 + 预览瞬时双份内存）
+    staleTime: Infinity,
+    gcTime: 10 * 60_000,
   })
 
   // 图片：blob → objectURL（挂载期拥有，卸载/换图 revoke——KbImage 先例）
@@ -72,7 +76,7 @@ export function SourceView({
 
   return (
     <div className="ap-ws">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b pl-4 pr-12 py-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b pl-4 pr-[88px] py-3">
         <span className="truncate text-sm font-semibold">{name}</span>
         <span className="rounded-full bg-accent px-2 py-0.5 text-xs text-muted-foreground">
           输入文件 · 只读

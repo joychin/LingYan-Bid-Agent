@@ -23,7 +23,7 @@ function ChildStep({ step }: { step: ToolStep }) {
   const isRunning = step.status === 'running'
   const isError = step.status === 'error'
   const isPaused = step.status === 'paused'
-  const statusText = isRunning ? '执行中' : isError ? '失败' : isPaused ? '已暂停' : '成功'
+  const statusText = isRunning ? '执行中' : isError ? '失败' : isPaused ? '已暂停' : '已完成'
   return (
     <Collapsible className="group" open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger className="flex w-full cursor-pointer items-center gap-2 py-0.5 text-left text-[12.5px] text-muted-foreground transition-colors hover:text-foreground">

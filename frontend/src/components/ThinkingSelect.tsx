@@ -53,7 +53,7 @@ export function ThinkingSelect({
 
       {open && (
         <div className="absolute bottom-full right-0 z-30 mb-2 w-56 rounded-[var(--Radius-radius-12)] border border-line bg-card py-1.5 shadow-md">
-          <p className="px-2.5 pb-1 pt-0.5 text-[11px] text-muted-foreground">思考强度（对下一条消息生效）</p>
+          <p className="px-2.5 pb-1 pt-0.5 text-[11px] text-muted-foreground">思考强度（随每条消息生效）</p>
           {LEVELS.map((l) => (
             <button
               key={l.value}

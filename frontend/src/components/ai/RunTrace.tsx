@@ -72,7 +72,7 @@ const ToolStepRow = memo(function ToolStepRow({ step, embedded }: { step: ToolSt
         ? '失败'
         : step.status === 'paused'
           ? '已暂停'
-          : '成功'
+          : '已完成'
   return (
     <Collapsible className="group cv-step" open={open} onOpenChange={setOpen}>
       {!embedded && (

@@ -1,12 +1,12 @@
-"""/api/templates：模板库 CRUD/激活/预览 + 任务换装（重建式+恢复点+409 守卫）。"""
+"""/api/templates：版式库 CRUD/设默认/预览 + list_templates 只读工具。（「应用
+到任务」换装 2026-09-08 用户拍板删除，整链端点/工具/契约随之移除；2026-09-09
+「模板库」定名改「版式库」，标识符不动。）"""
 
 from docx import Document
 from docx.oxml.ns import qn
 from docx.shared import Pt
 
-from app import artifact_store, runctx
-from app.tools import docx_ops
-from tests.util import create_task
+from app.tools import docx_ops, list_templates
 
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -97,49 +97,37 @@ def test_activation_affects_new_documents(client, tmp_path):
     assert docx_ops._body_style(doc) is None  # 降级：正文段回落 Normal
 
 
-def _mk_section(path, title, paragraphs=""):
-    r = docx_ops.docx_section_create.invoke({"path": path, "title": title, "paragraphs": paragraphs})
-    assert r.startswith("[已创建]"), r
+def test_list_templates_tool_builtin_only(client):
+    """空库：内置恒在且即默认——治实测「有多少模板」被答成 0 的盲区。"""
+    r = list_templates.invoke({})
+    assert "版式库共 1 个：内置 1 个、用户上传 0 个" in r
+    assert "当前默认=内置标书基准版式" in r
+    assert "1. 内置标书基准版式 —— 内置 · 当前默认" in r
+    assert "界面「版式库」" in r  # 换默认的用户出口（工具只读）
 
 
-def test_apply_restyle_to_task(client, tmp_path):
-    """换装=重建式：生效模板重建节文件，内置样式段吃新定义、内容/修订保留、
-    旧版入恢复点；「整本-」派生物跳过。"""
-    body = create_task(client)
-    tid = body["task"]["id"]
-    conv = client.post("/api/conversations", json={"task_id": tid, "title": "c"}).json()
-    runctx.set_run(conv["id"], "r_tpl", tid)
-    _mk_section("body/技术部分/3.1 方案.docx", "3.1 方案", "正文内容一。")
-    _mk_section("body/投标函.docx", "投标函")
-    vol = artifact_store.work_dir(tid) / "body" / "整本-技术部分.docx"
-    vol.parent.mkdir(parents=True, exist_ok=True)
-    Document().save(vol)
-
-    tpl = tmp_path / "新版模板.docx"
-    _make_custom_template(tpl, east="楷体", size=15)
+def test_list_templates_tool_user_upload_and_activation(client, tmp_path):
+    tpl = tmp_path / "公司模板.docx"
+    _make_custom_template(tpl)
     key = _upload(client, tpl)["key"]
+
+    r = list_templates.invoke({})
+    assert "版式库共 2 个：内置 1 个、用户上传 1 个" in r
+    assert "2. 公司模板 —— 用户上传" in r
+    assert "1. 内置标书基准版式 —— 内置 · 当前默认" in r  # 上传不自动激活
+
     assert client.post(f"/api/templates/{key}/activate").status_code == 200
-    runctx.clear_run()
+    r = list_templates.invoke({})
+    assert "当前默认=公司模板" in r
+    assert "公司模板 —— 用户上传" in r and " · 当前默认" in r
+    assert "内置标书基准版式 —— 内置 · 当前默认" not in r
 
-    r = client.post("/api/templates/apply", json={"task_id": tid})
-    assert r.status_code == 200, r.text
-    rep = r.json()
-    assert rep["applied"] == 2 and rep["skipped_volumes"] == 1 and rep["failed"] == 0
-    assert all(x["ok"] for x in rep["results"])
 
-    sec = artifact_store.work_dir(tid) / "body" / "技术部分" / "3.1 方案.docx"
-    doc = Document(str(sec))
-    fonts = doc.styles["Normal"].element.get_or_add_rPr().get_or_add_rFonts()
-    assert fonts.get(qn("w:eastAsia")) == "楷体"  # 新模板定义生效
-    texts = [p.text for p in doc.paragraphs]
-    assert "3.1 方案" in texts and "正文内容一。" in texts  # 内容原样
-    rp_dir = sec.parent / (sec.name + ".restorepoints")
-    assert rp_dir.is_dir() and any(rp_dir.glob("*.bak"))  # 恢复点兜底
-    assert not list((sec.parent).glob("*.restyle.tmp"))  # 原子落盘无临时残留
+def test_list_templates_tool_error_path(client, monkeypatch):
+    def _boom():
+        raise RuntimeError("disk on fire")
 
-    # 404 任务不存在 / 409 活跃 run 守卫
-    assert client.post("/api/templates/apply", json={"task_id": "t_nope"}).status_code == 404
-    from app import db
-
-    db.create_run(conv["id"])
-    assert client.post("/api/templates/apply", json={"task_id": tid}).status_code == 409
+    monkeypatch.setattr(docx_ops, "list_templates_info", _boom)
+    r = list_templates.invoke({})
+    assert r.startswith("[查询失败]")
+    assert "RuntimeError" in r

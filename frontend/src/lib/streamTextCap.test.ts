@@ -31,6 +31,11 @@ describe('capStreamingText', () => {
     expect(r.text.endsWith('def')).toBe(true)
   })
 
+  it('自定义名词进提示行（活卡正文流复用同一封顶）', () => {
+    const r = capStreamingText('abcdef', 3, '正文')
+    expect(r.text).toContain('⋯已折叠前 3 字的正文，结束后可查看完整内容')
+  })
+
   it('空字符串安全', () => {
     expect(capStreamingText('')).toEqual({ text: '', omitted: 0 })
   })

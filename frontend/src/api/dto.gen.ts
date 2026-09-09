@@ -276,24 +276,6 @@ export interface MtOutlineNode {
 export interface OcrSettings {
   configured: boolean;
 }
-/**
- * 任务换装报告（applied=成功节数；skipped_volumes=「整本-」派生物跳过数）。
- */
-export interface RestyleReport {
-  applied?: number;
-  failed?: number;
-  skipped_volumes?: number;
-  results?: RestyleResult[];
-}
-/**
- * 换装单节结果（elements=搬迁的段落/表格数）。
- */
-export interface RestyleResult {
-  file: string;
-  ok: boolean;
-  elements?: number;
-  error?: string | null;
-}
 export interface RunInfo {
   id: string;
   conversation_id: string;
@@ -346,7 +328,7 @@ export interface Task {
 }
 /**
  * 文档模板（格式资产，与素材=内容资产分离）：内置基准或用户上传 .docx，
- * 全局一个生效位（active）。
+ * 全局一个默认模板位（active=当前默认）。
  */
 export interface TemplateInfo {
   name: string;

@@ -103,5 +103,5 @@ def test_tender_body_kickoff_and_material_first():
     text = (skills_source_dir() / "tender-body" / "SKILL.md").read_text(encoding="utf-8")
     for kw in ("写作指引", "关键事实与承诺", "素材先行", "block_ids", "待补", "待澄清",
                "validate_body", "guide_path", "tender-body-writer", "兄弟节开头摘要",
-               "由系统在派发时自动补全", "只重写我指定的章节"):
+               "由系统在派发时自动补全", "只重写我指定的章节", "封面"):
         assert kw in text, f"tender-body/SKILL.md 缺少开工纪律关键词：{kw}"

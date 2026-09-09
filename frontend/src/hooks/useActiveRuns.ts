@@ -9,7 +9,9 @@ export function useActiveRuns() {
   return useQuery({
     queryKey: ['runs', 'active'],
     queryFn: fetchActiveRuns,
-    refetchInterval: 3000,
+    // react-query 默认（refetchIntervalInBackground=false）隐藏期本就跳过 interval
+    // 拉取；函数式只是把隐藏期的定时器唤醒从每 3s 一次降到每 30s 一次（省空转）
+    refetchInterval: () => (document.hidden ? 30_000 : 3000),
     select: (d) => d.runs,
   })
 }

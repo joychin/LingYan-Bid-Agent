@@ -822,6 +822,25 @@ def resume_run(rid: str) -> bool:
         conn.close()
 
 
+def cancel_waiting_run(rid: str, error: str, seq: int | None = None) -> bool:
+    """用户放弃等待中的 run（waiting_input 逃生口，2026-09-08）：落 cancelled 终态。
+
+    与 resume_run 同款条件 UPDATE 抢占——并发 resume/cancel 只有一个能赢，
+    输家回 409。此时无活 worker（暂停存活于 checkpoint），不置取消事件、
+    不清 checkpoint（与 running 取消同口径，下一 run 由 langgraph 自愈悬空
+    tool_calls）；interrupt 快照清空防残留，last_seq 可随终态事件回写。"""
+    conn = _conn()
+    try:
+        cur = conn.execute(
+            "UPDATE runs SET status='error', error=?, error_code='cancelled', interrupt=NULL, "
+            "last_seq=COALESCE(?, last_seq) WHERE id=? AND status='waiting_input'",
+            (error, seq, rid),
+        )
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def recover_stale_runs() -> int:
     """sidecar 崩溃/被杀重启后，把残留的 running run 标记为 error。
 

@@ -27,6 +27,28 @@ from ..knowledge.types import role_of
 _SNIPPET_CHARS = 300
 
 
+def _kb_image_hint(file_name: str) -> str:
+    """命中条目的可用图提示（证书贴正文的入口指引；无图返回空串）。
+
+    图片抽取产物在 knowledge/parse/<stem>/images/（每文档一目录、无 DB 记录，
+    listdir 即清单）；证书扫描 PDF 的抽取图每页一张、文件序号即页序。
+    """
+    from ..knowledge import images as kb_images
+
+    try:
+        imgs = kb_images.list_images(file_name)
+    except Exception:
+        return ""
+    if not imgs:
+        return ""
+    first = imgs[0]["name"]
+    return (
+        f"\n  含图 {len(imgs)} 张——贴证书复印件用 docx_image_insert 插入正文节："
+        f"knowledge/parse/{Path(file_name).stem}/images/{first}…（文件序号即页序，"
+        "任选一张；PDF 原件也可按页渲染插入）"
+    )
+
+
 def _excerpt(item: dict, line_start, line_end, *, section_path=None) -> str:
     # 说明段行号为空——摘录直接取 statement 原文（AI 整理语义入口）
     if section_path == "§statement":
@@ -150,7 +172,8 @@ def search_company_assets(query: str, doc_type: str | None = None) -> str:
 
     Returns:
         命中列表（统一命中头：角色｜类型｜确认状态｜时效；行号区间、摘录、引用键）与
-        精读指引。纪律：**来自历史标书的业绩描述可引用但须与合同/验收核对**；「拟投入
+        精读指引；条目含抽取图时附图片路径——证书复印件用 docx_image_insert 贴进
+        正文节。纪律：**来自历史标书的业绩描述可引用但须与合同/验收核对**；「拟投入
         N 人」「承诺 7×24」类是当年投标承诺，**不是公司现状事实**；数字一律重核；
         过期证书不得写为有效；标注「AI 整理」的说明段引用数字须回原文核对。
     """
@@ -206,6 +229,7 @@ def search_company_assets(query: str, doc_type: str | None = None) -> str:
                 f"- {item['file_name']}［{header}］{ai_note}{linked}{section}{_loc(h)}\n"
                 f"  摘录：{_excerpt(item, h.get('line_start'), h.get('line_end'), section_path=h.get('section_path'))}\n"
                 f"  引用键：{key}"
+                + _kb_image_hint(item["file_name"])
             )
             ev.append({
                 "key": key, "file": item["file_name"], "hash": item["file_hash"], "role": role,

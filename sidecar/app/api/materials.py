@@ -10,13 +10,19 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 from .. import db
 from ..knowledge import materials_lib as mlib
 
 router = APIRouter()
 
-MT_ALLOWED_EXTENSIONS = {".docx", ".pdf", ".txt", ".md", ".doc"}
+# 素材库只收 .docx：素材块的价值锚点是「原文可整体拷贝注入新标书」——只有 docx
+# 解析才产出 element_map（元素级映射，图表/编号/格式可随块注入），其余格式只能
+# 文字参考（图进不来、表格是碎的），属 silently 缩水路径；老 .doc 在 Word 里
+# 「另存为 .docx」一步即可（2026-09-08 用户拍板）。
+MT_ALLOWED_EXTENSIONS = {".docx"}
+_MT_EXTENSION_HINT = "素材库只收 .docx（历史标书原文，支持图表整体拷贝）——PDF/老 .doc 范文请先用 Word 打开，另存为 .docx 再传"
 MAX_SIZE_BYTES = 100 * 1024 * 1024
 _CHUNK = 1024 * 1024
 
@@ -43,10 +49,7 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="文件名非法")
     ext = Path(name).suffix.lower()
     if ext not in MT_ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的文件类型：{ext or '(无扩展名)'}（素材挑章节需要文档结构，允许 .docx/.pdf/.txt/.md）",
-        )
+        raise HTTPException(status_code=400, detail=_MT_EXTENSION_HINT)
 
     mlib.ensure_dirs()
     tmp = mlib.mt_files_dir() / f".{name}.{uuid.uuid4().hex[:8]}.part"
@@ -122,6 +125,18 @@ async def reparse_file(fid: str):
     return {"ok": True}
 
 
+@router.get("/materials/files/{fid}/raw")
+async def get_file_raw(fid: str):
+    """原件文件流（预览「原件」模式：docx/pdf 版式渲染，文件不出本机）。"""
+    f = db.mt_get_file(fid)
+    if not f:
+        raise HTTPException(status_code=404, detail="素材文件不存在")
+    src = mlib.mt_files_dir() / f["file_name"]
+    if not src.is_file():
+        raise HTTPException(status_code=404, detail="原件缺失")
+    return FileResponse(src, filename=f["file_name"])
+
+
 @router.get("/materials/blocks")
 async def list_blocks(q: str | None = None):
     """全部素材块（跨文件；文件信息附带）。
@@ -151,6 +166,28 @@ async def get_block_content(bid: str):
     content = mlib.block_content(bid)
     if not content:
         raise HTTPException(status_code=404, detail="素材块不存在")
+    return content
+
+
+# 挑章节预览单次跨度上限（防误点根节点一次拉整本）
+_PREVIEW_MAX_LINES = 2000
+
+
+@router.get("/materials/files/{fid}/content")
+async def get_file_content(fid: str, start: int, end: int):
+    """文件片段内容（挑章节实时预览）：点目录树节点按行号取该节正文。"""
+    f = db.mt_get_file(fid)
+    if not f:
+        raise HTTPException(status_code=404, detail="素材文件不存在")
+    if f["parse_status"] != "ready":
+        raise HTTPException(status_code=422, detail="文件尚未解析完成，稍候再试")
+    if start < 1 or end < start:
+        raise HTTPException(status_code=422, detail="行号区间无效")
+    if end - start + 1 > _PREVIEW_MAX_LINES:
+        raise HTTPException(status_code=422, detail="预览区间过大，请选择更小的章节")
+    content = mlib.file_content(fid, start, end)
+    if content is None:
+        raise HTTPException(status_code=404, detail="解析产物缺失——请重新解析该文件")
     return content
 
 

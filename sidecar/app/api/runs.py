@@ -4,7 +4,10 @@ run.interrupt 暂停（status=waiting_input）后，用户在前端做出 decisi
 （approve / reject+理由 / respond=回答 / edit），经本端点以
 Command(resume={"decisions": [...]}) 从 checkpoint 的 interrupt 处续跑同一 run。
 stop 端点对 running 的 run 置位协作式取消事件，worker 线程在下一个流事件边界退出
-（半截回复落库 + run 标 error「任务已停止」，语义同既有中断路径）。
+（半截回复落库 + run 标 error「任务已停止」，语义同既有中断路径）；对
+waiting_input 的 run 走逃生口分支——无活 worker，直接落 cancelled 终态
+（暂停消息标记改「任务中断」+ 发 agent.error code=cancelled），与 resume
+经条件 UPDATE 互斥抢占。
 """
 
 import asyncio
@@ -15,12 +18,21 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from .. import db
+from .. import bg, db, events
 from ..agent import get_run_snapshot, request_cancel, run_stream
+from ..bus import publish as bus_publish
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# 错误 detail 里 runs 状态枚举的人话（未知值回退原样，防未来新增状态漏译）
+_STATUS_LABELS = {
+    "running": "执行中",
+    "waiting_input": "等待输入",
+    "completed": "已完成",
+    "error": "出错",
+}
 
 
 class DecisionBody(BaseModel):
@@ -65,7 +77,11 @@ async def snapshot(rid: str):
     run = db.get_run(rid)
     if run is None:
         raise HTTPException(status_code=404, detail="run 不存在")
-    data = get_run_snapshot(rid) or {
+    # 快照读取含整树 deepcopy（get_live_trace 自带锁、线程安全）：挪出事件循环，
+    # 避免大 run 期间对账拉取阻塞 SSE 心跳与其余请求（FastAPI 官方 async 纪律）
+    data = await asyncio.get_running_loop().run_in_executor(
+        None, get_run_snapshot, rid
+    ) or {
         "run_id": rid,
         "tools": [],
         "todos": [],
@@ -84,8 +100,29 @@ async def cancel(rid: str):
     run = db.get_run(rid)
     if run is None:
         raise HTTPException(status_code=404, detail="run 不存在")
+    if run["status"] == "waiting_input":
+        # 等待中的逃生口（2026-09-08）：无活 worker（暂停存活于 checkpoint），
+        # 直接落 cancelled 终态。条件 UPDATE 与 resume 互斥抢占——用户恰在此刻
+        # 提交回答则本分支输，回 409（与 resume 撞 cancel 对偶）。终态事件由本
+        # 端点发（agent.error + code=cancelled，前端中性灰「重新执行」已就绪）
+        seq = int(run.get("last_seq") or 0) + 1
+        if not db.cancel_waiting_run(rid, events.CANCELLED_MESSAGE, seq):
+            raise HTTPException(status_code=409, detail="该任务不在等待用户输入状态")
+        db.retire_pause_marker(run.get("pause_msg_id"))
+        await bus_publish(
+            run["conversation_id"],
+            {
+                "event": "agent.error",
+                "data": events.error_payload(
+                    rid, run["conversation_id"], events.CANCELLED_MESSAGE, "cancelled", seq
+                ),
+            },
+        )
+        logger.info("run %s 用户放弃等待（waiting_input → cancelled）", rid)
+        return {"ok": True, "run_id": rid}
     if run["status"] != "running":
-        raise HTTPException(status_code=409, detail=f"该任务不在执行中（当前状态：{run['status']}）")
+        status_label = _STATUS_LABELS.get(run["status"], run["status"])
+        raise HTTPException(status_code=409, detail=f"该任务不在执行中（当前状态：{status_label}）")
     if not request_cancel(rid):
         # 状态仍为 running 但本进程无执行体（极端窗口：恰好在此刻收尾）——按已结束处理
         raise HTTPException(status_code=409, detail="该任务已结束或正在收尾")
@@ -109,7 +146,7 @@ async def resume(rid: str, body: ResumeBody):
     if len(body.decisions) != len(requests):
         raise HTTPException(
             status_code=422,
-            detail=f"需要 {len(requests)} 个决策（对应 {len(requests)} 个待确认动作），收到 {len(body.decisions)} 个",
+            detail=f"需要 {len(requests)} 项决定（对应 {len(requests)} 个待确认操作），收到 {len(body.decisions)} 项",
         )
 
     decisions = [d.model_dump(exclude_none=True) for d in body.decisions]
@@ -124,7 +161,7 @@ async def resume(rid: str, body: ResumeBody):
             # run_id 关联：回答与暂停消息同属一个回合（前端按 run 聚合）
             db.create_user_message(run["conversation_id"], d["message"].strip(), rid=rid)
 
-    asyncio.create_task(
+    bg.spawn_background(
         run_stream(
             run["conversation_id"],
             rid,

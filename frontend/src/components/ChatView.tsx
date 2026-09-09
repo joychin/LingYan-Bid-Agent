@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getSettings } from '@/api/client'
-import { ArrowDown, CirclePause } from 'lucide-react'
+import { ArrowDown, CirclePause, Paperclip } from 'lucide-react'
 import { UploadDropzone } from '@/components/UploadDropzone'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { ChatMessage, DeepThinking } from '@/components/ChatMessage'
@@ -23,8 +23,10 @@ import { toolDisplayName } from '@/components/ai/toolDisplay'
 import { Message as WMessage } from '@/components/workspace/Message'
 import { ArtifactCard } from '@/components/ArtifactCard'
 import { placeArtifacts } from '@/lib/artifactPlacement'
+import { capStreamingText } from '@/lib/streamTextCap'
 import { WelcomeScreen } from '@/components/WelcomeScreen'
 import { InputComposer } from '@/components/InputComposer'
+import { UploadChips } from '@/components/UploadChips'
 import { TaskPicker } from '@/components/TaskPicker'
 import { useMessages } from '@/hooks/useMessages'
 import { useRun } from '@/hooks/useRun'
@@ -126,7 +128,7 @@ export function ChatView({
   const { data: conversations = [] } = useConversations()
   const createTask = useCreateTask()
   const { toast } = useToast()
-  const { setTaskScope, uploads, taskScope, acknowledgeUploads } = useFileUpload()
+  const { setTaskScope, uploads, taskScope, acknowledgeUploads, openFilePicker } = useFileUpload()
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottom = useRef(true)
   const [showJump, setShowJump] = useState(false)
@@ -438,15 +440,6 @@ export function ChatView({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }
 
-  // HITL 等待期间主输入框禁用（作答在卡内），placeholder 只做指引
-  const waitingHint = interrupt
-    ? wizardMode
-      ? curReq && !isQuestion(curReq)
-        ? '此步为审批：请在上方卡片选择批准或拒绝…'
-        : '请在上方卡片中作答（可先在此上传文件）…'
-      : '请在上方卡片中选择批准或拒绝…'
-    : undefined
-
   return (
     <UploadDropzone>
       {/* min-h-0：本层与 UploadDropzone 层都是 .main（flex column，上邻 50px chat-head）里的
@@ -509,31 +502,6 @@ export function ChatView({
                   continuationAnswer={continuationAnswer}
                 />
               )}
-              {interrupt && !running && (
-                <div className="turn-attach">
-                  {wizardMode ? (
-                    <InterruptCard
-                      requests={interrupt.requests}
-                      wizard={{
-                        stepIndex,
-                        stepDrafts,
-                        onToggleStep: toggleStepOption,
-                        onTextChange: setStepText,
-                        onApprovalChoice: setStepApproval,
-                        onReasonChange: setStepReason,
-                        onNav: wizardNav,
-                      }}
-                      onOpenWorkbench={onOpenWorkbench}
-                    />
-                  ) : (
-                    <InterruptCard
-                      requests={interrupt.requests}
-                      onDecide={(d) => void decide(d)}
-                      onOpenWorkbench={onOpenWorkbench}
-                    />
-                  )}
-                </div>
-              )}
               {error && (
                 <ErrorCard
                   message={error}
@@ -557,32 +525,77 @@ export function ChatView({
             </button>
           )}
         </div>
-        <InputComposer
-          running={running}
-          waiting={!!interrupt}
-          waitingHint={waitingHint}
-          disabled={!!interrupt}
-          stopping={stopping}
-          onSend={doSend}
-          value={prompt}
-          onChange={setPrompt}
-          thinking={thinking}
-          onThinkingChange={changeThinking}
-          model={model}
-          onModelChange={changeModel}
-          onOpenSettings={onOpenSettings}
-          onStop={() => void cancel()}
-          leftSlot={
-            !convId ? (
-              <TaskPicker
-                tasks={tasks}
-                value={pickedTaskId}
-                onChange={setPickedTaskId}
-                onCreateTask={handlePickerCreateTask}
-              />
-            ) : null
-          }
-        />
+        {interrupt && !running ? (
+          /* HITL 等待期：提问卡原位替换输入框（2026-09-09 拍板方向 A）——回答入口搬到
+             输入区，提交/放弃后输入框原位回归；活卡冻结态留在上方消息流，此卡是唯一
+             动作入口。上传钮+chips 随行，保住确认门补传补遗能力（提交时 wizardNav 拼
+             「我上传了文件：…」）。 */
+          <div className="composer">
+            <div className="interrupt-host">
+              <div className="interrupt-scroll">
+                {wizardMode ? (
+                  <InterruptCard
+                    requests={interrupt.requests}
+                    wizard={{
+                      stepIndex,
+                      stepDrafts,
+                      onToggleStep: toggleStepOption,
+                      onTextChange: setStepText,
+                      onApprovalChoice: setStepApproval,
+                      onReasonChange: setStepReason,
+                      onNav: wizardNav,
+                    }}
+                    onOpenWorkbench={onOpenWorkbench}
+                    onAbandon={() => void cancel()}
+                  />
+                ) : (
+                  <InterruptCard
+                    requests={interrupt.requests}
+                    onDecide={(d) => void decide(d)}
+                    onOpenWorkbench={onOpenWorkbench}
+                    onAbandon={() => void cancel()}
+                  />
+                )}
+              </div>
+              <div className="interrupt-upload-row">
+                <button
+                  type="button"
+                  className="composer-plus"
+                  title={taskScope ? '上传文件到当前任务' : '请先选择所属任务'}
+                  onClick={openFilePicker}
+                  disabled={!taskScope}
+                >
+                  <Paperclip />
+                </button>
+                <UploadChips />
+              </div>
+            </div>
+          </div>
+        ) : (
+          <InputComposer
+            running={running}
+            stopping={stopping}
+            onSend={doSend}
+            value={prompt}
+            onChange={setPrompt}
+            thinking={thinking}
+            onThinkingChange={changeThinking}
+            model={model}
+            onModelChange={changeModel}
+            onOpenSettings={onOpenSettings}
+            onStop={() => void cancel()}
+            leftSlot={
+              !convId ? (
+                <TaskPicker
+                  tasks={tasks}
+                  value={pickedTaskId}
+                  onChange={setPickedTaskId}
+                  onCreateTask={handlePickerCreateTask}
+                />
+              ) : null
+            }
+          />
+        )}
       </div>
     </UploadDropzone>
   )
@@ -709,7 +722,9 @@ function RunMessage({
             )}
           </ReasoningTrigger>
           <ReasoningContent contentClassName="mt-2 space-y-2">
-            {pauseNarration.trim() && <NarrationLine text={pauseNarration} />}
+            {pauseNarration.trim() && (
+              <NarrationLine text={capStreamingText(pauseNarration, undefined, '正文').text} />
+            )}
             <RunTrace tools={tools} todos={todos} done={done} total={total} />
             {/* 思考块 = 当前未封口段（历史思考已按 tool.called 封段沉入步骤行），
                 放步骤区之后保持时序：先看到已发生的工具流水，再看到正在增长的思考 */}
@@ -721,7 +736,12 @@ function RunMessage({
         <div className="bubble">
           {shownText ? (
             <>
-              <MemoMarkdown text={shownText} components={markdownComponents} />
+              {/* 流式正文同思考流封顶（11GB 修复家族漏网的一处）：尾窗预览，
+                  终态后由落库最终消息渲染全文 */}
+              <MemoMarkdown
+                text={running ? capStreamingText(shownText, undefined, '正文').text : shownText}
+                components={markdownComponents}
+              />
               <span className="caret-blink ml-0.5 inline-block h-[1.15em] w-0.5 translate-y-[0.2em] bg-primary" />
             </>
           ) : retrying ? (

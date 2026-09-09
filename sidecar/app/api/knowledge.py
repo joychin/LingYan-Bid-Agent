@@ -275,8 +275,10 @@ async def get_material_image(kid: str, name: str):
     return FileResponse(path)
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=8)
 def _convert_unfriendly_image(path_str: str, mtime_ns: int) -> bytes:
+    # 缓存的是整图 PNG 字节（扫描件单张可达数 MB），容量必须小：满载常驻控制在
+    # ~20MB 量级；源头文件在盘上，miss 重转一次的代价远小于大缓存常驻
     from ..knowledge import images
 
     data, _ = images.as_browser_friendly(Path(path_str).read_bytes(), Path(path_str).suffix)

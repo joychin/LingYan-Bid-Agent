@@ -29,11 +29,16 @@ export function DocxView({ taskId, path }: { taskId: string | null; path: string
     queryFn: async () => await getWorkbenchDocxView(taskId!, path!),
     enabled: !!taskId && !!path,
   })
-  // 版式预览字节：只在版式模式拉（合册可能几十 MB）
+  // 版式预览字节：合册可能几十 MB。staleTime 30s 保住「文本/版式来回切不重拉」
+  // （不能 Infinity：workbench docx 不是不可变原件，AI run 进行中会修订节文件，
+  // 而字节失效只在 run 终态经 ['workbench'] 前缀连带——中途重开预览的陈旧窗口
+  // 由 30s 封顶；sources 原件才配 Infinity）
   const raw = useQuery({
     queryKey: ['workbench', taskId, 'docx-raw', path],
     queryFn: async () => await fetchWorkbenchRaw(taskId!, path!),
     enabled: !!taskId && !!path && mode === 'layout',
+    staleTime: 30_000,
+    gcTime: 10 * 60_000,
   })
 
   const handlePreviewError = useCallback(() => {
@@ -43,12 +48,17 @@ export function DocxView({ taskId, path }: { taskId: string | null; path: string
 
   if (!path || !taskId) return null
   const display = path.split('/').pop() ?? path
+  // 整本=最终交付物：常驻交付提醒（文件带修订标记与待办批注，面板预览只显示
+  // 接受视角——干净的样子不等于可直接递交）；节文件是中间产物，不提示
+  const isFinal = display.startsWith('整本-')
 
   return (
     <div className="ap-ws">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b pl-4 pr-12 py-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b pl-4 pr-[88px] py-3">
         <span className="truncate text-sm font-semibold">{display}</span>
-        <span className="rounded-full bg-accent px-2 py-0.5 text-xs text-muted-foreground">Word 正文 · 只读</span>
+        <span className="rounded-full bg-accent px-2 py-0.5 text-xs text-muted-foreground">
+          {isFinal ? '整本 · 最终稿' : 'Word 正文 · 只读'}
+        </span>
         <div className="flex items-center rounded-md border border-line p-0.5 text-xs">
           {(['layout', 'text'] as const).map((m) => (
             <button
@@ -80,6 +90,12 @@ export function DocxView({ taskId, path }: { taskId: string | null; path: string
           )}
         </div>
       </div>
+      {isFinal && (
+        <p className="shrink-0 border-b bg-warning/10 px-4 py-1.5 text-xs text-warning">
+          交付前请在 Word 中接受所有修订、解决全部批注（审阅 → 接受所有修订 / 删除批注）
+          ——本预览显示的是接受修订后的效果。
+        </p>
+      )}
       {fallbackNote && mode === 'text' && (
         <p className="shrink-0 border-b bg-warning/10 px-4 py-1.5 text-xs text-warning">{fallbackNote}</p>
       )}

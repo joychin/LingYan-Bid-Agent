@@ -40,6 +40,9 @@ def test_types_payload_roles(client):
     types = _types(client)
     assert types["past_proposal"]["role"] == "writing"
     assert types["financial_report"]["role"] == "fact"
+    # 社保缴纳证明（2026-09-08 补）：事实类、period 时间锚点，不再落 other
+    assert types["social_security"]["role"] == "fact"
+    assert types["social_security"]["time_fields"] == ["period"]
     assert "decompose" not in types["past_proposal"]  # 策略字段已删（role 驱动）
     assert "field_labels" in client.get("/api/kb/types").json()
 
@@ -94,6 +97,25 @@ def test_content_meta_image_count(client):
     assert meta["conversion"] == "txt-passthrough" and meta["chars"] > 0
 
 
+def _docx_bytes(
+    paras: int = 20,
+    first: str = "一、方案",
+    line_tpl: str = "运维服务方案内容文本第{i}行补充说明。",
+) -> bytes:
+    """最小素材 docx（一级标题 + N 段正文）——上传白名单收口为仅 .docx 后的 API 载体。"""
+    import io
+
+    from docx import Document
+
+    doc = Document()
+    doc.add_heading(first, level=1)
+    for i in range(1, paras + 1):
+        doc.add_paragraph(line_tpl.format(i=i))
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
 def test_kb_materials_endpoints_removed(client):
     """素材分离：知识库侧素材端点全部删除（素材域在 /api/materials）。"""
     r = _upload(client, "x.txt", b"# x\n\ncontent")
@@ -108,17 +130,17 @@ def test_materials_files_api_flow(client):
     import hashlib
     import time
 
-    body = "# 一、方案\n\n" + "\n".join(f"运维服务方案内容文本第{i}行补充说明。" for i in range(20))
+    body = _docx_bytes()
     r = client.post(
         "/api/materials/files",
-        files={"file": ("库标书.md", body.encode(), "application/octet-stream")},
+        files={"file": ("库标书.docx", body, "application/octet-stream")},
     )
     assert r.status_code == 201
     fid = r.json()["id"]
     # 同 hash 重复上传 → 409
     dup = client.post(
         "/api/materials/files",
-        files={"file": ("库标书.md", body.encode(), "application/octet-stream")},
+        files={"file": ("库标书.docx", body, "application/octet-stream")},
     )
     assert dup.status_code == 409
 
@@ -150,7 +172,7 @@ def test_materials_files_api_flow(client):
     files = client.get("/api/materials/files").json()["files"]
     assert next(f for f in files if f["id"] == fid)["block_count"] == 1
     blocks = client.get("/api/materials/blocks").json()["blocks"]
-    assert blocks[0]["file_name"] == "库标书.md" and blocks[0]["note"] == "政务云运维"
+    assert blocks[0]["file_name"] == "库标书.docx" and blocks[0]["note"] == "政务云运维"
 
     # 改备注 → 删块 → 删文件（连带）
     assert client.put(f"/api/materials/blocks/{bid}", json={"note": "改后备注"}).json()["note"] == "改后备注"
@@ -161,6 +183,59 @@ def test_materials_files_api_flow(client):
     assert hashlib.sha256(b"gone")  # 保持 import 使用
 
 
+def test_materials_upload_docx_only(client):
+    """上传白名单收口为仅 .docx：其余格式 400 + 人话出路（Word 另存为 docx）。"""
+    r = client.post(
+        "/api/materials/files",
+        files={"file": ("范文.pdf", b"%PDF-1.4 fake", "application/octet-stream")},
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert ".docx" in detail and "另存为" in detail
+
+
+def test_materials_file_content_endpoint(client):
+    """挑章节预览端点：按行号切片 / 越界 clamp / 参数非法 422 / 404 / 未 ready 422。"""
+    import time
+
+    from app import db
+
+    r = client.post(
+        "/api/materials/files",
+        files={"file": ("预览标书.docx", _docx_bytes(paras=40, first="预览标书"), "application/octet-stream")},
+    )
+    assert r.status_code == 201
+    fid = r.json()["id"]
+    deadline = time.time() + 5
+    outline: dict = {}
+    while time.time() < deadline:
+        outline = client.get(f"/api/materials/files/{fid}/outline").json()
+        if outline["parse_status"] in ("ready", "failed"):
+            break
+        time.sleep(0.05)
+    assert outline["parse_status"] == "ready"
+    assert outline["outline"], "docx 应解析出目录树"
+
+    # 正常切片（闭区间；正文以标题行起）
+    content = client.get(f"/api/materials/files/{fid}/content", params={"start": 2, "end": 4}).json()
+    assert content["sections"][0]["start"] == 2 and content["sections"][0]["end"] == 4
+    assert content["sections"][0]["text"]
+    assert content["chars"] > 0
+
+    # 越界 clamp：end 超总行数但跨度合法 → 夹到实际行数；跨度超上限 → 422
+    total = outline["outline"][0]["end_line"]
+    over = client.get(f"/api/materials/files/{fid}/content", params={"start": total - 2, "end": total + 50}).json()
+    assert over["sections"] and over["sections"][0]["end"] == total
+    assert client.get(f"/api/materials/files/{fid}/content", params={"start": 1, "end": 99999}).status_code == 422
+
+    # 参数非法 → 422；文件不存在 → 404；未解析（pending）→ 422
+    assert client.get(f"/api/materials/files/{fid}/content", params={"start": 0, "end": 5}).status_code == 422
+    assert client.get(f"/api/materials/files/{fid}/content", params={"start": 5, "end": 2}).status_code == 422
+    assert client.get("/api/materials/files/mt_nope/content", params={"start": 1, "end": 2}).status_code == 404
+    fid2 = db.mt_insert_file(file_name="未解析预览.docx", file_hash="h-preview")
+    assert client.get(f"/api/materials/files/{fid2['id']}/content", params={"start": 1, "end": 2}).status_code == 422
+
+
 def test_materials_reparse_file(client):
     """reparse 端点：失败文件重试恢复 + 404 不存在 + 409 正在解析（单飞）。"""
     import time
@@ -168,10 +243,9 @@ def test_materials_reparse_file(client):
     from app import db
     from app.knowledge import materials_lib as mlib
 
-    body = "# 一、方案\n\n" + "素材重试路径内容补充。" * 10
     r = client.post(
         "/api/materials/files",
-        files={"file": ("重试标书.md", body.encode(), "application/octet-stream")},
+        files={"file": ("重试标书.docx", _docx_bytes(paras=12), "application/octet-stream")},
     )
     fid = r.json()["id"]
 
@@ -211,6 +285,25 @@ def test_materials_reparse_file(client):
     finally:
         mlib._inflight.discard(fid)
         db.mt_update_file(fid, parse_status="ready", error=None)
+
+
+def test_materials_file_raw_endpoint(client):
+    """原件字节端点（预览「原件」模式）：200=全量字节+下载名 / 404 不存在。"""
+    body = _docx_bytes(paras=10, first="原件预览标书")
+    r = client.post(
+        "/api/materials/files",
+        files={"file": ("原件预览.docx", body, "application/octet-stream")},
+    )
+    assert r.status_code == 201
+    fid = r.json()["id"]
+    raw = client.get(f"/api/materials/files/{fid}/raw")
+    assert raw.status_code == 200
+    assert raw.content == body
+    # 中文文件名经 RFC 5987 编码（filename*=utf-8''…），断言形态而非原文
+    assert "attachment" in raw.headers.get("content-disposition", "")
+    assert raw.headers.get("content-disposition", "").endswith(".docx")
+    assert client.get("/api/materials/files/mt_nope/raw").status_code == 404
+    assert client.delete(f"/api/materials/files/{fid}").status_code == 200
 
 
 def test_item_images_listing(client):
@@ -300,10 +393,15 @@ def test_materials_content_search_usage_flow(client):
     """完善批端点：块内容分节 / ?q= 正文检索 / outline 字数 / 引用打点透出。"""
     import time
 
-    body = "# 一、方案\n\n" + "\n".join(f"等保合规建设内容第{i}行补充。" for i in range(20))
     fid = client.post(
         "/api/materials/files",
-        files={"file": ("完善标书.md", body.encode(), "application/octet-stream")},
+        files={
+            "file": (
+                "完善标书.docx",
+                _docx_bytes(paras=20, line_tpl="等保合规建设内容第{i}行补充。"),
+                "application/octet-stream",
+            )
+        },
     ).json()["id"]
     deadline = time.time() + 5
     while time.time() < deadline:

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { subagentStepTitle, toolDisplayName } from './toolDisplay'
+import { TOOL_DISPLAY, subagentStepTitle, toolDisplayName } from './toolDisplay'
 
 describe('subagentStepTitle', () => {
   it('提示词纪律：首行 ≤24 字短名直接用作标题', () => {
@@ -41,5 +41,40 @@ describe('subagentStepTitle', () => {
 
   it('空短名时调用方回退通用显示名', () => {
     expect(subagentStepTitle() || toolDisplayName('task')).toBe('派发子代理')
+  })
+})
+
+describe('TOOL_DISPLAY 覆盖率', () => {
+  // 冻结镜像：sidecar/app/tools/__init__.py 的 TOOLS 注册表（新增工具须双侧同步，
+  // 漏配中文名=过程区直接显示英文原码，此测试即红）
+  const SIDECAR_TOOLS = [
+    'parse_document',
+    'assemble_tender',
+    'ask_human',
+    'publish_artifact',
+    'read_artifact',
+    'search_company_assets',
+    'search_references',
+    'check_name_residue',
+    'check_pipeline_state',
+    'list_templates',
+    'validate_analysis',
+    'validate_body',
+    'update_task_progress',
+    'fetch_url',
+    'docx_section_create',
+    'docx_section_read',
+    'docx_material_inject',
+    'docx_source_inject',
+    'docx_image_insert',
+    'docx_comment_add',
+    'docx_section_revise',
+    'docx_assemble_volume',
+  ]
+
+  it('sidecar 全部注册工具有中文显示名（过程区不漏英文原码）', () => {
+    for (const tool of SIDECAR_TOOLS) {
+      expect(TOOL_DISPLAY[tool], `工具 ${tool} 缺中文名映射`).toBeTruthy()
+    }
   })
 })

@@ -13,7 +13,7 @@
  * 的 TS 移植，**显示用途**（加行选择器、已写徽章）——对账真值仍归 sidecar 工具。
  */
 
-import type { EditDoc, EditNode } from '@/components/processors/directoryTree'
+import type { DirectoryData, EditDoc, EditNode } from '@/components/processors/directoryTree'
 
 export interface TableSpec {
   /** 表头识别：这些列名必须都出现才认这张表（宽松——列序不限） */
@@ -261,4 +261,169 @@ export function writtenPathOf(sectionCell: string, written: Map<string, string>,
     title = tail.join('/').trim()
   }
   return written.get(rowSectionKey(vol, title, multi))
+}
+
+// ---------- 指引查看态：过滤 + 一级章节分组（纯显示用途，2026-09-09 设计稿 A+D） ----------
+
+export type GuideFilterKey = 'all' | 'missing' | 'stale' | 'offtree' | 'todo' | 'written'
+
+/** 指引行的问题/进度标记——过滤胶囊与计数共用同一份判定，避免两处口径漂移。 */
+export interface GuideRowFlags {
+  /** 素材列带【缺】 */
+  missing: boolean
+  /** 素材列引用的块 id 已不在素材库（块失效） */
+  stale: boolean
+  /** 节名不在目录叶子中（目录改版后未对齐） */
+  offtree: boolean
+  /** 该节已有正文文件 */
+  written: boolean
+}
+
+/** 行标记判定。leafKeys 传 null=无目录产物（offtree 恒 false，不判越界）。 */
+export function guideRowFlags(
+  sectionCell: string,
+  materialCell: string,
+  opts: { validBlockIds: Set<string>; leafKeys: Set<string> | null; written: boolean },
+): GuideRowFlags {
+  const mat = parseBlockRefs(materialCell)
+  return {
+    missing: mat.missing,
+    stale: mat.blockIds.some((id) => !opts.validBlockIds.has(id)),
+    offtree: opts.leafKeys !== null && !opts.leafKeys.has(sectionCell),
+    written: opts.written,
+  }
+}
+
+/** 过滤谓词：行标记是否命中某枚过滤值（单选，同设计稿 D 的胶囊交互）。 */
+export function guideRowMatches(f: GuideRowFlags, key: GuideFilterKey): boolean {
+  switch (key) {
+    case 'all':
+      return true
+    case 'missing':
+      return f.missing
+    case 'stale':
+      return f.stale
+    case 'offtree':
+      return f.offtree
+    case 'todo':
+      return !f.written
+    case 'written':
+      return f.written
+  }
+}
+
+/** 叶子的分组归属：一级章节（最顶层祖先）+ 二级章节（顶层之下的那层容器；
+ *  顶层直接挂叶子时 second=null）。 */
+export interface LeafGroup {
+  top: string
+  second: string | null
+}
+
+/**
+ * 两级章节分组：叶子键 → {top=顶层章节, second=顶层之下的容器章节}。
+ * 顶层节点自身是叶子时组=自身（second=null）；叶子挂在顶层下（深度 3）second=null；
+ * 更深叶子（册→顶层→二级→…→叶子）second=祖先链上第二层。多册按册分键互不串台；
+ * 无树/空树返回 null（不分组）。大章内部几十行平铺时二级分组是层级可读性的主力。
+ */
+export function leafGroups(docs: EditDoc[] | undefined, multi: boolean): Map<string, LeafGroup> | null {
+  const list = docs ?? []
+  if (!list.length) return null
+  const out = new Map<string, LeafGroup>()
+  const walk = (vol: string, top: string, second: string | null, nodes: EditNode[] | undefined) => {
+    for (const n of nodes ?? []) {
+      if (n.children?.length) {
+        const title = (n.目录名称 ?? '').trim()
+        walk(vol, top, second ?? (title || null), n.children)
+        continue
+      }
+      const title = (n.目录名称 ?? '').trim()
+      if (title) out.set(leafKey(vol, title, multi), { top, second })
+    }
+  }
+  for (const d of list) {
+    const vol = (d.name ?? '').trim() || '主册'
+    for (const top of d.directory ?? []) {
+      const topTitle = (top.目录名称 ?? '').trim()
+      if (topTitle) walk(vol, topTitle, null, top.children?.length ? top.children : [top])
+    }
+  }
+  return out.size > 0 ? out : null
+}
+
+const REF_TYPE_ORDER = ['MAND', 'TPL', 'REQ', 'SCORE']
+
+const refTypeOrder = (id: string) => {
+  const i = REF_TYPE_ORDER.indexOf(id.split('-')[0]?.toUpperCase() ?? '')
+  return i < 0 ? 9 : i
+}
+
+/** 依据 id 排序：MAND→TPL→REQ→SCORE 分组、组内按编号升序（选择器列表显示序）。 */
+export function sortRefIds(ids: string[]): string[] {
+  return ids.toSorted((a, b) => {
+    const ta = refTypeOrder(a)
+    const tb = refTypeOrder(b)
+    if (ta !== tb) return ta - tb
+    return (Number.parseInt(a.split('-')[1] ?? '0', 10) || 0) - (Number.parseInt(b.split('-')[1] ?? '0', 10) || 0)
+  })
+}
+
+// ---------- 正文组面板显示序（纯显示用途） ----------
+
+/** 文件路径 → 去扩展名的主干（整本册名/节标题对账用）。 */
+const pathStem = (p: string): string => {
+  const name = p.split('/').pop() ?? ''
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? name.slice(0, dot) : name
+}
+
+export interface BodyRowOrder {
+  /** 整本-<册>.docx（按 response_documents 册序；未匹配册名的尾置） */
+  finals: string[]
+  guide: string | null
+  promise: string | null
+  /** 节文件：按目录树叶子先序对账；未匹配的尾置、组内保持传入相对序（sort 稳定） */
+  sections: string[]
+}
+
+/**
+ * body/ 文件的面板显示序：整本 → 指引 → 承诺 → 节文件。章序真值是目录树序、
+ * 不是文件名序（docx 合册 _tree_nodes 同款立场）；对账复用 writtenSections 的
+ * 文件侧/行侧键规则。dir=null（无目录产物/解析失败）回退传入原序，节文件不排序
+ * （字母序原样）——旧任务/无目录时保持现行为。
+ */
+export function orderBodyRows(paths: string[], dir: DirectoryData | null): BodyRowOrder {
+  const out: BodyRowOrder = { finals: [], guide: null, promise: null, sections: [] }
+  for (const p of paths) {
+    if (!p.startsWith('body/')) continue
+    const name = p.split('/').pop() ?? ''
+    if (name.startsWith('整本-')) out.finals.push(p)
+    else if (name === '写作指引.md' && !out.guide) out.guide = p
+    else if (name === '关键事实与承诺.md' && !out.promise) out.promise = p
+    else out.sections.push(p)
+  }
+  const docs = dir?.response_documents
+  if (!docs?.length) return out
+  // 整本按册序：整本-<sanitize(册名)>.docx ↔ response_documents 顺序（docx_ops 落名同款）
+  const volOrder = new Map<string, number>()
+  docs.forEach((d, i) => {
+    const key = `整本-${sanitizeName((d.name ?? '').trim() || '主册')}`
+    if (!volOrder.has(key)) volOrder.set(key, i)
+  })
+  const finalIdx = (p: string) => volOrder.get(pathStem(p)) ?? docs.length
+  out.finals.sort((a, b) => finalIdx(a) - finalIdx(b))
+  // 节文件按树序（先序叶子）；未匹配（已删节/孤儿稿）尾置
+  const multi = multiVolume(docs)
+  const leafOrder = new Map<string, number>()
+  iterLeaves(docs).forEach((l, i) => {
+    const k = rowSectionKey(l.vol, l.title, multi)
+    if (!leafOrder.has(k)) leafOrder.set(k, i)
+  })
+  const leafCount = leafOrder.size
+  const sectionIdx = (p: string) => {
+    const parts = p.split('/')
+    const vol = parts.length > 2 ? parts[parts.length - 2] : ''
+    return leafOrder.get(fileSectionKey(vol, pathStem(p), multi)) ?? leafCount
+  }
+  out.sections.sort((a, b) => sectionIdx(a) - sectionIdx(b))
+  return out
 }

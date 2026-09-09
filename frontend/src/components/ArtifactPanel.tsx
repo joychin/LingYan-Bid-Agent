@@ -1,17 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { FileText, Maximize2, Minimize2 } from 'lucide-react'
+import { ChevronDown, FileText, X } from 'lucide-react'
 import type { Artifact, FileItem, Task, WorkbenchFile } from '@/api/client'
 import {
+  fetchWorkbenchRaw,
   getWorkbenchContent,
   isTauri,
   revealInFolder,
   restoreArtifact,
 } from '@/api/client'
-import { useTaskArtifacts, useConversationArtifacts } from '@/hooks/useArtifacts'
+import { useArtifactContent, useTaskArtifacts, useConversationArtifacts } from '@/hooks/useArtifacts'
 import { useFiles } from '@/hooks/useFiles'
 import { useWorkbench } from '@/hooks/useWorkbench'
+import type { DirectoryData } from '@/components/processors/directoryTree'
 import { ArtifactOpenHost } from '@/components/ArtifactOpenHost'
 import { DocxView } from '@/components/DocxView'
 import { SourceView, sourcePreviewable } from '@/components/SourceView'
@@ -23,16 +25,28 @@ import { ContextMenu } from '@/components/ui/ContextMenu'
 import type { ContextMenuItem } from '@/components/ui/ContextMenu'
 import { useToast } from '@/context/Toast'
 import { fileExtIcon, kindIcon } from '@/artifacts/registry'
-import { cn, downloadText, formatSize } from '@/lib/utils'
+import { orderBodyRows } from '@/lib/workbenchTable'
+import { cn, downloadBlob, downloadText, formatSize } from '@/lib/utils'
 
 const DEFAULT_W = 300
 const MIN_W = 240
 const MAX_W = 560
 /* 工作区覆盖态（.ap-shell.wide）宽度：与窄态列宽分开记忆；可拖面板左缘调节，
- * 上限动态计算给聊天区留 ≥360px */
-const WS_DEFAULT_W = 1000
+ * 上限动态计算给聊天区留 ≥360px。
+ * 默认宽按视口比例（60%，1120 封顶）——小窗口自动少占聊天区、大屏不用手动拖宽；
+ * 拖过的宽度存 localStorage，启动读回时同样过上限夹取（换小窗口打开不爆）。
+ * 窗口缩放时实时重夹（resize 监听），否则先拖宽后缩窗面板会盖满聊天区。 */
 const WS_MIN_W = 640
+const WS_DEFAULT_CAP = 1120
+const WS_WIDTH_KEY = 'tender-agent.ws-width'
 const wsMaxW = () => Math.max(WS_MIN_W, window.innerWidth - 360)
+const wsDefaultW = () =>
+  Math.min(WS_DEFAULT_CAP, Math.max(WS_MIN_W, Math.round(window.innerWidth * 0.6)))
+const clampWsW = (w: number) => Math.max(WS_MIN_W, Math.min(wsMaxW(), w))
+const wsStoredW = (): number => {
+  const raw = Number(localStorage.getItem(WS_WIDTH_KEY))
+  return Number.isFinite(raw) && raw >= WS_MIN_W ? raw : wsDefaultW()
+}
 /* 窄态列宽上限同样视口感知：聊天区至少留 360px（侧栏按 264 估），小窗口拖不 crush 聊天 */
 const navMaxW = () => Math.max(MIN_W, Math.min(MAX_W, window.innerWidth - 264 - 360))
 
@@ -56,10 +70,13 @@ const WB_NAMES: Record<string, string> = {
   'analysis/disqualification.md': '废标条款',
   'analysis/evaluation.md': '评分标准',
   'analysis/clarifications.md': '待澄清',
-  'outline/tender-response-docs.md': '投标目录（工作表）',
+  'outline/tender-response-docs.md': '目录底稿',
   'body/写作指引.md': '写作指引',
   'body/关键事实与承诺.md': '关键事实与承诺',
 }
+
+// 整本-<册名>.docx=合册产出的最终交付物（行徽标/组内置顶/DocxView 交付提醒共用判定）
+const isFinalDoc = (path: string) => (path.split('/').pop() ?? '').startsWith('整本-')
 
 /** 业务流分类夹（平台封闭）。产物按其 kind 归入 group；过程文件按 path 前缀归入 group。 */
 const GROUPS: { key: string; label: string }[] = [
@@ -91,6 +108,7 @@ export function ArtifactPanel({
   onOpenWorkbench,
   onOpenSource,
   onClearPreview,
+  onOpenLibrary,
 }: {
   currentConvId: string | null
   currentTask: Task | null
@@ -105,21 +123,42 @@ export function ArtifactPanel({
   onOpenWorkbench: (path: string, anchorLine?: number) => void
   onOpenSource: (name: string) => void
   onClearPreview: () => void
+  /** 跳素材库主视图（写作指引缺素材→检索建块闭环）；缺省不渲染入口 */
+  onOpenLibrary?: () => void
 }) {
   const { data: taskArtifacts = [], isLoading: loadingTask } = useTaskArtifacts(currentTask?.id ?? null)
   const { data: convArtifacts = [] } = useConversationArtifacts(currentConvId)
   const { data: workbench = [], isLoading: loadingWorkbench } = useWorkbench(currentTask?.id ?? null)
   const { data: sourceFiles = [], isLoading: loadingFiles } = useFiles(currentTask?.id ?? null)
   const [width, setWidth] = useState(DEFAULT_W)
-  const [wsWidth, setWsWidth] = useState(() => Math.min(WS_DEFAULT_W, wsMaxW()))
+  const [wsWidth, setWsWidth] = useState(() => clampWsW(wsStoredW()))
   const [dragging, setDragging] = useState(false)
   const appRect = useRef<DOMRect | null>(null)
   // 行级右键菜单（fixed 浮层，与编辑器 Esc/点选互不干扰见 ContextMenu）
   const [menu, setMenu] = useState<{ x: number; y: number; target: RowMenuTarget } | null>(null)
+  // 组折叠态（组头可点击；会话内记忆，与 NavSection 同纪律不进 localStorage）
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
+  // 正文章节子区默认收起：整本/指引/承诺常驻可见，几十个节文件不糊屏
+  const [sectionsOpen, setSectionsOpen] = useState(false)
+  // 目录中间稿（底稿+分册草稿）默认收起：目录产物常驻可见，草稿不糊屏
+  const [draftsOpen, setDraftsOpen] = useState(false)
   const queryClient = useQueryClient()
   const { toast } = useToast()
 
   const wsOpen = !collapsed && (!!previewId || !!workbenchPath || !!sourceFile)
+
+  // 章序真值 = 目录产物树序（不是文件名序）；无目录/解析失败回退 null → 面板保持原序
+  const dirArtifact = taskArtifacts.find((a) => a.kind === 'tender.directory')
+  const { data: dirRaw } = useArtifactContent(dirArtifact?.artifact_id ?? null)
+  const dirData = useMemo<DirectoryData | null>(() => {
+    if (!dirRaw?.content) return null
+    try {
+      const parsed = JSON.parse(dirRaw.content) as DirectoryData
+      return Array.isArray(parsed.response_documents) ? parsed : null
+    } catch {
+      return null
+    }
+  }, [dirRaw])
 
   const copyText = async (text: string, what: string) => {
     try {
@@ -140,6 +179,16 @@ export function ArtifactPanel({
       if (!currentTask) return
       const { content } = await getWorkbenchContent(currentTask.id, f.path)
       downloadText(f.path.split('/').pop() ?? '未命名.md', content)
+    } catch (e) {
+      toast(errMsg(e), 'error')
+    }
+  }
+
+  /** docx 副本下载（整本交付物拿到本机打印/交标；复用版式预览的 raw 端点，文件不出本机）。 */
+  const saveDocxCopy = async (f: WorkbenchFile) => {
+    try {
+      if (!currentTask) return
+      downloadBlob(f.path.split('/').pop() ?? '未命名.docx', await fetchWorkbenchRaw(currentTask.id, f.path))
     } catch (e) {
       toast(errMsg(e), 'error')
     }
@@ -179,6 +228,9 @@ export function ArtifactPanel({
         ...(f.path.endsWith('.md')
           ? [{ label: '另存为…', action: () => void saveMdCopy(f) }]
           : []),
+        ...(f.path.endsWith('.docx')
+          ? [{ label: '下载副本', action: () => void saveDocxCopy(f) }]
+          : []),
       ]
     }
     const a = t.artifact
@@ -201,6 +253,14 @@ export function ArtifactPanel({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [wsOpen, onClearPreview])
+
+  // 窗口缩放时把面板宽重新夹进上限（聊天区 ≥360 兜底）：只夹不改语义——
+  // 拖宽后再缩窗，面板若无此步会保持旧宽盖满聊天区甚至伸出窗口左缘
+  useEffect(() => {
+    const onResize = () => setWsWidth(clampWsW)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
 
   // 解析去重：每个源文件只列一行主稿（<stem>.md）
   const parseFiles = workbench.filter((f) => f.path.startsWith('parse/'))
@@ -270,9 +330,21 @@ export function ArtifactPanel({
     )
   }
 
-  const wbRow = (f: WorkbenchFile, name?: string) => {
+  const wbRow = (f: WorkbenchFile, name?: string, tailOverride?: string) => {
     // 图标按扩展名（.docx=W 徽章，与素材库/知识库同一色板族）
     const icon = fileExtIcon(f.path)
+    const isFinal = isFinalDoc(f.path)
+    const parts = f.path.split('/')
+    // 多册节文件嵌套在 body/<册>/ 下——尾部显册名；平铺 docx 全组同质，不占徽章
+    const volDir = parts.length > 2 ? parts[parts.length - 2] : ''
+    const tail = isFinal
+      ? '整本 · 最终稿'
+      : (tailOverride ??
+        (f.editable
+          ? '可编辑'
+          : f.path.endsWith('.docx')
+            ? volDir
+            : '解析只读'))
     return (
       <div
         key={f.path}
@@ -284,9 +356,22 @@ export function ArtifactPanel({
         <span className={cn('ft-ico', icon.cls)}>{icon.mark}</span>
         <span className="ap-row-name truncate">{name ?? WB_NAMES[f.path] ?? f.path.split('/').pop()}</span>
         <span className="ap-row-tail">
-          <span className="ap-status regen">
-            {f.editable ? '可重生成' : f.path.endsWith('.docx') ? 'Word 正文' : '解析只读'}
-          </span>
+          {tail && (
+            <span
+              className={cn('ap-status', !isFinal && 'regen')}
+              style={
+                isFinal
+                  ? {
+                      color: 'var(--Color-brand-primary)',
+                      background:
+                        'color-mix(in srgb, var(--Color-brand-primary) 12%, var(--Color-bg-canvas))',
+                    }
+                  : undefined
+              }
+            >
+              {tail}
+            </span>
+          )}
         </span>
       </div>
     )
@@ -311,14 +396,18 @@ export function ArtifactPanel({
               e.preventDefault()
               appRect.current = e.currentTarget.closest('.app')?.getBoundingClientRect() ?? null
               setDragging(true)
+              let last = wsWidth
               const onMove = (ev: MouseEvent) => {
                 if (!appRect.current) return
                 const next = appRect.current.right - ev.clientX
-                if (wsOpen) setWsWidth(Math.max(WS_MIN_W, Math.min(wsMaxW(), next)))
-                else setWidth(Math.max(MIN_W, Math.min(navMaxW(), next)))
+                if (wsOpen) {
+                  last = clampWsW(next)
+                  setWsWidth(last)
+                } else setWidth(Math.max(MIN_W, Math.min(navMaxW(), next)))
               }
               const onUp = () => {
                 setDragging(false)
+                if (wsOpen) localStorage.setItem(WS_WIDTH_KEY, String(last))
                 window.removeEventListener('mousemove', onMove)
                 window.removeEventListener('mouseup', onUp)
               }
@@ -328,27 +417,20 @@ export function ArtifactPanel({
           />
           <div className="ap-head">
             <span className="ap-head-title">任务文件 · {currentTask?.title ?? '当前任务'}</span>
-            <div className="ap-head-actions">
-              {wsOpen ? (
-                <button type="button" className="panel-btn" title="缩小面板" onClick={onClearPreview}>
-                  <Minimize2 />
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="panel-btn"
-                  title="放大面板（打开最近产物）"
-                  disabled={taskArtifacts.length === 0}
-                  onClick={() => {
-                    const target = taskArtifacts[0]
-                    if (target) onOpen(target.artifact_id)
-                  }}
-                >
-                  <Maximize2 />
-                </button>
-              )}
-            </div>
           </div>
+          {/* 宽态编辑器收起钮（2026-09-09 三态切换重构：右上角两个钮各管一段——
+              这个 X 只管「回文件列表」，钉角开关只管「隐藏面板」；Esc 同义。
+              让位注记见各编辑器头部 88px 右 padding） */}
+          {wsOpen && (
+            <button
+              type="button"
+              className="ap-editor-close"
+              title="收起编辑器，回到文件列表（Esc）"
+              onClick={onClearPreview}
+            >
+              <X />
+            </button>
+          )}
 
           <div className="ap-body">
             {loading ? (
@@ -360,37 +442,111 @@ export function ArtifactPanel({
               <p className="ap-empty">
                 任务还没有文件。
                 <br />
-                Agent 解析、分析、生成目录或笔记后，会显示在这里。
+                AI 解析、分析、生成目录或笔记后，会显示在这里。
               </p>
             ) : (
               GROUPS.map((g) => {
                 const rows: ReactNode[] = []
+                // 文件计数（组头徽章）：章节子区算 N 不算 1
+                let count = 0
+                const pushRow = (node: ReactNode) => {
+                  rows.push(node)
+                  count += 1
+                }
                 // 产物
                 if (g.key === 'outline') {
-                  directoryArtifacts.forEach((a) => rows.push(artifactRow(a)))
+                  directoryArtifacts.forEach((a) => pushRow(artifactRow(a)))
                 } else if (g.key === 'note') {
-                  noteArtifacts.forEach((a) => rows.push(artifactRow(a)))
+                  noteArtifacts.forEach((a) => pushRow(artifactRow(a)))
                 }
                 // 输入文件（只读行）与过程文件
-                if (g.key === 'sources') sourceFiles.forEach((f) => rows.push(sourceRow(f)))
-                else if (g.key === 'parse') parseRows.forEach((f) => rows.push(wbRow(f, f.path.split('/')[1])))
-                else if (g.key === 'analysis') analysisFiles.forEach((f) => rows.push(wbRow(f)))
+                if (g.key === 'sources') sourceFiles.forEach((f) => pushRow(sourceRow(f)))
+                else if (g.key === 'parse') parseRows.forEach((f) => pushRow(wbRow(f, f.path.split('/')[1])))
+                else if (g.key === 'analysis') analysisFiles.forEach((f) => pushRow(wbRow(f)))
                 else if (g.key === 'outline') {
-                  outlineFiles.forEach((f) => rows.push(wbRow(f)))
-                  fragmentFiles.forEach((f) => {
-                    const stem = (f.path.split('/').pop() ?? '').replace(/\.[^.]+$/, '')
-                    rows.push(wbRow(f, `分册 · ${stem}`))
+                  // 底稿/分册收进默认折叠的「中间稿」子区（正文组「章节 · 中间稿」同款交互）
+                  if (outlineFiles.length > 0 || fragmentFiles.length > 0) {
+                    // 底稿 mtime 更新 = 分册内容已并入（mtime 可靠侧先例；合并后又改分册则自动失效恢复「可编辑」）
+                    const worksheet = outlineFiles.find((f) => f.path === 'outline/tender-response-docs.md')
+                    const mergedInto = (f: WorkbenchFile) =>
+                      !!worksheet && new Date(worksheet.mtime).getTime() > new Date(f.mtime).getTime()
+                    rows.push(
+                      <div className={cn('ap-sub', !draftsOpen && 'collapsed')} key="ap-outline-drafts">
+                        <button
+                          type="button"
+                          className="ap-sub-head"
+                          onClick={() => setDraftsOpen((v) => !v)}
+                        >
+                          <span>中间稿</span>
+                          <span className="ap-count">{outlineFiles.length + fragmentFiles.length}</span>
+                          <ChevronDown className="ap-chev" />
+                        </button>
+                        {draftsOpen && (
+                          <>
+                            {outlineFiles.map((f) => wbRow(f))}
+                            {fragmentFiles.map((f) =>
+                              wbRow(
+                                f,
+                                `分册 · ${(f.path.split('/').pop() ?? '').replace(/\.[^.]+$/, '')}`,
+                                mergedInto(f) ? '已并入' : undefined,
+                              ),
+                            )}
+                          </>
+                        )}
+                      </div>,
+                    )
+                    count += outlineFiles.length + fragmentFiles.length
+                  }
+                } else if (g.key === 'body') {
+                  // 整本=最终交付物排组首（册序）；节文件按目录树序；无目录回退列表原序
+                  const ordered = orderBodyRows(bodyFiles.map((f) => f.path), dirData)
+                  const byPath = new Map(bodyFiles.map((f) => [f.path, f]))
+                  const rowOf = (p: string | null) => (p ? byPath.get(p) : undefined)
+                  ordered.finals.forEach((p) => {
+                    const f = rowOf(p)
+                    if (f) pushRow(wbRow(f))
                   })
-                } else if (g.key === 'body') bodyFiles.forEach((f) => rows.push(wbRow(f)))
+                  const guideF = rowOf(ordered.guide)
+                  if (guideF) pushRow(wbRow(guideF))
+                  const promiseF = rowOf(ordered.promise)
+                  if (promiseF) pushRow(wbRow(promiseF))
+                  if (ordered.sections.length > 0) {
+                    // 章节中间稿默认收进折叠区（默认收起）——整本/指引/承诺常驻可见
+                    const sectionFiles = ordered.sections
+                      .map((p) => byPath.get(p))
+                      .filter((f): f is WorkbenchFile => !!f)
+                    rows.push(
+                      <div className={cn('ap-sub', !sectionsOpen && 'collapsed')} key="ap-body-sections">
+                        <button
+                          type="button"
+                          className="ap-sub-head"
+                          onClick={() => setSectionsOpen((v) => !v)}
+                        >
+                          <span>章节 · 中间稿</span>
+                          <span className="ap-count">{sectionFiles.length}</span>
+                          <ChevronDown className="ap-chev" />
+                        </button>
+                        {sectionsOpen && sectionFiles.map((f) => wbRow(f))}
+                      </div>,
+                    )
+                    count += sectionFiles.length
+                  }
+                }
 
                 if (rows.length === 0) return null
+                const collapsedG = !!collapsedGroups[g.key]
                 return (
-                  <div className="ap-group" key={g.key}>
-                    <div className="ap-group-head">
+                  <div className={cn('ap-group', collapsedG && 'collapsed')} key={g.key}>
+                    <button
+                      type="button"
+                      className="ap-group-head clickable"
+                      onClick={() => setCollapsedGroups((m) => ({ ...m, [g.key]: !m[g.key] }))}
+                    >
                       <span>{g.label}</span>
-                      {rows.length > 0 && <span className="ap-count">{rows.length}</span>}
-                    </div>
-                    {rows}
+                      {count > 0 && <span className="ap-count">{count}</span>}
+                      <ChevronDown className="ap-chev" />
+                    </button>
+                    {!collapsedG && rows}
                   </div>
                 )
               })
@@ -424,6 +580,7 @@ export function ArtifactPanel({
                   taskId={currentTask?.id ?? null}
                   path={workbenchPath}
                   onOpenWorkbench={onOpenWorkbench}
+                  onOpenLibrary={onOpenLibrary}
                 />
               ) : workbenchPath.split('/').pop() === '关键事实与承诺.md' ? (
                 <PromiseFileView key={workbenchPath} taskId={currentTask?.id ?? null} path={workbenchPath} />

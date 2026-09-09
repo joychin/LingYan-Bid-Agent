@@ -8,6 +8,8 @@
  * - 预览栏：复用全站 ReactMarkdown 管线（GFM、单波浪关闭）；
  * - anchorLine：打开即切源码栏并滚动定位该行（来源追溯「查看原文上下文」用；
  *   选中即高亮，长文档不迷路）；同文件再定位（anchor 变化）同样响应；
+ * - 行长封顶（2026-09-09）：查看类形态（viewOnly/readOnly/独占预览）文字列
+ *   最宽 860px 居中（.md-prose-cap），中文长文舒适行长；可编辑源码/分屏吃满；
  * - 受控纪律：父组件负责「仅内容不同且无本地改动时才换 value」（防打断输入、
  *   防 undo 栈被重置）——本组件不做二次守卫。
  */
@@ -71,9 +73,12 @@ export function MarkdownEditor({
   if (viewOnly) {
     return (
       <div className={cn('md-editor-preview prose-sm min-h-0 flex-1 overflow-auto', className)}>
-        <ReactMarkdown remarkPlugins={mdRemarkPlugins} components={markdownComponents}>
-          {stripCommentLines(value) || emptyLabel}
-        </ReactMarkdown>
+        {/* 行长封顶在内层：滚动条留在面板缘，只有文字列居中收窄 */}
+        <div className="md-prose-cap">
+          <ReactMarkdown remarkPlugins={mdRemarkPlugins} components={markdownComponents}>
+            {stripCommentLines(value) || emptyLabel}
+          </ReactMarkdown>
+        </div>
       </div>
     )
   }
@@ -109,11 +114,21 @@ export function MarkdownEditor({
             extensions={[markdown()]}
             placeholder={placeholder}
             basicSetup={{ highlightActiveLine: !readOnly, foldGutter: false }}
-            className="min-h-0 flex-1 overflow-hidden rounded-lg border border-line"
+            className={cn(
+              'min-h-0 flex-1 overflow-hidden rounded-lg border border-line',
+              // 只读源码=定位视图是「看」，同样收行长；可编辑源码/分屏吃满
+              readOnly && 'md-prose-cap',
+            )}
           />
         )}
-        {mode === 'split' && (
-          <div className="md-editor-preview prose-sm min-h-0 flex-1 overflow-auto rounded-lg border border-line bg-card p-3">
+        {mode !== 'source' && (
+          <div
+            className={cn(
+              'md-editor-preview prose-sm min-h-0 flex-1 overflow-auto rounded-lg border border-line bg-card p-3',
+              // 独占预览态收行长；分屏态每栏本就半宽不收
+              mode === 'preview' && 'md-prose-cap',
+            )}
+          >
             <ReactMarkdown remarkPlugins={mdRemarkPlugins} components={markdownComponents}>
               {stripCommentLines(value) || emptyLabel}
             </ReactMarkdown>

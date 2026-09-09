@@ -208,6 +208,23 @@ export interface WizardProps {
   onNav: (dir: -1 | 1) => void
 }
 
+/** 逃生口链接（弱化呈现，不与批准/拒绝/提交同权重）：放弃等待并停止 run。
+ *  等待期输入框整体禁用，这里是唯一出口；已写产物不受影响。 */
+function AbandonLink({ disabled, onAbandon }: { disabled: boolean; onAbandon?: () => void }) {
+  if (!onAbandon) return null
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onAbandon}
+      title="不回答了：停止本次任务（已产出内容保留）"
+      className="inline-flex items-center text-[11px] font-normal text-muted-foreground/80 underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
+    >
+      放弃并停止
+    </button>
+  )
+}
+
 /** 提问 args 里带 guide_path（work/ 相对路径）时渲染「打开指引」按钮——视图动作，
  *  不参与 resume；打开面板的回调由宿主传入。 */
 function guidePathOf(req: InterruptRequest): string {
@@ -227,6 +244,7 @@ export function InterruptCard({
   disabled = false,
   wizard,
   onOpenWorkbench,
+  onAbandon,
 }: {
   requests: InterruptRequest[]
   /** 审批决策回调（纯审批形态）；向导形态由 onNav 统一提交，不使用 */
@@ -236,17 +254,31 @@ export function InterruptCard({
   wizard?: WizardProps
   /** 提问带 guide_path 时的「打开指引」动作（面板覆盖式打开，ChatView 注入） */
   onOpenWorkbench?: (path: string) => void
+  /** 逃生口（2026-09-08）：放弃等待并停止本次 run（waiting_input 取消）——
+   *  弱化链接呈现，不与批准/拒绝/提交同权重 */
+  onAbandon?: () => void
 }) {
   // hooks 必须在早返回之前调用（wizard 分支不使用 reason，仅保 hook 顺序稳定）
   const [reason, setReason] = useState('')
   if (wizard)
-    return <WizardCard requests={requests} disabled={disabled} {...wizard} onOpenWorkbench={onOpenWorkbench} />
+    return (
+      <WizardCard
+        requests={requests}
+        disabled={disabled}
+        {...wizard}
+        onOpenWorkbench={onOpenWorkbench}
+        onAbandon={onAbandon}
+      />
+    )
 
   return (
-    <div className="w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm">
-      <div className="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
-        <ShieldQuestion className="h-3.5 w-3.5" />
-        助手请求执行以下操作，等待你的确认
+    <div className="w-full rounded-xl border border-line bg-surface px-3 py-2.5 text-sm shadow-sm">
+      <div className="flex items-center justify-between gap-1.5 text-[12px] font-medium text-muted-foreground">
+        <span className="inline-flex items-center gap-1.5">
+          <ShieldQuestion className="h-3.5 w-3.5" />
+          助手请求执行以下操作，等待你的确认
+        </span>
+        <AbandonLink disabled={disabled} onAbandon={onAbandon} />
       </div>
       <div className="mt-2 space-y-2">
         {requests.map((r, i) => (
@@ -298,7 +330,13 @@ function WizardCard({
   onReasonChange,
   onNav,
   onOpenWorkbench,
-}: WizardProps & { requests: InterruptRequest[]; disabled: boolean; onOpenWorkbench?: (path: string) => void }) {
+  onAbandon,
+}: WizardProps & {
+  requests: InterruptRequest[]
+  disabled: boolean
+  onOpenWorkbench?: (path: string) => void
+  onAbandon?: () => void
+}) {
   const total = requests.length
   const idx = Math.min(stepIndex, total - 1)
   const req = requests[idx]
@@ -311,7 +349,7 @@ function WizardCard({
   const showProgress = total > 1
 
   return (
-    <div className="w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm">
+    <div className="w-full rounded-xl border border-line bg-surface px-3 py-2.5 text-sm shadow-sm">
       <div className="flex items-center justify-between text-[12px] font-medium text-muted-foreground">
         <span className="inline-flex items-center gap-1.5">
           {question ? (
@@ -322,7 +360,10 @@ function WizardCard({
           {/* 问句项按 tool_use 呈现（同过程步骤的「向你提问」行同族），不像确认弹窗 */}
           {question ? `已询问 ${total} 个问题` : '需要你的确认'}
         </span>
-        {showProgress && <span>第 {idx + 1} / {total} 项</span>}
+        <span className="inline-flex items-center gap-2.5">
+          {showProgress && <span>第 {idx + 1} / {total} 项</span>}
+          <AbandonLink disabled={disabled} onAbandon={onAbandon} />
+        </span>
       </div>
       {question && (
         <div className="mt-1 text-[12px] text-muted-foreground">

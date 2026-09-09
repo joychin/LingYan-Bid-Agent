@@ -108,6 +108,8 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
         updateUpload({ id, name: file.name, size: file.size, taskId, status: 'done', progress: 100 })
         retryRef.current.delete(id) // 成功的不再需要重试引用；失败的保留
         queryClient.invalidateQueries({ queryKey: ['files', taskId] })
+        // 同名重传=内容可能不同：预览字节缓存一并失效（source-raw staleTime Infinity 的配套）
+        queryClient.invalidateQueries({ queryKey: ['source-raw', taskId] })
         toast(`已上传 ${file.name}`, 'success')
       } catch (err) {
         updateUpload({

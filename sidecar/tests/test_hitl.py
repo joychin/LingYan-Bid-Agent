@@ -533,3 +533,67 @@ def test_latest_run_returns_requests_snapshot(client, tmp_path, monkeypatch):
     resp = client.get(f"/api/conversations/{cid}/runs/latest").json()["run"]
     assert resp["status"] == "waiting_input"
     assert resp["requests"][0]["tool"] == "ask_human"
+
+
+# ---------- waiting_input 取消（逃生口，2026-09-08） ----------
+
+
+def test_cancel_waiting_run_escape_hatch(tmp_path, monkeypatch):
+    """等待中的 run 可被用户放弃：终态 error/cancelled、暂停消息改「任务中断」、
+    interrupt 快照清空、last_seq 随终态事件回写、占用解除、发 agent.error。"""
+    import pytest
+    from fastapi import HTTPException
+
+    cid, rid = _setup_conv(tmp_path, monkeypatch)
+    # 复刻 worker interrupt 分支的落库形状：半截暂停消息 + waiting_input 快照
+    msg_id = db.append_assistant_message(cid, "我先确认一下\n\n（等待你的输入…）", rid=rid)["id"]
+    db.interrupt_run(
+        rid,
+        [{"tool": "ask_human", "args": {"question": "工期?"}, "allowed": ["respond"]}],
+        last_seq=5,
+        pause_msg_id=msg_id,
+    )
+
+    published: list = []
+
+    async def fake_publish(conversation_id, event):
+        published.append((conversation_id, event))
+
+    monkeypatch.setattr(runs_api, "bus_publish", fake_publish)
+    out = asyncio.run(runs_api.cancel(rid))
+    assert out == {"ok": True, "run_id": rid}
+
+    row = db.get_run(rid)
+    assert row["status"] == "error" and row["error_code"] == "cancelled"
+    assert row["error"] == events.CANCELLED_MESSAGE
+    assert row["interrupt"] is None
+    assert row["last_seq"] == 6  # 终态事件 seq 回写（对账水位推进）
+    # 暂停消息标记改写：不再宣称「等待你的输入」
+    msgs = {m["id"]: m for m in db.list_messages(cid)}
+    assert "任务中断" in msgs[msg_id]["content"]
+    assert "等待你的输入" not in msgs[msg_id]["content"]
+    # 终态事件已发（前端据此收敛为中性灰「重新执行」卡）
+    assert published and published[0][0] == cid
+    assert published[0][1]["event"] == "agent.error"
+    assert published[0][1]["data"]["code"] == "cancelled"
+    assert published[0][1]["data"]["seq"] == 6
+    # 占用解除：同会话可发新消息
+    assert not db.active_run_exists(cid)
+    # 重复取消 → 409
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(runs_api.cancel(rid))
+    assert ei.value.status_code == 409
+
+
+def test_cancel_waiting_loses_to_resume_race(tmp_path, monkeypatch):
+    """resume 先抢到（用户恰在此刻提交回答）→ cancel 走 running 分支 409：
+    条件 UPDATE 互斥抢占，resume/cancel 一对一必有一个赢。"""
+    import pytest
+    from fastapi import HTTPException
+
+    cid, rid = _setup_conv(tmp_path, monkeypatch)
+    db.interrupt_run(rid, [{"tool": "ask_human", "args": {}, "allowed": ["respond"]}], last_seq=3)
+    assert db.resume_run(rid)  # 抢占成功：status → running（无执行体，纯状态断言）
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(runs_api.cancel(rid))  # running 且本进程无 worker → 409
+    assert ei.value.status_code == 409

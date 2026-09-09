@@ -9,6 +9,7 @@ agent.stream(stream_mode=["messages","updates"])，把 iter_stream 归一化的�
 """
 
 import asyncio
+import contextvars
 import copy
 import dataclasses
 import itertools
@@ -122,7 +123,7 @@ def _classify_error(exc: BaseException) -> tuple[str, str]:
             "llm_unavailable",
             f"模型服务暂时不可用。\n服务方返回：{str(exc)[:300]}",
         )
-    return "internal", f"程序内部错误：{exc}"
+    return "internal", f"程序内部错误，请重试；反复出现可导出诊断反馈。\n错误详情：{str(exc)[:300]}"
 
 
 def _task_failure_content(exc: Exception, request: "ToolCallRequest") -> str | None:
@@ -393,10 +394,75 @@ class _DispatchEnrichMiddleware(AgentMiddleware):
         return handler(request)
 
 
+# 本地重工具超时封顶（秒）。对齐 Claude Code bash 工具「默认 2min/硬上限 10min」
+# 的机制纪律；LLM/HTTP 调用自带 180s 超时不在此列。
+_TOOL_TIMEOUT_SECONDS = 600
+# 超时管制的工具清单：本地解析/组装/docx 族（磁盘+CPU 密集、无自身超时）。
+_TIMEOUT_TOOLS = frozenset({
+    "parse_document",
+    "assemble_tender",
+    "docx_section_create",
+    "docx_section_read",
+    "docx_section_revise",
+    "docx_material_inject",
+    "docx_source_inject",
+    "docx_image_insert",
+    "docx_assemble_volume",
+})
+
+
+class _ToolTimeoutMiddleware(AgentMiddleware):
+    """本地重工具超时封顶：卡死的工具调用限时返回错误，run 不再被拖死。
+
+    动因=本地工具（文件系统停顿/超大文件）挂住时 worker 线程永不返回——run 状态、
+    活树快照、用量桶全部永久驻留且占死线程池槽位。超时返回错误字符串走既有
+    tool error 通道，模型可自行缩小范围重试或绕行，run 正常收尾清理。
+    机制边界（明示）：Python 杀不掉线程——超时后底层工具线程（daemon）滞留至
+    自然结束，滞留计数=超时次数有界；wrap_tool_call 是同步链，故真 handler 在
+    复制了 contextvars 的新线程里执行（工具读任务上下文不受影响），本线程限时等待。
+    """
+
+    def wrap_tool_call(self, request: "ToolCallRequest", handler):
+        call = request.tool_call
+        if call.get("name") not in _TIMEOUT_TOOLS:
+            return handler(request)
+        ctx = contextvars.copy_context()
+        box: list = []
+        done = threading.Event()
+
+        def _run():
+            try:
+                box.append(handler(request))
+            except BaseException as exc:  # 原样回传给上层链处理
+                box.append(exc)
+            finally:
+                done.set()
+
+        threading.Thread(
+            target=ctx.run, args=(_run,), daemon=True, name="tool-timeout"
+        ).start()
+        if not done.wait(_TOOL_TIMEOUT_SECONDS):
+            return ToolMessage(
+                content=(
+                    f"[工具超时：{call.get('name')} 已运行 "
+                    f"{_TOOL_TIMEOUT_SECONDS // 60} 分钟未完成——多半是文件过大或底层卡死。"
+                    "请缩小范围（分节/分文件/限行号区间）后重试，或换一条路径完成目标]"
+                ),
+                status="error",
+                tool_call_id=call.get("id") or "",
+                name=call.get("name") or "",
+            )
+        result = box[0]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
 _SUBAGENT_COMPASS_MW = _SubagentCompassMiddleware()
 _SUBAGENT_SCOPE_MW = _SubagentScopeMiddleware()
 _PATH_RESCUE_MW = _PathRescueMiddleware()
 _DISPATCH_ENRICH_MW = _DispatchEnrichMiddleware()
+_TOOL_TIMEOUT_MW = _ToolTimeoutMiddleware()
 
 # 显式注册的子代理（deepagents 还会自动补 general-purpose）。tools 不指定 → 继承主
 # agent 全部工具；interrupt_on={} 整体替换继承：子代理不直接向用户提问（问答统一由
@@ -428,7 +494,7 @@ SUBAGENTS: list[dict] = [
             "完成后返回简短中文摘要：目录节点数、来源标注数、跳过的清理道及原因、待澄清项。"
         ),
         "interrupt_on": {},
-        "middleware": [_SUBAGENT_COMPASS_MW, _SUBAGENT_SCOPE_MW, _PATH_RESCUE_MW],
+        "middleware": [_SUBAGENT_COMPASS_MW, _SUBAGENT_SCOPE_MW, _PATH_RESCUE_MW, _TOOL_TIMEOUT_MW],
     },
     {
         # 正文编写子代理：单节生成的执行单元（tender-body 多节并发）。同 outline-writer：
@@ -444,7 +510,8 @@ SUBAGENTS: list[dict] = [
         "system_prompt": (
             "你是响应文件正文编写子代理，只负责一个目录节的正文。任务描述=首行节名与"
             "主代理意图，其后系统自动附上本节派发上下文：任务目录前缀（读写路径都必须"
-            "带该前缀）、节文件输出路径（.docx）、写作模式、要求清单（每条=要求内容+"
+            "带该前缀）、节文件输出路径（.docx）、今天日期（封面/函件落款用这行，"
+            "不要自编日期）、写作模式、要求清单（每条=要求内容+"
             "出处，随时可按出处读招标原文核对）、可用素材块 id（格式跟随/格式件节另带"
             "拷原件指引）、承诺清单的全部值、兄弟节开头摘要——已含你所需的全部共享"
             "信息。\n"
@@ -463,22 +530,27 @@ SUBAGENTS: list[dict] = [
             "描述给的来源文件名，lines=行号区间；独立格式附件整文件拷）把招标格式原样"
             "拷进节文件，再 revise 填空——表格空格子 fill、旧值 replace（表格按 "
             "table/row/col 格坐标寻址）；pdf 原件无可拷元素，按解析文本自行成形。\n"
-            "硬纪律：承诺类数字只能使用任务描述给出的承诺清单值，清单没有的一律写"
-            "【待澄清：…】不得编造；缺料写【待补：…】继续写不阻塞；docx 素材块必须先"
+            "硬纪律：承诺类数字只能使用任务描述给出的承诺清单值，清单没有的用 "
+            "docx_comment_add 加批注带回待澄清，不得编造；缺料/待核验同样 "
+            "docx_comment_add 加批注（锚定相关段落）继续写不阻塞——**正文里禁止写"
+            "【待补】【待澄清】占位文字**（会随交付稿打印出去，validate_body 判不过）；"
+            "docx 素材块必须先"
             " docx_material_inject 注入贴底稿再 revise 适配，禁止跳过注入直接自写——"
-            "图片只有注入能带进正文（自写=图全丢，写作工具没有放图通道）；正文是干净文本，"
+            "素材块内的图片只有注入能带进正文（自写=图全丢）；证书复印件等独立图片"
+            "用 docx_image_insert 插入（图源路径用 search_company_assets 命中行的"
+            "「含图 N 张」提示，PDF 原件传路径+页号）；正文是干净文本，"
             "不带任何头部/元信息，且 REQ/MAND/SCORE/TPL-xx 内部对账编号（无论从任务"
             "描述还是指引等文件里看到）一个都不写进正文——呼应招标要求用要求内容或"
             "招标文件真实印着的章节/条款号（如「按第三章 2.3 条」，评标人可对照原文，"
             "内部编号他们对不上）；兄弟节已覆盖的要点参考摘要避免重复展开；只写自己"
             "名分的节文件（已存在的节重建传 replace=true），不动任何其他文件。\n"
-            "禁止调用 ask_human（无人应答）：需要用户裁决的写【待澄清：…】带回。\n"
+            "禁止调用 ask_human（无人应答）：需要用户裁决的用 docx_comment_add 加批注带回。\n"
             "禁止改写写作指引与关键事实与承诺清单（共享文件只归主线程维护）。\n"
             "完成后返回简短中文摘要：节名、字数、使用素材块与重叠率、自查结果、"
-            "待补/待澄清清单。"
+            "待办批注清单。"
         ),
         "interrupt_on": {},
-        "middleware": [_SUBAGENT_COMPASS_MW, _SUBAGENT_SCOPE_MW, _PATH_RESCUE_MW],
+        "middleware": [_SUBAGENT_COMPASS_MW, _SUBAGENT_SCOPE_MW, _PATH_RESCUE_MW, _TOOL_TIMEOUT_MW],
     },
 ]
 
@@ -835,7 +907,8 @@ def build_agent(profile: cfg.ModelProfile | None = None):
         # 永久错误会打死整个主 run——见 _task_failure_content）；文件工具路径自愈
         # （子代理各自 ToolNode 独立，故 SUBAGENTS 条目里还挂了一份）；tender-body-writer
         # 派发说明程序拼装（治「派发塌成节名五字→子代理开局自救烧 token」，
-        # 见 dispatch_enrich 模块头）
+        # 见 dispatch_enrich 模块头）；本地重工具超时封顶（治卡死工具拖死 run，
+        # 子代理同样直接调 docx 族工具故 SUBAGENTS 条目里还挂了一份）
         middleware=[
             _SubagentTagMiddleware(),
             TodoListMiddleware(),
@@ -843,6 +916,7 @@ def build_agent(profile: cfg.ModelProfile | None = None):
             ToolErrorMiddleware(on_error=_task_failure_content, tools=["task"]),
             _PATH_RESCUE_MW,
             _DISPATCH_ENRICH_MW,
+            _TOOL_TIMEOUT_MW,
         ],
         system_prompt=(
             "你是标书助理，在一个投标任务下的会话里工作。产物归任务、单一当前版本："
@@ -856,9 +930,19 @@ def build_agent(profile: cfg.ModelProfile | None = None):
             "去除文本中的 AI 写作痕迹、让中文读起来更自然用 humanizer-zh。"
             "向用户介绍能力、流程或产物时只说你确定的内容，不虚构具体章节名、"
             "步骤名、字段名；没读技能文件前说到概括层（如「按招标文件结构提取"
-            "七个方面的要点」）。"
+            "七个方面的要点」）。用户请求你没有的能力时，如实说明做不到并指出"
+            "最接近的可行做法，不要发明替代路径凑合执行。"
             "用户上传的文件在当前任务工作目录的 sources/ 下（任务目录前缀见任务上下文，"
             "如 <任务目录>/sources/招标文件.docx）。"
+            "资料词汇表——以下各词与日常语义不同，严格按此区分：知识库=公司事实"
+            "（资质/案例/业绩）；写作素材库=用户手工挑选的章节素材块（内容资产，"
+            "供拷贝改写）；版式库=纯版式资产（原「模板库」），只决定之后新建节与"
+            "重新合册的样式，不改已写节的内容；版式库现状（数量/默认版式）用"
+            " list_templates 工具查询（版式文件在任务工作区之外，不要用文件工具"
+            "检索）。不存在「把版式应用到整本/已写章节」的工具：被这样"
+            "要求时如实说明，可行做法是先在版式库把版式设为默认、再重新生成整本；"
+            "不要把素材库文件当「模板」候选、不要发明路径。招标文件自带的格式模板"
+            "（投标函/授权书等格式件）是招标方要求的格式，不属于版式库或素材库。"
             "引用结构化成果（如投标目录）时用 read_artifact 按契约读取当前内容，"
                 "不要猜文件路径；中途想保存的未登记内容以 doc.note 笔记保存。"
                 "完成阶段性工作后用 update_task_progress 更新任务进度便签（保持简短）。"
@@ -1377,7 +1461,11 @@ def _sync_sub_reasoning(top_steps: list[dict], bufs: dict[str, list[str]]) -> No
         if s.get("tool") == "task":
             buf = bufs.get(s.get("tool_call_id"))
             if buf is not None:
-                s["reasoning"] = "".join(buf)
+                joined = "".join(buf)
+                # 收敛为单元素：保留后续 chunk 追加的增量 join 语义，同时避免
+                # chunk 列表与拼好串双份驻留整个 run（join 复用同一字符串对象）
+                buf[:] = [joined]
+                s["reasoning"] = joined
 
 
 def _merge_trace_trees(old: list[dict], new: list[dict]) -> list[dict]:
@@ -1455,22 +1543,49 @@ CANCEL_EVENTS: dict[str, threading.Event] = {}
 
 # 运行中过程快照：只在当前 sidecar 进程内用于 SSE 断线/页面重挂对账。
 # 终态仍以 app.db 的 run_traces 为历史真值，快照不伪造消息、不轮询 agent.db。
+#
+# 拷贝节流（SSE 微合批同思路）：结构性事件密集期整树 deepcopy 是 O(事件数×树大小)
+# 的平方放大（32 节 run ~500+ 步）。窗口内只记树引用+脏标记，下一个事件或读侧
+# 超窗才真拷——快照最多滞后 _LIVE_TRACE_WINDOW。树只在事件边界被 worker 线程改写，
+# 读侧补拷与 worker 并发改树撞 deepcopy 异常时沿用旧快照下次再补（探测+兜底，不加锁）。
+_LIVE_TRACE_WINDOW = 0.5
 _LIVE_TRACE_LOCK = threading.Lock()
-_LIVE_TRACES: dict[str, dict] = {}
+_LIVE_TRACES: dict[str, dict] = {}  # 最近一次已拷贝的安全快照
+_LIVE_TRACE_PENDING: dict[str, dict] = {}  # 窗口内未拷贝的最新树引用
+_LIVE_TRACE_TS: dict[str, float] = {}  # 每 rid 最近一次真实拷贝时间（monotonic）
+
+
+def _copy_live_trace(rid: str, trace: dict) -> dict:
+    return {
+        "run_id": rid,
+        "tools": copy.deepcopy(trace.get("tools") or []),
+        "todos": copy.deepcopy(trace.get("todos") or []),
+        "reasoning": trace.get("reasoning") or "",
+    }
 
 
 def set_live_trace(rid: str, trace: dict) -> None:
     with _LIVE_TRACE_LOCK:
-        _LIVE_TRACES[rid] = {
-            "run_id": rid,
-            "tools": copy.deepcopy(trace.get("tools") or []),
-            "todos": copy.deepcopy(trace.get("todos") or []),
-            "reasoning": trace.get("reasoning") or "",
-        }
+        now = time.monotonic()
+        if now - _LIVE_TRACE_TS.get(rid, 0.0) < _LIVE_TRACE_WINDOW:
+            _LIVE_TRACE_PENDING[rid] = trace
+            return
+        _LIVE_TRACES[rid] = _copy_live_trace(rid, trace)
+        _LIVE_TRACE_TS[rid] = now
+        _LIVE_TRACE_PENDING.pop(rid, None)
 
 
 def get_live_trace(rid: str) -> dict | None:
     with _LIVE_TRACE_LOCK:
+        if rid in _LIVE_TRACE_PENDING and (
+            time.monotonic() - _LIVE_TRACE_TS.get(rid, 0.0) >= _LIVE_TRACE_WINDOW
+        ):
+            try:  # worker 单线程改树，仅与事件边界并发时可能撞——沿用旧快照
+                _LIVE_TRACES[rid] = _copy_live_trace(rid, _LIVE_TRACE_PENDING[rid])
+                _LIVE_TRACE_TS[rid] = time.monotonic()
+                _LIVE_TRACE_PENDING.pop(rid, None)
+            except Exception:
+                pass
         trace = _LIVE_TRACES.get(rid)
         return copy.deepcopy(trace) if trace is not None else None
 
@@ -1478,6 +1593,8 @@ def get_live_trace(rid: str) -> dict | None:
 def clear_live_trace(rid: str) -> None:
     with _LIVE_TRACE_LOCK:
         _LIVE_TRACES.pop(rid, None)
+        _LIVE_TRACE_PENDING.pop(rid, None)
+        _LIVE_TRACE_TS.pop(rid, None)
 
 
 def get_run_snapshot(rid: str) -> dict | None:

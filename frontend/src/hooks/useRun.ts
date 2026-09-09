@@ -341,28 +341,43 @@ export function useRun(convId: string | null) {
   )
 
   /** 用户主动停止：置位协作式取消，收敛由随后的 agent.error（「任务已停止」）完成。
-   *  取消到真正终止之间存在事件边界等待（通常 1~2s），stopping 态让按钮转「正在停止…」。 */
+   *  取消到真正终止之间存在事件边界等待（通常 1~2s），stopping 态让按钮转「正在停止…」。
+   *  waiting_input（2026-09-08 逃生口）：端点直接落终态并回发 agent.error——202 后
+   *  本地 settle-error 兜底收敛（SSE 半开时终态事件到不了，冻结的问答卡清不掉；
+   *  不能靠 reconcile：convergeRun 的 !running 守卫对等待态无能为力；双保险幂等）。 */
   const cancel = useCallback(async () => {
     const cur = stateRef.current
-    if (!cur.runId || !cur.running || cur.stopping) return
-    dispatch({ type: 'stop-requested' })
+    if (cur.stopping) return
+    // 目标 run：执行中用 runId；等待输入用 interrupt.runId（此时 running=false）
+    const waiting = !cur.running
+    const targetRun = waiting ? cur.interrupt?.runId : cur.runId
+    if (!targetRun) return
+    if (!waiting) dispatch({ type: 'stop-requested' })
     try {
-      await cancelRun(cur.runId)
+      await cancelRun(targetRun)
+      if (waiting) {
+        dispatch({ type: 'settle-error', error: '任务已停止', code: 'cancelled' })
+        void queryClient.invalidateQueries({ queryKey: ['messages', convId] })
+        void queryClient.invalidateQueries({ queryKey: ['runs', 'active'] })
+      }
     } catch (e) {
       const status = (e as Error & { status?: number }).status
       if (status === 404 || status === 409) {
-        // 404/409 = run 已结束或正在收尾的竞态窗口：主动对账收敛，不能只依赖 SSE
-        // 终态（半开/断开时没有终态事件，stopping 会把发送钮永久锁在「正在停止…」）。
-        // 绕过限频（用户刚点过停止，此刻的对账不该被吞）；对账确认仍在跑则保持 stopping。
-        lastReconcileRef.current = 0
-        void reconcile()
+        // 404/409 = run 已结束/正在收尾的竞态窗口（或与续跑撞车——用户恰在此刻
+        // 提交回答）：主动对账收敛，不能只依赖 SSE 终态（半开/断开时没有终态
+        // 事件，stopping 会把发送钮永久锁在「正在停止…」）。绕过限频（用户刚
+        // 点过停止，此刻的对账不该被吞）；对账确认仍在跑则保持 stopping。
+        if (!waiting) {
+          lastReconcileRef.current = 0
+          void reconcile()
+        }
         return
       }
       // 网络层失败（请求未达 sidecar）：复位 stopping 解除按钮锁死，允许重试；
       // run 若仍在跑，随后的终态事件/对账照常收敛
       dispatch({ type: 'stop-failed' })
     }
-  }, [dispatch, reconcile])
+  }, [convId, dispatch, queryClient, reconcile])
 
   return { ...state, send, decide, cancel }
 }

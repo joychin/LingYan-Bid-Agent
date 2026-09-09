@@ -359,30 +359,12 @@ class KbParseMeta(_ContractModel):
 
 
 class TemplateInfo(_ContractModel):
-    """文档模板（格式资产，与素材=内容资产分离）：内置基准或用户上传 .docx，
-    全局一个生效位（active）。"""
+    """版式文件（格式资产，与素材=内容资产分离）：内置基准或用户上传 .docx，
+    全局一个默认版式位（active=当前默认）。"""
 
-    name: str  # 显示名（文件名主干；内置=「内置标书基准模板」）
-    key: str  # 寻址键（用户模板=文件名；内置="__builtin__"）
+    name: str  # 显示名（文件名主干；内置=「内置标书基准版式」）
+    key: str  # 寻址键（用户版式=文件名；内置="__builtin__"）
     builtin: bool = False
     active: bool = False
     size: int = 0
     mtime: float = 0.0
-
-
-class RestyleResult(_ContractModel):
-    """换装单节结果（elements=搬迁的段落/表格数）。"""
-
-    file: str
-    ok: bool
-    elements: int = 0
-    error: str | None = None
-
-
-class RestyleReport(_ContractModel):
-    """任务换装报告（applied=成功节数；skipped_volumes=「整本-」派生物跳过数）。"""
-
-    applied: int = 0
-    failed: int = 0
-    skipped_volumes: int = 0
-    results: list[RestyleResult] = Field(default_factory=list)

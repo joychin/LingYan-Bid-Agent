@@ -38,6 +38,13 @@ dev = [
     "pydantic-to-typescript",
 ]
 
+# cryptography 是传递依赖（deepagents → langchain-google-genai → google-auth）。
+# 49.0.0 起 macOS 轮子只发 arm64，x86_64-apple-darwin（mac universal 包的 Intel 半边）
+# 会被迫源码编译（maturin + x86_64 OpenSSL，Rosetta Homebrew 一堆前置）；48.x 仍是
+# universal2 轮子、纯下载。等上游恢复 x86_64 轮子或放弃 universal 时可解除。
+[tool.uv]
+constraint-dependencies = ["cryptography<49"]
+
 [tool.ruff]
 target-version = "py312"
 # 不启用 formatter（待工作区干净后再一次性全量格式化，避免大 diff 混入功能改动）

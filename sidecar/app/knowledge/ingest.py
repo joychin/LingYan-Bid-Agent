@@ -3,7 +3,7 @@
 写作素材在独立的素材库（materials_lib，用户手工勾选建块），知识库不做任何章节
 拆分——历史标书在此只做事实检索（statement + 业绩候选段）。
 
-fire-and-forget（上传 API asyncio.create_task + to_thread）；启动对账
+fire-and-forget（上传 API bg.spawn_background + bg.run_in_ingest 专用线程池）；启动对账
 db.recover_stale_kb 兜底（残留 parsing/running → failed + 清 progress，可重触发）。
 
 每步完成即对外生效（收益逐层提交，无跨步事务）：
@@ -21,7 +21,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .. import baidu_ocr, db, vlm
+from .. import baidu_ocr, bg, db, vlm
 from .. import config as cfg
 from ..parse import convert as parse_convert
 from ..parse import count_nodes, outline_with_lines, write_atomic
@@ -48,13 +48,13 @@ def schedule_ingest(kid: str) -> bool:
         logger.info("知识库入库在跑，跳过重复触发：%s", kid)
         return False
     _inflight.add(kid)
-    asyncio.get_running_loop().create_task(_run_safe(kid))
+    bg.spawn_background(_run_safe(kid))
     return True
 
 
 async def _run_safe(kid: str) -> None:
     try:
-        await asyncio.to_thread(run_ingest, kid)
+        await bg.run_in_ingest(run_ingest, kid)
     except Exception:
         logger.exception("知识库入库异常：%s", kid)
         try:

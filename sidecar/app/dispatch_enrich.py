@@ -13,7 +13,9 @@ description——任务前缀/输出路径/指引行/要求清单（registry 解
 - 节名对不上目录叶子、或一节多义时原样放行（宁可不猜——拼错节的说明比瘦说明更糟）；
 - 产出文本零 REQ/MAND/SCORE/TPL 编号（2026-09-08 派发契约：编号会被写手镜像
   进正文首句）；依据列 ID 由 registry 解析为「要求原文+出处」后即弃；
-- 拼装块无时间戳、同子代理 run 内字节稳定（前缀缓存铁律）；兄弟摘要随派发时点
+- 拼装块除天级「今天日期」行外无时间戳、同子代理 run 内字节稳定（前缀缓存
+  铁律；日期与任务上下文块同精度——写手子代理不继承任务上下文拿不到日期，
+  模型自编日期不可信，封面/投标函落款用这行）；兄弟摘要随派发时点
   变化，但那属于各子代理自己的独立前缀，不伤共享前缀；
 - 任何内部异常一律放行原文，绝不打断 run。
 """
@@ -23,6 +25,7 @@ from __future__ import annotations
 import difflib
 import logging
 import re
+from datetime import date
 
 from . import artifact_store
 from .tools import body_contract, docx_ops
@@ -211,6 +214,9 @@ def build_enriched_description(desc: str, task_id: str) -> str | None:
             "无需再读 写作指引/关键事实与承诺，也无需 check_pipeline_state）",
             f"任务目录前缀：{task_id}/",
             f"输出路径：{task_id}/work/{rel}",
+            # 天级日期（写手子代理不继承任务上下文块拿不到日期，模型自编日期
+            # 不可信——封面/投标函等落款用这行；单日内字节稳定，前缀缓存无伤）
+            f"今天日期：{date.today().isoformat()}",
         ]
         if mode and mode != "—":
             out.append(f"写作模式：{mode}")

@@ -1,200 +1,22 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+/**
+ * 知识库主视图（2026-09-08 重设计）：左栏 = 搜索（防抖，范围含内容说明与
+ * 检索问题）+ 分类下拉 + 待确认胶囊 + 文件平铺列表；右区 = 大空态（上传 CTA）
+ * 或条目详情（components/kb/）。上传走 XHR 进度 + 拖拽。
+ * 信息表单有未保存修改时，切条目/切 tab 弹确认（放弃/继续）——不加锁。
+ */
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import ReactMarkdown from 'react-markdown'
-import {
-  BookText,
-  Copy,
-  Loader2,
-  Plus,
-  RefreshCw,
-  Search,
-  Trash2,
-  TriangleAlert,
-  X,
-  Zap,
-} from 'lucide-react'
+import { Search, TriangleAlert, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import {
-  fetchKbItemRaw,
-  uploadKbFile,
-  type KbItem,
-  type KbParseMeta,
-  type KbTypePayload,
-} from '@/api/client'
+import { ModalShell } from '@/components/ui/ModalShell'
+import { uploadKbFile } from '@/api/client'
 import { fileExtIcon } from '@/artifacts/registry'
 import { Loader } from '@/components/ai/Loader'
-import { mdRemarkPlugins } from '@/lib/markdown'
-import { markdownComponents } from '@/components/ai/MemoMarkdown'
-import {
-  useConfirmMetadata,
-  useDeleteKbItem,
-  useKbContent,
-  useKbItemImages,
-  useKbItems,
-  useKbTypes,
-  useRetriggerKbItem,
-} from '@/hooks/useKnowledge'
-import { KbImage } from '@/components/KbImage'
+import { useKbItems, useKbTypes } from '@/hooks/useKnowledge'
 import { useToast } from '@/context/Toast'
-import { cn } from '@/lib/utils'
-
-const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp'])
-
-type DetailTab = 'content' | 'info'
-
-/** 状态点：解析/整理中转圈 / 待确认橙 / 已确认绿 / 失败红 */
-function StatusDot({ item }: { item: KbItem }) {
-  if (item.parse_status === 'pending' || item.parse_status === 'parsing' || item.extract_status === 'running') {
-    return <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
-  }
-  if (item.parse_status === 'failed') return <span className="kb-dot kb-dot--error" title={item.error ?? ''} />
-  if (item.review_status === 'pending_review') return <span className="kb-dot kb-dot--warn" title="待确认" />
-  return <span className="kb-dot kb-dot--ok" title="已确认" />
-}
-
-/** 状态行文案：能力档位 + 进行中进度（不再裸转圈）。 */
-function statusText(item: KbItem): string {
-  if (item.parse_status === 'pending' || item.parse_status === 'parsing')
-    return item.progress ?? '解析中…'
-  if (item.extract_status === 'running') return item.progress ?? '整理中…'
-  if (item.parse_status === 'failed') return '解析失败'
-  return item.doc_type_name
-}
-
-const WARN_CONVERSIONS = new Set([
-  'docx-numbered',
-  'pdf-numbered',
-  'pdf-plain',
-  'pdf-fontsize',
-  'vision-unavailable',
-])
-
-function ParseMetaBar({ meta }: { meta?: KbParseMeta | null }) {
-  if (!meta) return null
-  const chips: string[] = []
-  if (meta.chars != null) chips.push(`${meta.chars.toLocaleString()} 字符`)
-  if (meta.headings != null) chips.push(`${meta.headings} 个标题`)
-  if (meta.tables != null) chips.push(`${meta.tables} 个表格`)
-  if (meta.pages != null) chips.push(`${meta.pages} 页`)
-  if (meta.image_count != null && meta.image_count > 0) chips.push(`${meta.image_count} 张图片`)
-  if (meta.scanned_pages?.length) chips.push(`扫描页 ${meta.scanned_pages.length}`)
-  return (
-    <div className="kb-meta">
-      <div className="kb-meta-bar">
-        <span
-          className={cn('kb-meta-badge', WARN_CONVERSIONS.has(meta.conversion) && 'kb-meta-badge--warn')}
-        >
-          {meta.conversion_label}
-        </span>
-        {chips.map((c) => (
-          <span key={c} className="kb-meta-chip">
-            {c}
-          </span>
-        ))}
-      </div>
-      {meta.warnings.map((w) => (
-        <div key={w} className="kb-meta-warn">
-          <TriangleAlert className="h-3 w-3 shrink-0" />
-          <span>{w}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-/** 时间边界警示条（sidecar 动态计算：过期/临期/陈旧）。 */
-function FreshnessBar({ item }: { item: KbItem }) {
-  if (!item.freshness?.length) return null
-  return (
-    <div className="kb-freshness">
-      {item.freshness.map((f) => (
-        <span key={f.kind} className={cn('kb-freshness-item', f.kind === 'expired' && 'kb-freshness-item--expired')}>
-          <TriangleAlert className="h-3 w-3 shrink-0" />
-          {f.label}
-        </span>
-      ))}
-    </div>
-  )
-}
-
-/** 内容说明卡（v3）：AI 自由提取的带锚点要点——事实类文件的语义入口 +
- * 检索问题 pills（用户会怎么问，进 §questions 检索段）。 */
-function StatementCard({ item }: { item: KbItem }) {
-  const basis = item.business ?? item.suggested
-  const statement = basis?.statement?.trim()
-  const questions = (basis?.questions ?? []).filter((q) => q.trim())
-  if (!statement && questions.length === 0) return null
-  const confirmed = Boolean(item.business?.statement?.trim())
-  return (
-    <div className="kb-statement">
-      <div className="kb-statement-head">
-        <BookText className="h-3.5 w-3.5 shrink-0" />
-        <span className="kb-statement-title">内容说明</span>
-        <span className={cn('kb-statement-tag', confirmed && 'kb-statement-tag--confirmed')}>
-          {confirmed ? '已确认' : 'AI 整理·数字须回原文核对'}
-        </span>
-      </div>
-      {statement && <p className="kb-statement-body">{statement}</p>}
-      {questions.length > 0 && (
-        <div className="kb-q-block">
-          <span className="kb-q-label">可回答的问题</span>
-          <div className="kb-q-pills">
-            {questions.map((q, i) => (
-              <span key={`${i}-${q}`} className="kb-q-pill">{q}</span>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-const TRUNCATE_CHARS = 8000
-
-function MarkdownPreview({ content }: { content: string }) {
-  const [expanded, setExpanded] = useState(false)
-  const [copied, setCopied] = useState<'ok' | 'fail' | null>(null)
-  const clean = content.replace(/<!--[\s\S]*?-->/g, '')
-  const isTruncated = clean.length > TRUNCATE_CHARS
-  let shown = clean
-  if (isTruncated && !expanded) {
-    const cut = clean.lastIndexOf('\n\n', TRUNCATE_CHARS)
-    shown = cut > TRUNCATE_CHARS * 0.6 ? clean.slice(0, cut) : clean.slice(0, TRUNCATE_CHARS)
-  }
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(content)
-      setCopied('ok')
-    } catch {
-      setCopied('fail')
-    }
-    window.setTimeout(() => setCopied(null), 2000)
-  }
-
-  return (
-    <div>
-      <ReactMarkdown remarkPlugins={mdRemarkPlugins} components={markdownComponents}>
-        {shown}
-      </ReactMarkdown>
-      {isTruncated && (
-        <div className="kb-md-tail">
-          <span className="kb-md-count">
-            {expanded ? '全文' : '已截断，共'} {clean.length.toLocaleString()} 字符
-          </span>
-          <button type="button" className="kb-md-action" onClick={() => setExpanded((v) => !v)}>
-            {expanded ? '收起' : '查看完整内容'}
-          </button>
-          <button type="button" className="kb-md-action" onClick={() => void copy()}>
-            <Copy className="h-3 w-3" />
-            {copied === 'ok' ? '已复制' : copied === 'fail' ? '复制失败' : '复制全文'}
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
+import { cn, formatRelativeTime } from '@/lib/utils'
+import { ItemDetail, type DetailTab } from '@/components/kb/ItemDetail'
+import { KbHeroEmpty, StatusDot, statusText } from '@/components/kb/kbShared'
 
 interface UploadState {
   id: number
@@ -202,7 +24,9 @@ interface UploadState {
   percent: number
 }
 
-export function KnowledgeView() {
+type PendingNav = { type: 'tab'; to: DetailTab } | { type: 'select'; id: string }
+
+export function KnowledgeView({ onGoLibrary }: { onGoLibrary?: () => void }) {
   const { data, isLoading } = useKbItems()
   const items = data?.items ?? []
   const { data: typeInfo } = useKbTypes()
@@ -212,12 +36,21 @@ export function KnowledgeView() {
   const [filter, setFilter] = useState<'all' | 'pending'>('all')
   const [typeFilter, setTypeFilter] = useState<string>('all')
   const [query, setQuery] = useState('')
+  const [debounced, setDebounced] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [tab, setTab] = useState<DetailTab>('content')
+  const [infoDirty, setInfoDirty] = useState(false)
+  const [pendingNav, setPendingNav] = useState<PendingNav | null>(null)
   const [uploads, setUploads] = useState<UploadState[]>([])
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const uploadIdRef = useRef(0)
+
+  // 搜索防抖：输入即时回显，过滤 300ms 后生效（含说明/问题的过滤较重）
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebounced(query), 300)
+    return () => window.clearTimeout(t)
+  }, [query])
 
   const pending = items.filter((it) => it.review_status === 'pending_review')
   const typeCodes = new Set(types.map((t) => t.code))
@@ -225,14 +58,48 @@ export function KnowledgeView() {
   const filtered = useMemo(() => {
     const list = filter === 'pending' ? pending : items
     let scoped = typeFilter === 'all' ? list : list.filter((it) => (it.doc_type ?? 'other') === typeFilter)
-    if (query.trim()) {
-      const q = query.trim().toLowerCase()
-      scoped = scoped.filter((it) => it.file_name.toLowerCase().includes(q) || it.title.toLowerCase().includes(q))
+    const q = debounced.trim().toLowerCase()
+    if (q) {
+      scoped = scoped.filter((it) => {
+        if (it.file_name.toLowerCase().includes(q) || it.title.toLowerCase().includes(q)) return true
+        const basis = it.business ?? it.suggested
+        if (basis?.statement?.toLowerCase().includes(q)) return true
+        return (basis?.questions ?? []).some((x) => x.toLowerCase().includes(q))
+      })
     }
     return scoped
-  }, [items, pending, filter, typeFilter, query])
+  }, [items, pending, filter, typeFilter, debounced])
 
   const selected = items.find((it) => it.id === selectedId) ?? null
+
+  // ===== 脏状态守卫：信息 tab 有未保存修改时，切 tab / 切条目先问一声 =====
+  const applyNav = (nav: PendingNav) => {
+    if (nav.type === 'tab') setTab(nav.to)
+    else {
+      setSelectedId(nav.id)
+      setTab('content')
+    }
+  }
+  const guardedTab = (t: DetailTab) => {
+    if (infoDirty && tab === 'info' && t !== 'info') setPendingNav({ type: 'tab', to: t })
+    else setTab(t)
+  }
+  const guardedSelect = (id: string) => {
+    if (infoDirty && id !== selectedId) setPendingNav({ type: 'select', id })
+    else {
+      setSelectedId(id)
+      setTab('content')
+    }
+  }
+  const discardNav = () => {
+    if (!pendingNav) return
+    setInfoDirty(false)
+    applyNav(pendingNav)
+    setPendingNav(null)
+  }
+  useEffect(() => {
+    if (!selected) setInfoDirty(false)
+  }, [selected])
 
   const doUpload = async (files: FileList | File[]) => {
     const list = Array.from(files)
@@ -262,13 +129,13 @@ export function KnowledgeView() {
     )
   }
 
-  const emptyText = query.trim()
-    ? `没有匹配「${query.trim()}」的资料`
+  const emptyText = debounced.trim()
+    ? `没有匹配「${debounced.trim()}」的资料`
     : filter === 'pending'
       ? '没有待确认的资料'
       : typeFilter !== 'all'
         ? '该分类下暂无资料'
-        : '知识库还没有资料——上传资质证书、合同案例、历史标书等；挑章节建写作素材请到「写作素材库」'
+        : '没有符合条件的资料'
 
   return (
     <div className={cn('kb-view', dragOver && 'kb-view--drag')} data-tauri-drag-region={false}>
@@ -284,7 +151,7 @@ export function KnowledgeView() {
         }}
       />
 
-      {/* ===== 左栏：角色分组 + 搜索 + 类型分组列表 ===== */}
+      {/* ===== 左栏：搜索 + 筛选 + 文件平铺列表 ===== */}
       <aside
         className="kb-side"
         onDragOver={(e) => {
@@ -300,13 +167,10 @@ export function KnowledgeView() {
       >
         <div className="kb-side-head" data-tauri-drag-region>
           <span className="kb-title" data-tauri-drag-region>知识库</span>
-          <button type="button" className="kb-add" title="上传资料" onClick={() => fileInputRef.current?.click()}>
-            <Plus className="h-4 w-4" />
-          </button>
         </div>
         <div className="kb-search">
           <Search className="h-3.5 w-3.5" />
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索资料" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索文件名、说明或检索问题" />
         </div>
 
         <div className="kb-filter-row">
@@ -355,10 +219,7 @@ export function KnowledgeView() {
                 key={it.id}
                 type="button"
                 className={cn('kb-file', selectedId === it.id && 'kb-file--active')}
-                onClick={() => {
-                  setSelectedId(it.id)
-                  setTab('content')
-                }}
+                onClick={() => guardedSelect(it.id)}
               >
                 {(() => {
                   const ico = fileExtIcon(it.file_name)
@@ -369,11 +230,11 @@ export function KnowledgeView() {
                     {it.file_name}
                     {expired && <span className="kb-expired-tag">过期</span>}
                   </span>
-                  {busy && it.progress ? (
-                    <span className="kb-sub">{it.progress}</span>
-                  ) : (
-                    !busy && <span className="kb-sub">{it.doc_type_name}</span>
-                  )}
+                  <span className="kb-sub">
+                    {busy
+                      ? statusText(it)
+                      : `${it.doc_type_name} · ${formatRelativeTime(it.created_at)}`}
+                  </span>
                 </span>
                 <StatusDot item={it} />
               </button>
@@ -391,9 +252,18 @@ export function KnowledgeView() {
               <div className="kb-empty">{emptyText}</div>
             ))}
         </div>
+
+        {/* 上传入口与写作素材库同款：列表底部通栏主按钮 + 格式提示 */}
+        <div className="kb-side-foot">
+          <Button size="sm" className="kb-upload-btn" onClick={() => fileInputRef.current?.click()}>
+            <Upload className="h-3.5 w-3.5" />
+            上传文件
+          </Button>
+          <div className="kb-foot-hint">支持 .docx / .pdf / .txt / .md / .doc / 图片，单个不超过 100MB</div>
+        </div>
       </aside>
 
-      {/* ===== 右区：内容 / 信息 ===== */}
+      {/* ===== 右区：大空态 / 条目详情 ===== */}
       <section className="kb-main">
         {selected ? (
           <ItemDetail
@@ -401,667 +271,41 @@ export function KnowledgeView() {
             item={selected}
             types={types}
             tab={tab}
-            onTab={setTab}
+            onTab={guardedTab}
             onBeforeDelete={() => setSelectedId(null)}
+            onDirtyChange={setInfoDirty}
+          />
+        ) : items.length === 0 && !isLoading ? (
+          <KbHeroEmpty
+            onUpload={() => fileInputRef.current?.click()}
+            onGoLibrary={onGoLibrary}
           />
         ) : (
           <div className="kb-main-empty">
-            <p>知识库——上传公司资料与历史标书，写标书时 AI 自动检索引用</p>
+            <p>从左侧选择一份资料查看详情</p>
             <p className="text-xs text-muted-foreground">
-              上传不需要选择分类，AI 会自动识别类型并决定处理深度；待确认条目会在左侧标记
+              AI 已自动整理类型、说明与关键信息；待确认条目会有橙色标记
             </p>
           </div>
         )}
       </section>
-    </div>
-  )
-}
 
-function ItemDetail({
-  item,
-  types,
-  tab,
-  onTab,
-  onBeforeDelete,
-}: {
-  item: KbItem
-  types: KbTypePayload[]
-  tab: DetailTab
-  onTab: (t: DetailTab) => void
-  onBeforeDelete: () => void
-}) {
-  const { data: content } = useKbContent(item.id)
-  const { data: imagesData } = useKbItemImages(item.id)
-  const retrigger = useRetriggerKbItem()
-  const del = useDeleteKbItem()
-  const { toast } = useToast()
-  const [imgUrl, setImgUrl] = useState<string | null>(null)
-  const [confirmDelete, setConfirmDelete] = useState(false)
-  const isImage = IMAGE_EXTS.has(item.ext.toLowerCase())
-  const busy =
-    item.parse_status === 'pending' || item.parse_status === 'parsing' || item.extract_status === 'running'
-
-  useEffect(() => {
-    setImgUrl(null)
-    // 局部变量而非 state 读值：cleanup 闭包共享本变量，revoke 到的是 fetch 完成后的
-    // 真实 URL（读 state 的旧闭包恒拿到 null，objectURL 从不被释放——每看一张图泄一张）
-    let url: string | null = null
-    if (isImage && item.md_ready === false) {
-      void fetchKbItemRaw(item.id)
-        .then((u) => {
-          url = u
-          setImgUrl(u)
-        })
-        .catch(() => setImgUrl(null))
-    }
-    return () => {
-      if (url) URL.revokeObjectURL(url)
-    }
-  }, [item.id]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const parsing = item.parse_status === 'pending' || item.parse_status === 'parsing'
-  const extracting = item.extract_status === 'running'
-  const diff = useMemo(() => computeKbDiff(item, types), [item, types])
-
-  // 识别跑完给个明确反馈——确认版优先展示，此前主视图纹丝不动，只能猜成没成
-  const wasBusyRef = useRef(busy)
-  useEffect(() => {
-    if (wasBusyRef.current && !busy && item.extract_status === 'done') {
-      toast(diff ? `识别完成：${diffSummary(diff, types)}` : '识别完成', 'info')
-    }
-    wasBusyRef.current = busy
-  }, [busy]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  return (
-    <div className="kb-detail">
-      <header className="kb-detail-head">
-        <div className="min-w-0">
-          <div className="kb-detail-title">{item.file_name}</div>
-          <div className="kb-detail-meta">
-            {busy ? (
-              <span className="text-muted-foreground">{statusText(item)}</span>
-            ) : (
-            <span>{item.doc_type_name}</span>
-            )}
-            {item.review_status === 'confirmed' && <span className="text-success">已确认</span>}
-            {item.review_status === 'pending_review' && !busy && (
-              <span className="text-warning">待确认</span>
-            )}
-          </div>
-        </div>
-        <div className="flex gap-1.5">
-          {parsing ? (
-            <span className="inline-flex items-center gap-1.5 self-center px-1 text-xs text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              解析中…
-            </span>
-          ) : (
-            <Button
-              size="sm"
-              variant="outline"
-              className={item.parse_status === 'failed' ? 'text-error' : ''}
-              disabled={extracting}
-              title="重新解析与识别（覆盖建议信息，不动已确认内容）"
-              onClick={() => {
-                void retrigger
-                  .mutateAsync(item.id)
-                  .then(() => toast('已重新触发解析与识别', 'info'))
-                  .catch((e) => toast(e instanceof Error ? e.message : '重新识别失败', 'error'))
-              }}
-            >
-              <RefreshCw className={cn('h-3.5 w-3.5', retrigger.isPending && 'animate-spin')} />
-              {retrigger.isPending ? '提交中…' : item.parse_status === 'failed' ? '重新解析' : '重新识别'}
-            </Button>
-          )}
-          <Button
-            size="sm"
-            variant="outline"
-            className={!confirmDelete ? 'text-error' : ''}
-            onClick={() => {
-              if (!confirmDelete) {
-                setConfirmDelete(true)
-                window.setTimeout(() => setConfirmDelete(false), 3000)
-                return
-              }
-              onBeforeDelete()
-              void del.mutateAsync(item.id)
-            }}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            {confirmDelete ? '确认删除？' : '删除'}
-          </Button>
-        </div>
-      </header>
-
-      {item.parse_status === 'failed' && <div className="kb-error-bar">解析失败：{item.error}</div>}
-      <FreshnessBar item={item} />
-      <UpdateAdoption item={item} types={types} diff={diff} />
-
-      <nav className="kb-tabs">
-        <button type="button" className={cn('kb-tab', tab === 'content' && 'kb-tab--active')} onClick={() => onTab('content')}>
-          内容
-        </button>
-        <button type="button" className={cn('kb-tab', tab === 'info' && 'kb-tab--active')} onClick={() => onTab('info')}>
-          信息{item.review_status === 'pending_review' && !busy ? '（待确认）' : ''}
-        </button>
-      </nav>
-
-      {tab === 'content' ? (
-        <div className="kb-content">
-          <ParseMetaBar meta={content?.meta} />
-          <StatementCard item={item} />
-          {isImage && imgUrl ? (
-            <img src={imgUrl} alt={item.file_name} className="kb-image" />
-          ) : content?.content ? (
-            <MarkdownPreview content={content.content} />
-          ) : busy ? (
-            <div className="kb-main-empty">
-              <Loader variant="classic" size="md" tone="muted" />
-              <p>{statusText(item)}</p>
-            </div>
-          ) : (
-            <div className="kb-main-empty">
-              <p>无文本内容</p>
-              <p className="text-xs text-muted-foreground">
-                {isImage ? '图片原件可在「信息」页确认识别结果，或配置支持图片输入的模型后点「重新识别」' : '可点「重新识别」重试'}
-              </p>
-            </div>
-          )}
-          {(imagesData?.images?.length ?? 0) > 0 && (
-            <details className="kb-images-fold">
-              <summary>本文档图片 {imagesData!.images.length} 张（证书扫描/架构图等，仅供查看）</summary>
-              <div className="kb-images-grid">
-                {imagesData!.images.map((img) => (
-                  <KbImage key={img.name} itemId={item.id} imagePath={img.name} alt={img.name} />
-                ))}
-              </div>
-            </details>
-          )}
-        </div>
-      ) : (
-        <InfoForm item={item} types={types} />
-      )}
-    </div>
-  )
-}
-
-/** 重新识别后的采纳交互：更新条常驻亮差异，点开对比卡逐区「采纳建议 / 保留我的」，
- * 保存才落确认版——守住「确认内容不被静默覆盖」，但把两边差了什么摆到明面上。 */
-function UpdateAdoption({
-  item,
-  types,
-  diff,
-}: {
-  item: KbItem
-  types: KbTypePayload[]
-  diff: KbDiff | null
-}) {
-  const confirm = useConfirmMetadata()
-  const { toast } = useToast()
-  const labels = useKbTypes().data?.field_labels ?? {}
-  const [dismissedStamp, setDismissedStamp] = useState<string | null>(null)
-  const [open, setOpen] = useState(false)
-  const [choices, setChoices] = useState<Record<AdoptSectionKey, AdoptChoice>>(() =>
-    defaultChoices(diff),
-  )
-  const busy =
-    item.parse_status === 'pending' ||
-    item.parse_status === 'parsing' ||
-    item.extract_status === 'running'
-
-  // 新一轮识别落地（updated_at 变化）→ 重置选择与展开态
-  useEffect(() => {
-    setOpen(false)
-    setChoices(defaultChoices(diff))
-  }, [item.id, item.updated_at]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  if (busy || !diff || dismissedStamp === item.updated_at) return null
-
-  const save = async () => {
-    try {
-      await confirm.mutateAsync({ id: item.id, body: buildAdoptBody(item, diff, choices) })
-      toast('已保存', 'success')
-      setOpen(false)
-    } catch (e) {
-      toast(e instanceof Error ? e.message : '保存失败', 'error')
-    }
-  }
-
-  if (!open) {
-    return (
-      <div className="kb-update-bar">
-        <Zap className="h-3.5 w-3.5 shrink-0" />
-        <span className="kb-update-text">识别已更新：{diffSummary(diff, types)}</span>
-        <button type="button" className="kb-update-act" onClick={() => setOpen(true)}>
-          对比采纳
-        </button>
-        <button
-          type="button"
-          className="kb-update-act kb-update-act--ghost"
-          onClick={() => setDismissedStamp(item.updated_at)}
-        >
-          知道了
-        </button>
-      </div>
-    )
-  }
-
-  return (
-    <div className="kb-adopt">
-      <div className="kb-adopt-head">
-        <span>识别更新——逐区选择，保存后生效</span>
-        <button
-          type="button"
-          className="kb-adopt-close"
-          title="收起"
-          onClick={() => setOpen(false)}
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-
-      {diff.questions && (
-        <AdoptSection
-          title="检索问题"
-          adoptLabel={`采纳建议（${diff.questions.neu.length} 条）`}
-          keepLabel={`保留我的（现为 ${diff.questions.old.length} 条）`}
-          choice={choices.questions}
-          onChoose={(c) => setChoices((s) => ({ ...s, questions: c }))}
-        >
-          <div className="kb-adopt-pills">
-            {diff.questions.neu.map((q) => (
-              <span key={q} className="kb-q-pill">
-                {q}
-              </span>
-            ))}
-          </div>
-        </AdoptSection>
-      )}
-
-      {diff.statement && (
-        <AdoptSection
-          title="内容说明"
-          adoptLabel="采纳新版"
-          keepLabel="保留我的"
-          choice={choices.statement}
-          onChoose={(c) => setChoices((s) => ({ ...s, statement: c }))}
-        >
-          <div className="kb-adopt-sides">
-            <div className="kb-adopt-side">
-              <span className="kb-adopt-side-tag">我的</span>
-              <p>{diff.statement.old || '（空）'}</p>
-            </div>
-            <div className="kb-adopt-side kb-adopt-side--new">
-              <span className="kb-adopt-side-tag">AI 新版</span>
-              <p>{diff.statement.neu}</p>
+      {pendingNav && (
+        <ModalShell onClose={() => setPendingNav(null)} cardClassName="w-[min(92vw,380px)]">
+          <div className="p-5">
+            <p className="text-sm font-semibold">有未保存的修改</p>
+            <p className="mt-1 text-xs text-muted-foreground">离开后这些修改不会被保存。</p>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button size="sm" variant="outline" onClick={() => setPendingNav(null)}>
+                继续编辑
+              </Button>
+              <Button size="sm" variant="destructive" onClick={discardNav}>
+                放弃修改
+              </Button>
             </div>
           </div>
-        </AdoptSection>
-      )}
-
-      {diff.fields && diff.fields.length > 0 && (
-        <AdoptSection
-          title="锚点字段"
-          adoptLabel={`采纳（${diff.fields.length} 处变化）`}
-          keepLabel="保留我的"
-          choice={choices.fields}
-          onChoose={(c) => setChoices((s) => ({ ...s, fields: c }))}
-        >
-          {diff.fields.map((f) => (
-            <div key={f.key} className="kb-adopt-field">
-              <span className="kb-adopt-field-label">{labels[f.key] ?? f.key}</span>
-              <span className="kb-adopt-field-old">{f.old || '—'}</span>
-              <span className="kb-adopt-field-arrow">→</span>
-              <span className="kb-adopt-field-new">{f.neu}</span>
-            </div>
-          ))}
-        </AdoptSection>
-      )}
-
-      {diff.docType && (
-        <AdoptSection
-          title="资料类型"
-          adoptLabel={`改为「${typeNameOf(types, diff.docType.neu)}」`}
-          keepLabel={`保留「${typeNameOf(types, diff.docType.old)}」`}
-          choice={choices.docType}
-          onChoose={(c) => setChoices((s) => ({ ...s, docType: c }))}
-        >
-          <div className="kb-adopt-field">
-            <span className="kb-adopt-field-label">类型</span>
-            <span className="kb-adopt-field-old">{typeNameOf(types, diff.docType.old)}</span>
-            <span className="kb-adopt-field-arrow">→</span>
-            <span className="kb-adopt-field-new">{typeNameOf(types, diff.docType.neu)}</span>
-          </div>
-        </AdoptSection>
-      )}
-
-      <div className="kb-adopt-foot">
-        <Button size="sm" onClick={save} disabled={confirm.isPending}>
-          保存修改
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-function AdoptSection({
-  title,
-  adoptLabel,
-  keepLabel,
-  choice,
-  onChoose,
-  children,
-}: {
-  title: string
-  adoptLabel: string
-  keepLabel: string
-  choice: AdoptChoice
-  onChoose: (c: AdoptChoice) => void
-  children?: ReactNode
-}) {
-  return (
-    <div className="kb-adopt-section">
-      <div className="kb-adopt-sec-head">
-        <span className="kb-adopt-sec-title">{title}</span>
-        <div className="kb-adopt-choices">
-          <label className={cn('kb-adopt-choice', choice === 'suggest' && 'kb-adopt-choice--on')}>
-            <input
-              type="radio"
-              name={`adopt-${title}`}
-              checked={choice === 'suggest'}
-              onChange={() => onChoose('suggest')}
-            />
-            {adoptLabel}
-          </label>
-          <label className={cn('kb-adopt-choice', choice === 'keep' && 'kb-adopt-choice--on')}>
-            <input
-              type="radio"
-              name={`adopt-${title}`}
-              checked={choice === 'keep'}
-              onChange={() => onChoose('keep')}
-            />
-            {keepLabel}
-          </label>
-        </div>
-      </div>
-      {children}
-    </div>
-  )
-}
-
-/** 信息确认表单：内容说明编辑 + 检索问题增删改 + 时间锚点字段 + 类型（按事实/写法分组）+ 自由字段。 */
-function InfoForm({ item, types }: { item: KbItem; types: KbTypePayload[] }) {
-  const confirm = useConfirmMetadata()
-  const { toast } = useToast()
-  const basis = item.business ?? item.suggested
-  const [docType, setDocType] = useState<string>(basis?.doc_type ?? item.doc_type ?? 'other')
-  const [statement, setStatement] = useState(basis?.statement ?? '')
-  const [questions, setQuestions] = useState<string[]>(() => initQuestions(basis))
-  const [values, setValues] = useState<Record<string, string>>(() => initValues(basis))
-  useEffect(() => {
-    setDocType(basis?.doc_type ?? item.doc_type ?? 'other')
-    setStatement(basis?.statement ?? '')
-    setQuestions(initQuestions(basis))
-    setValues(initValues(basis))
-  }, [item.id, item.suggested, item.business]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const labels = useKbTypes().data?.field_labels ?? {}
-  const typeDef = types.find((t) => t.code === docType)
-  const fieldKeys = [
-    ...new Set([...(typeDef?.time_fields ?? []), 'project_name', 'client', ...Object.keys(values)]),
-  ]
-  const sources = basis?.fields ?? {}
-
-  const save = async () => {
-    try {
-      await confirm.mutateAsync({
-        id: item.id,
-        body: {
-          doc_type: docType,
-          statement: statement.trim() || undefined,
-          questions: questions.map((q) => q.trim()).filter(Boolean),
-          fields: values,
-        },
-      })
-      toast('已确认', 'success')
-    } catch (e) {
-      toast(e instanceof Error ? e.message : '保存失败', 'error')
-    }
-  }
-
-  return (
-    <div className="kb-info">
-      <div className="kb-info-form">
-        {basis && !item.business && (
-          <p className="kb-info-warn">以下为 AI 识别建议，请核对后确认；确认后不会被自动覆盖</p>
-        )}
-        {item.extract_status === 'failed' && (
-          <p className="kb-info-warn">自动识别失败（{item.error}）——可点「重新识别」或直接手动填写</p>
-        )}
-        <AutoCheckBar item={item} />
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">资料类型</label>
-          <select className="kb-select" value={docType} onChange={(e) => setDocType(e.target.value)}>
-            {types.map((t) => (
-              <option key={t.code} value={t.code}>
-                {t.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-muted-foreground">内容说明（供检索与写作引用）</label>
-          <textarea
-            className="kb-statement-input"
-            value={statement}
-            onChange={(e) => setStatement(e.target.value)}
-            rows={5}
-            placeholder="一份说明（关键数字/编号/范围逐条列出，附（第N页）出处）——留空则沿用 AI 整理版"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            检索问题（用户怎么问就怎么写，≤40 字/条、最多 10 条）
-          </label>
-          {questions.map((q, i) => (
-            <div key={i} className="kb-q-row">
-              <Input
-                value={q}
-                onChange={(e) => setQuestions((qs) => qs.map((v, j) => (j === i ? e.target.value : v)))}
-                placeholder="如：做过哪些医疗行业项目？"
-                maxLength={40}
-              />
-              <button
-                type="button"
-                className="kb-q-del"
-                title="删除该问题"
-                onClick={() => setQuestions((qs) => qs.filter((_, j) => j !== i))}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ))}
-          {questions.length < 10 && (
-            <button type="button" className="kb-q-add" onClick={() => setQuestions((qs) => [...qs, ''])}>
-              <Plus className="h-3.5 w-3.5" />
-              添加问题
-            </button>
-          )}
-        </div>
-        {fieldKeys.map((k) => (
-          <div key={k} className="space-y-1">
-            <label className="text-xs font-medium text-muted-foreground">
-              {labels[k] ?? k}
-              {sources[k]?.source && <span className="kb-source">（出处：{sources[k].source}）</span>}
-            </label>
-            <Input
-              value={values[k] ?? ''}
-              onChange={(e) => setValues((v) => ({ ...v, [k]: e.target.value }))}
-              placeholder="—"
-            />
-          </div>
-        ))}
-        <Button size="sm" onClick={save} disabled={confirm.isPending}>
-          {item.review_status === 'confirmed' ? '保存修改' : '确认信息'}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-/** 锚点回文核对结果（程序机械层）：自动确认=核对全过（business 带 confirmed_by="auto"）；
- * 人工确认过的条目不再显示——人已拍板。 */
-function AutoCheckBar({ item }: { item: KbItem }) {
-  const check = item.check_result
-  if (!check || (item.business && item.business.confirmed_by !== 'auto')) return null
-  const failed = (check.results ?? []).filter((r) => !r.ok)
-  const passed = (check.results ?? []).filter((r) => r.ok)
-  if (check.status === 'pass') {
-    return (
-      <div className="kb-check">
-        <span className="kb-check-tag">程序核对通过</span>
-        <span className="kb-check-note">
-          {passed.length > 0 ? `${passed.map((r) => r.label).join('、')} 均在原文命中` : '本类型无需核对锚点字段'}
-        </span>
-      </div>
-    )
-  }
-  return (
-    <div className="kb-check kb-check--fail">
-      {failed.map((r) => (
-        <div key={r.field} className="kb-check-row">
-          <TriangleAlert className="h-3 w-3 shrink-0" />
-          <span>
-            {r.label}：{r.detail}
-          </span>
-        </div>
-      ))}
-      {passed.length > 0 && (
-        <span className="kb-check-note">已在原文命中：{passed.map((r) => r.label).join('、')}</span>
+        </ModalShell>
       )}
     </div>
   )
-}
-
-function initQuestions(basis: KbItem['suggested']): string[] {
-  return (basis?.questions ?? []).filter((q) => typeof q === 'string' && q.trim())
-}
-
-function initValues(basis: KbItem['suggested']): Record<string, string> {
-  const init: Record<string, string> = {}
-  for (const [k, v] of Object.entries(basis?.fields ?? {})) init[k] = v?.value ?? ''
-  for (const [k, v] of Object.entries(basis?.extra ?? {})) init[k] = v?.value ?? ''
-  return init
-}
-
-/* ===== 确认版 vs 建议版的差异计算（重新识别后的对比采纳） ===== */
-
-type AdoptChoice = 'suggest' | 'keep'
-type AdoptSectionKey = 'questions' | 'statement' | 'fields' | 'docType'
-
-interface FieldChange {
-  key: string
-  old: string
-  neu: string
-}
-
-interface KbDiff {
-  questions: { old: string[]; neu: string[] } | null
-  statement: { old: string; neu: string } | null
-  fields: FieldChange[] | null
-  docType: { old: string; neu: string } | null
-}
-
-function typeNameOf(types: KbTypePayload[], code: string): string {
-  return types.find((t) => t.code === code)?.name ?? code
-}
-
-/** 只列「可采纳」的差异：建议侧为空的更新没有采纳价值（采纳即丢数据）。 */
-function computeKbDiff(item: KbItem, types: KbTypePayload[]): KbDiff | null {
-  const biz = item.business
-  const sug = item.suggested
-  if (!biz || !sug) return null
-  const out: KbDiff = { questions: null, statement: null, fields: null, docType: null }
-
-  const oldQs = initQuestions(biz)
-  const neuQs = initQuestions(sug)
-  if (neuQs.length > 0 && neuQs.join('\n') !== oldQs.join('\n')) {
-    out.questions = { old: oldQs, neu: neuQs }
-  }
-
-  const oldSt = (biz.statement ?? '').trim()
-  const neuSt = (sug.statement ?? '').trim()
-  if (neuSt && neuSt !== oldSt) out.statement = { old: oldSt, neu: neuSt }
-
-  const a = initValues(biz)
-  const b = initValues(sug)
-  const changes: FieldChange[] = []
-  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
-    const neu = b[k] ?? ''
-    if (neu && neu !== (a[k] ?? '')) changes.push({ key: k, old: a[k] ?? '', neu })
-  }
-  out.fields = changes.length > 0 ? changes : null
-
-  const neuType = sug.doc_type
-  if (neuType && neuType !== biz.doc_type && types.some((t) => t.code === neuType)) {
-    out.docType = { old: biz.doc_type ?? 'other', neu: neuType }
-  }
-
-  return out.questions || out.statement || out.fields || out.docType ? out : null
-}
-
-function diffSummary(diff: KbDiff, types: KbTypePayload[]): string {
-  const parts: string[] = []
-  if (diff.questions) {
-    parts.push(
-      diff.questions.old.length === 0
-        ? `新增 ${diff.questions.neu.length} 个检索问题`
-        : `检索问题有更新（${diff.questions.old.length}→${diff.questions.neu.length} 条）`,
-    )
-  }
-  if (diff.statement) parts.push('内容说明有改动')
-  if (diff.fields) parts.push(`${diff.fields.length} 处字段变化`)
-  if (diff.docType) parts.push(`类型建议改为「${typeNameOf(types, diff.docType.neu)}」`)
-  return parts.join(' · ')
-}
-
-function defaultChoices(diff: KbDiff | null): Record<AdoptSectionKey, AdoptChoice> {
-  return {
-    // 纯新增（确认版为空）默认采纳——没有可损失的东西；有旧值的一律默认保留，逐区选择
-    questions: diff?.questions && diff.questions.old.length === 0 ? 'suggest' : 'keep',
-    statement: 'keep',
-    fields: 'keep',
-    docType: 'keep',
-  }
-}
-
-function buildAdoptBody(
-  item: KbItem,
-  diff: KbDiff,
-  choices: Record<AdoptSectionKey, AdoptChoice>,
-): {
-  doc_type: string
-  statement?: string
-  questions: string[]
-  fields: Record<string, string>
-} {
-  const biz = item.business!
-  const fields: Record<string, string> = {}
-  for (const [k, v] of Object.entries(initValues(biz))) {
-    if (v.trim()) fields[k] = v
-  }
-  if (choices.fields === 'suggest') {
-    for (const f of diff.fields ?? []) fields[f.key] = f.neu
-  }
-  const statement =
-    choices.statement === 'suggest' && diff.statement ? diff.statement.neu : (biz.statement ?? '')
-  const questions =
-    choices.questions === 'suggest' && diff.questions ? diff.questions.neu : initQuestions(biz)
-  return {
-    doc_type:
-      choices.docType === 'suggest' && diff.docType ? diff.docType.neu : (biz.doc_type ?? 'other'),
-    statement: statement.trim() || undefined,
-    questions,
-    fields,
-  }
 }

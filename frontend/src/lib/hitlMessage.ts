@@ -32,7 +32,7 @@ export function isPauseMarked(content: string): boolean {
 
 /** 暂停/中断标记的状态徽章文案（渲染层用；正文不再保留尾巴文本）。 */
 export const MARKER_CHIP: Record<'pause' | 'interrupted', string> = {
-  pause: '⏣ 曾在此等待你的输入',
+  pause: '曾在此等待你的输入',
   interrupted: '已中断',
 }
 

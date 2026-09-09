@@ -27,7 +27,7 @@ export default function App() {
   // 「新建会话」草稿页：主区展示欢迎页+输入框（convId=null），所属任务在输入框胶囊里选/建
   const [drafting, setDrafting] = useState(false)
   // 主区形态：chat=对话工作台 / kb=知识库（全局资料层，与任务无关）/
-  // library=写作素材库（内容资产）/ templates=模板库（格式资产）
+  // library=写作素材库（内容资产）/ templates=版式库（格式资产；2026-09-09 由「模板库」改名，标识符不动）
   const [activeView, setActiveView] = useState<'chat' | 'kb' | 'library' | 'templates'>('chat')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [previewId, setPreviewId] = useState<string | null>(null)
@@ -155,7 +155,7 @@ export default function App() {
       <main className="main">
         <SidecarBanner />
         {activeView === 'kb' ? (
-          <KnowledgeView />
+          <KnowledgeView onGoLibrary={() => setActiveView('library')} />
         ) : activeView === 'library' ? (
           <MaterialsLibraryView />
         ) : activeView === 'templates' ? (
@@ -198,6 +198,7 @@ export default function App() {
           onOpen={openArtifact}
           onOpenWorkbench={openWorkbenchFile}
           onOpenSource={openSourceFile}
+          onOpenLibrary={() => setActiveView('library')}
           onClearPreview={() => {
             setPreviewId(null)
             setWorkbenchPath(null)

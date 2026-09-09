@@ -11,7 +11,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .. import agent, db, titler
+from .. import agent, bg, db, titler
 from .. import config as cfg
 from ..agent import delete_thread_memory, run_stream
 
@@ -154,10 +154,10 @@ async def create_message(cid: str, body: NewMessageBody):
     msg = db.create_user_message(cid, content, rid=run["id"])
 
     # 自动命名（fire-and-forget）：默认标题时后台生成，条件收敛在 titler 内部
-    asyncio.create_task(titler.maybe_generate_title(cid, content))
+    bg.spawn_background(titler.maybe_generate_title(cid, content))
 
     async def _task():
         await run_stream(cid, run["id"], content, thinking=thinking, model=model or None)
 
-    asyncio.create_task(_task())
+    bg.spawn_background(_task())
     return {"message_id": msg["id"], "run_id": run["id"]}

@@ -212,16 +212,17 @@ def test_section_pass_with_material_used(env):
     _write_body(env, "body/3.2 总体设计方案.md", section)
     r = validate_body.invoke({"section": "body/3.2 总体设计方案.md", "block_ids": [bid]})
     assert r.startswith("[校验通过]")
-    assert "[占位/待澄清] 无" in r
+    assert "[待办批注/占位] 无" in r
 
 
 def test_section_placeholder_census_not_issue(env):
+    """md 节是旧任务兼容形态（无批注能力）：内联占位维持清点进 notes，不判不过。"""
     _seed_directory(env)
     _write_body(env, "body/3.3 项目团队配置.md",
                 "团队拟投入 5 人。\n\n【待补：项目经理一级建造师证书】\n\n【待澄清：驻场人数是否含后台】\n")
     r = validate_body.invoke({"section": "body/3.3 项目团队配置.md", "block_ids": []})
-    assert r.startswith("[校验通过]")  # 占位是清单不是错误（缺料不阻塞）
-    assert "[占位/待澄清] 共 2 处" in r
+    assert r.startswith("[校验通过]")
+    assert "[待办批注/占位] 共 2 处" in r
     assert "L3：【待补：项目经理一级建造师证书】" in r
 
 
@@ -354,17 +355,19 @@ def _make_docx_section(env, rel: str, title: str, paragraphs: str = "") -> None:
     assert r.startswith("[已创建]"), r
 
 
-def test_section_docx_placeholder_p_numbering(env):
+def test_section_docx_placeholder_is_issue(env):
+    """docx 节内联占位判不过（占位文字会进交付稿）——待办正规落点是 Word 批注。"""
     _make_docx_section(env, "body/3.3 项目团队配置.docx", "3.3 项目团队配置",
                        "团队拟投入 5 人。\n【待补：项目经理证书】")
     r = validate_body.invoke({"section": "body/3.3 项目团队配置.docx", "block_ids": []})
-    assert r.startswith("[校验通过]")  # 占位是清单不是错误
-    assert "[占位/待澄清] 共 1 处" in r
-    assert "P3：【待补：项目经理证书】" in r  # P1=标题、P2=团队段、P3=占位段
+    assert r.startswith("[校验未通过]")
+    assert "P3：正文含内联占位「【待补：项目经理证书】」" in r  # P1=标题、P2=团队段、P3=占位段
+    assert "docx_comment_add" in r
 
 
 def test_section_docx_table_placeholder_t_label(env):
-    """表格单元格里的占位按 T{t}R{r} 定位（与读视图格坐标互查，不再是越界 P 号）。"""
+    """表格单元格里的占位按 T{t}R{r} 定位（与读视图格坐标互查，不再是越界 P 号）；
+    docx 内联占位同样判不过。"""
     from docx import Document as _Doc
 
     _make_docx_section(env, "body/3.2 总体设计方案.docx", "3.2 总体设计方案", "方案正文。")
@@ -376,9 +379,8 @@ def test_section_docx_table_placeholder_t_label(env):
     t.cell(0, 1).text = "【待补：分项报价表金额】"
     doc.save(p)
     r = validate_body.invoke({"section": "body/3.2 总体设计方案.docx", "block_ids": []})
-    assert r.startswith("[校验通过]")
-    assert "[占位/待澄清] 共 1 处" in r
-    assert "T1R1：分项报价 | 【待补：分项报价表金额】" in r
+    assert r.startswith("[校验未通过]")
+    assert "T1R1：正文含内联占位" in r
 
 
 def test_section_docx_residue_uses_pt_labels(env):
@@ -404,7 +406,7 @@ def test_section_docx_residue_uses_pt_labels(env):
 
 
 def test_section_docx_accepted_view_census(env):
-    """终稿视角：插入修订的占位计入、删除修订的占位不计（评委看到的是终稿）。"""
+    """终稿视角：插入修订的占位计为 issue、删除修订的占位不计（评委看到的是终稿）。"""
     import json
 
     from app.tools.docx_ops import docx_section_revise
@@ -419,9 +421,25 @@ def test_section_docx_accepted_view_census(env):
         {"path": "body/3.1 项目理解与需求分析.docx", "edits": edits}
     ).startswith("[已修订]")
     r = validate_body.invoke({"section": "body/3.1 项目理解与需求分析.docx", "block_ids": []})
-    assert "[占位/待澄清] 共 1 处" in r
-    assert "P3：【待澄清：插入的占位】" in r
+    assert r.startswith("[校验未通过]") and "共 1 处问题" in r
+    assert "P3：正文含内联占位「【待澄清：插入的占位】」" in r
     assert "要删的占位" not in r
+
+
+def test_section_docx_comment_census(env):
+    """docx_comment_add 落的待办批注清点进 notes（收尾点名），不影响 [校验通过]。"""
+    from app.tools.docx_ops import docx_comment_add
+
+    _make_docx_section(env, "body/3.3 项目团队配置.docx", "3.3 项目团队配置",
+                       "团队拟投入 5 人。")
+    assert docx_comment_add.invoke({
+        "path": "body/3.3 项目团队配置.docx", "after": "2",
+        "text": "项目经理一级建造师证书编号缺失，需向用户确认后回填",
+    }).startswith("[已加批注]")
+    r = validate_body.invoke({"section": "body/3.3 项目团队配置.docx", "block_ids": []})
+    assert r.startswith("[校验通过]")
+    assert "[待办批注/占位] 共 1 处" in r
+    assert "P2〔批注〕：项目经理一级建造师证书编号缺失" in r
 
 
 def test_section_docx_material_overlap_no_warning(env):

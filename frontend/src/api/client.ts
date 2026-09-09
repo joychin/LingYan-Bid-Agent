@@ -29,8 +29,6 @@ import type {
   MtBlock,
   MtFile,
   MtOutlineNode,
-  RestyleReport,
-  RestyleResult,
   RunInfo,
   RunTraceSnapshot as RunTraceSnapshotDto,
   SendMessageResult,
@@ -59,8 +57,6 @@ export type {
   MtBlock,
   MtFile,
   MtOutlineNode,
-  RestyleReport,
-  RestyleResult,
   RunInfo,
   SendMessageResult,
   Settings,
@@ -548,7 +544,7 @@ function _uploadWithProgress<T = { id: string; file_name: string; size: number }
   })
 }
 
-// ===== 文档模板库（格式资产：上传/激活/预览/任务换装）=====
+// ===== 版式库（格式资产：上传/设默认/预览；2026-09-09 由「模板库」改名，端点不动）=====
 
 export function uploadTemplate(file: File): Promise<TemplateInfo> {
   return _uploadWithProgress<TemplateInfo>('/api/templates', file)
@@ -566,16 +562,11 @@ export function deleteTemplate(key: string): Promise<{ ok: boolean }> {
   return request(`/templates/${encodeURIComponent(key)}`, { method: 'DELETE' })
 }
 
-/** 模板原始字节（版式预览渲染用；同 workbench raw——rawFetch 无 15s 超时）。 */
+/** 版式文件原始字节（版式预览渲染用；同 workbench raw——rawFetch 无 15s 超时）。 */
 export async function fetchTemplateRaw(key: string): Promise<Blob> {
   const res = await rawFetch(`/templates/${encodeURIComponent(key)}/raw`)
-  if (!res.ok) throw new Error(`模板拉取失败（${res.status}）`)
+  if (!res.ok) throw new Error(`版式文件拉取失败（${res.status}）`)
   return res.blob()
-}
-
-/** 把当前生效模板应用到任务已有正文节（重建式换装；「整本-」派生物跳过）。 */
-export function applyTemplate(taskId: string): Promise<RestyleReport> {
-  return request('/templates/apply', { method: 'POST', body: JSON.stringify({ task_id: taskId }) })
 }
 
 export function listMtFiles(): Promise<{ files: MtFile[] }> {
@@ -618,6 +609,11 @@ export function getMtBlockContent(id: string): Promise<MtBlockContent> {
   return request(`/materials/blocks/${id}/content`)
 }
 
+/** 文件片段内容（挑章节实时预览）：按行号闭区间切片，服务端 clamp 越界。 */
+export function getMtFileContent(fileId: string, start: number, end: number): Promise<MtBlockContent> {
+  return request(`/materials/files/${fileId}/content?start=${start}&end=${end}`)
+}
+
 export function createMtBlock(
   fileId: string,
   body: { title: string; note: string; ranges: [number, number][] },
@@ -633,14 +629,24 @@ export function deleteMtBlock(id: string): Promise<{ ok: boolean }> {
   return request(`/materials/blocks/${id}`, { method: 'DELETE' })
 }
 
-/** 原件二进制（图片条目预览）：带鉴权 fetch blob → objectURL（用完 revoke）。 */
-export async function fetchKbItemRaw(id: string): Promise<string> {
+/** 素材库原件字节：带鉴权 fetch → Blob（「原件」版式预览渲染体直接吃）。 */
+export async function fetchMtFileBlob(fileId: string): Promise<Blob> {
+  const res = await rawFetch(`/materials/files/${encodeURIComponent(fileId)}/raw`)
+  return res.blob()
+}
+
+/** 原件字节：带鉴权 fetch → Blob（版式预览渲染体直接吃 Blob）。 */
+export async function fetchKbItemBlob(id: string): Promise<Blob> {
   const { baseURL, token } = await getSidecarInfo()
   const resp = await fetch(`${baseURL}/api/kb/items/${id}/raw`, {    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   })
   if (!resp.ok) throw new Error(`原件获取失败（${resp.status}）`)
-  const blob = await resp.blob()
-  return URL.createObjectURL(blob)
+  return resp.blob()
+}
+
+/** 原件二进制（图片条目预览）：带鉴权 fetch blob → objectURL（用完 revoke）。 */
+export async function fetchKbItemRaw(id: string): Promise<string> {
+  return URL.createObjectURL(await fetchKbItemBlob(id))
 }
 
 // ---- 任务工作台（work/）：任务级共享的过程产物（parse/analysis/outline 的 md）----

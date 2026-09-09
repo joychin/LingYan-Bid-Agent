@@ -49,6 +49,25 @@ def _smoke() -> int:
 
     check("trafilatura(settings.cfg)", _trafilatura)
 
+    def _docx() -> str:
+        import docx
+
+        docx.Document()  # 包内默认模板可加载（漏收集 = 建文档即炸）
+        return f"{getattr(docx, '__version__', '?')} default.docx ok"
+
+    check("python-docx(default.docx)", _docx)
+
+    def _base_template() -> str:
+        # 基准版式模板是唯一「漏收集不崩溃、只静默退化为英文默认版式」的 datas 项
+        # （spec 注释原文），静默退化型必须靠冒烟断言盯住
+        from app.tools.docx_ops import _BASE_TEMPLATE
+
+        if not _BASE_TEMPLATE.is_file():
+            raise FileNotFoundError(f"基准版式模板缺失: {_BASE_TEMPLATE}")
+        return f"{_BASE_TEMPLATE.name} ok"
+
+    check("app/resources 模板", _base_template)
+
     def _openai() -> str:
         # 触发 _resources_proxy 的字符串 import_module("openai.resources") 懒代理
         from openai.resources import chat  # noqa: F401

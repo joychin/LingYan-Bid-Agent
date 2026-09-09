@@ -6,12 +6,14 @@
   非正文节点可「—」）、素材列块 id 可解析（blk_ 存在于素材库）、素材不跨节复用
   （同块多派=issue——注入两节即逐字重复；不同块同素材文件区间重叠=弱级提示，
   治历史重复建块）
-- 正文节（body/<册>/<节>.docx，兼容旧 .md）：占位与待澄清标记清点（清单式事实，
-  供收尾汇报逐条点名）、疑似残留（选用素材块所在文件名主干入扫描表——弱级来源，
+- 正文节（body/<册>/<节>.docx，兼容旧 .md）：待办批注清点（docx_comment_add 落的
+  Word 批注——收尾汇报逐条点名）、内联占位【待补/待澄清】**判不过**（占位文字会进
+  交付稿，正规落点是批注）、疑似残留（选用素材块所在文件名主干入扫描表——弱级来源，
   通用产品词可能误报，提示核对而非必须清零）、素材使用率（正文与选用
   块的字符级 shingle 重叠率——「查到素材却凭空写」的机械防线，提示不是门禁）；
-  docx 节按**接受全部修订后的终稿视角**取文本（评委最终看到的），占位定位段落
+  docx 节按**接受全部修订后的终稿视角**取文本（评委最终看到的），批注/占位定位段落
   为 P 段号、表格行为 T{t}R{r}（与 docx_section_read 视图互查），md 节仍为 L 行号
+  （旧任务兼容：md 无批注能力，内联占位维持清点不判不过）
 - 全局（section="body"）：承诺清单（关键事实与承诺.md 的「事项｜值」表）每个值
   是否落进任意正文节——去空白归一化子串匹配，未落正文点名（该节未写/值被改写）；
   节间两两查重（归一化 shingle 交集/较小方 ≥50% 点名——同一素材进多节或原文
@@ -32,12 +34,13 @@ from ..artifact_store import work_dir
 from ..knowledge import materials_lib
 from . import body_contract
 from .check_residue import re_split_name, scan_residue
-from .docx_ops import section_lines_labeled, section_text_lines
+from .docx_ops import section_comments_labeled, section_lines_labeled, section_text_lines
 from .validate_analysis import _iter_tables
 
 _BLOCK_ID_RE = re.compile(r"blk_[0-9a-f]{12}")
-# 占位/待澄清标记（收尾汇报必须逐条点名——不可静默留在交付稿里）
-_PLACEHOLDER_MARKS = ("【待补", "【待澄清", "【待补充")
+# 占位/待澄清标记：真值在 body_contract（docx_ops 合册兜底扫描共用）——待办的
+# 正规落点是 docx_comment_add 批注，本表只用于发现违规内联占位
+_PLACEHOLDER_MARKS = body_contract.PLACEHOLDER_MARKS
 # 素材使用率：块 shingle 在正文中的出现比例低于该值提示「未实质使用」
 _OVERLAP_HINT = 0.10
 # 节间查重：两节归一化 shingle 交集 / 较小方 ≥ 该值提示「疑似重复」
@@ -248,22 +251,39 @@ def _validate_guide(lines: list[str], task_id: str) -> tuple[list[str], list[str
 
 def _validate_section(
     lines: list[str], block_ids: list[str] | None, pos: str = "L",
-    labels: list[str] | None = None,
+    labels: list[str] | None = None, docx: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     issues: list[str] = []
     warnings: list[str] = []
     notes: list[str] = []
 
     if not any(ln.strip() for ln in lines):
-        return (["正文为空——每节须有实质内容（缺料写【待补：…】，不得留空文件）"], warnings, notes)
+        hint = (
+            "缺料用 docx_comment_add 加批注记待办"
+            if docx else "缺料在收尾汇报向用户逐项点名"  # md 旧形态无批注能力
+        )
+        return (
+            [f"正文为空——每节须有实质内容（{hint}），不得留空文件"],
+            warnings,
+            notes,
+        )
 
-    # 占位/待澄清清点：不是错误（缺料不阻塞），收尾汇报必须逐条点名
+    # 内联占位：docx 节判不过（占位文字会进交付稿——待办该走 docx_comment_add 批注）；
+    # md 节是旧任务兼容形态（md 无批注能力），维持清点进 notes 供收尾点名
     # （md 节 pos=L 行号；docx 节 labels 逐行给定位——段落 P 段号、表格行 T 行号，
     # 与 docx_section_read 视图互查）
     for i, ln in enumerate(lines, 1):
         if any(mark in ln for mark in _PLACEHOLDER_MARKS):
             loc = labels[i - 1] if labels and i <= len(labels) else f"{pos}{i}"
-            notes.append(f"{loc}：{ln.strip()[:50]}{'…' if len(ln.strip()) > 50 else ''}")
+            snippet = ln.strip()[:30]
+            if docx:
+                issues.append(
+                    f"{loc}：正文含内联占位「{snippet}」——占位文字会随交付稿出去，"
+                    "删除该文字、改用 docx_comment_add 加批注记待办"
+                    "（缺料/待澄清/待核验都落批注，不落正文）"
+                )
+            else:
+                notes.append(f"{loc}：{ln.strip()[:50]}{'…' if len(ln.strip()) > 50 else ''}")
 
     if block_ids is None:
         warnings.append("未传 block_ids——旧名残留与素材使用率检查跳过（使用计划里选了哪些块就传哪些）")
@@ -412,8 +432,8 @@ def validate_body(section: str, block_ids: list[str] | None = None) -> str:
     写完指引后传 section="body/写作指引.md" 校验表完整性（每节有行/模式合法/
     素材块可解析/素材不跨节复用——同块派多节直接判不过：注入两节=正文逐字重复，
     拆块或只留一节用块）；写完一节正文后传该节路径与使用计划选用的素材块 id
-    （docx 节按接受全部修订后的终稿视角校验，占位定位段落为 P 段号、表格行为
-    T 行号；旧 .md 节兼容）；
+    （docx 节按接受全部修订后的终稿视角校验，docx_comment_add 落的待办批注清点进
+    收尾点名、内联占位判不过；定位段落为 P 段号、表格行为 T 行号；旧 .md 节兼容）；
     整本收尾传 section="body"（目录）跑全局承诺比对与节间查重——承诺清单每个值
     未在任何正文出现、两节内容大面积重叠（同一素材进多节/原文照搬）都会被点名。
     [校验通过] 才算该节完成；[校验未通过] 逐条给出
@@ -444,10 +464,16 @@ def validate_body(section: str, block_ids: list[str] | None = None) -> str:
         if not p.exists():
             return f"[校验失败] {raw} 不存在"
         if p.suffix == ".docx":
-            # docx 节：终稿视角文本（接受全部修订后），占位定位段落 P 段号、表格行 T 行号
-            labeled = section_lines_labeled(Document(str(p)))
+            # docx 节：终稿视角文本（接受全部修订后），批注/占位定位段落 P 段号、表格行 T 行号
+            doc = Document(str(p))
+            labeled = section_lines_labeled(doc)
             issues, warnings, notes = _validate_section(
-                [t for _, t in labeled], block_ids, labels=[lbl for lbl, _ in labeled]
+                [t for _, t in labeled], block_ids, labels=[lbl for lbl, _ in labeled], docx=True
+            )
+            # 待办批注清点（docx_comment_add 落的待办——收尾汇报逐条点名，不是门禁）
+            notes.extend(
+                f"{loc}〔批注〕：{t[:50]}{'…' if len(t) > 50 else ''}"
+                for loc, t in section_comments_labeled(doc)
             )
         elif p.suffix == ".md":
             lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -463,8 +489,8 @@ def validate_body(section: str, block_ids: list[str] | None = None) -> str:
         )
         parts = [head]
         parts.extend(f"- {i}" for i in issues)
-        parts.append(f"[占位/待澄清] 共 {len(notes)} 处（收尾汇报逐条点名，不得只字不提）："
-                     if notes else "[占位/待澄清] 无")
+        parts.append(f"[待办批注/占位] 共 {len(notes)} 处（收尾汇报逐条点名，不得只字不提）："
+                     if notes else "[待办批注/占位] 无")
         parts.extend(f"- {n}" for n in notes)
         parts.extend(f"⚠️ {w}" for w in warnings)
         return "\n".join(parts)

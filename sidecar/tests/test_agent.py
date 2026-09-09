@@ -5,6 +5,7 @@
 半截正文清空、残留步骤收尾、trace 留证、额度用尽文案、backoff 尊重停止）。
 """
 
+import asyncio
 import threading
 import types
 
@@ -307,6 +308,30 @@ def test_system_prompt_task_retry_guidance():
     src = inspect.getsource(build_agent)
     for kw in ("重派一次", "不要静默跳过"):
         assert kw in src, f"主 prompt 缺少 task 失败纪律关键词：{kw}"
+
+
+def test_system_prompt_glossary_and_no_invented_paths():
+    """主 prompt 含资料词汇表（版式=格式/素材=内容）与无机制如实说纪律。
+
+    动因（2026-09-09）：「为整本应用模板」请求下 agent 把素材库文件列成
+    「模板库」候选——版式库对 agent 零可见，只能按日常语义把历史标书当模板。
+    同日「模板库」定名改「版式库」，关键词随改（正文守卫句保留「模板」字样
+    ——用户提问仍用日常词，守卫按日常词触发）。
+    """
+    import inspect
+
+    from app.agent import build_agent
+
+    src = inspect.getsource(build_agent)
+    for kw in (
+        "资料词汇表",
+        "写作素材库=用户手工挑选的章节素材块",
+        "版式库=纯版式资产",
+        "不要把素材库文件当「模板」候选",
+        "不存在「把版式应用到整本/已写章节」的工具",
+        "不要发明替代路径凑合执行",
+    ):
+        assert kw in src, f"主 prompt 缺少词汇表/无机制纪律关键词：{kw}"
 
 
 # ---- 瞬时 LLM 错误自动重试（2026-08-27 全量测试 T07 API 流断的修复）----
@@ -1219,3 +1244,164 @@ def test_subagent_compass_injection():
     assert "【路径罗盘】" in seen["content"] and "t_x9/" in seen["content"]
     agent_mod._SUBAGENT_COMPASS_MW.wrap_model_call(req, handler)  # 无任务上下文
     assert seen["content"] == "子代理提示词"
+
+
+def test_sub_reasoning_buffer_collapses_to_single_copy():
+    """子代理思考缓冲 join 后收敛为单元素：run 期间思考文本单份驻留（不再
+    chunk 列表+拼好串双份），后续 chunk 追加的增量 join 语义不变。"""
+    steps = [{"tool": "task", "tool_call_id": "s1", "reasoning": ""}]
+    bufs = {"s1": ["思", "考", "片", "段"]}
+    agent_mod._sync_sub_reasoning(steps, bufs)
+    assert steps[0]["reasoning"] == "思考片段"
+    assert bufs["s1"] == ["思考片段"]
+    bufs["s1"].append("继续")
+    agent_mod._sync_sub_reasoning(steps, bufs)
+    assert steps[0]["reasoning"] == "思考片段继续"
+    assert bufs["s1"] == ["思考片段继续"]
+
+
+def test_live_trace_throttle_dense_events_share_one_copy(monkeypatch):
+    """快照节流：窗口内密集 set 只真拷一次（pending 记引用），读侧窗口内沿用
+    旧快照、超窗后补拷最新——治「每结构性事件整树 deepcopy」的平方放大。"""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(agent_mod.time, "monotonic", lambda: clock["t"])
+    copies = {"n": 0}
+    real = agent_mod._copy_live_trace
+
+    def counting(rid, trace):
+        copies["n"] += 1
+        return real(rid, trace)
+
+    monkeypatch.setattr(agent_mod, "_copy_live_trace", counting)
+
+    tree = {"tools": [{"id": "t1", "tool": "read"}], "todos": [], "reasoning": ""}
+    agent_mod.set_live_trace("r_th", tree)
+    clock["t"] += 0.1
+    agent_mod.set_live_trace("r_th", {**tree, "reasoning": "第2次"})
+    clock["t"] += 0.1
+    agent_mod.set_live_trace("r_th", {**tree, "reasoning": "第3次"})
+    assert copies["n"] == 1  # 密集期只有首次真拷
+    snap = agent_mod.get_live_trace("r_th")
+    assert snap["reasoning"] == ""  # 窗口内读侧沿用旧快照，不并发拷 worker 的树
+    clock["t"] += agent_mod._LIVE_TRACE_WINDOW  # 超窗
+    snap = agent_mod.get_live_trace("r_th")
+    assert copies["n"] == 2  # 读侧补拷 pending 的最新树
+    assert snap["reasoning"] == "第3次"
+    agent_mod.clear_live_trace("r_th")
+    assert agent_mod.get_live_trace("r_th") is None
+    assert "r_th" not in agent_mod._LIVE_TRACE_PENDING
+    assert "r_th" not in agent_mod._LIVE_TRACE_TS
+
+
+def test_tool_timeout_middleware_wired():
+    """超时中间件接进 build_agent 与两个 SUBAGENTS 条目（子代理直接调 docx 族
+    工具）；管制清单里的名字必须是真实注册的工具名（防漂移）。"""
+    import inspect
+
+    src = inspect.getsource(agent_mod.build_agent)
+    assert "_TOOL_TIMEOUT_MW" in src
+    assert all(
+        agent_mod._TOOL_TIMEOUT_MW in (s.get("middleware") or []) for s in agent_mod.SUBAGENTS
+    )
+    names = {getattr(t, "name", None) for t in agent_mod.TOOLS}
+    assert agent_mod._TIMEOUT_TOOLS <= names
+
+
+def test_tool_timeout_middleware_times_out_and_passes_through(monkeypatch):
+    """超时中间件：管制工具限时等待，超时返回错误 ToolMessage（模型可缩小范围
+    重试、run 正常收尾）；正常完成/非管制工具/异常均原样透传。"""
+    import time
+
+    monkeypatch.setattr(agent_mod, "_TOOL_TIMEOUT_SECONDS", 0.05)
+    mw = agent_mod._ToolTimeoutMiddleware()
+
+    class _Req:
+        def __init__(self, name):
+            self.tool_call = {"name": name, "id": f"tc_{name}", "args": {}}
+
+    def slow(_req):
+        time.sleep(0.3)
+        return ToolMessage(content="不应到达", tool_call_id="tc_parse_document")
+
+    out = mw.wrap_tool_call(_Req("parse_document"), slow)
+    assert isinstance(out, ToolMessage) and out.status == "error"
+    assert "工具超时" in out.content and "parse_document" in out.content
+
+    ok = ToolMessage(content="完成", tool_call_id="tc_docx_section_read")
+    assert mw.wrap_tool_call(_Req("docx_section_read"), lambda _r: ok) is ok
+    plain = "非管制工具不包线程"
+    assert mw.wrap_tool_call(_Req("read_file"), lambda _r: plain) is plain
+
+    def boom(_req):
+        raise ValueError("工具异常原样回传")
+
+    try:
+        mw.wrap_tool_call(_Req("parse_document"), boom)
+        raise AssertionError("应当原样抛出")
+    except ValueError:
+        pass
+
+
+def test_wrap_tool_call_runs_off_event_loop_in_real_graph():
+    """守护超时中间件的承重假设：sync stream 驱动下 wrap_tool_call 在执行器
+    线程跑、所在线程无事件循环（langgraph tool_node 的 async 路径若只有 sync
+    钩子会在协程里直接调——届时 _ToolTimeoutMiddleware 的 done.wait(600) 会
+    卡死事件循环，本测试红=驱动方式变了，须先改超时实现）。"""
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    from langchain_core.tools import tool as lc_tool
+    from pydantic import PrivateAttr
+
+    seen: dict = {}
+
+    class _Probe(AgentMiddleware):
+        def wrap_tool_call(self, request, handler):
+            try:
+                asyncio.get_running_loop()
+                seen["loop"] = True
+            except RuntimeError:
+                seen["loop"] = False
+            seen["main"] = threading.current_thread() is threading.main_thread()
+            return handler(request)
+
+    class _ScriptedChatModel(BaseChatModel):
+        responses: list
+        _idx: int = PrivateAttr(default=0)
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            i = min(self._idx, len(self.responses) - 1)
+            self._idx += 1
+            return ChatResult(generations=[ChatGeneration(message=self.responses[i])])
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        @property
+        def _llm_type(self):
+            return "scripted-test"
+
+    @lc_tool
+    def parse_document(file_path: str) -> str:
+        """测试工具。"""
+        return "ok"
+
+    call_msg = AIMessage(
+        content="", tool_calls=[{"name": "parse_document", "args": {"file_path": "x"}, "id": "t1"}]
+    )
+    graph = create_agent(
+        _ScriptedChatModel(responses=[call_msg, AIMessage(content="done")]),
+        tools=[parse_document],
+        middleware=[_Probe()],
+    )
+
+    # 与 _run_agent_stream 同构：worker 线程里同步 stream
+    t = threading.Thread(
+        target=lambda: list(graph.stream({"messages": [("user", "hi")]}, stream_mode="updates"))
+    )
+    t.start()
+    t.join()
+    assert seen, "探针未被调用（真图未走到工具节点）"
+    assert seen["loop"] is False, "wrap_tool_call 跑在事件循环线程上——超时中间件的阻塞等待会卡死 loop"
+    assert seen["main"] is False

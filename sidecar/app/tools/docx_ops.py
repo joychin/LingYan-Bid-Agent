@@ -16,6 +16,10 @@ docx 翻译成文本世界（读视图/编号寻址），写入全由程序机�
   行号区间」元素级拷进正文节；现场跑解析注册表拿 element_lines 定位（确定性、
   不依赖任务侧解析落盘）；格式跟随与格式件（投标函/一览表等模板填充类）场景，
   与素材注入共用同一套迁移引擎
+- docx_image_insert：单图插入——证书复印件/扫描件/截图等独立图片（docx 直出
+  管线的放图通道；素材块/招标件内的图走注入、不经此工具）。图源=知识库抽取图
+  /任务 sources 图片/PDF 原件按页现场渲染；全宽居中、段落标记+内容双插入修订
+  （与插段同构——拒绝修订=整段含图消失）
 - docx_section_revise：定向修订，全部落成 Word 原生修订标记（w:ins/w:del，
   author=Tender Agent）——用户在 Word 审阅界面逐条接受/拒绝；正文段落按
   P 序号、表格单元格按 table/row/col（replace 改旧值、fill 填空格）；落盘前
@@ -41,25 +45,31 @@ from __future__ import annotations
 import functools
 import json
 import re
+import tempfile
 from copy import deepcopy
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+import pymupdf
 from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls, qn
+from docx.shared import Cm
 from langchain_core.tools import tool
 from lxml import etree
 
 from .. import db, runctx
 from ..artifact_store import sources_dir, work_dir
+from ..config import workspace_dir
 from ..knowledge import materials_lib
 from ..parse import convert as parse_convert
+from ..parse.pdf import render_page_png
 from . import body_contract
 
 _AUTHOR = "Tender Agent"
+_COMMENT_AUTHOR = "Swift Agent"  # 批注作者（Word 审阅侧栏可见；待办批注与修订标记分属两套体系）
 _VIEW_TEXT_LIMIT = 800  # 视图单段截断（修订需精确文本，超长段提示去 Word 处理）
 _CELL_TEXT_LIMIT = 60  # 视图单元格截断（填空场景格文本短；长格内容去 Word 看）
 
@@ -255,8 +265,9 @@ def _tracked_replace(para, old: str, new: str, rev_id: int) -> None:
 def _tracked_insert_after(anchor_p_el, text: str, rev_id: int, style_id: str | None = None):
     """新段落插在锚段（lxml 元素）之后，段落标记与内容均为插入修订（拒绝修订=
     整段消失）。返回新段元素——同段连续 insert_after 以返回值为下一次的锚
-    （否则 addnext 紧跟定位段，同批多条会倒序）。style_id 非空时挂正文样式
-    （Tender Body：标书正文行距/缩进），随锚段所在文档的模板有无自适应。"""
+    （否则 addnext 紧跟定位段，同批多条会倒序）。style_id 非空时挂该样式
+    （w:pStyle 挂 styleId：正文段=Tender Body，封面行=Tender Cover/Sub，
+    由调用方按样式名解析，随锚段所在文档的模板有无自适应）。"""
     date = _now_iso()
     pstyle = f'<w:pStyle w:val="{style_id}"/>' if style_id else ""
     new_p = parse_xml(
@@ -367,8 +378,20 @@ def _accepted_text(p_el) -> str:
 
 # ---------- 视图与图片迁移 ----------
 
+def _comment_texts(doc: Document) -> dict[int, str]:
+    """comment id → 批注文本（无批注部件返回空——读视图/清点不因批注缺失报错）。
+
+    python-docx 的 Document.comments 在无部件时懒创建空部件（不落盘无副作用）。
+    """
+    try:
+        return {c.comment_id: (c.text or "").strip() for c in doc.comments if (c.text or "").strip()}
+    except Exception:
+        return {}
+
+
 def view_lines(doc: Document) -> list[str]:
     view = []
+    comment_texts = _comment_texts(doc)
     paras = doc.paragraphs
     for i, para in enumerate(paras, 1):
         style = para.style.name if para.style is not None else "?"
@@ -383,6 +406,14 @@ def view_lines(doc: Document) -> list[str]:
             bits += "〔删除修订：接受后此段消失〕"
         elif _has_tracked(para._p):
             bits += "〔已含修订标记〕"
+        # 本段锚定的待办批注（commentRangeStart 是段落直接子元素；id 对不上批注部件=陈旧引用跳过）
+        notes = [
+            t for m in para._p.findall(qn("w:commentRangeStart"))
+            if (raw := m.get(qn("w:id")) or "").isdigit() and (t := comment_texts.get(int(raw)))
+        ]
+        if notes:
+            shown = "；".join(n[:40] + ("…" if len(n) > 40 else "") for n in notes)
+            bits += f"〔批注：{shown}〕"
         # python-docx 的 .text 不含修订标记内容——视图按「接受全部修订后」文本展示
         text = _accepted_text(para._p) or "（空段落）"
         if len(text) > _VIEW_TEXT_LIMIT:
@@ -414,7 +445,10 @@ def view_lines(doc: Document) -> list[str]:
                 last_tc = tc
             view.append(f"[T{ti}] R{ri}：" + " ".join(bits))
             prev_cells = list(row.cells)
-    view.insert(0, f"共 {len(paras)} 个段落、{len(doc.tables)} 个表格（段落按 P 编号，表格按 T 编号）")
+    head = f"共 {len(paras)} 个段落、{len(doc.tables)} 个表格（段落按 P 编号，表格按 T 编号）"
+    if comment_texts:
+        head += f"，待办批注 {len(comment_texts)} 条"
+    view.insert(0, head)
     return view
 
 
@@ -458,20 +492,69 @@ def _strip_inner_sectpr(el) -> None:
 
 
 _BASE_TEMPLATE = Path(__file__).resolve().parent.parent / "resources" / "tender_base_template.docx"
-_BODY_STYLE_NAME = "Tender Body"  # 模板自定义正文样式（1.5 倍行距+首行缩进 2 字符）
-TEMPLATE_SETTING_KEY = "docx_template"  # app_settings 键：当前生效的用户模板文件名
+_BODY_STYLE_NAME = "Tender Body"  # 版式文件自定义正文样式（1.5 倍行距+首行缩进 2 字符）
+_COVER_NODE_NAME = "封面"  # 树首封面节点的约定名（合册按清洗后标题识别，tender-outline 定下）
+TEMPLATE_SETTING_KEY = "docx_template"  # app_settings 键：默认版式的用户文件名（空=内置基准）
+BUILTIN_TEMPLATE_KEY = "__builtin__"  # 内置版式寻址键（版式库 API 与 LLM 工具共用）
+BUILTIN_TEMPLATE_NAME = "内置标书基准版式"  # 用户可见名（2026-09-09「模板库」改名「版式库」随改）
+
+
+def templates_dir() -> Path:
+    """用户版式文件目录（data/templates/，版式库 API 与工具共用）。"""
+    from .. import config
+
+    d = config.data_dir() / "templates"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def active_template_name() -> str | None:
+    """默认版式的用户文件名；None=内置基准生效。"""
+    from .. import db
+
+    return (db.get_setting(TEMPLATE_SETTING_KEY) or "").strip() or None
+
+
+def list_templates_info() -> list[dict]:
+    """版式库清单（读侧真值，HTTP API 与 list_templates 工具同源消费）：
+    内置恒首位 + 用户版式 mtime 降序；active=命中默认位（未设默认时内置即
+    默认）。stat 竞态（glob 到 stat 之间文件被删）跳行不抛。"""
+    active = active_template_name()
+
+    def _row(p: Path, *, key: str, name: str, builtin: bool) -> dict:
+        st = p.stat()
+        return {
+            "name": name,
+            "key": key,
+            "builtin": builtin,
+            "active": key == active or (builtin and active is None),
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+        }
+
+    out = [_row(_BASE_TEMPLATE, key=BUILTIN_TEMPLATE_KEY, name=BUILTIN_TEMPLATE_NAME, builtin=True)]
+    items: list[tuple[float, Path]] = []
+    for p in templates_dir().glob("*.docx"):
+        try:
+            items.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    for _, p in sorted(items, reverse=True):
+        try:
+            out.append(_row(p, key=p.name, name=p.stem, builtin=False))
+        except OSError:
+            continue
+    return out
 
 
 def _active_template_path() -> Path:
-    """当前生效模板：app_settings 命中的用户模板（data/templates/）优先，
-    否则内置基准。用户模板文件被误删等异常静默回落内置（探测不报错——
-    模板缺失不该打断建节）。"""
+    """默认版式：app_settings 命中的用户版式文件（data/templates/）优先，
+    否则内置基准。用户版式文件被误删等异常静默回落内置（探测不报错——
+    版式缺失不该打断建节）。"""
     try:
-        from .. import config, db
-
-        name = (db.get_setting(TEMPLATE_SETTING_KEY) or "").strip()
+        name = active_template_name()
         if name:
-            p = config.data_dir() / "templates" / name
+            p = templates_dir() / name
             if p.is_file():
                 return p
     except Exception:
@@ -480,7 +563,7 @@ def _active_template_path() -> Path:
 
 
 def _blank_from(template: Path) -> Document:
-    """从指定模板起建空白文档（剥离模板自带的样式示例段，只留 sectPr）。"""
+    """从指定版式文件起建空白文档（剥离自带的样式示例段，只留 sectPr）。"""
     doc = Document(str(template))
     body = doc.element.body
     for child in list(body):
@@ -490,13 +573,13 @@ def _blank_from(template: Path) -> Document:
 
 
 def _new_document() -> Document:
-    """从当前生效模板起建（格式与内容分离：版式全部活在模板 styles.xml；
-    生效位=app_settings 的用户模板，缺省内置基准，由 scripts/
+    """从默认版式起建（格式与内容分离：版式全部活在版式文件 styles.xml；
+    默认位=app_settings 的用户版式，缺省内置基准，由 scripts/
     make_base_template.py 生成维护；代码只挂样式名）。
 
-    模板 body 带样式示例段（打开模板可直观预览/改版式），起建时整段剥离
-    （body 只留 sectPr=版面/页脚），示例永不进入节文件与合册。模板缺失时
-    回落 python-docx 默认模板（英文版式，仅防打包漏带资源，不作为常态）。"""
+    版式文件 body 带样式示例段（打开可直观预览/改版式），起建时整段剥离
+    （body 只留 sectPr=版面/页脚），示例永不进入节文件与合册。版式文件缺失
+    时回落 python-docx 默认模板（英文版式，仅防打包漏带资源，不作为常态）。"""
     tpl = _active_template_path()
     if tpl.is_file():
         return _blank_from(tpl)
@@ -504,17 +587,26 @@ def _new_document() -> Document:
 
 
 def _body_style(doc: Document):
-    """Tender Body 样式对象，模板不带时返回 None（正文段回落 Normal，
-    建节不因换模板缺样式名而失败）。"""
+    """Tender Body 样式对象，版式文件不带时返回 None（正文段回落 Normal，
+    建节不因换版式缺样式名而失败）。"""
     try:
         return doc.styles[_BODY_STYLE_NAME]
     except KeyError:
         return None
 
 
+def _style_id_by_name(doc: Document, name: str) -> str | None:
+    """按样式名解析 styleId（w:pStyle 的 w:val 挂的是 styleId 不是样式名），
+    无此样式返回 None——调用方回落默认样式，换版式缺样式名不失败。"""
+    try:
+        return doc.styles[name].element.get(qn("w:styleId"))
+    except KeyError:
+        return None
+
+
 def _ensure_body_style(p_el, style_id: str) -> None:
-    """无样式引用的素材正文段挂模板正文样式（素材适配模板，2026-09-08 用户
-    拍板：素材库拷贝归顺模板、招标格式件保真）：获得标书正文缩进/行距/对齐；
+    """无样式引用的素材正文段挂版式正文样式（素材拷贝归顺版式，2026-09-08
+    用户拍板：素材归顺、招标格式件保真）：获得标书正文缩进/行距/对齐；
     已带样式引用（内置标题自动吃宿主定义、自定义样式走保真迁移）与表格整表
     保持原样——某段自定义素材该不该归顺是语义判断，归写作流程的改写适配
     步骤，机械层不做。"""
@@ -524,46 +616,6 @@ def _ensure_body_style(p_el, style_id: str) -> None:
         p_el.insert(0, ppr)
     if ppr.find(qn("w:pStyle")) is None:
         ppr.insert(0, parse_xml(f'<w:pStyle {nsdecls("w")} w:val="{style_id}"/>'))
-
-
-def restyle_docx(section_path: Path) -> dict:
-    """重建式换装：用当前生效模板重建节文件——原内容（含修订标记）整体搬迁
-    + 保真迁移（素材自定义样式/编号/图片，与素材注入同构引擎）。OOXML 样式=
-    引用-定义分离：内置样式段（Heading/Tender Body）引用名不变、自动吃新
-    模板定义；直接格式与自定义样式保真；旧版入恢复点栈（可反悔）。
-
-    供 api/templates.py「应用到已有章节」调用（用户显式操作+恢复点兜底，
-    无锁铁则）；不注册 LLM 工具——换装不是模型动作。返回迁移计数。"""
-    old = Document(str(section_path))
-    new = _new_document()
-    sect = new.element.body.find(qn("w:sectPr"))
-    elements: list = []
-    for el in old.element.body.iterchildren():
-        if el.tag.split("}")[-1] not in ("p", "tbl"):
-            continue
-        el2 = deepcopy(el)
-        _strip_inner_sectpr(el2)
-        elements.append(el2)
-        if sect is not None:
-            sect.addprevious(el2)
-        else:
-            new.element.body.append(el2)
-    if not elements:
-        return {"elements": 0, "styles": 0, "numbering": 0, "images": 0}
-    n_style = _merge_missing_styles(old, new, elements)
-    n_num = _merge_missing_numbering(old, new, elements)
-    n_img = sum(_migrate_images(old, new, el) for el in elements)
-    # 原子落盘：先写临时文件成功，再把旧版挪入恢复点、临时文件顶上。直接
-    # save 会留「旧文件已挪走、新文件写失败」窗口——节文件本体丢失只剩
-    # 恢复点（.restyle.tmp 不匹配 *.docx，不进面板列表与「本轮文件」）。
-    tmp = section_path.with_name(section_path.name + ".restyle.tmp")
-    try:
-        new.save(str(tmp))
-        _rotate_restore_point(section_path)
-        tmp.replace(section_path)
-    finally:
-        tmp.unlink(missing_ok=True)
-    return {"elements": len(elements), "styles": n_style, "numbering": n_num, "images": n_img}
 
 
 # ---------- 样式与自动编号定义迁移 ----------
@@ -747,6 +799,42 @@ def _merge_missing_styles(src_doc: Document, dst_doc: Document, elements) -> int
         # 传迁入副本：id 冲突重映射时样式定义里的 numPr 引用同步改写
         _merge_missing_numbering(src_doc, dst_doc, [new_style])
     return moved
+
+
+def _merge_missing_comments(src_doc: Document, dst_doc: Document, elements) -> int:
+    """把拷贝元素引用的源文档批注迁入目标文档（id 重映射，与编号迁移同构）。
+
+    随段落 deepcopy 拷入的 commentRangeStart/End/commentReference 引用的是源文档
+    comments part 的 id——不迁移则批注悬空丢失。只迁拷贝元素实际引用的条目（跳过
+    被丢弃的节标题段上的锚），源里查不到的陈旧标记就地摘除防悬空。
+    """
+    markers = (qn("w:commentRangeStart"), qn("w:commentRangeEnd"), qn("w:commentReference"))
+    nodes: list = []
+    refs: set[str] = set()
+    for el in elements:
+        for m in el.iter(*markers):
+            nodes.append(m)
+            refs.add(m.get(qn("w:id")) or "")
+    if not nodes:
+        return 0
+    id_map: dict[str, str] = {}
+    for cid in sorted(refs):
+        if not cid.isdigit():
+            continue
+        src_c = src_doc.comments.get(int(cid))
+        if src_c is None:
+            continue
+        new_c = dst_doc.comments.add_comment(
+            text=src_c.text or "", author=src_c.author or _COMMENT_AUTHOR, initials=src_c.initials or "AI"
+        )
+        id_map[cid] = str(new_c.comment_id)
+    for m in nodes:
+        old = m.get(qn("w:id")) or ""
+        if old in id_map:
+            m.set(qn("w:id"), id_map[old])
+        else:
+            m.getparent().remove(m)  # 陈旧/悬空标记：摘除防引用错乱
+    return len(id_map)
 
 
 # ---------- 工具 ----------
@@ -1059,6 +1147,196 @@ def docx_source_inject(source: str, dest: str, lines: str = "") -> str:
 
 
 @tool
+@_tool_guard("插图")
+def docx_image_insert(dest: str, image: str, after: str = "", page: int = 1) -> str:
+    """把一张图片插入正文节 docx（证书复印件/扫描件/系统截图——独立图片进正文的唯一
+    通道，自写文字无法带图）。
+
+    图片作为新段落落在指定位置：全宽适配（页宽减边距）、居中、带插入修订标记
+    （Word 审阅可逐张接受/拒绝）。多张图=多次调用。
+    Args:
+        dest: 目标节文件（须已用 docx_section_create 创建）
+        image: 图片路径（工作区相对，三类来源）：①知识库抽取图
+               knowledge/parse/<文件stem>/images/img_001.png——search_company_assets
+               命中行会给出路径，证书扫描 PDF 的抽取图每页一张、文件序号即页序；
+               ②当前任务上传图 sources/<文件名>（可带任务前缀）；
+               ③PDF 原件（knowledge/files/xxx.pdf 或 sources/xxx.pdf）——传页号
+               现场渲染那一页为图，兜住抽取缺图的形态。支持 png/jpg/bmp/gif；
+               webp 与 docx 原件不支持（换 PDF 或图片版）。
+        after: 插在该段落号之后（P 序号以 docx_section_read 视图为准，可带 P 前缀）；
+               留空=追加到节末尾
+        page: image 指向 PDF 时的页号（1 起；图片文件忽略此参数）
+    """
+    task_id = _task_id()
+    if not task_id:
+        return "[插图失败] 当前会话未归属任务"
+    try:
+        dst, rel = _dest_path(task_id, dest, must_exist=True)
+    except ValueError as e:
+        return f"[插图失败] {e}"
+    # 图源解析：sources/ 短前缀（含任务前缀形态）归一到当前任务 sources/，其余按
+    # workspace 相对（knowledge/…）；resolve 后 containment——图源只认工作区内文件
+    segs = [s for s in (image or "").strip().replace("\\", "/").split("/") if s]
+    if segs and segs[0] == task_id:
+        segs = segs[1:]
+    if not segs:
+        return "[插图失败] 未指定图片路径"
+    if segs[0] == "sources":
+        if len(segs) < 2:
+            return "[插图失败] sources/ 后未指定文件名"
+        base = sources_dir(task_id).resolve()
+        src = (base / "/".join(segs[1:])).resolve()
+        if base != src and base not in src.parents:
+            return f"[插图失败] 路径越界：{image}"
+    else:
+        root = workspace_dir().resolve()
+        src = (root / "/".join(segs)).resolve()
+        if root != src and root not in src.parents:
+            return (
+                f"[插图失败] 路径越界或不在工作区内：{image}"
+                "（图源=知识库抽取图 knowledge/parse/…/images/ 或任务 sources/ 下的文件）"
+            )
+    if not src.is_file():
+        return f"[插图失败] 图片文件不存在：{image}（以检索命中行给出的路径或任务 sources/ 清单为准）"
+
+    suffix = src.suffix.lower()
+    if suffix == ".pdf":
+        pd = pymupdf.open(str(src))
+        try:
+            n_pages = pd.page_count
+        finally:
+            pd.close()
+        if not 1 <= int(page) <= n_pages:
+            return f"[插图失败] 页号超范围：该 PDF 共 {n_pages} 页（page 须 1-{n_pages}）"
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+            tmp_png = Path(tf.name)
+        try:
+            render_page_png(src, int(page), tmp_png)
+            data = tmp_png.read_bytes()
+        finally:
+            tmp_png.unlink(missing_ok=True)
+        src_label = f"{image} 第 {page} 页（按页渲染）"
+    elif suffix in (".png", ".jpg", ".jpeg", ".bmp", ".gif"):
+        data = src.read_bytes()
+        src_label = image
+    else:
+        return (
+            f"[插图失败] 「{image}」不是可插入的图片或 PDF（{suffix or '无后缀'}）"
+            "——webp 请换 png/jpg 上传；docx 原件不作图源，请传 PDF 或图片版"
+        )
+
+    doc = Document(str(dst))
+    before = _flatten_rejected(doc)
+    sec = doc.sections[-1] if doc.sections else None
+    try:
+        avail = sec.page_width - sec.left_margin - sec.right_margin if sec else None
+    except TypeError:
+        avail = None
+    width = avail if isinstance(avail, int) and avail > 0 else Cm(15)
+    # drawing XML 让 python-docx 生成（先临时挂在节末），修订标记再手包+搬位
+    tmp_p = doc.add_paragraph()
+    run = tmp_p.add_run()
+    try:
+        run.add_picture(BytesIO(data), width=width)
+    except Exception as e:
+        return f"[插图失败] 图片无法解析（{type(e).__name__}）——请确认文件是完好的 png/jpg 图片"
+    date = _now_iso()
+    rev_id = _next_rev_id(doc)
+    ins_el = parse_xml(
+        f'<w:ins {nsdecls("w")} w:id="{rev_id + 1}" w:author="{_AUTHOR}" w:date="{date}"/>'
+    )
+    r_el = run._r
+    r_el.addprevious(ins_el)
+    ins_el.append(r_el)
+    p_el = tmp_p._p
+    # 段落标记修订（拒绝修订=整段含图消失）+ 居中；图片段不挂 Tender Body（正文
+    # 样式带首行缩进会把图推偏）；缺段落标记修订会让拒绝视角多出空行（自校验拦截）
+    p_el.insert(0, parse_xml(
+        f'<w:pPr {nsdecls("w")}>'
+        f'<w:jc w:val="center"/>'
+        f'<w:rPr><w:ins w:id="{rev_id}" w:author="{_AUTHOR}" w:date="{date}"/></w:rPr>'
+        f'</w:pPr>'
+    ))
+    if (after or "").strip():
+        try:
+            idx = int((after or "").strip().lstrip("Pp"))
+        except ValueError:
+            return "[插图失败] after 须为段落号（如 5 或 P5，以 docx_section_read 视图为准）"
+        paras = doc.paragraphs
+        if not 1 <= idx <= len(paras):
+            return f"[插图失败] 段落号超范围：after={idx}，本节视图共 {len(paras)} 段"
+        paras[idx - 1]._p.addnext(p_el)
+        where = f"P{idx} 之后"
+    else:
+        sect = doc.element.body.find(qn("w:sectPr"))
+        if sect is not None:
+            sect.addprevious(p_el)
+        else:
+            doc.element.body.append(p_el)
+        where = "节末"
+    if _flatten_rejected(doc) != before:
+        return "[插图失败] 修订标记自校验未通过（未保存，文件未变）——请重试或换图源"
+    doc.save(dst)
+    return (
+        f"[已插图] {src_label} → work/{rel}（{where}）：图片 1 张，全宽居中、带插入修订标记"
+        "\n下一步：docx_section_read 确认位置（图片段显示〔图×1〕）；需要图注可在该段前后"
+        "用 docx_section_revise 插文字段。"
+    )
+
+
+@tool
+@_tool_guard("批注")
+def docx_comment_add(path: str, text: str, after: str = "") -> str:
+    """给正文节 docx 加一条 Word 批注——缺料/待澄清/待核验等待办的唯一落点。
+
+    批注锚定在指定段落上：Word 审阅侧栏可见（作者 Swift Agent）、打印与 PDF
+    导出默认不带；docx_section_read 视图该段行尾显示〔批注：…〕，validate_body
+    清点待办批注，合册时批注原样迁移进整本。**正文里禁止写【待补】【待澄清】
+    占位文字**（会进交付稿）——缺什么、要用户裁决什么、哪个数字待核验，都走本工具。
+    Args:
+        path: 目标节文件（相对任务 work/，须已用 docx_section_create 创建）
+        text: 批注内容——写清缺什么/要澄清什么（如「项目经理 PMP 证书编号缺失，
+              需向用户确认后回填」）
+        after: 锚定段落号（P 序号以 docx_section_read 视图为准，可带 P 前缀）；
+               留空=节末最后一段
+    """
+    task_id = _task_id()
+    if not task_id:
+        return "[批注失败] 当前会话未归属任务"
+    if not (text or "").strip():
+        return "[批注失败] 批注内容为空——写清缺什么/要澄清什么"
+    try:
+        dst, rel = _dest_path(task_id, path, must_exist=True)
+    except ValueError as e:
+        return f"[批注失败] {e}"
+    doc = Document(str(dst))
+    paras = doc.paragraphs
+    if not paras:
+        return "[批注失败] 本节没有段落可锚定"
+    if (after or "").strip():
+        try:
+            idx = int((after or "").strip().lstrip("Pp"))
+        except ValueError:
+            return "[批注失败] after 须为段落号（如 5 或 P5，以 docx_section_read 视图为准）"
+        if not 1 <= idx <= len(paras):
+            return f"[批注失败] 段落号超范围：after={idx}，本节视图共 {len(paras)} 段"
+        para, where = paras[idx - 1], f"P{idx}"
+    else:
+        para, where = paras[-1], f"P{len(paras)}"
+    # 段落直接子 run 为空（全空段/内容全裹在修订标记里）时补一个零宽锚点 run——
+    # 批注锚在段尾，不往修订子树里插标记元素
+    runs = para.runs or [para.add_run("")]
+    doc.add_comment(runs, text=text.strip(), author=_COMMENT_AUTHOR, initials="AI")
+    doc.save(dst)
+    total = len(_comment_texts(doc))
+    snippet = text.strip()[:30] + ("…" if len(text.strip()) > 30 else "")
+    return (
+        f"[已加批注] work/{rel} {where}：「{snippet}」（本节待办批注共 {total} 条）"
+        "\n待办批注收尾必须逐条向用户点名（validate_body 也会清点）；正文里不要写占位文字。"
+    )
+
+
+@tool
 @_tool_guard("修订")
 def docx_section_revise(path: str, edits: str) -> str:
     """对正文节 docx 做定向修订，全部落成 Word 原生修订标记（用户在 Word 中审阅接受/拒绝）。
@@ -1072,7 +1350,10 @@ def docx_section_revise(path: str, edits: str) -> str:
         edits: JSON 数组，两类条目（不可混在同一条里）——正文段落
               {"para": 段落序号, "action": "replace|insert_after|delete",
                "find": 期望原文片段（replace 必填，防段落漂移的双重校验）,
-               "text": 新文本}；表格单元格 {"table": T序号, "row": 行, "col": 列,
+               "text": 新文本, "style": 样式名（仅 insert_after 可选，如
+               "Tender Cover"/"Tender Cover Sub"——封面等非正文段落挂指定
+               版式；样式不存在回落正文样式并在返回中注记）}；表格单元格
+               {"table": T序号, "row": 行, "col": 列,
                "action": "replace|fill", "find": 格内期望原文（replace 必填，须
                完整出现在同一格内段落）, "text": 新文本}——fill 仅限空格子
                （接受视角为空，填空动作）。replace 只替换首处命中；同段多条按
@@ -1142,6 +1423,7 @@ def docx_section_revise(path: str, edits: str) -> str:
     # 段落从后往前：插入/删除改变段落数，先改大序号防位移；同段连续
     # insert_after 以「上次插入的新段」为锚保提交顺序（游标按段序号记）
     insert_anchors: dict[int, object] = {}
+    style_notes: set[str] = set()  # 指定了但版式里不存在的样式名（回落正文样式）
     for it in sorted(para_items, key=lambda x: x["para"], reverse=True):
         i = it["para"]
         if i < 1 or i > len(paras):
@@ -1154,8 +1436,16 @@ def docx_section_revise(path: str, edits: str) -> str:
                 _tracked_replace(para, str(it["find"]), str(it["text"]), rev_id)
             elif act == "insert_after":
                 anchor = insert_anchors.get(i, para._p)
+                style_id = body_style_id
+                style_name = it.get("style")
+                if isinstance(style_name, str) and style_name.strip():
+                    resolved = _style_id_by_name(doc, style_name.strip())
+                    if resolved is None:
+                        style_notes.add(style_name.strip())
+                    else:
+                        style_id = resolved
                 insert_anchors[i] = _tracked_insert_after(
-                    anchor, str(it["text"]), rev_id, style_id=body_style_id
+                    anchor, str(it["text"]), rev_id, style_id=style_id
                 )
             else:
                 _tracked_delete(para, rev_id)
@@ -1199,10 +1489,13 @@ def docx_section_revise(path: str, edits: str) -> str:
     if _flatten_rejected(doc) != before:
         return "[修订失败] 修订标记一致性自校验未通过（未保存）——请重读视图核对序号与原文后重试"
     doc.save(dst)
-    return (
+    bits = (
         f"[已修订] work/{rel}：{applied} 处已落成 Word 修订标记（作者 {_AUTHOR}），"
         f"在 Word 中审阅可逐条接受/拒绝。修订后建议 check_name_residue 扫旧名残留。"
     )
+    if style_notes:
+        bits += f"（注：样式 {'、'.join(sorted(style_notes))} 不存在，该段已用正文样式）"
+    return bits
 
 
 # ---------- 整本合册与文本抽取 ----------
@@ -1261,6 +1554,31 @@ def section_text_lines(doc: Document) -> list[str]:
     return [text for _label, text in section_lines_labeled(doc)]
 
 
+def section_comments_labeled(doc: Document) -> list[tuple[str, str]]:
+    """(锚定段落 P 标签, 批注文本)——待办批注的定位清点（validate_body 消费）。
+
+    只扫正文级段落（commentRangeStart 是段落直接子元素）；锚在表格格内或跨段的
+    批注落在「?」兜底行——宁可位置不明也不漏清点。
+    """
+    texts = _comment_texts(doc)
+    if not texts:
+        return []
+    out: list[tuple[str, str]] = []
+    anchored: set[int] = set()
+    for i, para in enumerate(doc.paragraphs, 1):
+        for m in para._p.findall(qn("w:commentRangeStart")):
+            raw = m.get(qn("w:id")) or ""
+            if not raw.isdigit():
+                continue
+            cid = int(raw)
+            anchored.add(cid)
+            t = texts.get(cid)
+            if t:
+                out.append((f"P{i}", t))
+    out.extend(("?", t) for cid, t in texts.items() if cid not in anchored)
+    return out
+
+
 def head_text(path: str | Path, max_chars: int = 200) -> str:
     """docx 开头文本（接受修订视角）：前几段/表格行非空文本拼到 max_chars 截断。
 
@@ -1291,7 +1609,9 @@ def docx_assemble_volume() -> str:
     修订标记原样保留——在整本里继续用 Word 审阅逐条接受/拒绝）、一级章前分页、
     页脚页码；模板填充类叶子（目录标非正文）**产出节文件即按树序并入**（拷原件
     填空的格式件本就是标书组成部分）、未产出的按附件对待不占整本位（返回行点名）。
-    缺失的正文节文件逐个点名，不中断其余节。**整本是派生产物**：改内容
+    树首节点为「封面」时（tender-outline 的结构约定）整本首页即封面页：跳过册名
+    大标题与封面节点自身标题、开「首页不同」（封面页不带页眉页脚，页码从封面
+    后一页起显示）。缺失的正文节文件逐个点名，不中断其余节。**整本是派生产物**：改内容
     回节文件层改（或让模型改）再重新调用本工具覆盖合册，直接手改整本会被下次
     合册覆盖。
     """
@@ -1311,13 +1631,27 @@ def docx_assemble_volume() -> str:
     for doc in docs:
         vol = str(doc.get("name") or "").strip() or "主册"
         vol_dir = body_contract.sanitize_name(vol) if multi else ""
+        nodes = list(_tree_nodes(doc.get("directory") or []))
+        # 封面=树首一级叶子且清洗后标题为「封面」（tender-outline 的结构约定）：
+        # 整本首页即封面页——跳过册名大标题（封面自带册名）与节点自身标题，
+        # 开「首页不同」让封面页不带页眉页脚；无封面时行为与旧版逐字节一致。
+        has_cover = (
+            bool(nodes)
+            and nodes[0][0] == 1
+            and not nodes[0][2]
+            and body_contract.sanitize_name(nodes[0][1]) == _COVER_NODE_NAME
+        )
         out = _new_document()  # 模板自带 A4 版面/页边距/页脚页码，无需再手拼
-        out.add_heading(vol, 0)
-        merged = n_img = 0
+        if has_cover:
+            out.sections[0].different_first_page_header_footer = True
+        else:
+            out.add_heading(vol, 0)
+        merged = n_img = n_comment = 0
         missing: list[str] = []
         unfilled: list[str] = []  # 模板填充类叶子未产出节文件（按附件对待）
+        placeholders: list[str] = []  # 内联占位兜底扫描命中（正规落点=批注，此为防线）
         seen_chapter = False
-        for depth, title, is_container, mode in _tree_nodes(doc.get("directory") or []):
+        for idx, (depth, title, is_container, mode) in enumerate(nodes):
             stem = body_contract.sanitize_name(title)
             rel_src = f"body/{vol_dir}/{stem}.docx" if vol_dir else f"body/{stem}.docx"
             if not is_container and mode in body_contract.NON_PROSE_DELIVERY:
@@ -1325,11 +1659,16 @@ def docx_assemble_volume() -> str:
                     unfilled.append(title)
                     continue  # 模板填充未产出：按附件对待（打印装订时物理附上），不占整本位
                 # 已产出（拷原件+填空）：按树序并入整本，与正文叶子同路
-            h = out.add_heading(title, min(depth, 9))
-            if depth == 1:
-                if seen_chapter:
-                    h.paragraph_format.page_break_before = True
+            if has_cover and idx == 0:
+                # 封面节点不发「封面」标题行（节文件内容即整页），但占一级位：
+                # seen_chapter 置位让第一章拿到分页、封面独占首页
                 seen_chapter = True
+            else:
+                h = out.add_heading(title, min(depth, 9))
+                if depth == 1:
+                    if seen_chapter:
+                        h.paragraph_format.page_break_before = True
+                    seen_chapter = True
             if is_container:
                 continue
             src_path = wroot / rel_src
@@ -1338,6 +1677,14 @@ def docx_assemble_volume() -> str:
                 continue
             consumed.add(rel_src)
             src = Document(str(src_path))
+            # 内联占位兜底：接受视角逐行扫（整段删除修订不误报）——正规待办落点是
+            # docx_comment_add 批注，正文占位文字会进交付稿，点名逼改
+            for label, text in section_lines_labeled(src):
+                for mark in body_contract.PLACEHOLDER_MARKS:
+                    if mark in text:
+                        i = text.find(mark)
+                        placeholders.append(f"{title}({label})：{text[i : i + 24].strip()}")
+                        break
             children = [
                 c for c in src.element.body.iterchildren()
                 if c.tag.split("}")[-1] in ("p", "tbl")
@@ -1357,6 +1704,7 @@ def docx_assemble_volume() -> str:
                     out.element.body.append(new_el)
             _merge_missing_styles(src, out, copied)
             _merge_missing_numbering(src, out, copied)
+            n_comment += _merge_missing_comments(src, out, copied)
             merged += 1
         if merged == 0:
             detail = f"（缺失：{'、'.join(missing)}）" if missing else "（目录树无叶子节点）"
@@ -1373,9 +1721,18 @@ def docx_assemble_volume() -> str:
         bits = f"{vol}：合并 {merged} 节 → work/{rel}"
         if n_img:
             bits += f"（含图片 {n_img} 张）"
+        if n_comment:
+            bits += f"（含批注 {n_comment} 条待处理）"
         if missing:
             bits += f"；缺失 {len(missing)} 节未并入：{'、'.join(missing)}"
         reports.append(bits)
+        if placeholders:
+            shown = "；".join(placeholders[:8]) + ("…" if len(placeholders) > 8 else "")
+            reports.append(
+                f"⚠️ {vol}：正文含 {len(placeholders)} 处内联占位【待补/待澄清】"
+                "（占位文字会进交付稿——删除该文字，改用 docx_comment_add 加批注记待办）："
+                + shown
+            )
         if unfilled:
             reports.append(
                 f"{vol}：模板填充类未产出 {len(unfilled)} 节（按附件对待，不占整本位）："

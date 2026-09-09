@@ -9,6 +9,7 @@ import {
   getKbItemContent,
   getKbItemImages,
   getMtBlockContent,
+  getMtFileContent,
   getMtOutline,
   listKbItems,
   listKbTypes,
@@ -94,6 +95,8 @@ export function useRetriggerKbItem() {
       invalidate()
       // 重跑后解析内容已变，该条目的 content 查询一并失效
       void qc.invalidateQueries({ queryKey: ['kb', 'content', id] })
+      // 原件字节同样可能变化（同名覆盖语义不存在，但保险起见随重跑失效）
+      void qc.invalidateQueries({ queryKey: ['kb', 'raw', id] })
     },
   })
 }
@@ -156,6 +159,16 @@ export function useMtBlockContent(id: string | null, enabled: boolean) {
     queryFn: () => getMtBlockContent(id!),
     enabled: Boolean(id) && enabled,
     staleTime: 60_000,
+  })
+}
+
+/** 文件片段内容（挑章节点节点实时预览；staleTime 长——解析产物不变）。 */
+export function useMtFileContent(fileId: string | null, start: number, end: number) {
+  return useQuery({
+    queryKey: ['mt', 'file-content', fileId, start, end],
+    queryFn: () => getMtFileContent(fileId!, start, end),
+    enabled: Boolean(fileId) && start > 0 && end >= start,
+    staleTime: 5 * 60_000,
   })
 }
 

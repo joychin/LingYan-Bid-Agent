@@ -30,7 +30,7 @@ export function FileEditorShell({
 
   return (
     <div className="ap-ws">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b pl-4 pr-12 py-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b pl-4 pr-[88px] py-3">
         <span className="truncate text-sm font-semibold">{title}</span>
         <span className="rounded-full bg-accent px-2 py-0.5 text-xs text-muted-foreground">工作台</span>
         {file.revised && (

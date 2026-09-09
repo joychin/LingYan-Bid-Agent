@@ -8,7 +8,6 @@ import {
   FolderOpen,
   MoreHorizontal,
   Moon,
-  Package,
   Pencil,
   Plus,
   Settings,
@@ -45,11 +44,11 @@ export interface SidebarProps {
   onNewSession: () => void
   /** 打开写作素材库视图（素材跨文件浏览） */
   onOpenLibrary?: () => void
-  /** 打开模板库视图（文档模板=格式资产，与素材分离） */
+  /** 打开版式库视图（版式文件=格式资产，与素材分离；2026-09-09 由「模板库」改名） */
   onOpenTemplates?: () => void
   /** 打开知识库视图（全局资料层） */
   onOpenKnowledge: () => void
-  /** 主区形态：决定知识库/素材库/模板库入口的 active 态 */
+  /** 主区形态：决定知识库/素材库/版式库入口的 active 态 */
   activeView?: 'chat' | 'kb' | 'library' | 'templates'
   onOpenSettings: () => void
   /** 当前主题（图标即状态）；切换由 App 落 localStorage + documentElement */
@@ -286,12 +285,6 @@ export function Sidebar({
       <div className="side-scroll">
         <div className="quick-list">
           <NavRow icon={<Plus />} label="新建任务" onClick={onNewSession} />
-          {/* 占位入口：页面未落地前不给任何真实副作用（曾误绑设置弹窗/展开产物面板） */}
-          <NavRow
-            icon={<Package />}
-            label="投标工作台"
-            onClick={() => toast('投标工作台即将上线', 'info')}
-          />
           <NavRow
             icon={<BookOpen />}
             label="知识库"
@@ -307,7 +300,7 @@ export function Sidebar({
           />
           <NavRow
             icon={<LayoutTemplate />}
-            label="模板库"
+            label="版式库"
             active={activeView === 'templates'}
             onClick={onOpenTemplates}
           />
@@ -417,7 +410,7 @@ export function Sidebar({
           <div className="relative z-10 w-full max-w-sm rounded-xl border bg-card p-6 shadow-md">
             <h2 className="text-base font-semibold">删除会话</h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              删除「{confirmDelete.title}」？其消息与本会话产物将一并删除，项目文件保留。
+              删除「{confirmDelete.title}」？只清空该会话的聊天记录；任务文件与产物不受影响。
             </p>
             {confirmError && <p className="mt-2 text-sm text-error">删除失败：{confirmError}</p>}
             <div className="mt-4 flex justify-end gap-2">
