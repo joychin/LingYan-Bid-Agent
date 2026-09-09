@@ -1,113 +1,250 @@
-# Tender Agent — 本地标书 AI Agent 桌面客户端（MVP）
+# Tender Agent · 智能标书 AI Agent 桌面客户端
 
-Local-first 桌面 AI Agent：Tauri 2 壳 + React 前端 + Python sidecar（DeepAgents）。
-用户自带 LLM API Key（BYOK，默认 DeepSeek），支持多轮对话与 SKILL.md 技能自动调用，
-领域方向为招投标标书（tender-analysis / tender-toc）。全程本地运行、无云端服务。
-需求与验收详见 `tender-agent-mvp-prd.md`（本仓库唯一事实来源）。
+> **这可能是你能找到的功能最完整的标书编写 Agent**——
+> 从招标文件解析、要点提取、目录生成，到**逐节 .docx 直出、合册成整本投标文件**，
+> 全部在你的电脑上跑，数据不出本机。
+
+---
+
+## 为什么说「最全」
+
+大多数标书 Agent 卡在「聊一聊、给个大纲」就交差。Tender Agent 跑的是**一条完整到能交付**的流水线：
+
+| 通常别家停在 | Tender Agent 做到底 |
+|---|---|
+| 把招标文件读一遍、聊要点 | **逐节 .docx 直出**，批注 / 修订 / 表格单元格修订 / 单图插入 / 整本合册 |
+| 给个目录就算交差 | **整本 docx 合册**（封面、目录、页眉页脚、版式自动应用），可直接打印 |
+| 写完正文要人肉检查 | **写作指引 + 承诺清单**结构化表格界面，承诺项必须经人拍板才能落正文 |
+| 写到一半模型挂了整本重来 | **HITL 单回合聚合 + 续跑**，草稿存档、续段从断点接上 |
+| 素材复用要人肉拷贝 | **写作素材库**按区间勾出素材块，写作时按节自动注入改写 |
+| 多模型要写代码切换 | **BYOK 多模型 UI**（DeepSeek / 智谱 / 百炼 / Kimi / 豆包 / MiniMax / OpenAI），按会话粘性记忆 |
+| 整本写完要人肉改格式 | **版式库**（A4 / 字体 / 缩进行距 / 招标格式件保真） |
+| 招标件扫描页只能看 | **百度 OCR / PaddleOCR-VL** 兜底 |
+| 公司资质要人肉找 | **知识库**（营业执照、资质、人员证书、过往合同，事实层） |
+| 出错了用户分不清是模型还是程序 | **错误分类 code**（`llm_unavailable` / `llm_auth` / `cancelled` / `interrupted` / `internal`），UI 按类别给对应动作 |
+
+并且这些能力在**一台机器上、一个 App 里**串成一条流——不是散落的脚本。
+
+---
+
+## 完整工作流
+
+针对一次投标任务，Agent 会按四段流水线协同作业，每个阶段之间有**确认门**让你改方向、补料：
+
+| 阶段 | 技能 | 产出 |
+|---|---|---|
+| **1. 解析招标文件** | `document-parse` | docx / pdf / txt / md → 带行号的 markdown + 章节大纲 + 结构识别分档（书签 / 目录链接 / 印刷目录 / 中文编号） |
+| **2. 要点提取** | `tender-analysis` | 资格 / 模板 / 商务技术要求 / 评分项 四类清单，每条带「章节 + 行号 + 页码」出处 |
+| **3. 目录生成** | `tender-outline` | 响应文件目录树（多册并发派发，跨册去重互查） |
+| **4. 正文撰写** | `tender-body` | 按目录逐节 .docx（写作指引 → 承诺清单 → 派发写手 → 合册成整本） |
+
+附加技能：
+
+- **`tender-qa`** — 就招标文件问具体问题，产物优先，证据回溯原文
+- **`humanizer-zh`** — 中文去 AI 腔润色（按标书场景裁剪重写）
+- **`docx` 工具族** — 建节 / 读视图 / 修订标记 / 合册 / 表格单元格修订 / 单图插入 / 批注
+
+---
+
+## 怎么用
+
+### 1. 下载安装
+
+到 [Releases](../../releases) 页面下载与系统对应的安装包：macOS（Apple Silicon / Intel）/ Windows（x64）/ Linux（.deb / AppImage）。`docs/packaging.md` 有打包流水线说明。
+
+### 2. 配模型 Key
+
+首次打开进入「设置 → 模型」：
+
+- **添加模型**：填入 OpenAI 兼容协议的 API Key（DeepSeek、智谱、百炼、Kimi、豆包、MiniMax、OpenAI 等都支持）
+- **测试连通**：保存即测，失败会提示
+- **后台任务模型**（可选）：把知识库抽取、视觉转写这类小任务路由到便宜模型
+- **思考档位**（可选）：low / medium / high，正文撰写一般建议 medium
+
+Key 与配置存在本地 `app.db`，**不会上传任何服务端**。
+
+### 3. 选个模型
+
+右上角下拉切换本次会话用的模型，跨会话粘性记忆。
+
+### 4. 开始一个任务
+
+侧栏「新建任务」→ 给项目起个名 → 进入新建会话 → 把招标文件拖到「来源」区。
+之后 Agent 会按 document-parse → tender-analysis → tender-outline → tender-body 的顺序自己往下走。
+
+### 5. 写正文
+
+进入「正文」阶段后，Agent 会先给出一份**写作指引**（每节用什么模式、引用哪些素材、依据哪些招标条款），确认后再写。每节一个 .docx 文件，最后可一键**合册**成整本投标文件——含封面、目录、页眉页脚、版式自动应用。
+
+---
 
 ## 架构
 
 ```
-Tauri 2（Rust）
-  窗口 · spawn/重启 sidecar · 钥匙串 · IPC（零业务逻辑）
-    └─ React（webview）：Chat · 会话列表 · 工具时间线 · Settings
-          │ HTTP + SSE（127.0.0.1:随机端口，Bearer token）
-Python sidecar（FastAPI + uvicorn）
-  /api/* REST + SSE 事件流（§5.5 契约）
-  DeepAgents（skills + tools + SqliteSaver checkpointer）
-  SQLite（data/app.db） + workspace（data/workspace/）
-    └─ 用户自己的 LLM API（BYOK）
+┌──────────────────────────────────────────────────────────────┐
+│  Tauri 2 桌面壳（Rust）                                       │
+│  - 窗口 / 系统集成（reveal in folder / 文件关联）             │
+│  - sidecar 进程生命周期（spawn / healthz / 指数退避重启）    │
+│  - **零业务逻辑**，只做壳                                    │
+└──────────────────────────────────────────────────────────────┘
+                              │  IPC + 内部 HTTP
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│  React 19 + Vite + Tailwind 前端                              │
+│  - 聊天 / 任务树 / 产物面板 / 工作台 / 设置                  │
+│  - 只走事件契约（SSE 增量），不依赖 agent 内部格式            │
+└──────────────────────────────────────────────────────────────┘
+                              │  HTTP + SSE（127.0.0.1 + Bearer）
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Python sidecar（FastAPI + uvicorn）                          │
+│  - DeepAgents 0.7.7 + subagents + middleware                 │
+│  - SKILL.md 技能注册表（document-parse / tender-*）          │
+│  - 任务级 workspace（每个投标项目一个目录）                    │
+│  - 工具族：parse_document / docx 工具族 / 知识库 / 素材 / …  │
+│  - SQLite：app.db（业务）+ agent.db（langgraph checkpoint）  │
+└──────────────────────────────────────────────────────────────┘
+                              │  HTTPS
+                              ▼
+                ┌────────────────────────────┐
+                │  你自带的 LLM API（BYOK）   │
+                └────────────────────────────┘
 ```
 
 三条铁律（任何实现不得违反）：
 
-1. Rust 不含任何业务逻辑。
-2. **API Key 永不出现于 HTTP 请求/响应与前端 JS 内存**：key 由 Rust 从钥匙串读取，
-   在 spawn sidecar 时通过环境变量注入。
-   > 注：PRD §6.1 允许设置页在 webview 输入 API Key（经 IPC command 存钥匙串）。输入过程
-   > 会瞬时存在于 JS state / IPC payload，但**不进入任何 HTTP 载荷**，保存后立即清空。
-3. 前端只消费 PRD §5.5 定义的事件 schema，不依赖 DeepAgents 内部流格式。
+1. **Rust 不含业务逻辑**——壳就是壳。
+2. **API Key 只写不读**——Key 存本地 `app.db` 的 `app_settings` 表，从不回显到 HTTP 响应/前端内存。
+   `GET /settings` 只回 `key_configured: true/false`；环境变量只作兜底读取。
+3. **前端只走事件契约**——不依赖 DeepAgents 内部流格式，SSE 是唯一的实时通道。
 
-## 目录结构
+---
 
-```
-├── sidecar/            Python sidecar（FastAPI + DeepAgents）
-│   ├── app/
-│   │   ├── main.py     FastAPI 入口（--port；鉴权/CORS/lifespan；日志双写 stderr+文件）
-│   │   ├── config.py   env+settings.json 双角色配置（llm/vlm）
-│   │   ├── db.py       sqlite3：tasks/conversations/messages/runs/run_traces/artifact_index/kb（WAL）
-│   │   ├── db_migrations.py  user_version 编号迁移（schema 变更在此追加）
-│   │   ├── agent.py    build_agent + run_stream（实时发布事件/流式断点重试/协作取消）
-│   │   ├── events.py   LangGraph 流 → §5.5 事件的唯一映射层 + run 边界 payload 构造
-│   │   ├── contracts/  契约单一事实源（events/dto pydantic 模型 → 生成前端 TS 类型）
-│   │   ├── bus.py      每会话 asyncio.Queue 订阅表
-│   │   ├── api/        tasks/conversations/runs/settings/sse/files/artifacts/knowledge
-│   │   ├── tools/      LLM 工具（parse_document/assemble_tender/publish/read/…）
-│   │   ├── parse/      确定性解析注册表（docx/pdf/txt/md → md+outline+meta）
-│   │   ├── knowledge/  公司资料库（FTS5 jieba 检索/入库管线）
-│   │   └── skills/     document-parse + tender-analysis + tender-outline（SKILL.md）
-│   ├── scripts/        gen_ts_types.py（契约 TS 类型生成）
-│   └── data/           运行时生成（gitignore）：app.db / agent.db / workspace/ / logs/
-├── frontend/           React 19 + Vite + Tailwind（shadcn 风格，手写组件）
-│   └── src/            api(client/sse/events.gen/dto.gen) · hooks(含 runReducer+vitest) · components
-├── src-tauri/          Tauri 2 壳（sidecar 生命周期 / 钥匙串 / commands）
-│   ├── src/sidecar.rs  spawn·healthz·指数退避重启·进程树清理·双角色设置
-│   └── src/lib.rs      commands：get_sidecar_info / get/set_model_settings / get_api_key_has_value / reveal_in_folder
-└── tender-agent-mvp-prd.md
-```
+## 三种运行模式
 
-## 运行方式（三种）
-
-前置：`uv`（Python ≥3.12）、Node ≥20、Rust stable ≥1.85（本机已用 rsproxy 镜像）。
+前置：`uv`（Python ≥3.12）、Node ≥20、Rust stable ≥1.85。
 
 ```bash
-# 1) 纯 sidecar（无前端无壳）
-cd sidecar
-uv sync
-uv run --env-file .env python -m app.main --port 8765
-# 另开终端：curl localhost:8765/api/healthz
-
-# 2) 浏览器开发模式（sidecar 手动起在 8765）
-npm run dev:browser        # 一条命令：同时拉起 8765 sidecar + Vite（Ctrl+C 一起退出）
-# 或分开：cd sidecar && uv run --env-file .env python -m app.main --port 8765
-#         cd frontend && npm run dev
-# 连接地址在 frontend/.env.development 的 VITE_SIDECAR_URL
-
-# 3) Tauri 桌面（推荐，一条命令）
+# A. Tauri 桌面（推荐，一条命令）
 npx tauri dev
-# sidecar 由 Tauri 自动拉起（随机端口 + 随机 token），key 从钥匙串读取注入
+
+# B. 浏览器开发（适合改前端时热更快）
+npm run dev:browser    # 一条命令：sidecar(8765) + Vite 一起起
+# 分开也行：
+#   cd sidecar && uv run --env-file .env python -m app.main --port 8765
+#   cd frontend && npm run dev
+
+# C. 纯 sidecar（只想用 API / 接别的客户端）
+cd sidecar && uv sync && uv run --env-file .env python -m app.main --port 8765
+curl localhost:8765/api/healthz
 ```
 
-首次使用前把 API Key 存进钥匙串（Mac 钥匙串 App / 终端）：
+国内网络需要配镜像：`sidecar/pyproject.toml` 已内置清华源；`frontend/.npmrc` 用 npmmirror；`src-tauri/.cargo/config.toml` 用 rsproxy。
+
+---
+
+## 工程结构
+
+```
+.
+├── sidecar/                  Python sidecar（FastAPI + DeepAgents + SQLite）
+│   ├── app/
+│   │   ├── agent.py          build_agent + run_stream（流式事件 / 协作取消 / HITL）
+│   │   ├── events.py         LangGraph 流 → SSE 事件的唯一映射层
+│   │   ├── contracts/        契约单一事实源（pydantic → 自动生成 TS 类型）
+│   │   ├── db.py / db_migrations.py   SQLite + schema 版本化迁移
+│   │   ├── api/              tasks / conversations / runs / files / artifacts
+│   │   │                     / knowledge / materials / workbench / templates
+│   │   ├── tools/            LLM 工具（parse_document / docx 族 / publish / read / …）
+│   │   ├── skills/           document-parse / tender-* / humanizer-zh
+│   │   ├── parse/            docx / pdf / txt / md 解析注册表
+│   │   └── knowledge/        FTS5 知识库
+│   ├── scripts/              gen_ts_types.py（pydantic → TS interface）
+│   └── tests/
+├── frontend/                 React 19 + Vite + Tailwind
+│   └── src/
+│       ├── api/              client / sse / events.gen / dto.gen（自动生成）
+│       ├── hooks/            useRun + runReducer（带 vitest）
+│       └── components/       workspace + 三栏 + 产物面板 + 工作台 …
+├── src-tauri/                Tauri 2 壳
+│   └── src/                  sidecar.rs / commands
+├── docs/
+│   ├── user-stories.md       14 个 Epic + 偏离场景的完整用户故事
+│   ├── packaging.md          多平台打包流水线
+│   ├── designtokens/         设计 token
+│   ├── prototypes/           UI 原型
+│   └── skill design/         skill 重构手册 + 四个 JSON Schema
+├── AGENTS.md                 给 coding agent 的工作约定（边界/铁律/历史决策）
+├── check.sh                  一键全栈检查（Python + TS + Rust）
+└── LICENSE
+```
+
+---
+
+## 文档索引
+
+- **`docs/user-stories.md`** — 14 个 Epic + 47 个偏离场景的用户故事，可直接拆卡
+- **`docs/packaging.md`** — 多平台打包流水线（PyInstaller 冻结 + Tauri externalBin）
+- **`AGENTS.md`** — 给在这个仓库写代码的 agent 看的工程约定（铁律、架构边界、历史决策索引）
+- **`sidecar/scripts/gen_ts_types.py`** — pydantic → TS 类型生成器；改契约必跑 + 入库
+- **`docs/skill design/`** — skill 体系的重构手册（背景 / Workflow / 四个 JSON Schema）
+
+---
+
+## 开发与测试
 
 ```bash
-security add-generic-password -U -s tender-agent -a llm-api-key -w '<你的 key>'
-# 或：窗口内「设置」→ 保存 API Key（仅 Tauri 环境显示该输入框）
-security find-generic-password -s tender-agent   # 验证
+./check.sh            # sidecar ruff/pytest + frontend lint/tsc/vitest/build + rust check/clippy
+./check.sh sidecar    # 只查 Python
+./check.sh frontend   # 只查前端
+./check.sh rust       # 只查 Rust
 ```
 
-## 网络镜像（本机直连超时，必配）
+注意：`check.sh` 里 `gen_ts_types.py` 会重生成前端 TS 类型并与入库版本 diff——
+**改了 pydantic 契约模型忘了跑生成器会在这里挂**。
 
-- **pypi**：`sidecar/pyproject.toml` 内置清华镜像。
-- **npm**：根与 frontend 的 `.npmrc` 已配 `registry.npmmirror.com`。
-- **cargo**：`src-tauri/.cargo/config.toml` 配 `rsproxy.cn` 镜像。
-- **rustup**：`RUSTUP_DIST_SERVER=https://rsproxy.cn`（升级 Rust 时用）。
+---
 
-## 验收要点（对应 PRD 里程碑）
+## 参与贡献
 
-- M1：`curl` 走通 healthz / 会话 CRUD / SSE（started→token→tool→completed）；重启后历史仍在。
-- M2：新建会话、流式打字、Markdown 表格、ToolTimeline、刷新后历史保留。
-- M3：`npx tauri dev` 一条命令；`kill -9 <python pid>` 后 10 秒内自动恢复；钥匙串可查。
-- M4：把 `招标文件.docx` 放入 `sidecar/data/workspace/`，窗口内让 tender-toc 走完整流水线，
-  `data/workspace/out/` 生成 `tender-response-docs.json` / `tender-directory.json` / `tender-directory.html`。
+Issues / PR 都欢迎。新增能力前建议先看 `AGENTS.md` 里的设计铁则与历史决策，能少走很多弯路。
 
-## 已知坑（PRD §11，均已实现应对）
+如果你想：
 
-1. skills 路径两种写法（`skills/` vs 带 root 前缀）以启动日志实测为准（当前 `skills/` 可用）。
-2. DeepAgents beta：库内部格式变化只改 `sidecar/app/events.py` 一个文件；deepagents 锁 0.7.7。
-3. uvicorn 不要开 `--reload`（与 Tauri 进程树管理冲突）。
-4. 解析支持 `.docx`（python-docx）与 `.pdf`（PyMuPDF 原生提取，无需 LibreOffice）；`.doc` 不支持（提示另存为 .docx）。
-5. **钥匙串**：`keyring` crate 在此 macOS 写入 Data Protection 钥匙串、`security` CLI 不可见，
-   故改为 Rust 调 `security` CLI 子进程读写 login 钥匙串（满足 PRD M3 验收）。
-6. sse-starlette 对 dict 的 `data` 会输出 Python repr（单引号非 JSON）——sidecar 在
-   `app/api/sse.py` 预先 `json.dumps`，保证 `data: <json>` 契约。
+- **加一个 skill**：照 `sidecar/app/skills/tender-*/SKILL.md` 格式 + `references/`；description 只写触发关键词
+  （不要把流程概述塞 description 里，实测会让模型走捷径）。
+- **加一个 LLM 工具**：写在 `sidecar/app/tools/`，注册到 `agent.py` 的 TOOLS；契约模型放 `app/contracts/` 并跑 `gen_ts_types.py`。
+- **改前端组件**：`frontend/src/components/`；样式走 `tokens.css` + Tailwind v4 的 `color-mix()` 派生。
+- **改事件契约**：pydantic 模型是唯一真源；`events.gen.ts` / `dto.gen.ts` 自动生成，不要手改。
+
+提交前跑 `./check.sh` 全绿。
+
+---
+
+## 已知限制与未来工作
+
+- **断线补发**：MVP 不做历史事件补发，刷新/重连靠 `run.state` 收敛。详见 AGENTS.md。
+- **跨平台打包**：当前 macOS / Windows / Linux 各自要原生机器构建，详见 `docs/packaging.md`。
+- **代码签名 / 自动更新**：暂未做，下载安装需要用户手动确认。
+- **驾驶舱式全局视图**：侧栏已有运行状态指示，但全局任务看板是 Phase 2+ 候选。
+
+---
+
+## License
+
+[MIT](./LICENSE) © 2026 Tender Agent Contributors
+
+---
+
+## 致谢
+
+- 底层：[DeepAgents](https://github.com/langchain-ai/deepagents) / LangGraph
+- 前端：[React 19](https://react.dev) + [Vite](https://vitejs.dev) + [Tailwind CSS v4](https://tailwindcss.com)
+- 桌面壳：[Tauri 2](https://tauri.app)
+- PDF 解析：[PyMuPDF](https://pymupdf.io)
+- docx 解析与产出：[python-docx](https://python-docx.readthedocs.io)
+- 通用润色：[Humanizer-zh](https://github.com/op7418/Humanizer-zh)（MIT）
+
+---
+
+> 截图占位：后续在 `docs/screenshots/` 下放 1-2 张主界面图，README 顶部会引用。
