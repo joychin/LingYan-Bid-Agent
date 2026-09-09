@@ -193,8 +193,19 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
-        // 记住窗口大小/位置（退出自动持久化到系统 app 配置目录），纯 plumbing 无 IPC
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // 记住窗口大小/位置（退出自动持久化到系统 app 配置目录），纯 plumbing 无 IPC。
+        // flags 去掉 VISIBLE：插件默认含它，restore 会把 visible:false 的主窗提前
+        // show 出来（与 splash 并存，用户实测「同时展示很怪异」）——显示时机只归
+        // sidecar.rs 的 reveal_main_from_splash。DECORATIONS/FULLSCREEN 同理不跨启动恢复。
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .build(),
+        )
         // 日志后端（Stdout + 应用日志目录文件，轮转自带）：sidecar.rs 的 log:: 调用
         // 此前因无后端被静默丢弃。不开 Webview target——纯 Rust 侧 plumbing，零 IPC 权限。
         .plugin(

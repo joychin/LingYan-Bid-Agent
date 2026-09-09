@@ -512,6 +512,9 @@ pub fn reveal_main_from_splash(app: &AppHandle) {
         return;
     }
     if let Some(w) = app.get_webview_window("splash") {
+        // 先 hide 再 close：hide 同步生效保证视觉上 splash 先消失，close（销毁
+        // WebView）是异步的，主窗 show 不等它——防两窗短暂并存
+        let _ = w.hide();
         let _ = w.close();
     }
     if let Some(w) = app.get_webview_window("main") {
