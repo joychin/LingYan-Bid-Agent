@@ -27,6 +27,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 全历史：changelog 步骤的 git describe 需要上一个 tag 可达（shallow 下拉不到 tag 引用的 commit）
 
       - name: 安装 Node 22
         uses: actions/setup-node@v4

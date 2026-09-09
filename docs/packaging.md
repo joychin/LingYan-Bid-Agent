@@ -75,7 +75,7 @@ npm run tauri build -- --target universal-apple-darwin        # 需两个 triple
   Developer ID 签名 + 公证 = 后续门（Tauri bundler 届时会对 externalBin 逐个签名公证）。
 - 用户数据目录（bundled 模式 `DATA_DIR`）：`~/Library/Application Support/com.tenderagent.app`。
 
-## 3. Windows（未实测门——首次真机出包时把踩到的坑补记回本文件）
+## 3. Windows（2026-09-09 首次真机出包已跑通，v0.1.1 经 GitHub Actions 产出）
 
 环境：Rust（MSVC）+ Node 22 + uv + Git Bash，全部默认安装路径即可。
 
@@ -85,13 +85,21 @@ npm run build:release
 ```
 
 产物：`src-tauri/target/release/bundle/` 下 `nsis/*.exe`（推荐分发）与 `msi/*.msi`
-（msi 首次构建会自动下载 WiX）。
+（msi 首次构建会自动下载 WiX）。CI 实测产物：setup.exe 94MB / msi 95MB。
 
 - 侧车无控制台窗已接好（spec `console=False`，stderr 由 Rust 侧重定向进 boot 留档）。
 - 已知坑备案（AGENTS）：**NSIS 覆盖安装不更新 externalBin**（tauri#15134）——靠版本号
-  变化规避，即每次发新版前把 `tauri.conf.json` 的 `version` 抬一位。
+  变化规避，即每次发新版前把 `tauri.conf.json` 的 `version` 抬一位（CI 已从 tag 自动同步）。
 - 未签名 exe 杀软误报偏高，正式代码签名证书 = 后续门。
 - 用户数据目录：`%APPDATA%\com.tenderagent.app`。
+- **实测坑①（已修）**：Windows 的 stdout/stderr 默认 locale 编码（cp1252），
+  `run_frozen.py --smoke` 打印含中文的 JSON 结果时 `UnicodeEncodeError` 必炸
+  （mac/Linux 默认 UTF-8 复现不了）。修法=`run_frozen.py` 入口统一
+  `sys.stdout/stderr.reconfigure(encoding="utf-8", errors="replace")`。
+  本地复现验证：`PYTHONIOENCODING=cp1252 .build-venv/bin/python run_frozen.py --smoke`。
+- **实测坑②（已修）**：CI changelog 用 `git describe` 找上一个 tag——actions/checkout
+  默认 shallow（fetch-depth: 1）拉不到 tag 引用的 commit，describe 必失败走「首次发布」
+  分支。修法=checkout 加 `fetch-depth: 0`。
 
 ## 4. Linux
 
