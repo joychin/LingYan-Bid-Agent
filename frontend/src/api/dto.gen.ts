@@ -327,8 +327,8 @@ export interface Task {
   created_at: string;
 }
 /**
- * 文档模板（格式资产，与素材=内容资产分离）：内置基准或用户上传 .docx，
- * 全局一个默认模板位（active=当前默认）。
+ * 版式文件（格式资产，与素材=内容资产分离）：内置基准或用户上传 .docx，
+ * 全局一个默认版式位（active=当前默认）。
  */
 export interface TemplateInfo {
   name: string;

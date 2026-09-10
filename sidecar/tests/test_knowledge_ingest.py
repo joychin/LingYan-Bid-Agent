@@ -306,7 +306,7 @@ def test_extract_docx_zip_guards(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     src = store.kb_files_dir() / "护栏.docx"
     src.write_bytes(_make_docx_with_images(tmp_path))
-    member, total, count = (
+    member, total, _count = (
         images_mod._MAX_MEMBER_BYTES,
         images_mod._MAX_TOTAL_BYTES,
         images_mod._MAX_IMAGES,

@@ -1106,7 +1106,7 @@ describe('等待死卡出口（run 已在服务端终态，2026-09-10 review）'
     s = runReducer(s, {
       type: 'settle-interrupt',
       runId,
-      requests: [{ kind: 'ask', question: '请确认', options: ['继续'] }],
+      requests: [{ tool: 'ask_human', args: {}, description: '请确认', allowed: ['respond'] }],
     }).state
     return s
   }

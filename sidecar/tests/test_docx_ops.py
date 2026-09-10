@@ -402,7 +402,7 @@ def test_material_inject_block_after_table(env, tmp_path):
     f = db.mt_insert_file("补充素材.docx", "hash_docx_after_table")
     mlib.run_parse(f["id"])
     md_lines = mlib.mt_parse_paths("补充素材.docx")[0].read_text(encoding="utf-8").splitlines()
-    ln = next(i for i, l in enumerate(md_lines, 1) if "独家承诺文本" in l)
+    ln = next(i for i, line in enumerate(md_lines, 1) if "独家承诺文本" in line)
     block = mlib.create_block(f["id"], "表格后承诺段", "勾选表格后段落", ranges=[[ln, ln]])
 
     section = _make_section()

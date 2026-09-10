@@ -4,6 +4,7 @@
 产出文本零 REQ/MAND/SCORE/TPL 编号（派发契约，编号会被写手镜像进正文）。
 """
 
+import json
 import re
 
 import pytest
@@ -170,8 +171,6 @@ def test_rich_description_passthrough(env):
 def test_material_card_resolved_from_guide(env):
     """素材列 blk id → 逐块名片（标题/字数/来源文件/备注）：写手据此直接使用，
     不再每节重检索素材库（指引期检索的内容层复用）。"""
-    import json as _json
-
     from app import db
 
     f = db.mt_insert_file("历史标书-某政务项目.docx", file_hash="h_mt1")
@@ -182,7 +181,7 @@ def test_material_card_resolved_from_guide(env):
                 "id": "blk_abc123def456",
                 "title": "运维服务方案",
                 "note": "通用运维章节，改项目名即可",
-                "ranges": _json.dumps([[10, 80]]),
+                "ranges": json.dumps([[10, 80]]),
                 "chars": 1200,
             }
         ],
@@ -326,14 +325,12 @@ def test_multi_volume_path_sanitizes_volume_name(env):
 
 # ---------- 原件定位行（2026-09-10） ----------
 
-import json as _json
-
 
 def _seed_outline(env, fname: str, nodes: list) -> None:
     """往 work/parse/<文件名>/ 落一份 outline.json（标题树形态同 parse_document）。"""
     pdir = artifact_store.work_dir(env[0]["id"]) / "parse" / fname
     pdir.mkdir(parents=True, exist_ok=True)
-    (pdir / f"{fname}.outline.json").write_text(_json.dumps(nodes, ensure_ascii=False), encoding="utf-8")
+    (pdir / f"{fname}.outline.json").write_text(json.dumps(nodes, ensure_ascii=False), encoding="utf-8")
 
 
 def test_source_location_unique_marker_match(env):
