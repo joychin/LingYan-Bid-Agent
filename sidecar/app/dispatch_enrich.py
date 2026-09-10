@@ -159,7 +159,9 @@ def _promise_lines(task_id: str) -> list[str]:
 def _sibling_lines(task_id: str, content: dict, vol: str, own_title: str) -> list[str]:
     """同册已写节的开头摘要（mtime 降序 ≤3 个，排除自己与整本合册）。"""
     multi = body_contract.multi_volume(content)
-    vdir = artifact_store.work_dir(task_id) / "body" / (vol if multi else "")
+    # 册名清洗后拼路径（实际落点=docx_assemble_volume/check_pipeline 的 sanitize_name
+    # 口径；原样拼接在册名含 /: 等字符时指错目录——摘要静默空、路径行误导）
+    vdir = artifact_store.work_dir(task_id) / "body" / (body_contract.sanitize_name(vol) if multi else "")
     if not vdir.is_dir():
         return []
     own = body_contract.sanitize_name(own_title) + ".docx"
@@ -334,7 +336,7 @@ def build_enriched_description(desc: str, task_id: str) -> str | None:
             return None
         vol, title, delivery = match
         multi = body_contract.multi_volume(content)
-        rel = f"body/{vol + '/' if multi else ''}{body_contract.sanitize_name(title)}.docx"
+        rel = f"body/{body_contract.sanitize_name(vol) + '/' if multi else ''}{body_contract.sanitize_name(title)}.docx"
 
         req_lines: list[str] = []
         has_tpl = False

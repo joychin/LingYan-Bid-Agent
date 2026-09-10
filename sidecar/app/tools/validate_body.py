@@ -368,7 +368,20 @@ def _validate_body_global(body_dir: Path) -> str:
             return "\n".join(section_text_lines(Document(str(q))))
         return q.read_text(encoding="utf-8", errors="replace")
 
-    finals = [_final_text(q) for q in sections]
+    # 单节损坏不拖垮全局（2026-09-10 review）：坏节剔除并点名，承诺比对/节间
+    # 查重对其余节照常跑——同类消费者（兄弟摘要/合册缺节点名）都是这个口径
+    finals: list[str] = []
+    broken: list[str] = []
+    readable: list[Path] = []
+    for q in sections:
+        try:
+            finals.append(_final_text(q))
+            readable.append(q)
+        except Exception:
+            broken.append(f"{q.parent.name}/{q.name}")
+    if broken and not finals:
+        return "[校验失败] body 全局：正文节全部损坏（" + "、".join(broken) + "）——删除重建后再收尾"
+    sections = readable
     dup_warns = _section_dup_warnings(body_dir, sections, finals)
 
     skip_note: str | None = None
@@ -414,6 +427,11 @@ def _validate_body_global(body_dir: Path) -> str:
                 + (f"，{len(warn_lines)} 项未落正文" if warn_lines else "")
             )
     warn_lines.extend(dup_warns)
+    if broken:
+        warn_lines.append(
+            "损坏节（无法按终稿视角读取，已跳过、未参与比对/查重）：" + "、".join(broken)
+            + "——删除重建或人工核查"
+        )
 
     head = (
         f"[校验通过] body 全局：{len(sections)} 节正文{promise_summary}"

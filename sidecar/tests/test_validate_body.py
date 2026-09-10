@@ -345,6 +345,25 @@ def test_global_body_dir_missing(tmp_path, monkeypatch):
     assert r.startswith("[校验失败]") and "body" in r
 
 
+def test_global_broken_docx_isolated(env):
+    """坏节隔离（2026-09-10 review）：单个损坏 docx 不拖垮全局——剔除并点名，
+    其余节的承诺比对照常跑；全部损坏才失败。"""
+    _write_body(env, "body/关键事实与承诺.md",
+                "| 事项 | 值 | 说明 |\n|---|---|---|\n| 工期 | 90 天 | 拍板 |\n")
+    _write_body(env, "body/3.1 项目理解.md", "工期 90 天。\n")
+    bad = _wroot(env[0]) / "body" / "3.2 损坏节.docx"
+    bad.write_bytes(b"not a docx at all")
+    r = validate_body.invoke({"section": "body"})
+    assert r.startswith("[校验通过] body 全局")  # 好节照常比对
+    assert "承诺 1 项比对，1 项已落正文" in r
+    assert "损坏节" in r and "body/3.2 损坏节.docx" in r
+    # 全部损坏 → 明确失败而非「0 项已落正文」的误导通过
+    (_wroot(env[0]) / "body" / "3.1 项目理解.md").unlink()
+    (_wroot(env[0]) / "body" / "3.1 项目理解.docx").write_bytes(b"broken too")
+    r2 = validate_body.invoke({"section": "body"})
+    assert r2.startswith("[校验失败]") and "全部损坏" in r2
+
+
 # ---------- docx 正文节（终稿视角校验） ----------
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import get_args
 
 from langchain_core.tools import tool
 from pydantic import ValidationError
@@ -26,6 +27,8 @@ from pydantic import ValidationError
 from .. import publish, runctx
 from ..artifact_store import work_dir
 from ..config import workspace_dir
+from ..contracts.tender_directory import NumberingScheme
+from . import body_contract
 
 CONTRACT_KEY = "tender.directory/tender-response-docs@1"
 
@@ -492,6 +495,14 @@ def assemble_tender() -> str:
             "meta": meta,
             "lineage_check": {"unused_ids": unused_ids, "dangling_ids": dangling_ids},
         }
+        # 章节编号格式透传（2026-09-10 review）：numbering 唯一写入点是前端目录
+        # 编辑器，重组装不带上会把用户选的格式静默清掉、下次合册回落 chapter。
+        # 旧产物无此键或值不合法（contract Literal）→ 不带，缺省语义不变
+        _, prev_content, _ = body_contract.load_directory(task_id)
+        if isinstance(prev_content, dict):
+            prev_numbering = prev_content.get("numbering")
+            if prev_numbering in get_args(NumberingScheme):
+                content["numbering"] = prev_numbering
         if warnings:
             content["warning"] = "\n".join(warnings)
 

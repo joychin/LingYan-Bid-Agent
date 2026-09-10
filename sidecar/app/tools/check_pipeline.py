@@ -337,7 +337,13 @@ def check_pipeline_state() -> str:
                         )
                         if key not in known or key in actual:
                             continue  # 指引行不在目录树（改版残留）或该节已写
-                        note_i = cols.get("缺口/备注", 4)
+                        # 缺口列头变体匹配（与 dispatch_enrich._GAP_COL_KEYS 同口径）：
+                        # 模型把契约列头「缺口/备注」写成「缺口」等变体时，精确键拿不
+                        # 到列 → 物理附件节漏剔除被派子代理（两处判定分叉的收口）
+                        note_i = next(
+                            (i for k, i in cols.items() if ("缺口" in k or "备注" in k)),
+                            4,
+                        )
                         note = cells[note_i] if note_i < len(cells) else ""
                         if "物理附件" in note:
                             continue

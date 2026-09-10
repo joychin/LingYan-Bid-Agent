@@ -387,6 +387,38 @@ def test_body_wave_reference(env):
     assert "第1波（权重和 7）" in wave_text  # 10 - 3.1 的权重 3
 
 
+def test_body_wave_reference_gap_column_variant(env):
+    """缺口列头变体（「缺口」而非契约名「缺口/备注」）：物理附件仍被剔除——
+    与 dispatch_enrich._GAP_COL_KEYS 同口径，两处判定不分叉（2026-09-10 review）。"""
+    content = _dir_content()  # 已含「附件：资质证书复印件」节点
+    content["response_documents"][0]["directory"].insert(0, {
+        "目录名称": "投标函", "level": 1, "children": [],
+        "交付形态": "模板或附件填充", "来源位置": ["MAND-03"],
+    })
+    content["response_documents"][0]["directory"].append({
+        "目录名称": "3.4 实施与服务方案", "level": 1, "children": [],
+        "交付形态": "正文编写", "来源位置": ["REQ-02"],
+    })
+    _seed_directory(env, content)
+    _write_body(
+        env,
+        "body/写作指引.md",
+        "\n".join([
+            "| 节 | 模式 | 依据 | 素材 | 缺口 |",
+            "|---|---|---|---|---|",
+            "| 投标函 | — | MAND-03 | — | 格式件：docx_source_inject 拷原件+revise 填空 |",
+            "| 3.1 项目理解与需求分析 | 素材修订 | REQ-01 | — | — |",
+            "| 3.2 总体设计方案 | 推理撰写 | SCORE-02 | — | — |",
+            "| 附件：资质证书复印件 | — | MAND-02 | — | 物理附件，列待填清单 |",
+        ]) + "\n",
+    )
+    r = check_pipeline_state.invoke({})
+    assert "[body] 均衡分波参考" in r
+    wave_text = r.split("均衡分波参考", 1)[1]
+    assert "资质证书复印件" not in wave_text  # 变体列头下物理附件照样剔除
+    assert "投标函" in wave_text and "3.1 项目理解与需求分析" in wave_text
+
+
 def test_body_wave_reference_multi_volume_keys(env):
     """多册分波键=「册名/标题」，与对账行同口径。"""
     content = _dir_content()

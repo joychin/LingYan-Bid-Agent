@@ -279,6 +279,17 @@ def test_source_inject_whole_file(env):
     assert "第一章 招标公告" in texts and "致：______（招标人名称）" in texts
     assert len(chk.tables) == 1 and chk.tables[0].cell(0, 0).text == "项目名称"
 
+    # 同区间重复注入拦截（2026-09-10 review，与素材侧同口径）：append 语义下
+    # 重拷=格式件翻倍可直达交付合册。第二次同源注入被拦、节文件未被追加
+    r2 = docx_source_inject.invoke({"source": "招标文件.docx", "dest": section})
+    assert r2.startswith("[注入失败]") and "已注入过" in r2 and "replace=true" in r2
+    chk2 = Document(str(_abs(env, section)))
+    assert len(chk2.paragraphs) == len(chk.paragraphs) and len(chk2.tables) == 1
+
+    # 不同节不受影响（拦截按目标节当前内容比对，非全局记账）
+    other = _make_section("技术部分/投标函副本.docx")
+    assert docx_source_inject.invoke({"source": "招标文件.docx", "dest": other}).startswith("[已注入]")
+
 
 def test_source_inject_line_range(env):
     """行号区间拷（L 前缀容忍）：只带第四章格式章，不带第一章公告。"""

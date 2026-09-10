@@ -1110,6 +1110,24 @@ def docx_source_inject(source: str, dest: str, lines: str = "") -> str:
     src = Document(str(src_path))
     dst_doc = Document(str(dst))
     children = list(src.element.body.iterchildren())
+    # 同区间重复注入拦截（2026-09-10 review，与素材侧同口径）：注入是 append
+    # 语义，同区间重拷=格式件整段翻倍（写手遗忘已注入/工具超时重试/HITL 续跑
+    # 重放同一调用都可能触发），且下游 validate_body 节间查重/合册对同节重复
+    # 均无防线、可直达交付合册。概率防线：大幅改写后漏拦可接受
+    incoming = _sig_shingles(
+        "".join("".join(children[i].itertext()) for i in idx if i < len(children))
+    )
+    if len(incoming) >= 5:
+        # 目标侧同口径 itertext（section_text_lines 的表格行/单元格有截断，
+        # 重叠率被稀释漏拦——两侧同为元素全量文本，重复注入时 ≈100% 命中）
+        cur = _sig_shingles("".join(dst_doc.element.body.itertext()))
+        if len(incoming & cur) / len(incoming) >= 0.6:
+            scope_hit = "整份文件" if lo is None else f"行号区间 {lo}-{hi}"
+            return (
+                f"[注入失败] 《{name}》（{scope_hit}）的内容已大量出现在 work/{rel}"
+                "（已注入过）——注入是追加语义，重复拷贝会翻倍格式件；确需重拷请先重建"
+                "节文件（docx_section_create 传 replace=true）"
+            )
     sect = dst_doc.element.body.find(qn("w:sectPr"))
     n_para = n_tbl = n_img = 0
     copied: list = []

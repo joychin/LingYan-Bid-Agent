@@ -290,6 +290,40 @@ def test_multi_volume_path_and_format_note(env):
     assert "TPL-" not in out
 
 
+def test_multi_volume_path_sanitizes_volume_name(env):
+    """册名含 : 等路径非法字符：输出路径与兄弟摘要目录都走 sanitize_name——与
+    实际落点（docx_assemble_volume/check_pipeline）同口径，原样拼接指错路径
+    （2026-09-10 review）。注：册名含 / 属「册名/标题」拆分协议的既有限制，不在此测。"""
+    content = _multi_volume_content()
+    content["response_documents"][0]["name"] = "技术:第一册"
+    task = env[0]
+    from app import publish
+
+    publish.publish_artifact(_KEY, content, task_id=task["id"])
+    wroot = artifact_store.work_dir(task["id"])
+    from app.tools.body_contract import sanitize_name
+
+    assert "技术:第一册" != sanitize_name("技术:第一册")  # 确认该名确实会被清洗
+    vol_dir = wroot / "body" / sanitize_name("技术:第一册")
+    vol_dir.mkdir(parents=True, exist_ok=True)
+    from docx import Document as _D
+
+    d = _D()
+    d.add_paragraph("已写节的开头摘要文本。")
+    d.save(str(vol_dir / "已写节.docx"))
+    (wroot / "body/写作指引.md").write_text(
+        "| 节 | 模式 | 依据 | 素材 | 缺口/备注 |\n|---|---|---|---|---|\n"
+        "| 技术:第一册/投标函 | — | TPL-02 | — | 格式件：拷原件+填空 |\n",
+        encoding="utf-8",
+    )
+    out = build_enriched_description("写投标函", task["id"])
+    assert out is not None
+    # 路径行=清洗后的册目录（原样拼「:」在部分文件系统上即非法路径）
+    assert f"输出路径：{task['id']}/work/body/{sanitize_name('技术:第一册')}/投标函.docx" in out
+    # 兄弟摘要目录同样清洗（清洗错误时摘要恒空——找不到目录）
+    assert "已写节" in out
+
+
 # ---------- 原件定位行（2026-09-10） ----------
 
 import json as _json

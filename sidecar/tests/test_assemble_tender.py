@@ -173,6 +173,31 @@ def test_assemble_and_publish(env):
     assert js["lineage_check"]["unused_ids"] == ["SCORE-01", "SCORE-02", "TPL-01"]
 
 
+def test_reassemble_carries_over_numbering(env):
+    """编号格式透传（2026-09-10 review）：numbering 唯一写入点是前端目录编辑器，
+    重组装必须带上——否则用户选的格式被静默清掉、下次合册回落 chapter。"""
+    assert assemble_tender.invoke({}).startswith("[组装发布成功]")
+    arts = [a for a in artifact_store.list_from_disk() if a["kind"] == "tender.directory"]
+    p = artifact_store.content_path(arts[0]["artifact_id"], arts[0])
+    # 模拟前端目录编辑器写入 numbering=gov
+    content = json.loads(p.read_text(encoding="utf-8"))
+    content["numbering"] = "gov"
+    p.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+
+    assert assemble_tender.invoke({}).startswith("[组装发布成功]")
+    arts = [a for a in artifact_store.list_from_disk() if a["kind"] == "tender.directory"]
+    fresh = json.loads(artifact_store.read_content(arts[0]["artifact_id"], arts[0]))
+    assert fresh.get("numbering") == "gov"
+
+    # 非法值不透传（契约 Literal 之外）：重组装回到缺省无键
+    content["numbering"] = "roman-x"
+    p.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+    assert assemble_tender.invoke({}).startswith("[组装发布成功]")
+    arts = [a for a in artifact_store.list_from_disk() if a["kind"] == "tender.directory"]
+    fresh = json.loads(artifact_store.read_content(arts[0]["artifact_id"], arts[0]))
+    assert "numbering" not in fresh
+
+
 def _node(name: str, ids: list[str], children: list[dict] | None = None) -> dict:
     return {"目录名称": name, "children": children or [], "来源位置": list(ids)}
 
