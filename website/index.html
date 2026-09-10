@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>灵燕智能 — 本地运行的标书写作 AI 智能体</title>
+  <meta name="description" content="上传招标文件，灵燕智能帮你读原文、理要点、搭目录，逐节写出投标正文。结论注明出处，大事先问你，文档都在你自己的电脑上。" />
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+  <link rel="preload" href="assets/fonts/display-serif.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+
+  <!-- ============ 导航 ============ -->
+  <header class="nav" id="top">
+    <div class="wrap nav-inner">
+      <a class="brand" href="#top" aria-label="灵燕智能 首页">
+        <svg class="brand-logo" viewBox="0 0 600 600" aria-hidden="true"><use href="assets/logo.svg#swallow" /></svg>
+        <span class="brand-name">灵燕智能</span>
+      </a>
+
+      <nav class="nav-links" id="navLinks" aria-label="站内导航">
+        <a href="#how">工作流程</a>
+        <a href="#features">核心能力</a>
+        <a href="#assets">三个库</a>
+        <a href="#faq">常见问题</a>
+        <a class="nav-cta" href="https://github.com/joychin/Bid_Copilot_client/releases/latest" target="_blank" rel="noopener">免费下载</a>
+      </nav>
+
+      <button class="nav-burger" id="navBurger" aria-expanded="false" aria-controls="navLinks" aria-label="打开菜单">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ============ Hero（Steep 标志：居中衬线大标题 + 浮动产品碎片拼贴） ============ -->
+    <section class="hero">
+      <div class="wrap">
+        <div class="hero-head reveal">
+          <span class="hero-cap">标书智能体 · 数据在你自己的电脑上</span>
+          <h1>把标书交给<em>一个</em>智能体</h1>
+          <p class="hero-sub">上传招标文件和公司资料——素材库供内容、知识库供证明、版式库定格式，灵燕智能读原文、搭目录、逐节写出带出处的投标正文。</p>
+          <div class="hero-cta">
+            <a class="btn btn-primary" href="https://github.com/joychin/Bid_Copilot_client/releases/latest" target="_blank" rel="noopener">
+              免费下载
+            </a>
+            <a class="btn btn-ghost" href="#how">看看工作流程</a>
+          </div>
+        </div>
+
+        <div class="hero-collage reveal" aria-hidden="true">
+          <!-- 浮动碎片 1：招标要求分析表 -->
+          <div class="artifact artifact-table">
+            <div class="artifact-head"><span>招标要求分析</span><span>32 项</span></div>
+            <table>
+              <thead><tr><th>类别</th><th>条目</th><th>出处</th></tr></thead>
+              <tbody>
+                <tr><td>资质</td><td>ISO 9001 体系</td><td>L218</td></tr>
+                <tr><td>工期</td><td>180 日历天</td><td>L412</td></tr>
+                <tr><td>评分</td><td>技术 60 / 价格 40</td><td>L1</td></tr>
+                <tr><td>履约</td><td>履约保证金 5%</td><td>L526</td></tr>
+                <tr><td>售后</td><td>3 年免费质保</td><td>L608</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- 浮动碎片 2：正文生成进度 -->
+          <div class="artifact artifact-chart">
+            <h4>正文生成进度</h4>
+            <div class="delta">第 3 章 · 12/32 节</div>
+            <svg viewBox="0 0 280 110" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M0 90 C 30 78, 60 60, 90 55 S 160 30, 200 22 S 260 8, 280 4"
+                    fill="none" stroke="#5d2a1a" stroke-width="2" stroke-linecap="round"/>
+              <path d="M0 90 C 30 78, 60 60, 90 55 S 160 30, 200 22 S 260 8, 280 4 L 280 110 L 0 110 Z"
+                    fill="rgba(251, 225, 209, 0.45)"/>
+            </svg>
+            <div class="x-labels"><span>8 章</span><span>已规划</span><span>逐节并行</span><span>合册</span></div>
+          </div>
+
+          <!-- 浮动碎片 3：stat 卡片 -->
+          <div class="artifact artifact-stat">
+            <div class="num">8 章 32 节</div>
+            <div class="lbl">本项目已规划</div>
+            <div class="hint">封面 / 投标函 / 技术 / 商务 / 报价</div>
+          </div>
+
+          <!-- 浮动碎片 4：peach 编辑式引述卡 -->
+          <div class="artifact artifact-quote">
+            <p>「正文里的要求和数字，每个都跟着招标原文的章节和行号。」</p>
+            <div class="by">— 灵燕智能</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 客户落地方向 ============ -->
+    <section class="logos">
+      <div class="wrap">
+        <p class="logos-cap">面向需要写投标文档的团队</p>
+        <div class="logos-row">
+          <span>政府项目</span>
+          <span>软件公司</span>
+          <span>系统集成</span>
+          <span>能源企业</span>
+          <span>教育机构</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 工作流程（时间线 + 阶段块） ============ -->
+    <section class="how" id="how">
+      <div class="wrap">
+        <div class="sec-head reveal">
+          <h2>从招标文件到合册交付</h2>
+          <p>三个阶段，五步交付。</p>
+        </div>
+        <ol class="stages">
+          <!-- 阶段 1 -->
+          <li class="stage">
+            <div class="stage-meta">
+              <div class="stage-tag">阶段 1</div>
+              <div class="stage-num">01</div>
+            </div>
+            <div class="stage-body">
+              <h3>把招标文件读成可引用的结构化数据</h3>
+              <p class="brief">解析 PDF、Word、扫描件，提取章节、关键要求和评分办法，落到能引用的工作区。每条要求都带着原文行号。</p>
+              <div class="stage-steps">
+                <div class="stage-step">
+                  <span class="k">第 1 步</span>
+                  <p class="d"><b>解析招标文件</b>。识别章节结构，整理出一份关键要求清单。</p>
+                </div>
+                <div class="stage-step">
+                  <span class="k">第 2 步</span>
+                  <p class="d"><b>提取要点</b>。资质、工期、评分办法逐项列好，每条注明出自原文哪一页、哪一行。</p>
+                </div>
+              </div>
+            </div>
+            <div class="stage-visual" aria-hidden="true">
+              <div class="artifact artifact-table">
+                <div class="artifact-head"><span>招标要求分析</span><span>32 项</span></div>
+                <table>
+                  <thead><tr><th>类别</th><th>条目</th><th>出处</th></tr></thead>
+                  <tbody>
+                    <tr><td>资质</td><td>ISO 9001 体系</td><td>L218</td></tr>
+                    <tr><td>工期</td><td>180 日历天</td><td>L412</td></tr>
+                    <tr><td>评分</td><td>技术 60 / 价格 40</td><td>L1</td></tr>
+                    <tr><td>履约</td><td>履约保证金 5%</td><td>L526</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </li>
+
+          <!-- 阶段 2 -->
+          <li class="stage">
+            <div class="stage-meta">
+              <div class="stage-tag">阶段 2</div>
+              <div class="stage-num">02</div>
+            </div>
+            <div class="stage-body">
+              <h3>照着评分标准搭架子，再一节一节写正文</h3>
+              <p class="brief">目录按评分项组织。正文按节选择写法：有素材的改写你的素材，招标方给的格式件照原件拷贝填空，都没有才推理撰写。</p>
+              <div class="stage-steps">
+                <div class="stage-step">
+                  <span class="k">第 3 步</span>
+                  <p class="d"><b>生成目录</b>。照着评分标准搭目录，每一节写什么、缺什么材料，先列清楚再动手。</p>
+                </div>
+                <div class="stage-step">
+                  <span class="k">第 4 步</span>
+                  <p class="d"><b>逐节写正文</b>。素材块、格式件、公司资料按需取用；拿不准的地方停下来问你，缺料的标进批注，不编。</p>
+                </div>
+              </div>
+            </div>
+            <div class="stage-visual" aria-hidden="true">
+              <div class="artifact artifact-chart">
+                <h4>写作进度</h4>
+                <div class="delta">↑ 5.5× 比上周</div>
+                <svg viewBox="0 0 280 110" preserveAspectRatio="none" aria-hidden="true">
+                  <path d="M0 90 C 30 78, 60 60, 90 55 S 160 30, 200 22 S 260 8, 280 4"
+                        fill="none" stroke="#5d2a1a" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M0 90 C 30 78, 60 60, 90 55 S 160 30, 200 22 S 260 8, 280 4 L 280 110 L 0 110 Z"
+                        fill="rgba(251, 225, 209, 0.45)"/>
+                </svg>
+                <div class="x-labels"><span>8 月</span><span>9 月</span><span>10 月</span><span>11 月</span></div>
+              </div>
+            </div>
+          </li>
+
+          <!-- 阶段 3 -->
+          <li class="stage">
+            <div class="stage-meta">
+              <div class="stage-tag">阶段 3</div>
+              <div class="stage-num">03</div>
+            </div>
+            <div class="stage-body">
+              <h3>合成整本 Word，等你最后审一遍</h3>
+              <p class="brief">按目录合册成一份 .docx：封面、标题分级、页码、表格都按标书惯例排好。没定的事留在批注里，你在 Word 里接受修订、解决批注，就是终稿。</p>
+              <div class="stage-steps">
+                <div class="stage-step">
+                  <span class="k">第 5 步</span>
+                  <p class="d"><b>合册交付</b>。整本按目录树顺序合成，版式走标书基准模板；待办在批注里点名，打印和导出 PDF 不会带出去。</p>
+                </div>
+              </div>
+            </div>
+            <div class="stage-visual" aria-hidden="true">
+              <div class="artifact artifact-stat">
+                <div class="num">8 章 32 节</div>
+                <div class="lbl">本项目已规划</div>
+                <div class="hint">封面 / 投标函 / 技术 / 商务 / 报价</div>
+              </div>
+            </div>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- ============ 核心能力（neutral 24px 圆角 + peach 强调一处） ============ -->
+    <section class="features" id="features">
+      <div class="wrap">
+        <div class="sec-head reveal">
+          <h2>标书写得快，也要靠得住</h2>
+          <p>快靠模型。靠得住，靠的是下面三件事。</p>
+        </div>
+
+        <div class="feat-rows">
+          <!-- 行 1：出处 -->
+          <div class="feat-row reveal">
+            <div class="feat-copy">
+              <div class="kicker">每个结论都有出处</div>
+              <h3>每个要求都跟着招标原文</h3>
+              <p>正文里的数字和结论，后面都跟着原文的章节和行号，并且写完逐条机器校验——引用锚不到原文行号的内容过不了自查。评审对照、自己复核，都能直接翻到那一段。</p>
+            </div>
+            <div class="feat-visual" aria-hidden="true">
+              <div class="panel-doc">
+                <h4>3.1 工程概况</h4>
+                <p>本项目工期要求为 <span class="mark">180 日历天</span>，计划开工日期及工期违约条款以招标文件载明为准。</p>
+                <p>园区采用「一线放开、二线管住」的通关模式。</p>
+                <span class="cite">
+                  <svg viewBox="0 0 16 16"><path d="M6.5 9.5 9.5 6.5M7 4.5 8.6 2.9a2.5 2.5 0 0 1 3.5 3.5L10.5 8M9 11.5 7.4 13.1a2.5 2.5 0 0 1-3.5-3.5L5.5 8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+                  招标文件 第 3 章 · L412–L430 · 第 23 页
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 行 2：先问你（peach 强调 — 唯一一处） -->
+          <div class="feat-row is-accent is-flip reveal">
+            <div class="feat-copy">
+              <div class="kicker">重要事项先问你</div>
+              <h3>大事由你拍板</h3>
+              <p>工期填多少、质保承诺几年——这些不能拍脑袋的事，它会停下来先问你，你确认了才写进正文。</p>
+            </div>
+            <div class="feat-visual" aria-hidden="true">
+              <div class="panel-ask">
+                <div class="lead">写「售后服务承诺」前，需要你确认：</div>
+                <div class="q">本项目的质保期承诺为几年？</div>
+                <div class="opts">
+                  <span class="opt is-picked">3 年</span>
+                  <span class="opt">5 年</span>
+                  <span class="opt">自定义…</span>
+                </div>
+                <div class="done">
+                  <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m5 8.2 2 2 4-4.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  已确认 3 年，正文按此撰写
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 行 3：Word 交付 -->
+          <div class="feat-row reveal">
+            <div class="feat-copy">
+              <div class="kicker">交付标准 Word 文档</div>
+              <h3>一份带修订标记的 Word 终稿</h3>
+              <p>正文、表格、封面、证书图都在一个 .docx 里，版式按标书基准模板排好；AI 的改动全部带修订标记，你在 Word 里逐条接受或拒绝——审阅权在你手里。</p>
+            </div>
+            <div class="feat-visual" aria-hidden="true">
+              <div class="panel-word">
+                <div class="page">
+                  <h4>五、售后服务承诺</h4>
+                  <p>我方承诺提供 <span class="ins">3 年</span>免费质保服务，质保期内的质量问题在 48 小时内响应处理。</p>
+                  <p>质保期满后，我方继续提供有偿维护服务。</p>
+                </div>
+                <div class="balloon"><b>批注 · 灵燕智能</b>资质证书扫描件待补充。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 三个库（素材 / 知识 / 版式） ============ -->
+    <section class="assets" id="assets">
+      <div class="wrap">
+        <div class="sec-head reveal">
+          <h2>三个库，越攒越顺</h2>
+          <p>素材库装内容，知识库装证明，版式库装格式。传一次，每份标书都在用。</p>
+        </div>
+
+        <div class="asset-grid">
+          <!-- 素材库 -->
+          <div class="asset-card reveal">
+            <div class="asset-tag">素材库 · 内容资产</div>
+            <h3>过往标书拆成素材块</h3>
+            <p>历史标书和公司文档按目录树勾选区间，拆成带出处的素材块。写正文时按节检索取用：引用保持原文，改写适配本项目。</p>
+            <div class="asset-demo" aria-hidden="true">
+              <div class="demo-frame">
+                <div class="demo-row"><span class="demo-name">园区通关方案</span><span class="demo-src">2025 园区标书 · L88–152</span></div>
+                <div class="demo-row"><span class="demo-name">质保服务承诺</span><span class="demo-src">2024 物业标书 · L40–67</span></div>
+                <div class="demo-row"><span class="demo-name">项目管理组织</span><span class="demo-src">2023 集成标书 · L12–96</span></div>
+              </div>
+              <div class="demo-more">按块引用 · 原文保真 · 自动算重叠</div>
+            </div>
+          </div>
+
+          <!-- 知识库 -->
+          <div class="asset-card reveal">
+            <div class="asset-tag">知识库 · 证明材料</div>
+            <h3>公司档案自动归档</h3>
+            <p>营业执照、资质证书、合同案例、人员证书传一次，自动识别类型和有效期。投标要什么证明，直接查——过期了会提醒。</p>
+            <div class="asset-demo" aria-hidden="true">
+              <div class="demo-frame">
+                <div class="demo-row"><span class="demo-name">营业执照</span><span class="demo-chip is-on">效期内</span></div>
+                <div class="demo-row"><span class="demo-name">ISO 9001 质量体系</span><span class="demo-chip is-on">至 2027-05</span></div>
+                <div class="demo-row"><span class="demo-name">近三年合同案例 ×6</span><span class="demo-chip">已归档</span></div>
+              </div>
+              <div class="demo-more">证书到期提醒 · 投标高频件清单</div>
+            </div>
+          </div>
+
+          <!-- 版式库 -->
+          <div class="asset-card reveal">
+            <div class="asset-tag">版式库 · 格式资产</div>
+            <h3>版式跟着你的单位走</h3>
+            <p>内置一套标书基准版式：A4、标题分级、页脚页码。也可以传一份你们单位的标书 .docx 设为默认，之后生成的每一节都用它。</p>
+            <div class="asset-demo" aria-hidden="true">
+              <div class="demo-frame">
+                <div class="demo-row"><span class="demo-name">内置 · 标书基准版式</span><span class="demo-chip">默认</span></div>
+                <div class="demo-row"><span class="demo-name">XX 局投标文件模板.docx</span><span class="demo-chip is-on">已上传</span></div>
+                <div class="demo-row"><span class="demo-name">封面 / 目录 / 页眉页脚</span><span class="demo-chip">随版式</span></div>
+              </div>
+              <div class="demo-more">换默认版式只影响新写的节</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ FAQ ============ -->
+    <section class="faq" id="faq">
+      <div class="wrap">
+        <div class="faq-grid">
+          <div class="faq-intro reveal">
+            <h2>常见问题</h2>
+            <p>关于模型、联网和交付格式的实际问题。</p>
+          </div>
+          <div class="faq-list reveal">
+            <details>
+              <summary>需要联网才能用吗？<svg class="chev" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+              <p>解析、存储、文档生成都发生在你电脑上；只有调用你配置的大模型时才需要联网。</p>
+            </details>
+            <details>
+              <summary>用什么大模型？<svg class="chev" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+              <p>自带 API Key，支持 DeepSeek、智谱、Kimi、通义等 OpenAI 兼容接口，也可以按每条对话随时切换模型。</p>
+            </details>
+            <details>
+              <summary>支持哪些操作系统？<svg class="chev" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+              <p>目前提供 Windows 与 macOS 安装包，可在 GitHub Releases 页面下载。</p>
+            </details>
+            <details>
+              <summary>公司资料要每次重新传吗？<svg class="chev" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+              <p>不用。营业执照、资质证书、合同案例、过往标书这些传一次进素材库和知识库，写任何新标书时都会按需检索。素材引用保持原文，写作时改写适配本项目。</p>
+            </details>
+            <details>
+              <summary>生成结果是 Word 吗？我能修改吗？<svg class="chev" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+              <p>是标准 .docx，带修订标记和批注。你在 Word 里直接改，改过的内容它后续写其他章节时也会参考。</p>
+            </details>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CTA（peach 编辑式卡） ============ -->
+    <section class="cta">
+      <div class="wrap">
+        <div class="cta-inner">
+          <div class="cta-card reveal">
+            <h2>拿一份真实的招标文件试试</h2>
+            <p>免费下载，配上自己的模型 Key 就能用。</p>
+            <a class="btn btn-primary" href="https://github.com/joychin/Bid_Copilot_client/releases/latest" target="_blank" rel="noopener">
+              免费下载
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ 页脚 ============ -->
+  <footer class="footer">
+    <div class="wrap">
+      <div class="footer-inner">
+        <div class="footer-brand-row">
+          <svg class="brand-logo" viewBox="0 0 600 600" aria-hidden="true"><use href="assets/logo.svg#swallow" /></svg>
+          <span class="footer-brand-name">灵燕智能</span>
+          <span class="footer-quote">「把时间还给内容，把判断留给人。」</span>
+        </div>
+        <div class="footer-cols">
+          <div class="footer-col">
+            <h4>产品</h4>
+            <a href="https://github.com/joychin/Bid_Copilot_client/releases/latest" target="_blank" rel="noopener">下载客户端</a>
+            <a href="#how">工作流程</a>
+            <a href="#features">核心能力</a>
+            <a href="#assets">三个库</a>
+          </div>
+          <div class="footer-col">
+            <h4>资源</h4>
+            <a href="https://github.com/joychin/Bid_Copilot_client" target="_blank" rel="noopener">GitHub</a>
+            <a href="https://github.com/joychin/Bid_Copilot_client/releases" target="_blank" rel="noopener">更新日志</a>
+            <a href="#faq">常见问题</a>
+          </div>
+        </div>
+      </div>
+      <div class="footer-base">
+        <p class="footer-note">本产品辅助撰写投标文档，不承诺中标结果。投标文件的责任由提交者自负。</p>
+        <p class="footer-copy">© 2026 灵燕智能</p>
+      </div>
+    </div>
+  </footer>
+
+  <script src="assets/main.js"></script>
+</body>
+</html>

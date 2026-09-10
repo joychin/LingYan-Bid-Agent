@@ -1,0 +1,2 @@
+Noto Serif CJK SC (https://github.com/notofonts/noto-cjk)
+SIL Open Font License 1.1 — https://openfontlicense.org
