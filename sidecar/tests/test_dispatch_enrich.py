@@ -387,3 +387,49 @@ def test_source_location_adjacent_shell_merged(env):
     assert out is not None
     # 447-448 壳 + 449-463 正文合并（464 的表2 不含：标记不同不命中、也不相邻合并）
     assert "原件定位：谈判文件.docx L447-L463" in out
+
+
+# ---------- 转述节名脱靶（2026-09-10 实测形态） ----------
+
+
+def _perf_content():
+    """大地任务实测目录片段：附件6/附件7 两张格式件表（派发脱靶事故现场）。"""
+    return {
+        "response_documents": [
+            {
+                "name": "技术部分",
+                "scope": "",
+                "directory": [
+                    {"目录名称": "近三年承接类似项目情况一览表（附件6）", "level": 1, "children": [],
+                     "交付形态": "格式跟随", "来源位置": ["TPL-09"]},
+                    {"目录名称": "投标单位财务状况一览表（附件7）", "level": 1, "children": [],
+                     "交付形态": "格式跟随", "来源位置": ["TPL-10"]},
+                ],
+            }
+        ],
+        "registry": {
+            "TPL-09": {"type": "模板", "text": "按附件6格式填报近三年类似项目", "出处": "第三章 附件6"},
+            "TPL-10": {"type": "模板", "text": "按附件7格式填报财务状况", "出处": "第三章 附件7"},
+        },
+    }
+
+
+def test_paraphrased_name_misses_passthrough(env):
+    """2026-09-10 实测形态：模型转述节名（「情况一览表」说成「业绩表」）→
+    精确/包含/近似全不中（对最近叶 ratio≈0.385 < 0.55）→ 放行裸描述，
+    子代理拿不到〔系统附〕块只能开局自救重读指引/清单——正是派发拼装
+    要省的开销。「宁可不猜」设计的已知失败半径；若加兜底（表尾词变体
+    匹配/附节无关罗盘两行），翻转本断言。"""
+    tid = _seed(env, content=_perf_content())
+    out = build_enriched_description("写类似项目业绩表", tid)
+    assert out is None  # 实锚：转述改词 0 命中 → 放行
+
+
+def test_echo_substring_name_enriches(env):
+    """对照组（同日同批 31 派发中 30 例命中的典型形态）：派发短名是叶子名
+    的子串回声（「财务状况一览表」⊂「投标单位财务状况一览表（附件7）」）→
+    包含命中、正常拼装——边界：回声命中、改词脱靶。"""
+    tid = _seed(env, content=_perf_content())
+    out = build_enriched_description("写财务状况一览表", tid)
+    assert out is not None
+    assert "投标单位财务状况一览表（附件7）.docx" in out
