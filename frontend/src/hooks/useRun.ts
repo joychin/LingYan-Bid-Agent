@@ -228,7 +228,7 @@ export function useRun(convId: string | null) {
         return
       }
       const err = run && run.status === 'error' ? (run.error ?? '任务已中断') : null
-      dispatch({ type: 'reconcile-converge', error: err })
+      dispatch({ type: 'reconcile-converge', error: err, runId: run?.id })
       void queryClient.invalidateQueries({ queryKey: ['messages', convId] })
     } catch {
       /* sidecar 暂不可达：保持现状，等重连或健康探活恢复 */
@@ -295,9 +295,15 @@ export function useRun(convId: string | null) {
           void queryClient.invalidateQueries({ queryKey: ['runs', 'active'] })
           restoreSnapshot(runId)
         } catch (e) {
-          // 409 = 已在续跑（连点/竞态窗口）：不置错误卡（run 确实在跑），但向上抛——
-          // InputComposer 据此保留输入，静默 resolve 会把用户刚打的回答清掉
-          if ((e as Error & { status?: number }).status === 409) throw e
+          // 409 = 已在续跑（连点/竞态窗口），不置错误卡（run 确实在跑），但向上抛——
+          // InputComposer 据此保留输入，静默 resolve 会把用户刚打的回答清掉。
+          // 409 也可能是 run 已被别处终止的「不在等待输入」——强制对账一次，
+          // 等待死卡出口（reconcile-converge 带 runId）负责终态收敛
+          if ((e as Error & { status?: number }).status === 409) {
+            lastReconcileRef.current = 0
+            void reconcile()
+            throw e
+          }
           dispatch({ type: 'send-failed', error: e instanceof Error ? e.message : String(e) })
           throw e
         }
@@ -357,13 +363,19 @@ export function useRun(convId: string | null) {
         restoreSnapshot(runId)
         return true
       } catch (e) {
-        // 409 = 已在续跑（双击竞态窗口），静默且视为成功
-        if ((e as Error & { status?: number }).status === 409) return true
+        // 409 多数是已在续跑（双击竞态窗口），静默且视为成功；但也可能是 run 已被
+        // 别处终止后的「不在等待输入」——强制对账一次，等待死卡出口（reconcile-
+        // converge 带 runId）负责终态收敛，确认在跑则对账恢复真实状态
+        if ((e as Error & { status?: number }).status === 409) {
+          lastReconcileRef.current = 0
+          void reconcile()
+          return true
+        }
         dispatch({ type: 'send-failed', error: e instanceof Error ? e.message : String(e) })
         return false
       }
     },
-    [dispatch, queryClient, restoreSnapshot],
+    [dispatch, queryClient, restoreSnapshot, reconcile],
   )
 
   /** 用户主动停止：置位协作式取消，收敛由随后的 agent.error（「任务已停止」）完成。
@@ -389,14 +401,21 @@ export function useRun(convId: string | null) {
     } catch (e) {
       const status = (e as Error & { status?: number }).status
       if (status === 404 || status === 409) {
+        if (waiting) {
+          // 等待卡撞 404/409（2026-09-10 review）= run 已不在服务端等待态（别处
+          // 终止/收尾竞态）——本地按已停止收敛（SSE 半开时终态事件到不了；
+          // settle-error 幂等，终态事件后到不冲突）。此前直接 return 是死卡死角
+          dispatch({ type: 'settle-error', error: '任务已停止', code: 'cancelled' })
+          void queryClient.invalidateQueries({ queryKey: ['messages', convId] })
+          void queryClient.invalidateQueries({ queryKey: ['runs', 'active'] })
+          return
+        }
         // 404/409 = run 已结束/正在收尾的竞态窗口（或与续跑撞车——用户恰在此刻
         // 提交回答）：主动对账收敛，不能只依赖 SSE 终态（半开/断开时没有终态
         // 事件，stopping 会把发送钮永久锁在「正在停止…」）。绕过限频（用户刚
         // 点过停止，此刻的对账不该被吞）；对账确认仍在跑则保持 stopping。
-        if (!waiting) {
-          lastReconcileRef.current = 0
-          void reconcile()
-        }
+        lastReconcileRef.current = 0
+        void reconcile()
         return
       }
       // 网络层失败（请求未达 sidecar）：复位 stopping 解除按钮锁死，允许重试；

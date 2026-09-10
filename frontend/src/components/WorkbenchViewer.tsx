@@ -151,12 +151,14 @@ export function WorkbenchViewer({
   const display = wbDisplayName(path)
   const editable = data.editable
 
-  const finishEdit = () => {
+  const finishEdit = async () => {
     if (auto.state === 'conflict') {
       toast('请先裁决：拉取最新或保留我的版本', 'error')
       return
     }
-    if (auto.state === 'dirty') void auto.saveNow()
+    // 闸门拦截（行数漂移确认条）=保存未发起：留在编辑态处理确认条（此前 void
+    // fire-and-forget 会直接退出编辑、确认条随编辑器卸载而丢失，2026-09-10 review）
+    if (auto.state === 'dirty' && !(await auto.saveNow())) return
     setEditing(false)
   }
 

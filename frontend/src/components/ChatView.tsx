@@ -289,19 +289,22 @@ export function ChatView({
       }
       setStepDrafts(drafts)
       if (stepIndex + 1 >= reqs.length) {
+        // 上传告知只进 decisions、不落草稿（2026-09-10 review：失败重试保留草稿
+        // 可重提——此前拼进 drafts[stepIndex].text，重试会重复拼接「我上传了文件」）
         const fileNote =
           freshFiles.length > 0 && isQuestion(reqs[stepIndex])
             ? `我上传了文件：${freshFiles.map((f) => f.name).join('、')}，请查收处理`
             : ''
-        if (fileNote) {
-          drafts[stepIndex] = { ...cur, text: [cur.text.trim(), fileNote].filter(Boolean).join('\n') }
-        }
         const decisions = reqs.map((r, i) => {
           const d = drafts[i]
           if (isQuestion(r)) {
+            const text =
+              i === stepIndex && fileNote
+                ? [d.text.trim(), fileNote].filter(Boolean).join('\n')
+                : d.text.trim()
             return {
               type: 'respond' as const,
-              message: [d.picked.length > 0 ? `已选：${d.picked.join('；')}` : '', d.text.trim()]
+              message: [d.picked.length > 0 ? `已选：${d.picked.join('；')}` : '', text]
                 .filter(Boolean)
                 .join('\n'),
             }

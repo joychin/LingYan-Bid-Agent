@@ -1093,3 +1093,104 @@ describe('断流重试假终态（tools 节点失败复用同 id 复跑）', () 
     expect(s2.tools[0].error).toBe('真实工具错误')
   })
 })
+
+describe('等待死卡出口（run 已在服务端终态，2026-09-10 review）', () => {
+  function frozenWaiting(runId = 'r_wait') {
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId, now: NOW }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: runId, conversation_id: 'c1', tool: 'ask_human', args: {}, tool_call_id: 'q1', seq: 1 },
+    }).state
+    s = runReducer(s, {
+      type: 'settle-interrupt',
+      runId,
+      requests: [{ kind: 'ask', question: '请确认', options: ['继续'] }],
+    }).state
+    return s
+  }
+
+  it('run.state error 指认同一 run：冻结问答卡清掉并收敛为错误', () => {
+    const s = frozenWaiting('r_wait')
+    expect(s.interrupt?.runId).toBe('r_wait')
+    expect(s.running).toBe(false)
+    const out = runReducer(s, {
+      type: 'sse',
+      event: 'run.state',
+      now: NOW + 10_000,
+      data: { run_id: 'r_wait', conversation_id: 'c1', status: 'error', error: '任务已停止', code: 'cancelled' },
+    })
+    expect(out.state.interrupt).toBeNull()
+    expect(out.state.running).toBe(false)
+    expect(out.state.error).toBe('任务已停止')
+    expect(out.state.errorCode).toBe('cancelled')
+  })
+
+  it('run.state error 指认不上（历史 run 对账）：冻结卡维持原样', () => {
+    const s = frozenWaiting('r_wait')
+    const out = runReducer(s, {
+      type: 'sse',
+      event: 'run.state',
+      now: NOW + 10_000,
+      data: { run_id: 'r_other', conversation_id: 'c1', status: 'error', error: '旧任务的错误', code: null },
+    })
+    expect(out.state).toBe(s) // 不换引用：完全不动
+  })
+
+  it('reconcile-converge 带 runId：同一 run 的等待卡收敛', () => {
+    const s = frozenWaiting('r_wait')
+    const out = runReducer(s, { type: 'reconcile-converge', error: null, runId: 'r_wait' })
+    expect(out.state.interrupt).toBeNull()
+    expect(out.state.running).toBe(false)
+  })
+
+  it('run.state running 清跨窗口续跑残留的 interrupt（新消息不再被当 respond）', () => {
+    const s = frozenWaiting('r_wait')
+    const out = runReducer(s, {
+      type: 'sse',
+      event: 'run.state',
+      now: NOW + 10_000,
+      data: { run_id: 'r_wait', conversation_id: 'c1', status: 'running', started_at: NOW + 9_000 },
+    })
+    expect(out.state.interrupt).toBeNull()
+    expect(out.state.running).toBe(true)
+  })
+
+  it('snapshot merge 不回退未封口思考（本地新值优先，本地空才采快照）', () => {
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'search', args: {}, tool_call_id: 't1', seq: 1 },
+    }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'agent.reasoning',
+      now: NOW + 2_000,
+      data: { run_id: 'r1', conversation_id: 'c1', text: '本地更新的未封口思考', agent_id: null, seq: 3 },
+    }).state
+    expect(s.tools.length).toBeGreaterThan(0) // 树非空 → merge 路径
+    const out = runReducer(s, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools: s.tools,
+      todos: [],
+      reasoningText: '快照滞后的旧思考',
+    })
+    expect(out.state.reasoningText).toBe('本地更新的未封口思考')
+    // 本地为空（如刚封段）→ 采快照值兜底
+    const s2 = { ...s, reasoningText: '' }
+    const out2 = runReducer(s2, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools: s.tools,
+      todos: [],
+      reasoningText: '快照兜底思考',
+    })
+    expect(out2.state.reasoningText).toBe('快照兜底思考')
+  })
+})

@@ -116,8 +116,9 @@ export type Action =
       reasoningText: string
       snapshotSeq?: number
     }
-  /** SSE 断线后的 HTTP 对账收敛（getLatestRun 确认已结束才触发） */
-  | { type: 'reconcile-converge'; error: string | null }
+  /** SSE 断线后的 HTTP 对账收敛（getLatestRun 确认已结束才触发）；runId 用于
+   *  等待死卡出口的指认（convergeRun 见注释） */
+  | { type: 'reconcile-converge'; error: string | null; runId?: string | null }
   /** 流式高频事件（agent.token/agent.reasoning）的合并应用：useRun 把 200ms 窗口内的
    *  增量攒成一次 dispatch——逐 token 应用会让 ChatView 每 token 重渲染（reasoning
    *  还带整棵工具树的递归拷贝）。顺序语义不变：任何其他 action 之前先冲刷缓冲。
@@ -135,10 +136,18 @@ export interface ReducerResult {
   effects: Effect[]
 }
 
-/** 收敛已结束的 run：只有处于 running 态时才动作，避免历史 run 的 run.state 反复打扰。
- * 记账字段随 INITIAL_STATE 复位（terminalRuns 也清：与「换会话重挂」语义一致）。 */
-function convergeRun(s: RunState, error: string | null, errorCode: string | null = null): RunState {
-  if (!s.running) return s
+/** 收敛已结束的 run：只有处于 running 态时才动作，避免历史 run 的 run.state 反复打扰.
+ * 记账字段随 INITIAL_STATE 复位（terminalRuns 也清：与「换会话重挂」语义一致）。
+ *  等待死卡出口（2026-09-10 review）：本地冻结的问答卡（running=false 但 interrupt
+ *  非空）所属 run 已在服务端终态（别处窗口取消/续跑后终止/sidecar 重启对账）——
+ *  对账指认同一 run（runId 匹配）时清卡收敛；指认不上（历史 run）维持原样。 */
+function convergeRun(s: RunState, error: string | null, errorCode: string | null = null, runId?: string | null): RunState {
+  if (!s.running) {
+    if (runId && s.interrupt?.runId === runId) {
+      return { ...INITIAL_STATE, lastInstruction: s.lastInstruction, error, errorCode }
+    }
+    return s
+  }
   return { ...INITIAL_STATE, lastInstruction: s.lastInstruction, error, errorCode }
 }
 
@@ -473,19 +482,21 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
           : null
       // 本地已有过程树 = 不是重建而是过程对账（2026-09-08）：字段级 merge 补死步/丢
       // 步骤，不做 revive/freeze（树空重建才有的恢复语义）、不动 streamText 等流式状态
-      const tools =
-        s.tools.length > 0
-          ? mergeTraceTree(s.tools, action.tools)
-          : s.continuation
-            ? revivePausedSteps(action.tools)
-            : action.status === 'waiting_input'
-              ? // 防御性冻结：等待态快照按契约已是 paused 终态树，混入 running 也不转圈
-                freezeRunningSteps(action.tools)
-              : action.tools
+      const merging = s.tools.length > 0
+      const tools = merging
+        ? mergeTraceTree(s.tools, action.tools)
+        : s.continuation
+          ? revivePausedSteps(action.tools)
+          : action.status === 'waiting_input'
+            ? // 防御性冻结：等待态快照按契约已是 paused 终态树，混入 running 也不转圈
+              freezeRunningSteps(action.tools)
+            : action.tools
       return result({
         ...s,
         running: action.status === 'running' ? true : s.running,
         runId: action.runId,
+        // 快照=running 而 interrupt 残留（跨窗口续跑）时清卡，与 run.state running 对齐
+        interrupt: action.status === 'running' ? null : s.interrupt,
         // 清陈旧 error（2026-09-10 修订）：快照=状态重建（活 run 语境），send-failed
         // 遗留的红卡不清会与重建的活卡并存——终态快照已被上方守卫拦下，不会误清
         // settle-error 的真实错误
@@ -496,12 +507,14 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         // 清单计数随快照重算（丢过 todo.updated 的场景 items 修好了计数不能烂着）
         done: action.todos.filter((t) => t.status === 'completed').length,
         total: action.todos.length,
-        reasoningText: action.reasoningText,
+        // merge 路径不动未封口思考（本地常比快照新——快照 ≥500ms 滞后，回退会在
+        // 封段时把思考尾部永久封丢；本地空才采快照值）；树空重建才整段替换
+        reasoningText: merging ? s.reasoningText || action.reasoningText : action.reasoningText,
         ...(snapSeq != null ? { lastSeq: { runId: action.runId, seq: snapSeq } } : {}),
       })
     }
     case 'reconcile-converge':
-      return result(convergeRun(s, action.error))
+      return result(convergeRun(s, action.error, null, action.runId))
     case 'stream-batch': {
       // 合并窗口的流式增量一次应用（一棵树最多每 agent 走一遍，而非每 token 一遍）
       let tools = s.tools
@@ -632,6 +645,10 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
           running: true,
           runId: data.run_id,
           error: null,
+          // 跨窗口续跑残留清卡（2026-09-10 review）：本窗口未发起续跑、服务端已被
+          // 别处续跑 + 本窗口重连收到 run.state running——冻结的问答卡属已死状态，
+          // 残留会让 send 的 HITL 分支抢先判定把新消息当 respond 发出（撞 409）
+          interrupt: null,
           startedAt: data.started_at ?? s.startedAt ?? now,
         })
       }
@@ -660,7 +677,7 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
       }
       const err = data.status === 'error' ? (data.error ?? '任务已中断') : null
       return result(
-        convergeRun(s, err, data.status === 'error' ? (data.code ?? null) : null),
+        convergeRun(s, err, data.status === 'error' ? (data.code ?? null) : null, data.run_id),
         // 收敛时拉真值（run 已结束但客户端错过了 completed/error 事件）
         [{ kind: 'invalidate-messages' }],
       )

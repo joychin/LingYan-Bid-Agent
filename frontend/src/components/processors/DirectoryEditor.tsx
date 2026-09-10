@@ -399,7 +399,12 @@ function EditNodeRow(p: EditRowProps) {
                 onChange={(e) => p.setRenaming({ id: node._id!, draft: e.target.value })}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') commitRename()
-                  if (e.key === 'Escape') p.setRenaming(null)
+                  if (e.key === 'Escape') {
+                    // 阻断冒泡：取消改名不能连带触发面板 window 级 Escape（收起整个
+                    // 编辑器+触发冲刷保存——改名被「提交」而非「取消」）
+                    e.stopPropagation()
+                    p.setRenaming(null)
+                  }
                 }}
                 onBlur={commitRename}
                 className="w-56 rounded border border-primary bg-card px-1.5 py-0.5 text-sm outline-none"

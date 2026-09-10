@@ -100,6 +100,13 @@ export function createAutoSaveCore<V extends string | number>(opts: {
     }
     const seq = ++reqSeq
     const p = (async () => {
+      // 闸门统一在 doSave 入口（2026-09-10 review）：saveNow/续存与防抖同闸——
+      // 「完成编辑」在 800ms 防抖窗口内不再绕过结构/行数确认条。force=用户显式
+      // 裁决（「保留我的」覆盖等）直通。被闸时返回 false、状态不动（保持
+      // dirty/error 等用户处理确认条），调用方据此决定是否留在编辑态。
+      if (!force && opts.beforeSave?.() === false) {
+        return false
+      }
       setState('saving')
       try {
         const v = await saveRef.current(force)
