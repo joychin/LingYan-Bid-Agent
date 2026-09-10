@@ -117,10 +117,11 @@ async def _event_generator(cid: str):
                 code = "cancelled"
             if code:
                 data["code"] = code
-            # HITL 对账：waiting_input 附审批/问答快照，客户端据此恢复 InterruptCard
+            # HITL 对账：waiting_input 附审批/问答快照，客户端据此恢复 InterruptCard。
+            # 过一遍 ask_human 参数自愈——修复前落库的快照可能带泄漏形态（2026-09-10）
             if run["status"] == "waiting_input":
                 try:
-                    data["requests"] = json.loads(run["interrupt"] or "[]")
+                    data["requests"] = events.normalize_hitl_requests(json.loads(run["interrupt"] or "[]"))
                 except ValueError:
                     data["requests"] = []
             yield _frame(events.EVENT_RUN_STATE, data)

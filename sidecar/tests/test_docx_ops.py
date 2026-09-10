@@ -280,6 +280,110 @@ def test_source_inject_line_range(env):
     assert len(chk.tables) == 1  # 报价表随格式章带入
 
 
+def test_element_lines_coords_match_md_after_tables(tmp_path):
+    """坐标系统一回归（2026-09-10）：表格逐行展开后 element_lines 行号=最终 md
+    行号。修复前表格整块 append（内嵌换行不占下标），映射坐标在表格后累计
+    漂移——表格后段落按 md 行号找不到元素（实测 13 表拉开 140 行）。"""
+    from app.parse.docx import convert
+
+    doc = Document()
+    doc.add_heading("第一章 公告", 1)
+    doc.add_paragraph("公告正文第一段。")
+    t = doc.add_table(rows=3, cols=2)
+    t.style = "Table Grid"
+    for r in range(3):
+        t.cell(r, 0).text = f"行{r}"
+        t.cell(r, 1).text = f"值{r}"
+    doc.add_heading("附件14：承诺书", 2)
+    doc.add_paragraph("我单位承诺：拟派项目经理准时到位。")
+    p = tmp_path / "原件.docx"
+    doc.save(p)
+
+    res = convert(p)
+    md_lines = res.md.splitlines()
+    line_no = next(i for i, ln in enumerate(md_lines, 1) if "我单位承诺" in ln)
+    els = res.info["element_lines"]
+    assert max(e for _el, s, e in els) == len(md_lines), "映射未覆盖到 md 末行（坐标系漂移）"
+    hit = [(s, e) for _el, s, e in els if s <= line_no <= e]
+    assert hit, "表格后段落未映射（坐标系漂移回归）"
+    assert any("我单位承诺" in "\n".join(md_lines[s - 1 : e]) for s, e in hit)
+
+
+def test_source_inject_outline_range_after_table(env):
+    """端到端：按 outline.json 的行号区间注入「表格之后」的附件——写手探针
+    风暴的真实形态（承诺书在多张表后，修复前按 outline 区间注入必「未映射」，
+    写手被迫逐段试探）。"""
+    from app.artifact_store import sources_dir
+    from app.parse import convert as parse_convert
+    from app.parse import outline_with_lines
+
+    doc = Document()
+    doc.add_heading("第一章 招标公告", 1)
+    doc.add_paragraph("公告正文。")
+    for ti in range(2):
+        t = doc.add_table(rows=3, cols=2)
+        t.style = "Table Grid"
+        for r in range(3):
+            t.cell(r, 0).text = f"表{ti}行{r}"
+            t.cell(r, 1).text = "值"
+    doc.add_heading("附件14：承诺书", 1)
+    doc.add_paragraph("我单位承诺：拟派项目经理将准时到位。")
+    sroot = sources_dir(env["task"]["id"])
+    sroot.mkdir(parents=True, exist_ok=True)
+    doc.save(sroot / "谈判文件.docx")
+
+    def find(tree, kw):
+        for n in tree:
+            if kw in n["标题"]:
+                return n
+            hit = find(n.get("children") or [], kw)
+            if hit:
+                return hit
+        return None
+
+    node = find(outline_with_lines(parse_convert(sroot / "谈判文件.docx").md), "承诺书")
+    assert node is not None
+    section = _make_section()
+    r = docx_source_inject.invoke(
+        {"source": "谈判文件.docx", "dest": section, "lines": f"{node['start_line']}-{node['end_line']}"}
+    )
+    assert r.startswith("[已注入]"), r
+    chk = Document(str(_abs(env, section)))
+    texts = "\n".join(p.text for p in chk.paragraphs)
+    assert "附件14：承诺书" in texts and "我单位承诺" in texts
+    assert "招标公告" not in texts and len(chk.tables) == 0  # 表前的表不被误带
+
+
+def test_material_inject_block_after_table(env, tmp_path):
+    """素材块勾选区间落在表格之后：映射须命中正确元素（修复前两套坐标漂移，
+    表格后区块注入错元素或「未映射」——素材库「勾选区间需复核」的部分根因）。"""
+    from app import db
+
+    doc = Document()
+    doc.add_heading("运维方案", 1)
+    t = doc.add_table(rows=3, cols=2)
+    t.style = "Table Grid"
+    for r in range(3):
+        t.cell(r, 0).text = f"行{r}"
+        t.cell(r, 1).text = "值"
+    doc.add_paragraph("独家承诺文本：现场服务响应时间两小时。")
+    src = mlib.mt_files_dir() / "补充素材.docx"
+    doc.save(src)
+    f = db.mt_insert_file("补充素材.docx", "hash_docx_after_table")
+    mlib.run_parse(f["id"])
+    md_lines = mlib.mt_parse_paths("补充素材.docx")[0].read_text(encoding="utf-8").splitlines()
+    ln = next(i for i, l in enumerate(md_lines, 1) if "独家承诺文本" in l)
+    block = mlib.create_block(f["id"], "表格后承诺段", "勾选表格后段落", ranges=[[ln, ln]])
+
+    section = _make_section()
+    r = docx_material_inject.invoke({"block_id": block["id"], "dest": section})
+    assert r.startswith("[已注入]"), r
+    chk = Document(str(_abs(env, section)))
+    texts = "\n".join(p.text for p in chk.paragraphs)
+    assert "独家承诺文本：现场服务响应时间两小时。" in texts
+    assert len(chk.tables) == 0  # 只注入勾选段，表格不带
+
+
 def test_source_inject_rejects(env):
     from app.artifact_store import sources_dir
 
@@ -774,9 +878,9 @@ def test_base_template_layout_on_create_and_assemble(env):
     from app import publish
     from app.artifact_store import work_dir
 
-    section = _make_section("3.1 项目理解与需求分析.docx")
+    section = _make_section("项目理解与需求分析.docx")
     docx_section_create.invoke({  # 已存在 → 覆盖重写，带初始正文段
-        "path": section, "title": "3.1 项目理解与需求分析",
+        "path": section, "title": "项目理解与需求分析",
         "paragraphs": "本项目团队对采购需求的理解如下。", "replace": True,
     })
     doc = Document(str(work_dir(env["task"]["id"]) / section))
@@ -875,10 +979,10 @@ _DIR_SINGLE = {
             "name": "技术部分",
             "scope": "",
             "directory": [
-                {"目录名称": "第三章 技术方案", "level": 1, "children": [
-                    {"目录名称": "3.1 项目理解与需求分析", "level": 2, "children": [],
+                {"目录名称": "技术方案", "level": 1, "children": [
+                    {"目录名称": "项目理解与需求分析", "level": 2, "children": [],
                      "交付形态": "正文编写", "来源位置": ["REQ-01"]},
-                    {"目录名称": "3.2 总体设计方案", "level": 2, "children": [],
+                    {"目录名称": "总体设计方案", "level": 2, "children": [],
                      "交付形态": "混合", "来源位置": ["SCORE-02"]},
                 ]},
                 {"目录名称": "附件：资质证书复印件", "level": 1, "children": [],
@@ -898,27 +1002,28 @@ def _seed_dir_artifact(env, content):
 
 
 def test_assemble_tree_order_headings_and_missing(env):
-    """树序合册：容器标题层级随树深、节文件自带标题跳过、缺失节点名、
+    """树序合册：容器标题层级随树深、标题按树序自动编号（缺省第X章+1.1）、
+    节文件自带标题跳过（对账用裸名，不受编号影响）、缺失节点名、
     模板填充叶子未产出按附件对待（点名不占位）；重跑覆盖且整本不算孤儿。"""
     _seed_dir_artifact(env, _DIR_SINGLE)
     docx_section_create.invoke(
-        {"path": "body/3.1 项目理解与需求分析", "title": "3.1 项目理解与需求分析",
-         "paragraphs": "3.1 正文第一段。"}
+        {"path": "body/项目理解与需求分析", "title": "项目理解与需求分析",
+         "paragraphs": "项目理解正文第一段。"}
     )
     r = docx_assemble_volume.invoke({})
     assert r.startswith("[已合册]"), r
     assert "合并 1 节" in r
-    assert "缺失 1 节未并入：3.2 总体设计方案" in r
+    assert "缺失 1 节未并入：总体设计方案" in r
     assert "模板填充类未产出 1 节（按附件对待，不占整本位）：附件：资质证书复印件" in r
 
     chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
     paras = chk.paragraphs
     assert paras[0].style.name == "Title" and paras[0].text == "技术部分"
-    assert paras[1].style.name == "Heading 1" and paras[1].text == "第三章 技术方案"
-    assert paras[2].style.name == "Heading 2" and paras[2].text == "3.1 项目理解与需求分析"
+    assert paras[1].style.name == "Heading 1" and paras[1].text == "第一章\u3000技术方案"
+    assert paras[2].style.name == "Heading 2" and paras[2].text == "1.1 项目理解与需求分析"
     texts = [p.text for p in paras]
-    assert texts.count("3.1 项目理解与需求分析") == 1  # 节文件自带标题段已跳过
-    assert "3.1 正文第一段。" in texts
+    assert texts.count("1.1 项目理解与需求分析") == 1  # 节文件自带标题段已跳过（编号后标题仍只一份）
+    assert "项目理解正文第一段。" in texts
     assert not any("资质证书复印件" in t for t in texts)  # 未产出格式件不进整本
     # 页脚页码域（可打印闭环）
     assert "PAGE" in chk.sections[0].footer.paragraphs[0]._p.xml
@@ -935,8 +1040,8 @@ _DIR_COVER = {
             "directory": [
                 {"目录名称": "封面", "level": 1, "children": [],
                  "交付形态": "正文编写", "来源位置": []},
-                {"目录名称": "第三章 技术方案", "level": 1, "children": [
-                    {"目录名称": "3.1 项目理解与需求分析", "level": 2, "children": [],
+                {"目录名称": "技术方案", "level": 1, "children": [
+                    {"目录名称": "项目理解与需求分析", "level": 2, "children": [],
                      "交付形态": "正文编写", "来源位置": ["REQ-01"]},
                 ]},
             ],
@@ -981,8 +1086,8 @@ def test_assemble_cover_node(env):
          "style": "Tender Cover Sub"},
     ], ensure_ascii=False)})
     docx_section_create.invoke(
-        {"path": "body/3.1 项目理解与需求分析", "title": "3.1 项目理解与需求分析",
-         "paragraphs": "3.1 正文第一段。"}
+        {"path": "body/项目理解与需求分析", "title": "项目理解与需求分析",
+         "paragraphs": "项目理解正文第一段。"}
     )
     r = docx_assemble_volume.invoke({})
     assert r.startswith("[已合册]") and "缺失" not in r and "未产出" not in r
@@ -994,7 +1099,8 @@ def test_assemble_cover_node(env):
     assert paras[0].style.name == "Tender Cover" and texts[0] == "XX 项目投标文件（技术部分）"
     assert not any(p.style.name == "Title" for p in paras)  # 册名大标题被跳过
     assert "封面" not in texts  # 封面节点自身标题不发、节文件标题段被剥
-    chapter = next(p for t, p in zip(texts, paras) if t == "第三章 技术方案")
+    # 封面不占编号序：第一个内容章仍是「第一章」
+    chapter = next(p for t, p in zip(texts, paras) if t == "第一章\u3000技术方案")
     assert chapter.paragraph_format.page_break_before is True  # 封面独占首页
     assert chk.sections[0].different_first_page_header_footer is True
     assert "PAGE" in chk.sections[0].footer.paragraphs[0]._p.xml  # 默认页脚仍在
@@ -1005,8 +1111,8 @@ def test_assemble_cover_missing_reported(env):
     按附件对待），册名 Title 同样跳过（封面位由树决定，不因缺文件回退双标题）。"""
     _seed_dir_artifact(env, _DIR_COVER)
     docx_section_create.invoke(
-        {"path": "body/3.1 项目理解与需求分析", "title": "3.1 项目理解与需求分析",
-         "paragraphs": "3.1 正文第一段。"}
+        {"path": "body/项目理解与需求分析", "title": "项目理解与需求分析",
+         "paragraphs": "项目理解正文第一段。"}
     )
     r = docx_assemble_volume.invoke({})
     assert r.startswith("[已合册]")
@@ -1027,11 +1133,12 @@ def test_assemble_cover_missing_reported(env):
 
 
 def test_assemble_includes_produced_format_node(env):
-    """模板填充叶子产出节文件即按树序并进整本（格式件是标书组成部分）。"""
+    """模板填充叶子产出节文件即按树序并进整本（格式件是标书组成部分），
+    与正文统一编号（拍板 2026-09-10：格式件章也占章序）。"""
     _seed_dir_artifact(env, _DIR_SINGLE)
     docx_section_create.invoke(
-        {"path": "body/3.1 项目理解与需求分析", "title": "3.1 项目理解与需求分析",
-         "paragraphs": "3.1 正文第一段。"}
+        {"path": "body/项目理解与需求分析", "title": "项目理解与需求分析",
+         "paragraphs": "项目理解正文第一段。"}
     )
     docx_section_create.invoke(
         {"path": "body/附件：资质证书复印件", "title": "附件：资质证书复印件",
@@ -1043,7 +1150,7 @@ def test_assemble_includes_produced_format_node(env):
     chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
     texts = [p.text for p in chk.paragraphs]
     assert "（复印件附后）" in texts
-    assert texts.count("附件：资质证书复印件") == 1  # 树序标题一份（节文件自带标题已跳过）
+    assert texts.count("第二章\u3000附件：资质证书复印件") == 1  # 树序标题一份（格式件章统一编号；节文件自带标题已跳过）
     assert "个节文件未并入" not in r  # 格式件文件已消费，不算孤儿
 
 
@@ -1051,13 +1158,13 @@ def test_assemble_preserves_revision_marks_and_images(env):
     _seed_dir_artifact(env, {
         "response_documents": [
             {"name": "技术部分", "scope": "", "directory": [
-                {"目录名称": "3.1 运维方案", "level": 1, "children": [],
+                {"目录名称": "运维方案", "level": 1, "children": [],
                  "交付形态": "正文编写", "来源位置": ["REQ-01"]},
             ]}
         ]
     })
-    section = "body/3.1 运维方案.docx"
-    assert docx_section_create.invoke({"path": section, "title": "3.1 运维方案"}).startswith("[已创建]")
+    section = "body/运维方案.docx"
+    assert docx_section_create.invoke({"path": section, "title": "运维方案"}).startswith("[已创建]")
     assert docx_material_inject.invoke({"block_id": env["block"]["id"], "dest": section}).startswith("[已注入]")
     view = docx_section_read.invoke({"path": section})
     para_no = next(int(ln.split("]")[0][2:]) for ln in view.splitlines() if COMPANY in ln)
@@ -1078,30 +1185,30 @@ def test_assemble_migrates_comments_and_warns_inline(env):
     """节内待办批注迁入整本（id 重映射、标记不悬空）；内联占位兜底扫描点名。"""
     _seed_dir_artifact(env, _DIR_SINGLE)
     docx_section_create.invoke(
-        {"path": "body/3.1 项目理解与需求分析", "title": "3.1 项目理解与需求分析",
-         "paragraphs": "3.1 正文第一段。"}
+        {"path": "body/项目理解与需求分析", "title": "项目理解与需求分析",
+         "paragraphs": "项目理解正文第一段。"}
     )
     assert docx_comment_add.invoke({
-        "path": "body/3.1 项目理解与需求分析.docx", "after": "2",
-        "text": "3.1 缺项目批复文件编号，待用户确认",
+        "path": "body/项目理解与需求分析.docx", "after": "2",
+        "text": "缺项目批复文件编号，待用户确认",
     }).startswith("[已加批注]")
     docx_section_create.invoke(
-        {"path": "body/3.2 总体设计方案", "title": "3.2 总体设计方案",
-         "paragraphs": "3.2 方案正文。\n【待补：分项报价表金额】"}
+        {"path": "body/总体设计方案", "title": "总体设计方案",
+         "paragraphs": "方案正文。\n【待补：分项报价表金额】"}
     )
     assert docx_comment_add.invoke({
-        "path": "body/3.2 总体设计方案.docx",
+        "path": "body/总体设计方案.docx",
         "text": "分项报价表金额缺口径，待澄清",
     }).startswith("[已加批注]")
 
     r = docx_assemble_volume.invoke({})
     assert r.startswith("[已合册]") and "含批注 2 条待处理" in r, r
     assert "正文含 1 处内联占位" in r
-    assert "3.2 总体设计方案(P3)：【待补：分项报价表金额】" in r
+    assert "总体设计方案(P3)：【待补：分项报价表金额】" in r
 
     chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
     cmts = list(chk.comments)
-    assert {c.text for c in cmts} == {"3.1 缺项目批复文件编号，待用户确认", "分项报价表金额缺口径，待澄清"}
+    assert {c.text for c in cmts} == {"缺项目批复文件编号，待用户确认", "分项报价表金额缺口径，待澄清"}
     # 正文标记 id 已重映射、各自指向存在的批注（不悬空、不串号）
     starts = chk.element.body.findall(".//" + qn("w:commentRangeStart"))
     assert {s.get(qn("w:id")) for s in starts} == {str(c.comment_id) for c in cmts}
@@ -1111,16 +1218,16 @@ def test_assemble_multi_volume_and_orphans(env):
     _seed_dir_artifact(env, {
         "response_documents": [
             {"name": "技术部分", "scope": "", "directory": [
-                {"目录名称": "3.1 项目理解", "level": 1, "children": [],
+                {"目录名称": "项目理解", "level": 1, "children": [],
                  "交付形态": "正文编写", "来源位置": []},
             ]},
             {"name": "商务部分", "scope": "", "directory": [
-                {"目录名称": "6.1 售后服务承诺", "level": 1, "children": [],
+                {"目录名称": "售后服务承诺", "level": 1, "children": [],
                  "交付形态": "正文编写", "来源位置": []},
             ]},
         ]
     })
-    docx_section_create.invoke({"path": "body/技术部分/3.1 项目理解", "title": "3.1 项目理解", "paragraphs": "正文"})
+    docx_section_create.invoke({"path": "body/技术部分/项目理解", "title": "项目理解", "paragraphs": "正文"})
     docx_section_create.invoke({"path": "body/旧版遗留节", "title": "旧版遗留节", "paragraphs": "旧稿"})
     r = docx_assemble_volume.invoke({})
     assert r.startswith("[已合册]")
@@ -1132,6 +1239,103 @@ def test_assemble_multi_volume_and_orphans(env):
 
 def test_assemble_without_directory_errors(env):
     assert "[合册失败] 无投标目录产物" in docx_assemble_volume.invoke({})
+
+
+_DIR_NUMBERING = {
+    "response_documents": [
+        {
+            "name": "技术部分", "scope": "",
+            "directory": [
+                {"目录名称": "总体部署", "level": 1, "children": [
+                    {"目录名称": "部署原则", "level": 2, "children": [
+                        {"目录名称": "安全原则", "level": 3, "children": [],
+                         "交付形态": "正文编写", "来源位置": []},
+                    ]},
+                    {"目录名称": "分步实施", "level": 2, "children": [],
+                     "交付形态": "正文编写", "来源位置": []},
+                ]},
+                {"目录名称": "售后服务", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+            ],
+        },
+        {
+            "name": "商务部分", "scope": "",
+            "directory": [
+                {"目录名称": "报价说明", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+            ],
+        },
+    ]
+}
+
+
+def test_assemble_numbering_schemes(env):
+    """章节编号=树位置的纯函数：缺省 chapter（第X章全角空格+1.1）、decimal、
+    gov、none 四格式按树序生成；多册各自从首章重起；编号后 _is_title_para
+    对账剥标题仍按裸名（自带标题段只剥一份）。"""
+    import copy
+
+    for name in ("安全原则", "分步实施", "售后服务"):
+        docx_section_create.invoke(
+            {"path": f"body/技术部分/{name}", "title": name, "paragraphs": "正文"}
+        )
+    docx_section_create.invoke(
+        {"path": "body/商务部分/报价说明", "title": "报价说明", "paragraphs": "正文"}
+    )
+
+    def headings() -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for vol in ("技术部分", "商务部分"):
+            doc = Document(str(_abs(env, f"body/整本-{vol}.docx")))
+            out[vol] = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
+        return out
+
+    # 缺省（产物无 numbering 字段）=chapter
+    _seed_dir_artifact(env, _DIR_NUMBERING)
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]") and "⚠️" not in r, r
+    assert headings()["技术部分"] == [
+        "第一章\u3000总体部署", "1.1 部署原则", "1.1.1 安全原则",
+        "1.2 分步实施", "第二章\u3000售后服务",
+    ]
+    assert headings()["商务部分"] == ["第一章\u3000报价说明"]  # 各册从首章重起
+
+    for scheme, expected in (
+        ("decimal", ["1 总体部署", "1.1 部署原则", "1.1.1 安全原则", "1.2 分步实施", "2 售后服务"]),
+        ("gov", ["一、总体部署", "（一）部署原则", "1.安全原则", "（二）分步实施", "二、售后服务"]),
+        ("none", ["总体部署", "部署原则", "安全原则", "分步实施", "售后服务"]),
+    ):
+        content = copy.deepcopy(_DIR_NUMBERING)
+        content["numbering"] = scheme
+        _seed_dir_artifact(env, content)
+        assert docx_assemble_volume.invoke({}).startswith("[已合册]")
+        assert headings()["技术部分"] == expected, scheme
+
+
+def test_assemble_warns_self_numbered_node_names(env):
+    """目录节点名自带编号（树格式红线违例）：合册照常编号（双重编号如实可见）
+    + ⚠️ 点名请用户修目录产物——探测+提示裁决，不是门禁。"""
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "第一章 技术方案", "level": 1, "children": [
+                    {"目录名称": "1.1 项目理解", "level": 2, "children": [],
+                     "交付形态": "正文编写", "来源位置": []},
+                ]},
+            ]}
+        ]
+    })
+    docx_section_create.invoke(
+        {"path": "body/1.1 项目理解", "title": "1.1 项目理解", "paragraphs": "正文"}
+    )
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    assert "2 个目录节点名自带编号" in r
+    assert "第一章 技术方案" in r and "1.1 项目理解" in r
+    assert "双重编号" in r
+    texts = [p.text for p in Document(str(_abs(env, "body/整本-技术部分.docx"))).paragraphs]
+    assert "第一章\u3000第一章 技术方案" in texts  # 双重编号如实可见
+    assert "1.1 1.1 项目理解" in texts
 
 
 # ---------- 终稿视角文本抽取 ----------
@@ -1244,20 +1448,20 @@ def test_assemble_keeps_mismatched_own_heading(env):
     _seed_dir_artifact(env, {
         "response_documents": [
             {"name": "技术部分", "scope": "", "directory": [
-                {"目录名称": "3.1 运维方案", "level": 1, "children": [],
+                {"目录名称": "运维实施方案", "level": 1, "children": [],
                  "交付形态": "正文编写", "来源位置": []},
             ]}
         ]
     })
     # 建档标题写法与树节点不一致（素材整章注入后，素材自己的章标题同款形态）
-    assert docx_section_create.invoke({"path": "body/3.1 运维方案", "title": "运维方案"}).startswith("[已创建]")
+    assert docx_section_create.invoke({"path": "body/运维实施方案", "title": "运维方案"}).startswith("[已创建]")
     assert docx_material_inject.invoke(
-        {"block_id": env["block"]["id"], "dest": "body/3.1 运维方案.docx"}
+        {"block_id": env["block"]["id"], "dest": "body/运维实施方案.docx"}
     ).startswith("[已注入]")
     r = docx_assemble_volume.invoke({})
     assert r.startswith("[已合册]"), r
     texts = [p.text for p in Document(str(_abs(env, "body/整本-技术部分.docx"))).paragraphs]
-    assert "3.1 运维方案" in texts  # 树标题照发
+    assert "第一章\u3000运维实施方案" in texts  # 树标题照发（带程序编号）
     assert "运维方案" in texts  # 节自带标题不被吞
     assert "运维服务方案" in texts  # 素材章标题内容保留
 

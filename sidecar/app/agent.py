@@ -365,6 +365,30 @@ class _PathRescueMiddleware(AgentMiddleware):
 # 中间件引用同一常量，改名单点生效）
 _BODY_WRITER_NAME = "tender-body-writer"
 
+# 写手最小工具集（2026-09-10）：spec 不写 tools 字段时 deepagents 继承全量
+# TOOLS——22 个工具 schema 每轮模型调用都随身携带，实测 894 轮只用下列 13 个。
+# 剔除的 9 个均为「prompt 明令禁止 / 职责归主线程 / 零调用」：ask_human、
+# check_pipeline_state、docx_assemble_volume、read_artifact、assemble_tender、
+# publish_artifact、update_task_progress、validate_analysis、list_templates。
+# 文件七件套（ls/read_file/write_file/edit_file/glob/grep/delete）由
+# FilesystemMiddleware 提供、不受 spec.tools 控制，自动随行。守卫测试防拼错
+# 与「顺手加回」（test_agent）。
+_BODY_WRITER_TOOLS = frozenset({
+    "docx_section_create",
+    "docx_section_read",
+    "docx_section_revise",
+    "docx_source_inject",
+    "docx_material_inject",
+    "docx_image_insert",
+    "docx_comment_add",
+    "validate_body",
+    "check_name_residue",
+    "search_references",
+    "search_company_assets",
+    "parse_document",
+    "fetch_url",  # 用户明令保留（2026-09-10）：联网需求留通道
+})
+
 
 class _DispatchEnrichMiddleware(AgentMiddleware):
     """tender-body-writer 派发说明程序拼装（机制与动因见 dispatch_enrich 模块头）。
@@ -507,29 +531,37 @@ SUBAGENTS: list[dict] = [
         "description": (
             "按写作指引写单个目录节的响应文件正文（tender-body 技能多节并发时的执行单元）"
         ),
+        # 最小工具集（机制化收窄，见 _BODY_WRITER_TOOLS 注释）——不写则继承全量
+        "tools": [t for t in TOOLS if t.name in _BODY_WRITER_TOOLS],
         "system_prompt": (
             "你是响应文件正文编写子代理，只负责一个目录节的正文。任务描述=首行节名与"
             "主代理意图，其后系统自动附上本节派发上下文：任务目录前缀（读写路径都必须"
             "带该前缀）、节文件输出路径（.docx）、今天日期（封面/函件落款用这行，"
             "不要自编日期）、写作模式、要求清单（每条=要求内容+"
             "出处，随时可按出处读招标原文核对）、可用素材块 id（格式跟随/格式件节另带"
-            "拷原件指引）、承诺清单的全部值、兄弟节开头摘要——已含你所需的全部共享"
-            "信息。\n"
+            "拷原件指引）、公司材料与缺口（指引缺口列原文——【知识库】=知识库命中的"
+            "公司事实，证书数字照抄不改写；【缺】=库里没有，批注待办）、承诺清单的全部"
+            "值、兄弟节开头摘要——已含你所需的全部共享信息。\n"
             "开局纪律：只 read_file skills/tender-body/references/section-writing.md"
             "（要读的文件在同一条消息里并发读完，禁止逐个串行）；禁止调用"
             " check_pipeline_state（流水线状态归主线程）；禁止读 写作指引.md 与 "
             "关键事实与承诺.md 全文（你的指引行与全部承诺值已在任务描述）；"
             "docx_section_create 后 docx_section_read 通读一次，此后修订按段落/表格"
             "标签定位，不再整读全文。\n"
-            "严格按素材先行五步执行（docx 直出，模型不直接写 docx 二进制）：检索"
-            "（search_references）→ 列使用计划 → docx_section_create 建节 + "
+            "严格按素材先行五步执行（docx 直出，模型不直接写 docx 二进制）：选块"
+            "（任务描述已给素材块清单时**直接采用**——清单带每块标题/字数/含图/"
+            "来源文件，够做规划，**不再调用 search_references**；清单缺失、指引标"
+            "【缺】或块标已失效才自行检索）→ 列使用计划 → docx_section_create 建节 + "
             "docx_material_inject 素材块保真贴底稿（非 docx 素材才自行撰写）→ "
             "docx_section_read 拿段号 + docx_section_revise 改写适配本项目 → "
             "validate_body(section=<节路径>, block_ids=<使用计划的块>) 自查。\n"
             "格式跟随/格式件节：出处原件是 docx 时用 docx_source_inject（source=任务"
             "描述给的来源文件名，lines=行号区间；独立格式附件整文件拷）把招标格式原样"
             "拷进节文件，再 revise 填空——表格空格子 fill、旧值 replace（表格按 "
-            "table/row/col 格坐标寻址）；pdf 原件无可拷元素，按解析文本自行成形。\n"
+            "table/row/col 格坐标寻址）；pdf 原件无可拷元素，按解析文本自行成形。"
+            "填我方公司事实（资质证书/体系认证/注册信息/注册资本等）优先用任务描述"
+            "「公司材料与缺口」段的【知识库】命中事实（注册号/有效期照抄原文），"
+            "段里没有的现查 search_company_assets，查不到才批注待办——禁止凭印象编。\n"
             "硬纪律：承诺类数字只能使用任务描述给出的承诺清单值，清单没有的用 "
             "docx_comment_add 加批注带回待澄清，不得编造；缺料/待核验同样 "
             "docx_comment_add 加批注（锚定相关段落）继续写不阻塞——**正文里禁止写"
@@ -538,7 +570,9 @@ SUBAGENTS: list[dict] = [
             " docx_material_inject 注入贴底稿再 revise 适配，禁止跳过注入直接自写——"
             "素材块内的图片只有注入能带进正文（自写=图全丢）；证书复印件等独立图片"
             "用 docx_image_insert 插入（图源路径用 search_company_assets 命中行的"
-            "「含图 N 张」提示，PDF 原件传路径+页号）；正文是干净文本，"
+            "「含图 N 张」提示，PDF 原件传路径+页号）；物理附件/复印件节任务描述标了"
+            "【知识库】命中（含图）的，建节后按其图源路径逐张贴图产出节文件，库里"
+            "没有的证书批注点名待线下补；正文是干净文本，"
             "不带任何头部/元信息，且 REQ/MAND/SCORE/TPL-xx 内部对账编号（无论从任务"
             "描述还是指引等文件里看到）一个都不写进正文——呼应招标要求用要求内容或"
             "招标文件真实印着的章节/条款号（如「按第三章 2.3 条」，评标人可对照原文，"
@@ -977,6 +1011,8 @@ def build_agent(profile: cfg.ModelProfile | None = None):
                 "用 ask_human 向用户提问，不要自行猜测；可以明确推断的小事不要问。"
                 "需要用户在候选项里挑选时，把选项放进 options（「；」分隔）并按是否"
                 "允许多选设置 multiple，用户点选与补充文字会一并作为回答回传。"
+                "候选项与 guide_path 只写进各自参数，不要在 question 里写"
+                " options=…、guide_path=… 赋值行——会原样显示且按钮不渲染。"
         ),
         checkpointer=_get_saver(),
         interrupt_on=INTERRUPT_ON,

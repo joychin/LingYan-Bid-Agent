@@ -26,7 +26,8 @@ docx 翻译成文本世界（读视图/编号寻址），写入全由程序机�
   程序做「拒绝全部修订后文本与修订前逐字一致」的自校验（标记写坏的机械防线，
   覆盖正文与表格单元格段落）
 - docx_assemble_volume：整本合册——按投标目录树序把各节 docx 合并成每册
-  一个整本文件（容器节点发章标题、一级章前分页、页脚页码；模板填充类叶子
+  一个整本文件（容器节点发章标题——按树序自动编号（第X章/1.1，格式取目录
+  产物 numbering 字段）、一级章前分页、页脚页码；模板填充类叶子
   产出节文件即按树序并入、未产出按附件对待不占整本位；整本是派生产物，
   内容真值在节文件，重新合册覆盖）
 
@@ -1511,6 +1512,60 @@ def _tree_nodes(nodes: list[dict], depth: int = 1):
         yield from _tree_nodes(children, depth + 1)
 
 
+# ---------- 章节编号（合册按树序生成；格式取目录产物 numbering 字段） ----------
+
+_CN_DIGITS = "零一二三四五六七八九"
+
+# 目录节点名自带编号的前缀形态（合册会再加程序编号 → 双重编号；探测点名请用户
+# 裁决，提示不是门禁）。数字形态限一两位+空格，避开「2026 年度」类年份误报。
+_SELF_NUMBERED = re.compile(
+    r"^(第([一二三四五六七八九十百]+|\d+)章|[一二三四五六七八九十]+、"
+    r"|（[一二三四五六七八九十]+）|\d{1,2}(\.\d+)*[ 　])"
+)
+
+
+def _cn_num(n: int) -> str:
+    """1–99 → 中文数字（十一、二十一…）；超范围回落阿拉伯数字（防御，章节数到不了）。"""
+    if not 1 <= n <= 99:
+        return str(n)
+    if n < 10:
+        return _CN_DIGITS[n]
+    tens, ones = divmod(n, 10)
+    head = "十" if tens == 1 else _CN_DIGITS[tens] + "十"
+    return head + (_CN_DIGITS[ones] if ones else "")
+
+
+class _HeadingNumberer:
+    """合册章节编号器：编号=树位置的纯函数（每册一个实例，各册从首章重起）。
+
+    编号写进标题文本，不走 Word 样式绑定自动编号——素材拷入的标题段会被 Word
+    一起计数打乱章序、docx-preview 对经典绑定写法不渲染、节文件单看永远「第一章」。
+    chapter=第X章+1.1（一级全角空格接题名）、decimal=1+1.1、gov=一、（一）1.、
+    none=不加；封面节点不调用 prefix（不占序）。
+    """
+
+    def __init__(self, scheme: str):
+        self.scheme = scheme if scheme in ("chapter", "decimal", "gov", "none") else "chapter"
+        self.counters = [0] * 10  # counters[depth]：各深度当前计数（下标 1 起）
+
+    def prefix(self, depth: int) -> str:
+        """发一个 depth 级标题的编号前缀（消费一个序号并重置更深计数）。"""
+        if self.scheme == "none" or not 1 <= depth <= 9:
+            return ""
+        self.counters[depth] += 1
+        for d in range(depth + 1, 10):
+            self.counters[d] = 0
+        if self.scheme == "gov":
+            if depth == 1:
+                return f"{_cn_num(self.counters[1])}、"
+            if depth == 2:
+                return f"（{_cn_num(self.counters[2])}）"
+            return f"{self.counters[depth]}."
+        if self.scheme == "chapter" and depth == 1:
+            return f"第{_cn_num(self.counters[1])}章\u3000"
+        return ".".join(str(self.counters[d]) for d in range(1, depth + 1)) + " "
+
+
 def _is_title_para(p_el, title: str) -> bool:
     """节文件首段是否为其自带标题段（合册时跳过——标题由合册器按树深重发）。
 
@@ -1609,6 +1664,8 @@ def docx_assemble_volume() -> str:
     修订标记原样保留——在整本里继续用 Word 审阅逐条接受/拒绝）、一级章前分页、
     页脚页码；模板填充类叶子（目录标非正文）**产出节文件即按树序并入**（拷原件
     填空的格式件本就是标书组成部分）、未产出的按附件对待不占整本位（返回行点名）。
+    章节编号按树序自动生成（第一章/1.1；格式取目录产物的 numbering 字段，缺省
+    第X章+1.1；封面不占序，目录产物里可改为 1+1.1/一、（一）/不编号）。
     树首节点为「封面」时（tender-outline 的结构约定）整本首页即封面页：跳过册名
     大标题与封面节点自身标题、开「首页不同」（封面页不带页眉页脚，页码从封面
     后一页起显示）。缺失的正文节文件逐个点名，不中断其余节。**整本是派生产物**：改内容
@@ -1625,6 +1682,7 @@ def docx_assemble_volume() -> str:
     if not docs:
         return "[合册失败] 目录产物没有响应文件树"
     multi = body_contract.multi_volume(content)
+    numberer_scheme = str(content.get("numbering") or "").strip() or "chapter"
     wroot = work_dir(task_id).resolve()
     consumed: set[str] = set()
     reports: list[str] = []
@@ -1632,6 +1690,8 @@ def docx_assemble_volume() -> str:
         vol = str(doc.get("name") or "").strip() or "主册"
         vol_dir = body_contract.sanitize_name(vol) if multi else ""
         nodes = list(_tree_nodes(doc.get("directory") or []))
+        numberer = _HeadingNumberer(numberer_scheme)  # 各册从首章重起
+        self_numbered: list[str] = []  # 节点名自带编号（合册再编号会双重，探测点名）
         # 封面=树首一级叶子且清洗后标题为「封面」（tender-outline 的结构约定）：
         # 整本首页即封面页——跳过册名大标题（封面自带册名）与节点自身标题，
         # 开「首页不同」让封面页不带页眉页脚；无封面时行为与旧版逐字节一致。
@@ -1652,6 +1712,8 @@ def docx_assemble_volume() -> str:
         placeholders: list[str] = []  # 内联占位兜底扫描命中（正规落点=批注，此为防线）
         seen_chapter = False
         for idx, (depth, title, is_container, mode) in enumerate(nodes):
+            if _SELF_NUMBERED.match(title):
+                self_numbered.append(title)
             stem = body_contract.sanitize_name(title)
             rel_src = f"body/{vol_dir}/{stem}.docx" if vol_dir else f"body/{stem}.docx"
             if not is_container and mode in body_contract.NON_PROSE_DELIVERY:
@@ -1661,10 +1723,11 @@ def docx_assemble_volume() -> str:
                 # 已产出（拷原件+填空）：按树序并入整本，与正文叶子同路
             if has_cover and idx == 0:
                 # 封面节点不发「封面」标题行（节文件内容即整页），但占一级位：
-                # seen_chapter 置位让第一章拿到分页、封面独占首页
+                # seen_chapter 置位让第一章拿到分页、封面独占首页；编号不占序
                 seen_chapter = True
             else:
-                h = out.add_heading(title, min(depth, 9))
+                # 标题带编号发（对账剥节文件标题仍用裸 title，见 _is_title_para 调用处）
+                h = out.add_heading(numberer.prefix(depth) + title, min(depth, 9))
                 if depth == 1:
                     if seen_chapter:
                         h.paragraph_format.page_break_before = True
@@ -1737,6 +1800,13 @@ def docx_assemble_volume() -> str:
             reports.append(
                 f"{vol}：模板填充类未产出 {len(unfilled)} 节（按附件对待，不占整本位）："
                 + "、".join(unfilled)
+            )
+        if self_numbered:
+            shown = "、".join(self_numbered[:6]) + ("…" if len(self_numbered) > 6 else "")
+            reports.append(
+                f"⚠️ {vol}：{len(self_numbered)} 个目录节点名自带编号（{shown}）——"
+                "合册已再按树序自动编号，会出现「第一章 一、xxx」式双重编号；"
+                "请在目录产物中把节点名改为不带编号的纯标题后重新合册"
             )
     orphans: list[str] = []
     body_root = wroot / "body"

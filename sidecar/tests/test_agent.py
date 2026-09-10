@@ -248,6 +248,9 @@ def test_subagent_specs():
     assert "禁止调用 ask_human" in writer["system_prompt"]
     body = specs["tender-body-writer"]
     assert "section-writing.md" in body["system_prompt"]  # 素材先行方法论单一真源
+    # 素材复用纪律（2026-09-10 收口回归线）：派发已给块清单不再重检索素材库
+    assert "直接采用" in body["system_prompt"]
+    assert "不再调用 search_references" in body["system_prompt"]
     assert "禁止调用 ask_human" in body["system_prompt"]
     # 承诺纪律与共享写边界（并发下唯一写边界，漏写=子代理改清单/编承诺值）
     assert "承诺清单" in body["system_prompt"]
@@ -780,6 +783,26 @@ def test_dispatch_enrich_middleware_wired():
     assert any(
         s["name"] == agent_mod._BODY_WRITER_NAME for s in agent_mod.SUBAGENTS
     )
+
+
+def test_body_writer_minimal_toolset():
+    """写手最小工具集（2026-09-10）：spec 带 tools 字段收窄到 13 个；集合内名字
+    必须都在 TOOLS 注册表（防拼错=静默丢工具）；9 个禁用名不得「顺手加回」。"""
+    from app.tools import TOOLS
+
+    writer = next(s for s in agent_mod.SUBAGENTS if s["name"] == agent_mod._BODY_WRITER_NAME)
+    assert "tools" in writer, "写手 spec 缺 tools 字段——deepagents 会继承全量 TOOLS"
+    names = {t.name for t in writer["tools"]}
+    assert names == set(agent_mod._BODY_WRITER_TOOLS), "spec 工具集与常量漂移"
+    registry = {t.name for t in TOOLS}
+    unknown = names - registry
+    assert not unknown, f"写手工具集含未注册名字（拼错即静默丢工具）：{unknown}"
+    banned = {
+        "ask_human", "check_pipeline_state", "docx_assemble_volume", "read_artifact",
+        "assemble_tender", "publish_artifact", "update_task_progress",
+        "validate_analysis", "list_templates",
+    }
+    assert not (names & banned), f"禁用工具混入写手工具集：{names & banned}"
 
 
 def test_run_stream_heals_task_skeleton():

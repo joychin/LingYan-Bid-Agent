@@ -6,7 +6,11 @@
 重发（占整本 14.5M 输入 token 的约六成）。修法=派发契约从纪律升机制：task 调用
 进 sidecar 时（agent.py _DispatchEnrichMiddleware）把共享上下文程序拼进
 description——任务前缀/输出路径/指引行/要求清单（registry 解析为原文+出处）/
-承诺清单全部值/兄弟节摘要，写手开局只读方法论一份。
+素材块逐块名片（标题/字数/含图/来源文件/备注——指引期检索的内容层复用，写手
+据此直接列使用计划，不再每节重检索一遍素材库）/缺口列原文（指引期知识库命中的
+公司事实与缺料点名，2026-09-10 接线——此前该列零消费，检索命中沉淀不进派发，
+资质/基本情况类节的公司事实对写手不可见）/承诺清单全部值/兄弟节摘要，
+写手开局只读方法论一份。
 
 契约与边界：
 - 只对 tender-body-writer 生效（中间件三层过滤：工具名/子代理名/任务上下文）；
@@ -23,15 +27,17 @@ description——任务前缀/输出路径/指引行/要求清单（registry 解
 from __future__ import annotations
 
 import difflib
+import json
 import logging
 import re
 from datetime import date
 
-from . import artifact_store
+from . import artifact_store, db
 from .tools import body_contract, docx_ops
 
 # 注意：assemble_tender 在 tools/__init__ 里被同名 @tool 对象遮蔽，私有函数须走模块路径
 from .tools.assemble_tender import _norm_id
+from .tools.search_knowledge import _mt_image_count
 from .tools.validate_analysis import _iter_tables
 from .tools.validate_body import _parse_guide_rows
 
@@ -173,6 +179,140 @@ def _sibling_lines(task_id: str, content: dict, vol: str, own_title: str) -> lis
     return out
 
 
+def _material_lines(mat: str) -> list[str] | None:
+    """素材列 blk id → 逐块名片（标题/字数/含图/来源文件/备注）。
+
+    指引期检索的内容层复用：此前派发只传 id 字符串，写手不知块内是什么、
+    被迫每节再 search_references 一遍（2026-09-10 收口——名片够列使用计划，
+    全文走 docx_material_inject 注入后经读视图可见）。素材列无任何 blk id
+    （【缺】/—）返回 None，调用方维持旧行；查不到的 id 以失效提示降级
+    （写手自行检索）。来源文件名必须随行——改写后 check_name_residue 扫
+    旧机构名的 old_names 取自它。
+    """
+    ids = [t for t in re.split(r"[、,，;；\s]+", mat) if t.startswith("blk_")]
+    if not ids:
+        return None
+    files = {f["id"]: f for f in db.mt_list_files()}
+    blocks_by_id = {b["id"]: b for b in db.mt_list_blocks()}
+    out: list[str] = []
+    for bid in ids:
+        b = blocks_by_id.get(bid)
+        if not b:
+            out.append(f"- {bid}（已失效——请自行检索确认）")
+            continue
+        f = files.get(b.get("file_id"))
+        src = f["file_name"] if f else "（来源文件已删除）"
+        img = _mt_image_count(src, b.get("ranges")) if f else 0
+        img_bit = f"，含图 {img} 处" if img else ""
+        line = f"- 《{b['title']}》（约 {b.get('chars') or 0:,} 字{img_bit}）｜来源文件：{src}｜id：{bid}"
+        if b.get("note"):
+            line += f"｜备注：{b['note']}"
+        out.append(line)
+    return out
+
+
+_GAP_COL_KEYS = ("缺口", "备注")  # 指引缺口列表头名变体（契约名「缺口/备注」）
+_BARE_ID_RE = re.compile(r"(?:MAND|TPL|REQ|SCORE)-\d+")
+
+# 原件定位：标记与核心名提取（2026-09-10）。标记=附件N/附表N/表N（限 1-3 位
+# 数字、后不接年月日防「报表2026年」误报）；核心名=剥标记与全部标点空白。
+_LOC_MARK_RE = re.compile(r"(?:附件|附表|表)\s*(\d{1,3})(?![0-9年月日])")
+_LOC_NOISE_RE = re.compile(r"[\s（）()【】\[\]：:、，,。．.；;！!？?\-—_/·]+")
+
+
+def _core_name(s: str) -> tuple[str, tuple[str, ...]]:
+    """标题 → (清洗核心名, 标记元组)：匹配比较用的稳定键。"""
+    marks = tuple(re.sub(r"\s+", "", m.group(0)) for m in _LOC_MARK_RE.finditer(s))
+    core = _LOC_NOISE_RE.sub("", _LOC_MARK_RE.sub("", s))
+    return core, marks
+
+
+def _source_location_line(task_id: str, leaf_title: str) -> str | None:
+    """节名 → 「原件定位」行：在全部已解析来源的 outline.json 标题树里唯一定位
+    该节对应的原件区段（2026-09-10）。
+
+    动因：格式跟随/格式件节的写手此前要自己找「附件14」在哪——grep outline +
+    读原文试探，实测最重节 71 轮里约 40 轮在找位置。匹配保守：标记（附件N/
+    表N）双现且核心相容，或清洗核心名全等；跨全部文件唯一命中才带行，0 命中
+    或歧义返回 None（宁可不带——定位错比不带更糟）。同文件内相邻（间距 ≤2 行）
+    的命中合并区间（「表1：报价表」标题壳与正文条目两节点的常见形态）。
+    """
+    core_leaf, marks_leaf = _core_name(leaf_title)
+    if not core_leaf and not marks_leaf:
+        return None
+    pdir = artifact_store.work_dir(task_id) / "parse"
+    if not pdir.is_dir():
+        return None
+    hits: list[tuple[str, str, int, int]] = []  # (文件名, 条目标题, 起, 止)
+    for outline_path in sorted(pdir.glob("*/*.outline.json")):
+        try:
+            tree = json.loads(outline_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        fname = outline_path.name[: -len(".outline.json")]
+        stack = list(tree) if isinstance(tree, list) else []
+        while stack:
+            n = stack.pop()
+            if not isinstance(n, dict):
+                continue
+            title = str(n.get("标题") or "")
+            s, e = n.get("start_line") or 0, n.get("end_line") or 0
+            if title and isinstance(s, int) and isinstance(e, int) and s and e:
+                core_e, marks_e = _core_name(title)
+                shared = set(marks_leaf) & set(marks_e)
+                if shared and (not core_leaf or not core_e or core_leaf in core_e or core_e in core_leaf):
+                    hits.append((fname, title, s, e))
+                elif core_leaf and core_e and core_leaf == core_e:
+                    hits.append((fname, title, s, e))
+            stack.extend(n.get("children") or [])
+    if not hits:
+        return None
+    by_file: dict[str, list[tuple[str, int, int]]] = {}
+    for fname, title, s, e in hits:
+        by_file.setdefault(fname, []).append((title, s, e))
+    spans: list[tuple[str, str, int, int]] = []
+    for fname, items in by_file.items():
+        items.sort(key=lambda x: x[1])
+        first, cur_s, cur_e = items[0]
+        for title, s, e in items[1:]:
+            if s - cur_e <= 2:
+                cur_e = max(cur_e, e)
+            else:
+                spans.append((fname, first, cur_s, cur_e))
+                first, cur_s, cur_e = title, s, e
+        spans.append((fname, first, cur_s, cur_e))
+    if len(spans) != 1:
+        return None  # 跨文件或同文件多处命中：歧义不带
+    fname, title, s, e = spans[0]
+    return (
+        f"原件定位：{fname} L{s}-L{e}（{title}）——docx_source_inject 的 lines 参数"
+        "直接用此区间；核对原文可按同区间 read_file 解析 md"
+    )
+
+
+def _gap_lines(cells: list[str], cols: dict[str, int]) -> str | None:
+    """指引缺口列 → 「公司材料与缺口」段原文（整段透传，程序不解析格式）。
+
+    缺口列由指引期知识库检索写入（【知识库】命中事实 + 【缺：…】未命中点名，
+    见 guide-format.md）；这里只做机械透传。四类招标编号剥除（零编号派发契约：
+    模型可能把依据列编号抄进缺口列，编号镜像进正文即泄漏）；CLAR 类澄清编号
+    不剥——不是招标条款引用，写手需原样带回待办。
+    """
+    key = next((k for k in cols if any(x in k for x in _GAP_COL_KEYS)), None)
+    if key is None:
+        return None
+    idx = cols[key]
+    if idx >= len(cells):
+        return None
+    raw = cells[idx].strip()
+    if not raw or raw in ("—", "无"):  # 「无」=中文指引常见占位，非内容
+        return None
+    text = _BARE_ID_RE.sub("", raw)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"[（(]\s*[、，;；]?\s*[）)]", "", text)  # 删编号后残留的空括号
+    return text or None
+
+
 def build_enriched_description(desc: str, task_id: str) -> str | None:
     """瘦派发描述 → 补全派发说明；不适合拼装返回 None（调用方原样放行）。
 
@@ -200,6 +340,8 @@ def build_enriched_description(desc: str, task_id: str) -> str | None:
         has_tpl = False
         mode = ""
         mat = ""
+        gap = None
+        loc = None
         guide = _guide_row(task_id, content, vol, title)
         if guide is not None:
             cells, cols = guide
@@ -207,6 +349,11 @@ def build_enriched_description(desc: str, task_id: str) -> str | None:
             mode = cells[cols["模式"]].strip() if "模式" in cols else ""
             if "素材" in cols and cols["素材"] < len(cells):
                 mat = cells[cols["素材"]].strip()
+            gap = _gap_lines(cells, cols)
+        try:
+            loc = _source_location_line(task_id, title)
+        except Exception:
+            logger.debug("派发拼装：原件定位解析失败，跳过该行", exc_info=True)
 
         out = [
             desc.strip(),
@@ -230,8 +377,25 @@ def build_enriched_description(desc: str, task_id: str) -> str | None:
                     "本节含格式件：从 sources/ 招标原件拷贝（docx_source_inject；"
                     "pdf 原件无可拷元素，按解析文本自行成形）。"
                 )
+        if loc:
+            out.append(loc)
         if mat and mat != "—":
-            out.append(f"可用素材块：{mat}")
+            try:
+                mat_lines = _material_lines(mat)
+            except Exception:
+                logger.debug("派发拼装：素材块名片解析失败，降级 id 原文", exc_info=True)
+                mat_lines = None
+            if mat_lines:
+                out.append("可用素材块（直接据此列使用计划并注入，无需再检索）：")
+                out.extend(mat_lines)
+            else:
+                out.append(f"可用素材块：{mat}")
+        if gap:
+            out.append(
+                "公司材料与缺口（指引缺口列原文；【知识库】=知识库命中的公司事实，"
+                "证书数字照抄不得改写；【缺】=库里没有，加批注待办，禁止编造）："
+            )
+            out.append(gap)
         promises = _promise_lines(task_id)
         out.append("承诺清单全部值（承诺类数字只能用这里）：")
         out.extend(promises or ["（清单文件缺失或为空——缺项一律写【待澄清：…】不得编造）"])

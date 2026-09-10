@@ -5,9 +5,16 @@
 结构性错误（缺 response_documents、directory 非列表等）会拒绝发布。
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from . import ContractDef
+
+# 章节编号格式（合册 docx_assemble_volume 按树序生成标题编号时读取）：
+# chapter=第X章+1.1（缺省） decimal=1+1.1 gov=一、（一）1. none=不加编号。
+# 编号是树位置的纯函数、只在合册发标题那一刻生成——对账/派发/检索全用裸节点名。
+NumberingScheme = Literal["chapter", "decimal", "gov", "none"]
 
 
 class TocNode(BaseModel):
@@ -58,6 +65,8 @@ class TenderDirectoryModel(BaseModel):
     lineage_check: LineageCheck = Field(default_factory=LineageCheck)
     # 空目录守卫：脚本在未解析出目录时写入 warning 字段
     warning: str | None = None
+    # 章节编号格式（缺省 None=chapter；目录编辑界面可改，合册每次现读）
+    numbering: NumberingScheme | None = None
 
 
 TENDER_DIRECTORY = ContractDef(

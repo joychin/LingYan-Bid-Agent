@@ -52,6 +52,16 @@ export const BADGE_LABELS: Record<string, string> = {
   SCORE: '评分项',
 }
 
+type NumberingValue = NonNullable<DirectoryData['numbering']>
+
+/** 章节编号格式（合册按目录树序自动编号；真值存目录产物 numbering 字段） */
+const NUMBERING_OPTIONS: Array<{ value: NumberingValue; label: string }> = [
+  { value: 'chapter', label: '第一章 + 1.1' },
+  { value: 'decimal', label: '1 + 1.1' },
+  { value: 'gov', label: '一、（一）1.' },
+  { value: 'none', label: '不编号' },
+]
+
 /** 四色徽章图例：目录查看态头部与写作指引说明段共用（点击徽章=看登记原文与出处） */
 export function BadgeLegend() {
   return (
@@ -312,6 +322,24 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
             完成编辑
           </button>
           <SaveStateBar state={auto.state} lastSavedAt={auto.lastSavedAt} onRetry={() => void auto.saveNow()} />
+          <label className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+            章节编号
+            <select
+              value={docs?.numbering ?? 'chapter'}
+              onChange={(e) =>
+                mutate((d) => {
+                  d.numbering = e.target.value as NumberingValue
+                })
+              }
+              className="rounded-md border border-line bg-card px-2 py-1 text-xs focus:border-primary focus:outline-none"
+            >
+              {NUMBERING_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       )}
       {editing && structConfirm && (
@@ -383,6 +411,15 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
         </div>
       )}
       {!editing && <BadgeLegend />}
+      {!editing && (
+        <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span>章节编号（合册时按目录树序自动加）：</span>
+          <span className="rounded border border-line px-1.5 py-px font-medium text-foreground">
+            {NUMBERING_OPTIONS.find((o) => o.value === (data.numbering ?? 'chapter'))?.label}
+          </span>
+          <span>改格式请进「编辑目录」调整，重合册后生效</span>
+        </div>
+      )}
 
       {editing && docs && (
         <DirectoryEditor

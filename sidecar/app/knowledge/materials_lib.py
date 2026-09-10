@@ -12,15 +12,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import uuid
 from pathlib import Path
 
-from .. import bg
+from .. import bg, db
 from .. import config as cfg
-from .. import db
 from ..parse import convert as parse_convert
 from ..parse import outline_with_lines, write_atomic
 

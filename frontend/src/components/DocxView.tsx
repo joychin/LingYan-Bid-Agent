@@ -13,6 +13,7 @@ import { lazy, Suspense, useCallback, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { FolderOpen } from 'lucide-react'
 import { fetchWorkbenchRaw, getWorkbenchDocxView, isTauri, revealInFolder } from '@/api/client'
+import { wbDisplayName } from '@/lib/wbNames'
 import { cn } from '@/lib/utils'
 
 const DocxPreviewBody = lazy(() => import('./preview/DocxPreviewBody'))
@@ -47,7 +48,7 @@ export function DocxView({ taskId, path }: { taskId: string | null; path: string
   }, [])
 
   if (!path || !taskId) return null
-  const display = path.split('/').pop() ?? path
+  const display = wbDisplayName(path)
   // 整本=最终交付物：常驻交付提醒（文件带修订标记与待办批注，面板预览只显示
   // 接受视角——干净的样子不等于可直接递交）；节文件是中间产物，不提示
   const isFinal = display.startsWith('整本-')

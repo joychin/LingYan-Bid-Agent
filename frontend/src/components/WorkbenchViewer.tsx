@@ -21,6 +21,7 @@ import {
 } from '@/api/client'
 import { useToast } from '@/context/Toast'
 import { useAutoSave } from '@/hooks/useAutoSave'
+import { wbDisplayName } from '@/lib/wbNames'
 import { SaveStateBar } from '@/components/editors/SaveStateBar'
 import { MarkdownEditor, type EditorMode } from '@/components/editors/MarkdownEditor'
 
@@ -147,7 +148,7 @@ export function WorkbenchViewer({
     )
   }
 
-  const display = path.split('/').pop() ?? path
+  const display = wbDisplayName(path)
   const editable = data.editable
 
   const finishEdit = () => {

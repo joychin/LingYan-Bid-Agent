@@ -11,9 +11,13 @@ conversation.renamed（自动命名推送，无 seq）。
 
 import html
 import json
+import logging
+import re
 from typing import Iterator
 
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+
+logger = logging.getLogger(__name__)
 
 EVENT_STARTED = "agent.started"
 EVENT_TOKEN = "agent.token"
@@ -197,6 +201,67 @@ def _tool_args(args) -> dict:
     return {"raw": _deep_unescape(str(args))}
 
 
+# ask_human 参数泄漏行（2026-09-10 两轮实测）：deepseek-v4-flash 偶发把可选参数写成
+# `options="A；B"` / `guide_path="body/写作指引.md"` 赋值行塞进 question 正文、参数
+# 本身留空——前端候选项/「打开」按钮只读 args 字段，空则按钮整体不渲染、伪代码行
+# 原样上屏。白名单只收已观测的两个参数；multiple（布尔、短值）未观测不收。
+_SALVAGE_LINE = re.compile(r"^\s*(options|guide_path)\s*[=:：]\s*(.+?)\s*$")
+_SALVAGE_QUOTES = "\"'“”‘’「」"
+
+
+def _salvage_ask_human_args(args: dict) -> dict:
+    """ask_human 参数泄漏自愈：question 里的赋值行摘回对应参数（仅展示层副本）。
+
+    与 _deep_unescape 同边界：只改下发 UI 的 args 副本，工具实际执行与模型记忆
+    （checkpoint）仍用模型原始输出。参数已有值时不碰（两处信息冲突无从裁决，
+    保留原文诚实呈现）；命中的行从 question 删除。options 按候选项规则（；/;
+    分隔、逐项剥引号）重组，guide_path 只剥外层引号。
+    """
+    question = args.get("question")
+    if not isinstance(question, str) or not question:
+        return args
+    out = dict(args)
+    kept: list[str] = []
+    salvaged: list[str] = []
+    for line in question.split("\n"):
+        m = _SALVAGE_LINE.match(line)
+        key = m.group(1) if m else None
+        if key and not str(out.get(key) or "").strip():
+            value = m.group(2).strip().strip(_SALVAGE_QUOTES)
+            if key == "options":
+                items = [s.strip(_SALVAGE_QUOTES) for s in re.split(r"[；;]", value) if s.strip()]
+                value = "；".join(items)
+            if value:
+                out[key] = value
+                salvaged.append(key)
+                continue
+        kept.append(line)
+    if not salvaged:
+        return args
+    out["question"] = "\n".join(kept).rstrip()
+    logger.warning("ask_human 参数泄漏自愈：question 内 %s 赋值行已摘回参数", "/".join(salvaged))
+    return out
+
+
+def normalize_hitl_requests(requests) -> list:
+    """读侧兜底：落库的 interrupt requests 逐条过 ask_human 参数自愈。
+
+    修复上线前已等待中的 run，其 runs.interrupt 快照仍是泄漏形态；run.state
+    对账与 runs/latest 读出时过同一遍纠正，客户端重连/刷新后提问卡自愈
+    （写侧 _hitl_requests 只保住此后新中断的 run）。
+    """
+    if not isinstance(requests, list):
+        return requests
+    for req in requests:
+        if (
+            isinstance(req, dict)
+            and req.get("tool") == "ask_human"
+            and isinstance(req.get("args"), dict)
+        ):
+            req["args"] = _salvage_ask_human_args(req["args"])
+    return requests
+
+
 def _summary(content, limit: int = 4000) -> str:
     """tool 结果摘要：展开详情要能读到完整输出，上限放宽到 4000 字符；
     超限时明示截断与完整长度（静默「…」会让用户以为内容残缺）。"""
@@ -263,6 +328,8 @@ def _hitl_requests(interrupts) -> dict:
                 continue
             name = ar.get("name") or "unknown"
             args = _tool_args(ar.get("args"))
+            if name == "ask_human":
+                args = _salvage_ask_human_args(args)
             desc = ar.get("description") or ""
             if desc.startswith(_HITL_TEMPLATE_PREFIX):
                 desc = _friendly_description(name, args)

@@ -6,6 +6,7 @@
  */
 import { useState } from 'react'
 import { fileExtIcon } from '@/artifacts/registry'
+import { wbDisplayName } from '@/lib/wbNames'
 import type { Message } from '@/api/client'
 
 const VISIBLE = 5
@@ -27,8 +28,9 @@ export function RunFiles({
       <span className="run-files-label">本轮文件</span>
       <div className="run-files-chips">
         {shown.map((f) => {
-          const name = f.path.slice(f.path.lastIndexOf('/') + 1)
-          const icon = fileExtIcon(name)
+          // 显示名与面板行/编辑器头部同源（lib/wbNames）；图标按真实路径取扩展名
+          const name = wbDisplayName(f.path)
+          const icon = fileExtIcon(f.path)
           return (
             <button
               key={f.path}

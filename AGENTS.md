@@ -6,6 +6,9 @@ Artifact/任务系统的设计与决策唯一事实来源：`artifact-system-des
 另：`docs/skill design/`（重构手册上/下 + `schemas/` 四个 JSON Schema）是证据包/skill
 体系的设计参考材料（自包含，面向新场景重建，非本仓现状的实现说明）；`docs/prototypes/`
 放 HTML 原型页。改 skill/契约相关工作前值得先翻。
+许可：**AGPL-3.0-only**（2026-09-10 定；LICENSE 全文 + 根/frontend/sidecar/src-tauri
+manifest 同步）——`skills/` 方法论与提示词一并受其约束；唯一例外=`humanizer-zh`
+（第三方 MIT，随文件保留署名）。搬入三方代码/提示词前先过许可兼容检查。
 
 ## 结构与分层（重要边界）
 
@@ -13,6 +16,7 @@ Artifact/任务系统的设计与决策唯一事实来源：`artifact-system-des
 src-tauri/       Tauri 2 壳（Rust）：只做窗口、sidecar 进程管理、IPC command。零业务逻辑
 frontend/        React 19 + Vite + Tailwind（shadcn 风格手写组件）；只通过 HTTP+SSE 与 sidecar 通信
 sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
+website/         产品官网静态页（与应用代码独立，不进构建/打包）
 ```
 
 三条铁律：
@@ -617,6 +621,14 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   RT import 随之删除。历史已产出节文件不自动纠正（重注入/重写节才走新逻辑）。
   明确不做：素材库旧名元数据（零 LLM 是拍板设计，残留扫描弱级+显式名单兜底）、
   素材交叉引用跨块死链（跨文档引用无完美解，纸面无感，记录在案）。
+- **element_lines 坐标系统一（2026-09-10）**：parse/docx.py 表格从整块 append 改
+  逐行 extend——此前表格 md 的内嵌换行不占 lines 下标，element_lines 落在折叠
+  坐标系、md/outline 落在展开坐标系，表格后所有元素行号累计漂移（实测 13 表
+  拉开 140 行），按行号注入必「未映射/错元素」（素材块勾选区间在表格后错位的
+  正确性根因）。join 产物逐字节不变、仅映射坐标与最终 md 对齐；注入工具
+  （docx_source_inject/docx_material_inject）现场重跑解析拿映射，**对修复前
+  上传的素材即刻生效、无需重传**。测试 test_docx_ops 三例（坐标系回归/表格后
+  outline 区间端到端/素材块区间注入）。
 - **单图插入工具 `docx_image_insert`（2026-09-08，docx 直出管线的放图通道补全）**：
   动因=用户拍板「证书贴正文必须做」——此前独立图片（证书复印件/扫描件/截图）
   进正文无通道（图片只能随素材块/招标件元素级拷贝，知识库证书在正文只能文字
@@ -831,6 +843,30 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   （模板两样式断言/insert style 命中+未知回落/合册封面六断言/缺文件两形态）
   +test_dispatch_enrich 日期行+test_skills 封面锚点，622 绿；坑=插入段
   在 w:ins 修订包裹里 p.text 读不到，断言须走 _accepted_text 接受视角。
+  **章节编号批（2026-09-10，程序化生成、落点在合册）**：动因=整本 docx 章节
+  零编号（全链路本无编号逻辑，树格式红线又禁止节点名带号——设计空缺非 bug）。
+  方案拍板=编号=树位置的纯函数，在 `docx_assemble_volume` 发标题那一刻拼进
+  标题文本，**不走 Word 样式绑定自动编号**（三个实测坑：素材拷入的标题段会被
+  Word 一起计数打乱章序、docx-preview 对经典「lvl pStyle 无样式 numPr」写法
+  不渲染、节文件单看永远「第一章」）；`_HeadingNumberer`（docx_ops）每册一个
+  实例从首章重起，封面不占序，`_is_title_para` 剥节文件自带标题仍按裸名对账
+  （编号只进发出的标题段）。**格式可配且任务级**：契约 `tender.directory`
+  content 加 `numbering` 字段（Literal chapter/decimal/gov/none，缺省 None
+  回落 chapter=第X章全角空格+1.1；decimal=1+1.1；gov=一、（一）1.；none），
+  目录编辑界面（DirectoryProcessor）编辑态头部下拉改、查看态显示当前格式
+  （非结构变更不触发签名确认条）；dto 层不携带产物内容，dto.gen.ts 无需再生。
+  两个拍板：格式件章（投标函等 NON_PROSE）**与正文统一编号**（未产出的不进
+  整本自然不占序）；节内小标题**不自动编号+写作纪律**（素材拷入的标题与 AI
+  写的标题程序分不清，乱编号比没编号糟）。自带编号探测（探测+提示裁决铁则）：
+  节点名匹配 `第X章/一、/（一）/1.1 ` 前缀形态时合册返回 ⚠️ 点名双重编号请修
+  目录产物（数字限一两位+空格，避开「2026 年度」年份误报）。skill 接线三处：
+  tender-body SKILL 注意事项（建节 title 用裸名/节内小标题不写编号——模型
+  自编编号必错，不知道树位置）+section-writing 通用纪律同两条+tender-outline
+  无编号红线补「编号由合册自动生成」解释。测试：test_docx_ops 四格式序列/
+  封面不占序/格式件统一编号/自带编号 ⚠️/裸名对账不受编号影响，**_DIR_SINGLE
+  等夹具同批清成裸名**（原夹具自带「第三章/3.1」会叠加成「第一章 第三章」），
+  sidecar 631 绿+前端 tsc/oxlint/build 绿。历史已产出整本不自动改——重合册
+  即得编号（派生物语义）。
 - **tender-body 调度优化批（2026-09-08，straggler/串行检索治理；背景=整本 40min
   解剖：批被最慢节钉死 813s、先完成子代理均空等 ~400s、批间主线程轮 1.3-2min×5、
   指引检索 32 节=32 轮串行）**：①**整本派发按「均衡分波」不再按一级章节分批**——
@@ -896,6 +932,62 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   run_turn_usage 按 scope 聚合（45 万 token/节、~0.3 元/节 → ≤20 万、~0.1 元）。
   已知取舍：拼装只认 tender-body-writer（其他子代理零接触）；模型已写富文本
   （>200 字符）或含幂等标记「〔系统附」时放行原文。
+- **素材检索复用收口 + 知识库缺口点名（2026-09-10，检索链三态审计后落地）**：
+  审计结论=需求/评分链全复用（依据 ID 经 registry 解析成原文+出处进派发，零重复
+  检索）；素材链「路由复用、检索重跑」——指引期 search_references 只把块 id 记
+  进素材列，派发拼装也只传 id 字符串，写手按素材先行第一步每节再检索一遍（用户
+  在确认门拍板的块指派实为参考）；知识库链指引期完全不查（备料对账只对素材库，
+  「知识库缺 ISO 证书」要等写手写到那节才经批注暴露）。修法两件：①`dispatch_
+  enrich._material_lines` 把素材列 blk id 解析成**逐块名片**（`《标题》（约 N 字
+  [，含图 N 处]）｜来源文件：xxx.docx｜id：blk_…[｜备注：…]`，数据源=
+  db.mt_list_files+mt_list_blocks、含图数复用 search_knowledge._mt_image_count
+  ——**来源文件名必须随行**，check_name_residue 扫旧机构名的 old_names 取自它；
+  失效 id 降级「已失效——请自行检索确认」、无 blk id（【缺】/—）维持旧行、
+  函数异常降级 id 原文不丢拼装），引导句「可用素材块（直接据此列使用计划并
+  注入，无需再检索）」；配套三处文案同步改「选块」语义——section-writing.md
+  素材先行第 1 步、SKILL.md 素材修订 bullet、agent.py 写手 prompt 五步表述
+  （清单在=直接采用不再 search_references；清单缺失/【缺】/已失效才自行检索
+  =查漏出口保留；已派块的节不允许「再搜搜看」，素材不够覆盖走「素材修订+推理
+  撰写」组合）。②知识库缺口点名=纯 skill 文案（零代码）：指引生成时对推理
+  撰写节在缺口列点名将引用的企业事实/证书（「需：ISO9001/ISO27001、近三年
+  同类合同案例」）——**声明本节要什么供用户在确认门对照知识库核对，不是检索
+  知识库**；写手仍以写作时 search_company_assets 现场结果为准（查不到照旧批注
+  带回）；guide-format.md 示例行与素材/缺口两列说明同步。明确不做：指引期知识
+  库真检索（多数节用不到企业事实，会复制素材库重复检索的老毛病）。测试：
+  test_dispatch_enrich +2 例（名片解析/无 id 不拼段+失效降级）+ test_agent
+  写手 prompt 守卫两条（「直接采用」「不再调用 search_references」），629 绿。
+- **知识库材料进正文三处接线（2026-09-10 二批，取代上条②「点名需什么」版与
+  「明确不做指引期真检索」裁决——实测 KB 检索 65 次命中但三环节全漏：指引期
+  不沉淀/格式件格子不查/复印件一律判线下，命中沉淀不进派发=白查）**：
+  ①**指引缺口列升级为「检索沉淀+派发透传」**：指引生成同轮并发跑
+  search_company_assets（涉及公司事实的节：资质证书/基本情况/业绩案例/人员
+  资格/证书复印件），命中写缺口列【知识库】材料名+关键数字（注册号/有效期
+  **照抄原文**，多条分号分隔、含图注明「含图 N 张」）、未命中维持【缺：xxx】；
+  `dispatch_enrich._gap_lines` 把缺口列整段透传进派发块「公司材料与缺口」段
+  （四类招标编号剥除保零编号契约、CLAR 澄清编号保留原样带回；「—/无」占位
+  不拼段）——缺口列是公司事实的唯一调度落点。写手侧填空优先级=派发段
+  【知识库】＞现场 search_company_assets＞批注待办，禁止凭印象编（section-
+  writing「公司事实填空优先级」节）。②**物理附件三分**（取代一律「线下
+  准备」）：缺口列有【知识库】命中（含图）→建节+docx_image_insert 逐张贴图
+  产出节文件、库里没有的证书批注点名待线下补；全无命中才登记待填清单。
+  ③**派发加「原件定位」行**（`_source_location_line`）：节名对账全部已解析
+  outline.json 标题树唯一定位原件区段（附件N/表N 标记双现且核心名相容，或
+  清洗核心名全等；同文件相邻 ≤2 行命中合并区间=「表1：报价表」标题壳与正文
+  条目两节点形态；0 命中或跨文件歧义不带——定位错比不带更糟），直接给
+  docx_source_inject 的 lines 区间（治最重节 71 轮里 ~40 轮在找附件位置）。
+  测试 test_dispatch_enrich +7 例（缺口透传/占位不拼/编号剥除 + 定位唯一命中/
+  无命中不带/跨文件歧义/相邻壳合并）。
+- **写手最小工具集（2026-09-10）**：`agent._BODY_WRITER_TOOLS`（frozenset 13 个
+  =docx 七件套+validate_body+check_name_residue+search_references+
+  search_company_assets+parse_document+fetch_url——fetch_url 用户明令保留联网
+  通道）经 SUBAGENTS spec 的 `tools` 字段收窄（deepagents 语义：spec 带 tools
+  **独占**、不带才继承主代理全量；894 轮实测只用这 13 个，22 个工具 schema
+  每轮随身携带的固定 token 开销砍掉）；剔除 9 个=ask_human/check_pipeline_
+  state/docx_assemble_volume/read_artifact/assemble_tender/publish_artifact/
+  update_task_progress/validate_analysis/list_templates（prompt 明令禁止/职责
+  归主线程/零调用）。文件七件套由 FilesystemMiddleware 提供、不受 spec.tools
+  控制自动随行。test_body_writer_minimal_toolset 三重守卫：名字∈TOOLS 注册表
+  （防拼错=静默丢工具）、9 个禁用名不得「顺手加回」、spec 工具集与常量零漂移。
 - **内存/CPU 积累修复批（2026-09-08，行业实践对齐，零契约改动）**：系统排查
   （前端+sidecar 全量泄漏审计）后十项落地。①活树快照拷贝节流——`set_live_trace`
   500ms 窗口内只记 pending 引用不拷贝、下一个结构性事件或读侧超窗才真拷
@@ -1019,6 +1111,14 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   构造器 port 参数 .d.ts 类型写坏（null|undefined），走
   `GlobalWorkerOptions.workerPort` 模块级单例（多文档共享线程）绕开。
   Tauri/WKWebView 真壳层验证留用户前台验收。
+  **工作台显示名单源 wbNames（2026-09-10）**：`lib/wbNames.ts` 的 `wbDisplayName`
+  是产物面板行/「本轮文件」chips/编辑器头部三处显示名的唯一真值——固定过程文件
+  走业务名（结构事实/资格要求/写作指引…）、`parse/<源>/…` 显示「<源名> 解析稿」
+  （治双扩展剥目录后酷似上传原件、被误读成「招标文件是本轮新建的」）、
+  outline/fragments 显示「分册 · <册名>」、其余 basename；path 恒为寻址真值
+  不动，图标按真实路径取扩展名。RunFiles/DocxView/WorkbenchViewer/ArtifactPanel
+  四处换用，wbNames.test.ts 四例。同批：面板覆盖态宽度 1120 封顶删除
+  （2026-09-09 用户明令「产物栏不设最大宽度」，上限仅剩窗口宽−360）。
   **写作指引/承诺清单结构化表格界面（2026-09-08）**：产物面板按**文件名分发**
   （basename=`写作指引.md`/`关键事实与承诺.md`，容忍模型 guide_path 前缀变体）
   到 `components/workbench/` 的专用视图（GuideFileView 五列表 / PromiseFileView
@@ -1194,6 +1294,22 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   「我上传了文件：…」拼接（wizardNav）不动。InputComposer 的
   `waiting`/`waitingHint`/`disabled` props 随之删除（替换期间 composer 不渲染，纯死
   代码）；纯审批卡与问答卡一起挪（同一渲染条件，行为一致）。
+- **ask_human 参数泄漏自愈（2026-09-10，两轮实测两形态）**：deepseek-v4-flash
+  偶发把可选参数写成 `options="…"`/`guide_path="…"` 赋值行塞进 question 正文、
+  参数本身留空——前端候选项/「打开指引」按钮只读 args 字段，空则按钮整体
+  不渲染、伪代码行原样上屏（实测 run 无可点按钮只剩文本框；真凶=skill 教学
+  文本自己写赋值简写）。两层修：写侧 `events._salvage_ask_human_args`
+  （挂 _hitl_requests 出口——SSE 提问卡与 runs.interrupt 落库同源）+读侧
+  `events.normalize_hitl_requests`（sse.py run.state 对账与 conversations.py
+  runs/latest 读出过同一遍——修复前已等待中的 run 重连/刷新即自愈，无需重发
+  提问）。规则=行首 `options|guide_path [=:：]` 白名单匹配（multiple 未观测
+  不收）、**参数已有值不碰**（两处信息冲突无从裁决，保留原文诚实呈现）、
+  空值行保留（无可摘取）、options 按「；;」分隔重组逐项剥引号；与
+  _deep_unescape 同边界=只改下发 UI 的 args 副本，工具实际执行与模型记忆
+  （checkpoint）仍用模型原始输出。教学层同步四文件：ask_human docstring 补
+  完整调用示例（参数各归各位）、主 prompt ask_human 段加「候选项与 guide_path
+  只写进各自参数」句、document-parse/tender-body SKILL 提问点各加纪律。
+  test_hitl +5 例（两形态/变体/不误伤三断言/读侧）。
 
 ## 知识库与写作素材库（双域手工模型，2026-09-04 定稿；v3 自动拆分已废）
 
@@ -1599,3 +1715,10 @@ search_references 只查素材块一种形态。
   扫描 PDF（文本层过薄）与 `.doc`/图片在**已配置百度云文档解析**时路由云端整本 OCR
   （`app/baidu_ocr.py`，conversion=`paddleocr-vl`），未配置明确拒绝并提示设置入口
   （`.doc` 另可 Word 另存 `.docx` 后上传）。
+- **409 发送失败错误卡滞留（2026-09-10 已诊断未修复）**：run 运行中 POST /messages
+  撞防并发守卫 409 → useRun dispatch send-failed 只写 error 不碰 running/tools；
+  随后对账快照恢复活卡时红卡不清，「错误卡+运行中活卡」并存挂到 run 结束
+  （清除锚只有 started/settle-completed/run.state(running) 三路，纯执行期流事件
+  不触碰 error）。runReducer.test.ts 六例**特征测试**实锚现状（断言标「缺陷
+  实锚」，修复落地后对应断言应翻转）；修复方案待用户拍板——改此区域前先看
+  该 describe 块的时序注释。

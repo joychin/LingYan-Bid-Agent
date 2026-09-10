@@ -11,7 +11,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .. import agent, bg, db, titler
+from .. import agent, bg, db, events, titler
 from .. import config as cfg
 from ..agent import delete_thread_memory, run_stream
 
@@ -115,7 +115,8 @@ async def get_latest_run(cid: str):
     run = db.get_latest_run(cid)
     if run and run["status"] == "waiting_input":
         try:
-            run["requests"] = json.loads(run.pop("interrupt") or "[]")
+            # 过一遍 ask_human 参数自愈：修复前落库的快照可能带泄漏形态（2026-09-10）
+            run["requests"] = events.normalize_hitl_requests(json.loads(run.pop("interrupt") or "[]"))
         except ValueError:
             run["requests"] = []
     elif run:

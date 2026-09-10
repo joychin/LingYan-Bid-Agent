@@ -112,7 +112,12 @@ def convert(path: Path) -> ParseResult:
             t = Table(child, doc)
             start = len(lines) + 1
             lines.append("")
-            lines.append(_table_to_md(t))
+            # 表格逐行展开（2026-09-10 坐标系统一）：整块 append 时内嵌换行不占
+            # lines 下标，element_lines 落在折叠坐标系、md/outline 落在展开坐标
+            # 系，表格后两套行号累计漂移（实测 13 表拉开 140 行）——按 outline
+            # 行号注入必「未映射」，写手退化为逐段探针。逐行 extend 后 join
+            # 产物逐字节不变，仅映射坐标与最终 md 对齐。
+            lines.extend(_table_to_md(t).split("\n"))
             lines.append("")
             tables += 1
             el_lines.append([el_idx, start, len(lines)])

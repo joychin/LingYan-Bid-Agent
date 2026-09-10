@@ -167,6 +167,92 @@ def test_tool_args_literal_backslash_n_folded():
     assert called["args"]["question"] == "确认开始？\n说明"
 
 
+# ---------- ask_human 参数泄漏自愈（2026-09-10 实测两形态） ----------
+
+
+def test_ask_human_options_leak_salvaged():
+    """形态一（document-parse 两道门）：候选项写成 `options="…"` 行塞进 question、
+    options 参数留空——前端候选项只读 args.options，空则按钮整体不渲染、伪代码行
+    原样上屏。写侧 _hitl_requests 出口自愈（SSE 提问卡与 runs.interrupt 落库同源）。
+    """
+    q = (
+        "确认《AI--谈判文件.docx》为主文件，开始解析吗？\n"
+        "主文件是整份文件的骨架，也是后续划分响应文件的基准。\n"
+        'options="没有补充文件，开始解析（推荐）；我要再上传补充文件（请说明角色）"'
+    )
+    out = events._hitl_requests((_make_interrupt(q),))
+    [req] = out["requests"]
+    assert req["args"]["options"] == "没有补充文件，开始解析（推荐）；我要再上传补充文件（请说明角色）"
+    assert "options=" not in req["args"]["question"]
+    assert req["args"]["question"].endswith("划分响应文件的基准。")
+
+
+def test_ask_human_dual_leak_salvaged():
+    """形态二（tender-body 写作指引确认门）：options 与 guide_path 双泄漏——
+    选项按钮与「打开指引」按钮同时消失。两个参数各自摘回、行从 question 删除。
+    """
+    q = (
+        "写作指引已生成并通过校验，确认后按指引开写吗？\n"
+        "指引里逐节定了写作方式与依据。\n"
+        'options="确认，按指引开写（推荐）；重新生成指引"\n'
+        'guide_path="body/写作指引.md"'
+    )
+    out = events._hitl_requests((_make_interrupt(q),))
+    [req] = out["requests"]
+    assert req["args"]["options"] == "确认，按指引开写（推荐）；重新生成指引"
+    assert req["args"]["guide_path"] == "body/写作指引.md"
+    assert req["args"]["question"] == (
+        "写作指引已生成并通过校验，确认后按指引开写吗？\n指引里逐节定了写作方式与依据。"
+    )
+
+
+def test_ask_human_leak_variants():
+    """无引号 / 中文冒号 / 泄漏行在中间：同一套行匹配规则都接得住。"""
+    out = events._hitl_requests((_make_interrupt("继续吗？\noptions：继续；停止\n说明文字"),))
+    [req] = out["requests"]
+    assert req["args"]["options"] == "继续；停止"
+    assert req["args"]["question"] == "继续吗？\n说明文字"
+
+
+def test_ask_human_salvage_no_false_positive():
+    """不误伤：开放题原样返回；参数已有值时不碰；空候选无可摘取、行保留。"""
+    out = events._hitl_requests((_make_interrupt("用哪个方案？"),))
+    [req] = out["requests"]
+    assert req["args"] == {"question": "用哪个方案？"}
+
+    out = events._hitl_requests((_make_interrupt('继续吗？\noptions=""'),))
+    [req] = out["requests"]
+    assert "options" not in req["args"]
+    assert 'options=""' in req["args"]["question"]
+
+    # 非 ask_human 工具即使 args 里带同款行也不动（自愈只挂 ask_human）
+    out = events._hitl_requests(
+        (_template_interrupt("fetch_url", {"url": "https://x\noptions=\"a；b\""}),)
+    )
+    [req] = out["requests"]
+    assert req["args"]["url"] == 'https://x\noptions="a；b"'
+
+
+def test_normalize_hitl_requests_read_side():
+    """读侧兜底：修复前落库的 runs.interrupt 快照仍是泄漏形态，run.state 对账与
+    runs/latest 读出时过同一遍纠正——等待中的提问卡重连/刷新后自愈，无需重发提问。
+    """
+    requests = [
+        {
+            "tool": "ask_human",
+            "args": {"question": "确认吗？\noptions=\"是（推荐）；否\""},
+            "description": "",
+            "allowed": ["respond"],
+            "interrupt_id": "i1",
+        },
+        {"tool": "task", "args": {"description": "做 X\noptions=\"无关\""}, "interrupt_id": "i2"},
+    ]
+    out = events.normalize_hitl_requests(requests)
+    assert out[0]["args"]["options"] == "是（推荐）；否"
+    assert "options=" not in out[0]["args"]["question"]
+    assert out[1]["args"] == {"description": "做 X\noptions=\"无关\""}
+
+
 # ---------- run_stream：中断边界 ----------
 
 

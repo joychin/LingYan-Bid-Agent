@@ -25,6 +25,7 @@ import { ContextMenu } from '@/components/ui/ContextMenu'
 import type { ContextMenuItem } from '@/components/ui/ContextMenu'
 import { useToast } from '@/context/Toast'
 import { fileExtIcon, kindIcon } from '@/artifacts/registry'
+import { wbDisplayName } from '@/lib/wbNames'
 import { orderBodyRows } from '@/lib/workbenchTable'
 import { cn, downloadBlob, downloadText, formatSize } from '@/lib/utils'
 
@@ -32,16 +33,14 @@ const DEFAULT_W = 300
 const MIN_W = 240
 const MAX_W = 560
 /* 工作区覆盖态（.ap-shell.wide）宽度：与窄态列宽分开记忆；可拖面板左缘调节，
- * 上限动态计算给聊天区留 ≥360px。
- * 默认宽按视口比例（60%，1120 封顶）——小窗口自动少占聊天区、大屏不用手动拖宽；
+ * 上限动态计算给聊天区留 ≥360px（2026-09-09 用户明令：面板不设固定最大宽度）。
+ * 默认宽按视口比例（60%）——小窗口自动少占聊天区、大屏不用手动拖宽；
  * 拖过的宽度存 localStorage，启动读回时同样过上限夹取（换小窗口打开不爆）。
  * 窗口缩放时实时重夹（resize 监听），否则先拖宽后缩窗面板会盖满聊天区。 */
 const WS_MIN_W = 640
-const WS_DEFAULT_CAP = 1120
 const WS_WIDTH_KEY = 'tender-agent.ws-width'
 const wsMaxW = () => Math.max(WS_MIN_W, window.innerWidth - 360)
-const wsDefaultW = () =>
-  Math.min(WS_DEFAULT_CAP, Math.max(WS_MIN_W, Math.round(window.innerWidth * 0.6)))
+const wsDefaultW = () => Math.max(WS_MIN_W, Math.round(window.innerWidth * 0.6))
 const clampWsW = (w: number) => Math.max(WS_MIN_W, Math.min(wsMaxW(), w))
 const wsStoredW = (): number => {
   const raw = Number(localStorage.getItem(WS_WIDTH_KEY))
@@ -59,21 +58,6 @@ const navMaxW = () => Math.max(MIN_W, Math.min(MAX_W, window.innerWidth - 264 - 
  * 会话批注 = 纯高亮：产物按 provenance（当前会话产出）行名着品牌 tint（.from-conv）。
  * 覆盖式工作区（宽态编辑器）沿用 v3。
  */
-
-/** 工作台文件显示名：分析八件+目录主文件用业务名，其余用文件名。 */
-const WB_NAMES: Record<string, string> = {
-  'analysis/structure.md': '结构事实',
-  'analysis/requirements-qualification.md': '资格要求',
-  'analysis/requirements-submission.md': '递交要求',
-  'analysis/requirements-business.md': '商务技术要求',
-  'analysis/requirements-format.md': '格式要求',
-  'analysis/disqualification.md': '废标条款',
-  'analysis/evaluation.md': '评分标准',
-  'analysis/clarifications.md': '待澄清',
-  'outline/tender-response-docs.md': '目录底稿',
-  'body/写作指引.md': '写作指引',
-  'body/关键事实与承诺.md': '关键事实与承诺',
-}
 
 // 整本-<册名>.docx=合册产出的最终交付物（行徽标/组内置顶/DocxView 交付提醒共用判定）
 const isFinalDoc = (path: string) => (path.split('/').pop() ?? '').startsWith('整本-')
@@ -354,7 +338,7 @@ export function ArtifactPanel({
         onContextMenu={(e) => openMenu(e, { kind: 'workbench', file: f })}
       >
         <span className={cn('ft-ico', icon.cls)}>{icon.mark}</span>
-        <span className="ap-row-name truncate">{name ?? WB_NAMES[f.path] ?? f.path.split('/').pop()}</span>
+        <span className="ap-row-name truncate">{name ?? wbDisplayName(f.path)}</span>
         <span className="ap-row-tail">
           {tail && (
             <span
@@ -461,7 +445,7 @@ export function ArtifactPanel({
                 }
                 // 输入文件（只读行）与过程文件
                 if (g.key === 'sources') sourceFiles.forEach((f) => pushRow(sourceRow(f)))
-                else if (g.key === 'parse') parseRows.forEach((f) => pushRow(wbRow(f, f.path.split('/')[1])))
+                else if (g.key === 'parse') parseRows.forEach((f) => pushRow(wbRow(f)))
                 else if (g.key === 'analysis') analysisFiles.forEach((f) => pushRow(wbRow(f)))
                 else if (g.key === 'outline') {
                   // 底稿/分册收进默认折叠的「中间稿」子区（正文组「章节 · 中间稿」同款交互）
@@ -485,11 +469,7 @@ export function ArtifactPanel({
                           <>
                             {outlineFiles.map((f) => wbRow(f))}
                             {fragmentFiles.map((f) =>
-                              wbRow(
-                                f,
-                                `分册 · ${(f.path.split('/').pop() ?? '').replace(/\.[^.]+$/, '')}`,
-                                mergedInto(f) ? '已并入' : undefined,
-                              ),
+                              wbRow(f, undefined, mergedInto(f) ? '已并入' : undefined),
                             )}
                           </>
                         )}

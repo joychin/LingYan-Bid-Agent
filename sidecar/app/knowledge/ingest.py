@@ -14,7 +14,6 @@ db.recover_stale_kb 兜底（残留 parsing/running → failed + 清 progress，
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import tempfile

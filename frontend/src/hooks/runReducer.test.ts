@@ -874,3 +874,129 @@ describe('stream-batch（流式高频事件合并应用）', () => {
     expect(r.state.tools).toHaveLength(1)
   })
 })
+
+describe('409 发送失败错误卡滞留（2026-09-10 测查：错误卡与运行中活卡并存）', () => {
+  // 背景：run 运行中 POST /messages 被后端防并发守卫 409 拒绝（「该会话已有进行中的任务」），
+  // useRun 把它 dispatch 成 send-failed（HTTP 层错误，非 agent.error）。以下用例为特征测试
+  // （characterization）：断言**当前**行为并标注「缺陷实锚」——修复落地后对应断言应翻转。
+  const E409 = '该会话已有进行中的任务'
+  const snapStep: ToolStep = {
+    id: 'snap-1',
+    tool: 'task',
+    args: {},
+    status: 'running',
+    summary: '',
+    reasoning: '',
+    children: [],
+    startedAt: NOW,
+  }
+
+  it('主复现（截图链）：空闲窗口撞 409 → 对账快照恢复 running，错误卡不清 → 并存', () => {
+    // 重挂/对账空窗（INITIAL_STATE，前端尚不知 run 在跑）发送消息被后端 409 拒绝
+    let s = runReducer(INITIAL_STATE, { type: 'send-failed', error: E409 }).state
+    expect(s.error).toBe(E409)
+    expect(s.running).toBe(false)
+    // 随后 HTTP 对账（reconcile → restoreSnapshot）重建活卡
+    s = runReducer(s, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools: [snapStep],
+      todos: [],
+      reasoningText: '',
+    }).state
+    expect(s.running).toBe(true) // 活卡恢复
+    expect(s.tools).toHaveLength(1)
+    expect(s.error).toBe(E409) // 缺陷实锚：snapshot spread 保留旧 error——红卡与活卡并存
+  })
+
+  it('send-failed 只写 error，不碰 running/tools/errorCode——并存的根源', () => {
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'ls', args: {}, tool_call_id: 't1' },
+    }).state
+    s = runReducer(s, { type: 'send-failed', error: E409 }).state
+    expect(s.running).toBe(true) // 缺陷实锚：错误置位不影响运行态
+    expect(s.tools).toHaveLength(1) // 过程树原样
+    expect(s.error).toBe(E409)
+    expect(s.errorCode).toBeNull() // HTTP 层错误无 code（agent.error 的 code 值域不适用）
+  })
+
+  it('settle-interrupt（HITL 暂停冻结）不清 error——错误卡陪冻结的问答卡', () => {
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    s = runReducer(s, { type: 'send-failed', error: E409 }).state
+    s = runReducer(s, { type: 'settle-interrupt', runId: 'r1', requests: [] }).state
+    expect(s.interrupt).toMatchObject({ runId: 'r1' })
+    expect(s.running).toBe(false)
+    expect(s.error).toBe(E409) // 缺陷实锚：暂停冻结不清陈旧错误
+  })
+
+  it('snapshot waiting_input（等待期刷新对账）同样不清 error', () => {
+    let s = runReducer(INITIAL_STATE, { type: 'send-failed', error: E409 }).state
+    s = runReducer(s, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'waiting_input',
+      tools: [{ ...snapStep, status: 'paused' }],
+      todos: [],
+      reasoningText: '',
+    }).state
+    expect(s.running).toBe(false) // waiting 快照不置 running（既有契约）
+    expect(s.error).toBe(E409) // 缺陷实锚：同款滞留
+  })
+
+  it('清除锚：started / settle-completed / run.state(running) 三条路都清 error', () => {
+    // ① HITL 续跑（resume 202 的乐观 started，或 SSE agent.started）
+    let a = runReducer(INITIAL_STATE, { type: 'send-failed', error: E409 }).state
+    a = runReducer(a, { type: 'started', runId: 'r1', now: NOW, continuation: true }).state
+    expect(a.error).toBeNull()
+    expect(a.running).toBe(true)
+
+    // ② 终态收敛（消息拉回后撤活卡）
+    let b = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    b = runReducer(b, { type: 'send-failed', error: E409 }).state
+    b = runReducer(b, { type: 'settle-completed' }).state
+    expect(b.error).toBeNull()
+    expect(b.running).toBe(false)
+
+    // ③ SSE 重连对账 run.state=running
+    let c = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    c = runReducer(c, { type: 'send-failed', error: E409 }).state
+    c = runReducer(c, {
+      type: 'sse',
+      event: 'run.state',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', status: 'running', started_at: NOW },
+    }).state
+    expect(c.error).toBeNull()
+    expect(c.running).toBe(true)
+  })
+
+  it('时序解释：纯执行期（流式/工具事件）无任何清除路径——红卡挂到 run 结束', () => {
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    s = runReducer(s, { type: 'send-failed', error: E409 }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'agent.token',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', text: '写正文…', seq: 10 },
+    }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', args: {}, tool_call_id: 't2', seq: 11 },
+    }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.result',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', tool_call_id: 't2', summary: '完成', seq: 12 },
+    }).state
+    expect(s.running).toBe(true)
+    expect(s.error).toBe(E409) // 缺陷实锚：流式/工具事件均不触碰 error——直到 settle-completed 才消失
+  })
+})
