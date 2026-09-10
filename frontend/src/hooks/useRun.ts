@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { getLatestRun, getRunSnapshot, resumeRun, cancelRun, sendMessage, type HitlDecision, type ThinkingLevel } from '@/api/client'
 import { subscribeSSE, type ToolStep } from '@/api/sse'
 import { useSidecarHealth } from '@/context/SidecarHealth'
+import { useToast } from '@/context/Toast'
 import { INITIAL_STATE, runReducer, type Action, type RunState } from './runReducer'
 
 export type { ToolStep }
@@ -40,6 +41,7 @@ interface StreamBatch {
 export function useRun(convId: string | null) {
   const queryClient = useQueryClient()
   const { reconnectSeq } = useSidecarHealth()
+  const { toast } = useToast()
   const [state, setState] = useState<RunState>(INITIAL_STATE)
   const stateRef = useRef<RunState>(INITIAL_STATE)
   // SSE 断线对账的限频记号（2s 内只查一次最新 run）
@@ -206,6 +208,21 @@ export function useRun(convId: string | null) {
     try {
       const { run } = await getLatestRun(convId)
       if (run && (run.status === 'running' || run.status === 'waiting_input')) {
+        // 先走 run.state 语义（复用 SSE 对账分支：恢复 running / 等待卡含 requests、
+        // 清陈旧 error）再拉快照——快照分支不置 interrupt，只调快照的话等待态恢复出
+        // 冻结树却没有回答卡，用户无动作入口。与 SSE 重连路径的事件顺序一致。
+        // started_at 缺省走 reducer 兜底（此恢复路径计时起点小失真，接受）。
+        dispatch({
+          type: 'sse',
+          event: 'run.state',
+          now: Date.now(),
+          data: {
+            run_id: run.id,
+            conversation_id: convId,
+            status: run.status,
+            ...(run.status === 'waiting_input' ? { requests: run.requests ?? [] } : {}),
+          },
+        })
         // 树空=恢复活卡；树非空=对账补死步（断连窗口丢过事件的场景，2026-09-08）
         restoreSnapshot(run.id)
         return
@@ -295,12 +312,21 @@ export function useRun(convId: string | null) {
         // 发送立即使占用清单失效：侧栏 loader 不等 3s 轮询周期
         void queryClient.invalidateQueries({ queryKey: ['runs', 'active'] })
       } catch (e) {
-        // 发送失败（如 409 同会话并发）：展示错误并抛出，让调用方恢复输入框
+        if ((e as Error & { status?: number }).status === 409) {
+          // 409 = 后端有活 run（running/waiting_input）而本地不知——状态滞后不是故障
+          // （守卫空窗：重挂对账未达/202 后 started 未达）。对账恢复真实状态 + 轻提示，
+          // 不置错误卡（「报错了还在跑」的误导源，2026-09-10 测查后修订）。抛出保留输入。
+          lastReconcileRef.current = 0 // 绕过限频（cancel 路径同款先例）
+          void reconcile()
+          toast('任务进行中，这条消息没有发出')
+          throw e
+        }
+        // 发送失败（网络/服务错误）：展示错误并抛出，让调用方恢复输入框
         dispatch({ type: 'send-failed', error: e instanceof Error ? e.message : String(e) })
         throw e
       }
     },
-    [convId, queryClient, dispatch],
+    [convId, queryClient, dispatch, reconcile, toast],
   )
 
   /** HITL 审批卡的按钮裁决：全部动作统一 approve / reject（每个动作一个 decision）。

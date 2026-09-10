@@ -391,12 +391,16 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
       // 被门禁拦下的调用不会有 tool.result）、思考流保留（续跑段自然追加）、未封口正文
       // 移入 pauseNarration 渲染为旁白行——都不清空不换卡。暂停消息由 sidecar 落库、
       // 活卡存续期间前端不渲染独立卡，终态时被最终/中断消息吸收（MessageList 装配）。
+      // 清陈旧 error（2026-09-10 修订）：run 健康暂停的转换，send-failed 遗留的红卡
+      // 不该陪冻结的问答卡一起显示。
       return result({
         ...s,
         running: false,
         stopping: false,
         streamText: '',
         retrying: null,
+        error: null,
+        errorCode: null,
         pauseNarration: s.streamText,
         tools: freezeRunningSteps(s.tools),
         continuationAnswer: '',
@@ -445,6 +449,11 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         ...s,
         running: action.status === 'running' ? true : s.running,
         runId: action.runId,
+        // 清陈旧 error（2026-09-10 修订）：快照=状态重建（活 run 语境），send-failed
+        // 遗留的红卡不清会与重建的活卡并存——终态快照已被上方守卫拦下，不会误清
+        // settle-error 的真实错误
+        error: null,
+        errorCode: null,
         tools,
         todos: action.todos,
         // 清单计数随快照重算（丢过 todo.updated 的场景 items 修好了计数不能烂着）
@@ -599,6 +608,10 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
             pauseNarration: s.pauseNarration || s.streamText,
             tools: freezeRunningSteps(s.tools),
             interrupt: { runId: data.run_id, requests: data.requests ?? [] },
+            // 与 running 分支对齐清陈旧 error（2026-09-10 修订）：重连恢复等待卡时
+            // send-failed 遗留的红卡同样过期
+            error: null,
+            errorCode: null,
           },
           [{ kind: 'invalidate-messages' }],
         )

@@ -875,10 +875,11 @@ describe('stream-batch（流式高频事件合并应用）', () => {
   })
 })
 
-describe('409 发送失败错误卡滞留（2026-09-10 测查：错误卡与运行中活卡并存）', () => {
+describe('409 发送失败错误卡（2026-09-10 测查→同日修订：对账/暂停重建清陈旧错误）', () => {
   // 背景：run 运行中 POST /messages 被后端防并发守卫 409 拒绝（「该会话已有进行中的任务」），
-  // useRun 把它 dispatch 成 send-failed（HTTP 层错误，非 agent.error）。以下用例为特征测试
-  // （characterization）：断言**当前**行为并标注「缺陷实锚」——修复落地后对应断言应翻转。
+  // useRun 曾把它 dispatch 成 send-failed（HTTP 层错误，非 agent.error）——错误卡与运行中
+  // 活卡并存直到 run 结束。修订两刀：reducer 三处清陈旧 error（本文件锚定）+ useRun
+  // 撞 409 改对账+轻提示不置错误卡（hook 层，无测试基建、代码阅读定论）。
   const E409 = '该会话已有进行中的任务'
   const snapStep: ToolStep = {
     id: 'snap-1',
@@ -891,7 +892,7 @@ describe('409 发送失败错误卡滞留（2026-09-10 测查：错误卡与运�
     startedAt: NOW,
   }
 
-  it('主复现（截图链）：空闲窗口撞 409 → 对账快照恢复 running，错误卡不清 → 并存', () => {
+  it('主链（截图链）：空闲窗口撞 409 → 对账快照恢复 running 并清陈旧错误', () => {
     // 重挂/对账空窗（INITIAL_STATE，前端尚不知 run 在跑）发送消息被后端 409 拒绝
     let s = runReducer(INITIAL_STATE, { type: 'send-failed', error: E409 }).state
     expect(s.error).toBe(E409)
@@ -907,7 +908,7 @@ describe('409 发送失败错误卡滞留（2026-09-10 测查：错误卡与运�
     }).state
     expect(s.running).toBe(true) // 活卡恢复
     expect(s.tools).toHaveLength(1)
-    expect(s.error).toBe(E409) // 缺陷实锚：snapshot spread 保留旧 error——红卡与活卡并存
+    expect(s.error).toBeNull() // 已修语义：快照重建清陈旧错误——红卡不再与活卡并存
   })
 
   it('send-failed 只写 error，不碰 running/tools/errorCode——并存的根源', () => {
@@ -925,16 +926,16 @@ describe('409 发送失败错误卡滞留（2026-09-10 测查：错误卡与运�
     expect(s.errorCode).toBeNull() // HTTP 层错误无 code（agent.error 的 code 值域不适用）
   })
 
-  it('settle-interrupt（HITL 暂停冻结）不清 error——错误卡陪冻结的问答卡', () => {
+  it('settle-interrupt（HITL 暂停冻结）清陈旧 error——红卡不陪冻结的问答卡', () => {
     let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
     s = runReducer(s, { type: 'send-failed', error: E409 }).state
     s = runReducer(s, { type: 'settle-interrupt', runId: 'r1', requests: [] }).state
     expect(s.interrupt).toMatchObject({ runId: 'r1' })
     expect(s.running).toBe(false)
-    expect(s.error).toBe(E409) // 缺陷实锚：暂停冻结不清陈旧错误
+    expect(s.error).toBeNull() // 已修语义：健康暂停转换清陈旧错误
   })
 
-  it('snapshot waiting_input（等待期刷新对账）同样不清 error', () => {
+  it('snapshot waiting_input（等待期刷新对账）同样清陈旧 error', () => {
     let s = runReducer(INITIAL_STATE, { type: 'send-failed', error: E409 }).state
     s = runReducer(s, {
       type: 'snapshot',
@@ -945,10 +946,10 @@ describe('409 发送失败错误卡滞留（2026-09-10 测查：错误卡与运�
       reasoningText: '',
     }).state
     expect(s.running).toBe(false) // waiting 快照不置 running（既有契约）
-    expect(s.error).toBe(E409) // 缺陷实锚：同款滞留
+    expect(s.error).toBeNull() // 已修语义：同款滞留已清
   })
 
-  it('清除锚：started / settle-completed / run.state(running) 三条路都清 error', () => {
+  it('清除锚：started / settle-completed / run.state(running·waiting) 四条路都清 error', () => {
     // ① HITL 续跑（resume 202 的乐观 started，或 SSE agent.started）
     let a = runReducer(INITIAL_STATE, { type: 'send-failed', error: E409 }).state
     a = runReducer(a, { type: 'started', runId: 'r1', now: NOW, continuation: true }).state
@@ -973,6 +974,17 @@ describe('409 发送失败错误卡滞留（2026-09-10 测查：错误卡与运�
     }).state
     expect(c.error).toBeNull()
     expect(c.running).toBe(true)
+
+    // ④ run.state=waiting_input（2026-09-10 修订补齐，与 running 分支对齐）
+    let d = runReducer(INITIAL_STATE, { type: 'send-failed', error: E409 }).state
+    d = runReducer(d, {
+      type: 'sse',
+      event: 'run.state',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', status: 'waiting_input', requests: [] },
+    }).state
+    expect(d.error).toBeNull()
+    expect(d.interrupt).toMatchObject({ runId: 'r1' })
   })
 
   it('时序解释：纯执行期（流式/工具事件）无任何清除路径——红卡挂到 run 结束', () => {
