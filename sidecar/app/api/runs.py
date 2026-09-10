@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import bg, db, events
-from ..agent import get_run_snapshot, request_cancel, run_stream
+from ..agent import _frozen_ctx_cleanup, get_run_snapshot, request_cancel, run_stream
 from ..bus import publish as bus_publish
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,8 @@ async def cancel(rid: str):
         if not db.cancel_waiting_run(rid, events.CANCELLED_MESSAGE, seq):
             raise HTTPException(status_code=409, detail="该任务不在等待用户输入状态")
         db.retire_pause_marker(run.get("pause_msg_id"))
+        # 终态清冻结块（与 worker 的 finish_run 清理同口径）
+        _frozen_ctx_cleanup(rid)
         await bus_publish(
             run["conversation_id"],
             {
@@ -151,15 +153,25 @@ async def resume(rid: str, body: ResumeBody):
 
     decisions = [d.model_dump(exclude_none=True) for d in body.decisions]
     # 先条件抢占置 running（resume_run 内 WHERE status='waiting_input'，返回 False
-    # 即已被裁决/状态漂移 → 409），再落 respond 用户消息、spawn 续跑 worker
+    # 即已被裁决/状态漂移 → 409），再落 respond 用户消息、spawn 续跑 worker。
+    # 抢占成功后的任何失败必须收尸（2026-09-10 review）：无 worker 的 running run
+    # 会把会话 409 钉死到重启
     if not db.resume_run(rid):
         raise HTTPException(status_code=409, detail="该任务不在等待用户输入状态")
-    # respond = 用户回答：同步落一条 user message，保持「messages 表是记忆恢复源」
-    # 的完整（checkpoint 里是合成 ToolMessage，重建记忆时才不丢用户的回答）
-    for d in decisions:
-        if d.get("type") == "respond" and (d.get("message") or "").strip():
-            # run_id 关联：回答与暂停消息同属一个回合（前端按 run 聚合）
-            db.create_user_message(run["conversation_id"], d["message"].strip(), rid=rid)
+    try:
+        # respond = 用户回答：同步落一条 user message，保持「messages 表是记忆恢复源」
+        # 的完整（checkpoint 里是合成 ToolMessage，重建记忆时才不丢用户的回答）
+        for d in decisions:
+            if d.get("type") == "respond" and (d.get("message") or "").strip():
+                # run_id 关联：回答与暂停消息同属一个回合（前端按 run 聚合）
+                db.create_user_message(run["conversation_id"], d["message"].strip(), rid=rid)
+    except Exception:
+        logger.exception("续跑回答落库失败（rid=%s）", rid)
+        try:
+            db.finish_run_if_running(rid, "error", "回答落库失败，请重试")
+        except Exception:
+            logger.exception("幽灵 run 收尸失败（rid=%s）", rid)
+        raise
 
     bg.spawn_background(
         run_stream(

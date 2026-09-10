@@ -470,7 +470,9 @@ class _ToolTimeoutMiddleware(AgentMiddleware):
                 content=(
                     f"[工具超时：{call.get('name')} 已运行 "
                     f"{_TOOL_TIMEOUT_SECONDS // 60} 分钟未完成——多半是文件过大或底层卡死。"
-                    "请缩小范围（分节/分文件/限行号区间）后重试，或换一条路径完成目标]"
+                    "注意：原调用可能仍在后台执行并最终写盘，请勿立即重写同一文件"
+                    "（后写者会整体覆盖先写者）；请缩小范围（分节/分文件/限行号区间）"
+                    "或换一条路径完成目标]"
                 ),
                 status="error",
                 tool_call_id=call.get("id") or "",
@@ -675,9 +677,19 @@ def _task_context_block(task_id: str, conversation_id: str) -> str:
 # 任务上下文块的 run 内冻结缓存：run_id -> 块文本。前缀缓存铁律——system 在整个
 # run 内必须字节稳定（见 _task_context_block docstring），便签/产物清单随块在 run
 # 起点定格：run 中途的更新不再自动可见，模型要新鲜状态自己 read_artifact/查目录
-# （工具就是它的眼睛）。HITL 续跑同 run_id 沿用冻结块（续段缓存还能接上）。容量
-# 守卫防长驻进程累积（run 结束不回调清理，靠覆盖+清空，条目只是短文本）。
+# （工具就是它的眼睛）。HITL 续跑同 run_id 沿用冻结块（续段缓存还能接上）。
+# 容量守卫（2026-09-10 review 收口）：只逐条淘汰最旧一条、绝不全表 clear——全清
+# 会把仍在跑的长 run 已冻结的块一并抹掉，该 run 下次调用现算新块=system 中途变化，
+# 正是本机制要防的缓存全废事故。常态下 run 终态即清理（_frozen_ctx_cleanup），
+# 守卫只是长驻进程的兜底，基本不触达。条目只是短文本。
 _FROZEN_CTX: dict[str, str] = {}
+
+
+def _frozen_ctx_cleanup(run_id: str | None) -> None:
+    """run 终态（completed/error）清掉自己的冻结块——waiting_input 暂停不清
+    （续跑同 run_id 沿用冻结块的语义）。幂等，缺省静默。"""
+    if run_id:
+        _FROZEN_CTX.pop(run_id, None)
 
 
 def _task_context_block_frozen(task_id: str, conversation_id: str, run_id: str | None) -> str:
@@ -686,8 +698,11 @@ def _task_context_block_frozen(task_id: str, conversation_id: str, run_id: str |
         return _task_context_block(task_id, conversation_id)
     block = _FROZEN_CTX.get(run_id)
     if block is None:
-        if len(_FROZEN_CTX) > 64:
-            _FROZEN_CTX.clear()
+        if len(_FROZEN_CTX) >= 64:
+            # 逐条淘汰最旧若干、插入后总量封顶 64（insertion order；当前 rid
+            # 尚未插入必是最新，被淘汰的只会是早已结束的 run 的残留条目）
+            while len(_FROZEN_CTX) >= 64:
+                _FROZEN_CTX.pop(next(iter(_FROZEN_CTX)))
         block = _task_context_block(task_id, conversation_id)
         _FROZEN_CTX[run_id] = block
     return block
@@ -1128,10 +1143,20 @@ def _attach_step(top_steps: list[dict], step: dict, agent_id: str | None) -> Non
 
 
 def _find_pending(steps: list[dict], payload: dict) -> dict | None:
-    """在步骤树里按 tool_call_id（缺省退化按工具名）找 running 的待回填步骤。"""
+    """在步骤树里按 tool_call_id（缺省退化按工具名）找可回填的步骤。
+
+    可回填 = running，或 error 但 error 是断流重试标记（2026-09-10 review：
+    tools 节点失败的瞬时错误（子代理 LLM 断流上抛）重试时 langgraph 以同
+    tool_call_id 复跑该工具调用——_retire_broken_steps 先行标死的步骤必须允许
+    被真实 tool.result 覆写，否则重试成功后步骤永久显示「LLM 流中断」，而复用
+    同 id 的子代理新事件又挂在同一张卡下、自相矛盾。按名退化匹配不放开到
+    error 态——同工具名多步骤时可能复活错步骤）。"""
     for s in reversed(steps):
-        if s["status"] == "running":
-            tcid = payload.get("tool_call_id")
+        tcid = payload.get("tool_call_id")
+        revivable = s["status"] == "running" or (
+            bool(tcid) and s["status"] == "error" and s.get("error") == _RETRY_RETIRED_ERROR
+        )
+        if revivable:
             if tcid and s.get("tool_call_id") == tcid:
                 return s
             if not tcid and s["tool"] == payload["tool"]:
@@ -1140,6 +1165,40 @@ def _find_pending(steps: list[dict], payload: dict) -> dict | None:
         if hit is not None:
             return hit
     return None
+
+
+def _revive_step(top_steps: list[dict], payload: dict) -> dict | None:
+    """按 tool_call_id 找已有步骤并复活为 running（tools 节点重试复用同 id 重新
+    执行时，该步骤可能已被断流收尾标成 error；不复活则 trace 里出现两张同 id 卡）。
+
+    只认断流假终态（error==标记）——done/真实 error 的同 id 重发不复活（防杂散
+    重复事件把已完成步骤拖回运行中）。复位仅执行态字段（status/error/summary/
+    endedAt/startedAt）——text/reasoning 是第一次调用的封段产物，覆写会丢旁白；
+    cur_* 缓冲也不动（重试后的新旁白归下一次 tool.called 封段）。"""
+    tcid = payload.get("tool_call_id")
+    if not tcid:
+        return None
+    for s in top_steps:
+        if (
+            s.get("tool_call_id") == tcid
+            and s["status"] == "error"
+            and s.get("error") == _RETRY_RETIRED_ERROR
+        ):
+            s["status"] = "running"
+            s["error"] = None
+            s["summary"] = ""
+            s["endedAt"] = None
+            s["startedAt"] = int(time.time() * 1000)
+            return s
+        hit = _revive_step(s["children"], payload)
+        if hit is not None:
+            return hit
+    return None
+
+
+# 断流重试收尾的标记文案（_retire_broken_steps 落、_find_pending/_revive_step 据
+# 此识别可覆写/复活的假终态——tools 节点失败重试会复用同 tool_call_id 真实执行）
+_RETRY_RETIRED_ERROR = "LLM 流中断，已自动重试"
 
 
 def _llm_retry_step(attempt: int, err: str, backoff: float) -> dict:
@@ -1166,13 +1225,17 @@ def _retire_broken_steps(top_steps: list[dict], rid: str, cid: str, _publish) ->
     """断流重试前把残留的 running 步骤收尾为终态——失败那轮的 tool 调用实际未执行
     （流中断在工具节点之前），重试会以全新 tool_call_id 重新发起，旧步骤不收尾会
     在 trace 历史里永远转圈。顶层步骤同步补发 tool.result（error）让前端实时卡片收敛；
-    子代理 children 只改状态不发事件（agent_id 不在步骤里、且父卡已收敛）。"""
+    子代理 children 只改状态不发事件（agent_id 不在步骤里、且父卡已收敛）。
+
+    已知边界（2026-09-10 review 收口）：tools 节点失败的瞬时错误（子代理 LLM 断流
+    上抛）重试会**复用同 tool_call_id** 复跑——此前的假终态由 _find_pending（放宽
+    回填）与 _revive_step（同 id tool.called 复活）接住覆写，不再永久错标。"""
     now = int(time.time() * 1000)
 
     def mark(step: dict) -> None:
         if step["status"] == "running":
             step["status"] = "error"
-            step["error"] = "LLM 流中断，已自动重试"
+            step["error"] = _RETRY_RETIRED_ERROR
             step["endedAt"] = now
         for c in step["children"]:
             mark(c)
@@ -1308,16 +1371,20 @@ def _run_agent_stream(
                                 "agent_id": payload.get("agent_id"),
                             },
                         )
-                        step = _new_trace_step(payload)
-                        if not payload.get("agent_id"):
-                            # 主 agent 调用：把之前流出的正文封为旁白、思考流封为本步
-                            # 骤的 reasoning（同轮连发的后续调用两者均为空串）；子代理
-                            # 调用不封段（其正文 token 不透传，reasoning 走 agent_id 归属）
-                            step["text"] = "".join(cur_text_parts)
-                            cur_text_parts.clear()
-                            step["reasoning"] = "".join(cur_reasoning)
-                            cur_reasoning.clear()
-                        _attach_step(top_steps, step, payload.get("agent_id"))
+                        # 先尝试复活（tools 节点断流重试复用同 tool_call_id 重新执行，
+                        # 此前步骤可能已被假终态标死）；复活不动封段字段与 cur_* 缓冲
+                        step = _revive_step(top_steps, payload)
+                        if step is None:
+                            step = _new_trace_step(payload)
+                            if not payload.get("agent_id"):
+                                # 主 agent 调用：把之前流出的正文封为旁白、思考流封为本步
+                                # 骤的 reasoning（同轮连发的后续调用两者均为空串）；子代理
+                                # 调用不封段（其正文 token 不透传，reasoning 走 agent_id 归属）
+                                step["text"] = "".join(cur_text_parts)
+                                cur_text_parts.clear()
+                                step["reasoning"] = "".join(cur_reasoning)
+                                cur_reasoning.clear()
+                            _attach_step(top_steps, step, payload.get("agent_id"))
                         _sync_sub_reasoning(top_steps, sub_reasoning_bufs)
                         set_live_trace(
                             rid,
@@ -1807,6 +1874,7 @@ async def run_stream(
             # 先落库后发事件（与 completed 分支一致）：客户端收到终态事件即可立即对账
             seq = next_seq()
             db.finish_run(rid, "error", error, last_seq=seq, token_usage_json=_usage_json_final(rid), error_code=error_code)
+            _frozen_ctx_cleanup(rid)  # 终态清冻结块（前缀缓存铁律的缓存不再占用）
             # code（契约 additive）：错误定性（cancelled/llm_unavailable/llm_auth/internal，
             # 2026-09-08 扩展取值域），前端据此选人话文案与操作入口
             await publish(
@@ -1861,6 +1929,7 @@ async def run_stream(
         _save_merged_trace(rid, cid, msg["id"], trace, duration_ms, files=segment_files)
         seq = next_seq()
         db.finish_run(rid, "completed", last_seq=seq, token_usage_json=_usage_json_final(rid))
+        _frozen_ctx_cleanup(rid)
         await publish(
             cid,
             {
@@ -1900,6 +1969,7 @@ async def run_stream(
                 rid, "error", outer_error, last_seq=seq,
                 token_usage_json=_usage_json_final(rid), error_code=outer_code,
             )
+            _frozen_ctx_cleanup(rid)
             # code 恒有键（契约 2026-08-27 additive）：此前此处漏发 code，靠前端 ?? null 兜住
             await publish(
                 cid,

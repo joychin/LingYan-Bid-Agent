@@ -1428,3 +1428,94 @@ def test_wrap_tool_call_runs_off_event_loop_in_real_graph():
     assert seen, "探针未被调用（真图未走到工具节点）"
     assert seen["loop"] is False, "wrap_tool_call 跑在事件循环线程上——超时中间件的阻塞等待会卡死 loop"
     assert seen["main"] is False
+
+
+def test_retry_retired_steps_revive_on_same_call_id():
+    """断流重试假终态收口（2026-09-10 review）：tools 节点失败的瞬时错误重试会
+    复用同 tool_call_id 复跑——先标死的步骤要能被同 id 的真实 tool.result 覆写
+    （_find_pending 放宽）与同 id 的 tool.called 复活（不产生第二张卡），
+    done/真实 error 不受影响。"""
+    from app.agent import (
+        _RETRY_RETIRED_ERROR,
+        _find_pending,
+        _new_trace_step,
+        _retire_broken_steps,
+        _revive_step,
+    )
+
+    top = [_new_trace_step({"tool": "task", "tool_call_id": "call_1", "args": {"x": 1}})]
+    top[0]["text"] = "派发前旁白"  # 封段产物
+    published = []
+    _retire_broken_steps(top, "r1", "c1", lambda ev, p: published.append((ev, p)))
+    assert top[0]["status"] == "error" and top[0]["error"] == _RETRY_RETIRED_ERROR
+    assert len(published) == 1 and published[0][1]["error"] == _RETRY_RETIRED_ERROR
+
+    # ① 回填放宽：同 id 的真实 tool.result 找得到假终态步骤
+    hit = _find_pending(top, {"tool": "task", "tool_call_id": "call_1"})
+    assert hit is top[0]
+
+    # ② 同 id 的 tool.called 复活：复位执行态、保留封段字段、不新建第二张
+    revived = _revive_step(top, {"tool": "task", "tool_call_id": "call_1", "args": {}})
+    assert revived is top[0]
+    assert len(top) == 1
+    assert top[0]["status"] == "running" and top[0]["error"] is None and top[0]["endedAt"] is None
+    assert top[0]["text"] == "派发前旁白"  # 封段产物不被覆写
+
+    # ③ 真实终态不受影响：done / 真实 error 既不回填也不复活
+    top[0]["status"] = "done"
+    assert _find_pending(top, {"tool": "task", "tool_call_id": "call_1"}) is None
+    assert _revive_step(top, {"tool": "task", "tool_call_id": "call_1"}) is None
+    top[0]["status"] = "error"
+    top[0]["error"] = "真实工具错误"
+    assert _find_pending(top, {"tool": "task", "tool_call_id": "call_1"}) is None
+    assert _revive_step(top, {"tool": "task", "tool_call_id": "call_1"}) is None
+
+    # ④ 子代理 children 里的假终态同样可回填（递归路径）
+    child = _new_trace_step({"tool": "task", "tool_call_id": "call_kid"})
+    child["status"] = "error"
+    child["error"] = _RETRY_RETIRED_ERROR
+    top2 = [
+        {
+            "id": "parent", "tool": "task", "status": "done", "summary": "", "error": None,
+            "tool_call_id": "call_p", "children": [child], "args": {},
+        }
+    ]
+    assert _find_pending(top2, {"tool": "task", "tool_call_id": "call_kid"}) is child
+    assert _revive_step(top2, {"tool": "task", "tool_call_id": "call_kid"}) is child
+
+
+def test_frozen_ctx_eviction_and_cleanup(monkeypatch):
+    """_FROZEN_CTX 容量守卫收口（2026-09-10 review）：满 64 只逐条淘汰最旧、
+    绝不全表 clear（旧版 clear 会把在跑长 run 的冻结块一并抹掉，system 中途
+    变化=前缀缓存铁律事故复发）；run 终态由 _frozen_ctx_cleanup 清自己的条目。"""
+    from app import agent as am
+
+    monkeypatch.setattr(am, "_task_context_block", lambda tid, cid: f"块({tid})")
+    saved = dict(am._FROZEN_CTX)
+    am._FROZEN_CTX.clear()
+    try:
+        # 终态清理：清自己的、幂等、缺省静默
+        am._FROZEN_CTX["r1"] = "块1"
+        am._frozen_ctx_cleanup("r1")
+        assert "r1" not in am._FROZEN_CTX
+        am._frozen_ctx_cleanup(None)
+        am._frozen_ctx_cleanup("r_missing")
+
+        # 守卫：预塞 80 条（模拟清理失灵的长驻），新增一条后总量被压回 64、
+        # 最旧的被淘汰、其余全保留（旧版 clear() 会清成 1 条）
+        for i in range(80):
+            am._FROZEN_CTX[f"r_old_{i:03d}"] = f"块{i}"
+        am._FROZEN_CTX.pop("r_active", None)
+        # 在跑长 run 的块：为验证不被误伤，把 r_active 塞为第 81 个（最新）
+        am._FROZEN_CTX["r_active"] = "活跃块"
+        am._task_context_block_frozen("t_x", "c_x", "r_new")
+        assert len(am._FROZEN_CTX) <= 64
+        assert "r_old_000" not in am._FROZEN_CTX  # 最旧被淘汰
+        assert "r_active" in am._FROZEN_CTX  # 活跃块不被全清误伤
+        assert "r_new" in am._FROZEN_CTX and am._FROZEN_CTX["r_new"]
+        # 二次取值字节稳定（run 内冻结语义）
+        again = am._task_context_block_frozen("t_x", "c_x", "r_new")
+        assert again == am._FROZEN_CTX["r_new"]
+    finally:
+        am._FROZEN_CTX.clear()
+        am._FROZEN_CTX.update(saved)

@@ -1012,3 +1012,84 @@ describe('409 发送失败错误卡（2026-09-10 测查→同日修订：对账/
     expect(s.error).toBe(E409) // 缺陷实锚：流式/工具事件均不触碰 error——直到 settle-completed 才消失
   })
 })
+
+describe('断流重试假终态（tools 节点失败复用同 id 复跑）', () => {
+  const RETRY_ERR = 'LLM 流中断，已自动重试'
+
+  function seedWithErrorStep() {
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', args: {}, tool_call_id: 't1', seq: 1 },
+    }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.result',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', tool_call_id: 't1', summary: RETRY_ERR, error: RETRY_ERR, seq: 2 },
+    }).state
+    return s
+  }
+
+  it('同 id 的真实 tool.result 覆写假终态（fillStep 放宽）', () => {
+    let s = seedWithErrorStep()
+    expect(s.tools[0].status).toBe('error')
+    expect(s.tools[0].error).toBe(RETRY_ERR)
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.result',
+      now: NOW + 5_000,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', tool_call_id: 't1', summary: '已完成 3.1 节', seq: 3 },
+    }).state
+    expect(s.tools).toHaveLength(1)
+    expect(s.tools[0].status).toBe('done')
+    expect(s.tools[0].error).toBeUndefined()
+    expect(s.tools[0].summary).toBe('已完成 3.1 节')
+  })
+
+  it('同 id 的 tool.called 复活假终态为 running、不新建第二张卡、封段保留', () => {
+    let s = seedWithErrorStep()
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW + 1_000,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', args: {}, tool_call_id: 't1', seq: 3 },
+    }).state
+    expect(s.tools).toHaveLength(1) // 幂等：复用原步骤
+    expect(s.tools[0].status).toBe('running')
+    expect(s.tools[0].error).toBeNull()
+  })
+
+  it('真实终态不回填不复活（done / 真实 error）', () => {
+    let s = seedWithErrorStep()
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.result',
+      now: NOW + 5_000,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', tool_call_id: 't1', summary: '完成', seq: 3 },
+    }).state
+    expect(s.tools[0].status).toBe('done')
+    // done 后的同 id 重发：幂等丢弃（既有双连接防线），不复活不新建
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW + 6_000,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', args: {}, tool_call_id: 't1', seq: 4 },
+    }).state
+    expect(s.tools).toHaveLength(1)
+    expect(s.tools[0].status).toBe('done')
+    // 真实 error 的 result 不覆写（标记文案不同才算假终态）
+    let s2 = seedWithErrorStep()
+    s2.tools = s2.tools.map((t) => ({ ...t, error: '真实工具错误' }))
+    s2 = runReducer(s2, {
+      type: 'sse',
+      event: 'tool.result',
+      now: NOW + 7_000,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'task', tool_call_id: 't1', summary: '完成', seq: 5 },
+    }).state
+    expect(s2.tools[0].status).toBe('error') // 不被覆写
+    expect(s2.tools[0].error).toBe('真实工具错误')
+  })
+})

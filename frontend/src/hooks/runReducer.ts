@@ -178,9 +178,16 @@ function attachStep(steps: ToolStep[], step: ToolStep, agentId?: string | null):
   return [...steps, step]
 }
 
+/** 断流重试假终态标记（与 sidecar agent._RETRY_RETIRED_ERROR 同文案）：tools 节点
+ * 失败的瞬时错误重试会复用同 tool_call_id 真实执行，被标死的步骤允许被覆写/复活。 */
+const RETRY_RETIRED_ERROR = 'LLM 流中断，已自动重试'
+
 /** 不可变回填：按 tool_call_id（缺省退化按工具名）找执行中步骤写终态。
  *  paused 也匹配：续跑段 409 双窗口（SSE started 先到、乐观 revive 未发生）下，
- *  冻结步骤收到 tool.result 时服务端它确实在跑——照常回填终态。 */
+ *  冻结步骤收到 tool.result 时服务端它确实在跑——照常回填终态。
+ *  断流假终态（error 且文案=重试标记）也匹配且要求 id 相等：tools 节点重试复用
+ *  同 id 真实执行，假终态要能被真实结果覆写（按名退化不放开——同工具名多步骤
+ *  可能填错步骤）。 */
 function fillStep(
   steps: ToolStep[],
   data: { tool?: string; tool_call_id?: string | null; summary?: string; error?: string },
@@ -188,8 +195,12 @@ function fillStep(
 ): ToolStep[] {
   for (let i = steps.length - 1; i >= 0; i--) {
     const s = steps[i]
-    if (s.status === 'running' || s.status === 'paused') {
-      const tcid = data.tool_call_id ?? null
+    const tcid = data.tool_call_id ?? null
+    const fillable =
+      s.status === 'running' ||
+      s.status === 'paused' ||
+      (s.status === 'error' && s.error === RETRY_RETIRED_ERROR && !!tcid)
+    if (fillable) {
       const match = tcid ? s.toolCallId === tcid : s.tool === data.tool
       if (match) {
         const isError = !!data.error
@@ -217,6 +228,32 @@ function fillStep(
 }
 
 /** 树里是否已有该 tool_call_id（双连接重影的最后防线：同调用只入树一次）。 */
+/** 断流假终态复活（sidecar agent._revive_step 同口径）：同 tool_call_id 的
+ *  tool.called 重发=tools 节点重试复用同 id 真实执行，把标死的步骤复位 running。
+ *  只认假终态（error 且文案=标记）——running 的重复投递维持幂等丢弃（引用不变），
+ *  done/真实 error 不动（防杂散重复事件拖回运行中）。封段字段（text/reasoning）
+ *  保留——它们是第一次调用的产物。 */
+function reviveStep(steps: ToolStep[], toolCallId: string, now: number): ToolStep[] {
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i]
+    if (s.toolCallId === toolCallId && s.status === 'error' && s.error === RETRY_RETIRED_ERROR) {
+      return [
+        ...steps.slice(0, i),
+        { ...s, status: 'running' as const, error: null, summary: '', endedAt: null, startedAt: now },
+        ...steps.slice(i + 1),
+      ]
+    }
+    if (s.children.length > 0) {
+      const children = reviveStep(s.children, toolCallId, now)
+      if (children !== s.children) {
+        return [...steps.slice(0, i), { ...s, children }, ...steps.slice(i + 1)]
+      }
+    }
+  }
+  return steps
+}
+
+/** 幂等判定：树内是否已有该 tool_call_id 的步骤（双连接窗口去重）。 */
 function hasStepByCallId(steps: ToolStep[], toolCallId: string): boolean {
   return steps.some(
     (s) => s.toolCallId === toolCallId || (s.children.length > 0 && hasStepByCallId(s.children, toolCallId)),
@@ -545,9 +582,14 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
       }
       return result({ ...s, reasoningText: s.reasoningText + (data.text ?? ''), retrying: null })
     case 'tool.called': {
-      // 幂等兜底：双连接窗口内同一调用可能投递两次（单飞订阅已基本防住）
+      // 幂等兜底：双连接窗口内同一调用可能投递两次（单飞订阅已基本防住）。
+      // 例外=断流重试复用同 id 的真实执行：把假终态步骤复活为 running
+      //（sidecar _revive_step 同口径），否则重试成功后卡片永久显示「LLM 流中断」。
       const callId = data.tool_call_id ?? null
-      if (callId && hasStepByCallId(s.tools, callId)) return result(orig)
+      if (callId && hasStepByCallId(s.tools, callId)) {
+        const revived = reviveStep(s.tools, callId, now)
+        return result(revived === s.tools ? orig : { ...s, tools: revived, retrying: null })
+      }
       const step = newStep(`${now}-${s.stepCounter}`, data, now)
       s = { ...s, stepCounter: s.stepCounter + 1 }
       if (!data.agent_id) {

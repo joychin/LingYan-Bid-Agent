@@ -6,6 +6,7 @@ P4：会话必须归属任务（POST 必填 task_id）。2026-08-31 重构：文
 
 import asyncio
 import json
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -14,6 +15,8 @@ from pydantic import BaseModel
 from .. import agent, bg, db, events, titler
 from .. import config as cfg
 from ..agent import delete_thread_memory, run_stream
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -150,9 +153,21 @@ async def create_message(cid: str, body: NewMessageBody):
     thinking = body.thinking or "low"
     # 模型 profile：未知 id（配置已删）静默回落 default，不为此打断对话
     model = body.model if body.model and cfg.get_profile(body.model) else ""
-    # 先建 run 再落用户消息：messages.run_id 关联所属回合（前端按 run 聚合消息段）
-    run = db.create_run(cid, thinking, model)
-    msg = db.create_user_message(cid, content, rid=run["id"])
+    # 先建 run 再落用户消息：messages.run_id 关联所属回合（前端按 run 聚合消息段）。
+    # run 行已提交后的任何失败必须收尸（2026-09-10 review）：无 worker 的 running
+    # run 会把会话 409 钉死到重启（cancel 端点也无此 rid 的取消事件）
+    try:
+        run = db.create_run(cid, thinking, model)
+        msg = db.create_user_message(cid, content, rid=run["id"])
+    except Exception:
+        logger.exception("发消息落库失败（cid=%s）", cid)
+        rid = locals().get("run", {}).get("id")
+        if rid:
+            try:
+                db.finish_run_if_running(rid, "error", "消息落库失败，请重试")
+            except Exception:
+                logger.exception("幽灵 run 收尸失败（rid=%s）", rid)
+        raise
 
     # 自动命名（fire-and-forget）：默认标题时后台生成，条件收敛在 titler 内部
     bg.spawn_background(titler.maybe_generate_title(cid, content))
