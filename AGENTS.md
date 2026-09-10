@@ -867,6 +867,34 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
   等夹具同批清成裸名**（原夹具自带「第三章/3.1」会叠加成「第一章 第三章」），
   sidecar 631 绿+前端 tsc/oxlint/build 绿。历史已产出整本不自动改——重合册
   即得编号（派生物语义）。
+  **全仓 review 修复批（2026-09-10，四批 14 条：P1×1+P2×7+P3×6；四 commit=
+  5b60cc5/b09de99/4972a0c/fa049c2，check.sh 全绿含 dto.gen.ts 补再生）**：
+  四路并行 review（run 管线/docx 工具链/前端/安全面）后按拍板范围修复，缓做
+  四件=run worker 独立线程池、样式 id 内容比对重映射、fetch_url/baidu DNS 固定、
+  Rust 端口清扫收窄。批次 A（数据正确性+安全）：①element_map 升版 2、读侧
+  只认 ≥2——坐标系修复前的折叠坐标旧 map 被版本护栏拒收，注入走既有「幂等重跑
+  +md 漂移比对」自动换新坐标（**素材侧存量错位注入的根治**；此前「即刻生效
+  无需重传」的说法只对 docx_source_inject 成立）；②KB docx 图片抽取读前查
+  ZipInfo.file_size 三道闸（单条 50MB/累计 200MB/张数上限提前到读阶段——zip
+  炸弹 OOM 面）；③raw 端点四站恒 attachment+nosniff、FastAPI /docs 关闭、
+  Origin 守卫中间件（带 Origin 且非本机白名单 403，堵浏览器模式跨站简单请求）、
+  fs_guard 异常补 ValueError。批次 B（docx 交付防线）：assemble_tender 透传
+  numbering（重组装不清用户选的编号格式）；docx_source_inject 重复注入拦截
+  （itertext 对称 shingle ≥60% 拒，格式件翻倍不可再直达合册）；validate_body
+  坏节隔离（单损坏 docx 点名剔除不拖垮全局）；check_pipeline 缺口列头变体匹配
+  +dispatch_enrich 册名 sanitize（两处口径分叉收口）。批次 C（run 管线自愈
+  边界）：①断流重试假终态收口——tools 节点失败重试复用同 tool_call_id，
+  `_find_pending` 放宽回填（error==`_RETRY_RETIRED_ERROR` 标记）+`_revive_step`
+  同 id tool.called 复活（保留封段字段），前端 fillStep/幂等分支同口径 parity；
+  ②`_FROZEN_CTX` 守卫 clear() 全清改逐条淘汰+四终态清理点 `_frozen_ctx_cleanup`
+  （waiting_input 不清、续跑沿用冻结块）；③幽灵 run 收尸（create_run/resume_run
+  后落库失败 finish_run_if_running）+超时文案警示「勿立即重写同一文件」。批次 D
+  （前端）：等待死卡三出口（convergeRun 带 runId 指认同 run 才清冻结卡；decide/
+  send 的 interrupt 409 与 cancel waiting 404/409 强制对账或本地 settle）；run.state/
+  snapshot running 清跨窗口续跑残留 interrupt；snapshot merge 不回退未封口思考；
+  useAutoSave 闸门统一进 doSave（saveNow 同闸、force 直通，WorkbenchViewer
+  finishEdit 拦下留编辑态）；向导 fileNote 只进 decisions；DirectoryEditor 改名框
+  Escape 阻断冒泡。测试净增 19 例（sidecar 657/前端 204）。
 - **tender-body 调度优化批（2026-09-08，straggler/串行检索治理；背景=整本 40min
   解剖：批被最慢节钉死 813s、先完成子代理均空等 ~400s、批间主线程轮 1.3-2min×5、
   指引检索 32 节=32 轮串行）**：①**整本派发按「均衡分波」不再按一级章节分批**——
