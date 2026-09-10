@@ -273,7 +273,12 @@ async def read_raw(task_id: str, path: str):
         raise HTTPException(status_code=404, detail="工作文件不存在")
     if target.suffix != ".docx":
         raise HTTPException(status_code=400, detail="本端点只服务 .docx（markdown 用 /workbench/content）")
-    return FileResponse(target, media_type=_DOCX_MEDIA_TYPE)
+    return FileResponse(
+        target,
+        filename=target.name,
+        media_type=_DOCX_MEDIA_TYPE,
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 class WorkbenchWrite(BaseModel):

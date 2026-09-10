@@ -295,6 +295,41 @@ def test_unfriendly_image_converted_to_png():
     assert data3 == b"\x89PNG-rest" and ext3 == ".png"
 
 
+def test_extract_docx_zip_guards(tmp_path, monkeypatch):
+    """zip 解压护栏（2026-09-10 review）：单条声明超限跳过、累计声明超限早停、
+    张数上限提前到读阶段——高压缩比 media 条目可在小压缩包里声明数 GB 解压量，
+    必须读前用 file_size 拦，否则 OOM。阈值缩小驱动逻辑，真实阈值 50MB/200MB。"""
+    import zipfile
+
+    from app.knowledge import images as images_mod
+
+    _setup(tmp_path, monkeypatch)
+    src = store.kb_files_dir() / "护栏.docx"
+    src.write_bytes(_make_docx_with_images(tmp_path))
+    member, total, count = (
+        images_mod._MAX_MEMBER_BYTES,
+        images_mod._MAX_TOTAL_BYTES,
+        images_mod._MAX_IMAGES,
+    )
+    with zipfile.ZipFile(src) as z:
+        sizes = [i.file_size for i in z.infolist() if i.filename.startswith("word/media/")]
+    assert len(sizes) == 3
+
+    # 单条上限：真实 PNG 全部「声明超限」→ 全跳过，空结果不打崩
+    monkeypatch.setattr(images_mod, "_MAX_MEMBER_BYTES", 16)
+    assert images_mod._extract_docx(src) == []
+
+    # 累计上限：首条放行、第二条累计超限早停 → 恰好 1 条
+    monkeypatch.setattr(images_mod, "_MAX_MEMBER_BYTES", member)
+    monkeypatch.setattr(images_mod, "_MAX_TOTAL_BYTES", sizes[0] + 1)
+    assert len(images_mod._extract_docx(src)) == 1
+
+    # 张数上限在读阶段生效（不再先解压全部再截断）
+    monkeypatch.setattr(images_mod, "_MAX_TOTAL_BYTES", total)
+    monkeypatch.setattr(images_mod, "_MAX_IMAGES", 2)
+    assert len(images_mod._extract_docx(src)) == 2
+
+
 # ---------- 锚点回文核对 + 自动确认（两主人模型） ----------
 
 _CERT_MD = (

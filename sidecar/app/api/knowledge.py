@@ -7,6 +7,7 @@
 
 import hashlib
 import json
+import mimetypes
 import os
 import uuid
 from functools import lru_cache
@@ -272,7 +273,12 @@ async def get_material_image(kid: str, name: str):
             content=_convert_unfriendly_image(str(path), path.stat().st_mtime_ns),
             media_type="image/png",
         )
-    return FileResponse(path)
+    return FileResponse(
+        path,
+        filename=path.name,
+        media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 @lru_cache(maxsize=8)

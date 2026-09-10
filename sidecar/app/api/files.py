@@ -97,8 +97,9 @@ async def list_files(task_id: str):
 @router.get("/files/{name}/raw")
 async def read_file_raw(name: str, task_id: str):
     """来源原件原始字节：面板预览用（pdf/docx 在浏览器本地渲染，文件不出本机）。
-    containment 与 delete_file 同款；不设扩展白名单——读用户自己上传的文件
-    无风险，是否可渲染由前端按扩展名分流（与 kb items raw 同先例）。"""
+    containment 与 delete_file 同款；不设扩展白名单——但**恒 attachment 下发**
+    （前端 fetch+blob 预览不受影响；inline 会把上传的 html/svg 在浏览器模式下
+    于 sidecar 同源渲染，构成存储型 XSS——kb raw 端点同先例）。"""
     _require_task(task_id)
     clean = _clean_name(name)
     if clean is None:
@@ -108,7 +109,12 @@ async def read_file_raw(name: str, task_id: str):
     if not target.is_relative_to(files_dir) or not target.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-    return FileResponse(target, media_type=media_type)
+    return FileResponse(
+        target,
+        filename=target.name,
+        media_type=media_type,
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.delete("/files/{name}")

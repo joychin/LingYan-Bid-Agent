@@ -113,4 +113,5 @@ async def template_raw(key: str):
         str(p),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         filename=p.name,
+        headers={"X-Content-Type-Options": "nosniff"},
     )

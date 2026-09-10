@@ -162,6 +162,11 @@ def test_raw_roundtrip(client):
     assert r.content == payload
     assert r.headers["content-type"].startswith("application/pdf")
 
+    # 恒 attachment + nosniff（2026-09-10 review：inline 会把上传的 html/svg 在
+    # 浏览器模式下于 sidecar 同源渲染=存储型 XSS；前端 fetch+blob 预览不受影响）
+    assert r.headers["content-disposition"].startswith("attachment")
+    assert r.headers.get("x-content-type-options") == "nosniff"
+
     # 未知扩展名兜底 octet-stream；不存在/越界 404
     upload_file(client, tid, "附件.dat", b"zz")
     assert client.get(f"/api/files/{quote('附件.dat')}/raw", params={"task_id": tid}).headers[

@@ -60,7 +60,9 @@ class GuardedBackend(FilesystemBackend):
     def _deny(self, file_path: str) -> tuple[str, ...] | None:
         try:
             resolved = self._resolve_path(file_path)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
+            # ValueError：virtual_mode 对 ../ 越根/绝对路径逃逸抛的就是它——
+            # 吞掉让父类用自己的标准错误返回，而不是异常穿出 guard 被中间件兜成通用串
             return None  # 解析失败交给父类返回标准错误
         rel = resolved.relative_to(self.cwd)
         if _is_protected(rel.parts):

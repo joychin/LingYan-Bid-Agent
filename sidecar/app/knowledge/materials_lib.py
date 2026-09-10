@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 # 在跑解析（单飞）：连点/重复触发跳过
 _inflight: set[str] = set()
 
+# element_map.json 坐标系版本。v1 = 表格整块折叠坐标（2026-09-10 前的旧产物，
+# 表格后行号累计漂移、按行号注入会拷错元素）；v2 = 表格逐行展开、与最终 md
+# 对齐。读侧只认 ≥ 此版本——旧版返回 None，注入侧的「补跑解析 + md 漂移比对」
+# 路径自动接管（坐标系修复 md 逐字节不变，比对必放行）。
+ELEMENT_MAP_VERSION = 2
+
 
 def mt_files_dir() -> Path:
     return cfg.materials_dir() / "files"
@@ -49,8 +55,10 @@ def mt_parse_paths(file_name: str) -> tuple[Path, Path, Path]:
 def read_element_map(file_name: str) -> list[list[int]] | None:
     """docx 元素映射（[body 子元素全序索引, 起行, 止行]，最终 md 行号闭区间）。
 
-    仅 docx 原件解析时产出（pdf/txt 无元素可映射）；缺文件或损坏返回 None，
-    调用方据此决定是否重跑解析补产（run_parse 幂等，md 内容不变）。
+    仅 docx 原件解析时产出（pdf/txt 无元素可映射）；缺文件、损坏或**版本过旧**
+    返回 None，调用方据此决定是否重跑解析补产（run_parse 幂等，md 内容不变）。
+    版本护栏见 ELEMENT_MAP_VERSION：坐标系语义变过版，旧版 map 与现行 md 行号
+    对不齐（表格后错位），宁可重跑解析也不能直接消费。
     """
     p = mt_parse_dir(file_name) / "element_map.json"
     if not p.is_file():
@@ -59,7 +67,11 @@ def read_element_map(file_name: str) -> list[list[int]] | None:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    el = data.get("element_lines") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or not isinstance(data.get("version"), int):
+        return None
+    if data["version"] < ELEMENT_MAP_VERSION:
+        return None
+    el = data.get("element_lines")
     return el if isinstance(el, list) and el else None
 
 
@@ -153,7 +165,7 @@ def run_parse(fid: str) -> dict:
         # docx 元素映射（行号区间 → 原件 body 子元素），素材元素级注入的寻址基础
         write_atomic(
             mt_parse_dir(f["file_name"]) / "element_map.json",
-            json.dumps({"version": 1, "file_name": f["file_name"], "element_lines": element_lines}, ensure_ascii=False),
+            json.dumps({"version": ELEMENT_MAP_VERSION, "file_name": f["file_name"], "element_lines": element_lines}, ensure_ascii=False),
         )
     warnings: list[str] = []
     if not outline:

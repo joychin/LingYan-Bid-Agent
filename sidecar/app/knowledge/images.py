@@ -22,6 +22,10 @@ _MIN_EDGE = 200      # 短边下限（px）——过滤 icon/分割线
 _MIN_PAGE_RATIO = 0.10  # PDF 图面积/页面积下限——过滤装饰图
 _MAX_IMAGES = 60     # 单文件抽取上限
 _CONSEC_SCAN = 6     # 连续 N 张图无正文间隔 → 附件扫描区，跳过
+# zip 解压护栏（声明值，读前检查——KB 上传白名单收 docx、文件天然来自对手方，
+# 高压缩比 media 条目可在几 KB 压缩包里声明数 GB 解压量，不设限即 OOM 打死 sidecar）
+_MAX_MEMBER_BYTES = 50 * 1024 * 1024    # 单条目解压上限
+_MAX_TOTAL_BYTES = 200 * 1024 * 1024   # 单文件累计解压上限
 
 _MAGIC = [
     (b"\x89PNG", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"GIF8", ".gif"),
@@ -109,13 +113,29 @@ def _extract_docx(src: Path) -> list[tuple[bytes, str]]:
                 media_skip.update(run_imgs)
             run_imgs = []
     out: list[tuple[bytes, str]] = []
+    total_declared = 0
     with zipfile.ZipFile(src) as z:
-        for name in z.namelist():
-            if not name.startswith("word/media/"):
+        for info in z.infolist():
+            name = info.filename
+            if not name.startswith("word/media/") or name in media_skip:
                 continue
-            if name in media_skip:
+            if info.file_size > _MAX_MEMBER_BYTES:
+                logger.warning(
+                    "图片抽取跳过超大条目 %s（声明解压 %.0fMB > 上限）：%s",
+                    name, info.file_size / 1024 / 1024, src.name,
+                )
                 continue
-            data = z.read(name)
+            total_declared += info.file_size
+            if total_declared > _MAX_TOTAL_BYTES:
+                logger.warning(
+                    "图片抽取提前停止：media 累计声明解压超 %.0fMB（%s）",
+                    _MAX_TOTAL_BYTES / 1024 / 1024, src.name,
+                )
+                break
+            # 张数上限提前到读阶段（每条已解压在内存，读满即停不再白读）
+            if len(out) >= _MAX_IMAGES:
+                break
+            data = z.read(info)
             out.append(as_browser_friendly(data, _sniff_ext(data, Path(name).suffix or ".png")))
     return out
 

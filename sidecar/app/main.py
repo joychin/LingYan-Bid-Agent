@@ -9,6 +9,7 @@
 import argparse
 import logging
 import os
+import re
 import shutil
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
@@ -71,6 +72,13 @@ CORS_ORIGINS = [
 # 本地开发兜底：放行任意 localhost/127.0.0.1 端口（Vite 直连、端口回退等），
 # 避免浏览器模式因为 origin 不在白名单而整段拦截 /api 与 SSE。
 CORS_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+
+# Origin 守卫（浏览器模式 CSRF 面）：跨站页面对 127.0.0.1 的「简单请求」POST
+# （text/plain 免预检）可盲打 /api 状态变更端点。规则：带 Origin 且不在本机
+# 白名单 → 403；无 Origin（TestClient/curl/Tauri webview 非浏览器 fetch）放行。
+# 生产 Tauri 模式本就有 Bearer token，这里是浏览器开发模式的兜底闸。
+_ALLOWED_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?$")
+_ALLOWED_ORIGIN_EXACT = frozenset(CORS_ORIGINS)
 
 
 def _sync_skills() -> None:
@@ -141,7 +149,16 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="Tender Agent Sidecar", version=VERSION, lifespan=lifespan)
+app = FastAPI(
+    title="Tender Agent Sidecar",
+    version=VERSION,
+    lifespan=lifespan,
+    # 文档端点免鉴权暴露全 API 形状（/docs、/openapi.json 不在 /api 前缀下吃不到
+    # token 中间件）——本地单机也无展示需求，直接关掉。
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -159,6 +176,10 @@ async def auth_middleware(request: Request, call_next):
     # 否则带 Bearer 的跨源请求会因预检 401 而整体失败（浏览器报 "Load failed"）。
     if request.method == "OPTIONS":
         return await call_next(request)
+    if request.url.path.startswith("/api"):
+        origin = request.headers.get("Origin")
+        if origin and origin not in _ALLOWED_ORIGIN_EXACT and not _ALLOWED_ORIGIN_RE.match(origin):
+            return JSONResponse(status_code=403, content={"detail": "origin not allowed"})
     token = cfg.sidecar_token()
     if token and request.url.path.startswith("/api") and request.url.path != "/api/healthz":
         auth = request.headers.get("Authorization", "")

@@ -192,6 +192,25 @@ def test_material_inject_rebuilds_element_map(env):
     assert mlib.read_element_map("历史运维方案.docx")
 
 
+def test_material_inject_rejects_stale_element_map_v1(env):
+    """坐标系修复（2026-09-10 表格逐行）前的 v1 旧 map 被版本护栏拒收：
+    读侧返回 None → 注入走既有「幂等重跑 + md 漂移比对」路径换得 v2 正确坐标
+    （重跑 md 逐字节不变，比对放行）。手搓错位坐标证明是护栏在挡而非碰巧一致。
+    """
+    mp = mlib.mt_parse_dir("历史运维方案.docx") / "element_map.json"
+    stale = json.loads(mp.read_text(encoding="utf-8"))
+    assert stale["version"] >= 2  # 新解析产物已是现行版本
+    stale["version"] = 1
+    stale["element_lines"] = [[el, s + 100, e + 100] for el, s, e in stale["element_lines"]]
+    mp.write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+    assert mlib.read_element_map("历史运维方案.docx") is None
+    section = _make_section()
+    r = docx_material_inject.invoke({"block_id": env["block"]["id"], "dest": section})
+    assert r.startswith("[已注入]"), r
+    fresh = json.loads(mp.read_text(encoding="utf-8"))
+    assert fresh["version"] >= 2 and mlib.read_element_map("历史运维方案.docx") is not None
+
+
 def test_material_inject_requires_docx_source(env, tmp_path):
     """pdf/txt 等原件无可注入元素：明确拒绝并指路文本方式。"""
     from app import db
