@@ -2,6 +2,7 @@
 name = "tender-agent-sidecar"
 version = "0.1.0"
 description = "Tender Agent local-first sidecar: FastAPI + DeepAgents + SQLite"
+license = "AGPL-3.0-only"
 requires-python = ">=3.12"
 dependencies = [
     "deepagents==0.7.7",

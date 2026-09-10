@@ -111,3 +111,16 @@ security find-generic-password -s tender-agent   # 验证
    故改为 Rust 调 `security` CLI 子进程读写 login 钥匙串（满足 PRD M3 验收）。
 6. sse-starlette 对 dict 的 `data` 会输出 Python repr（单引号非 JSON）——sidecar 在
    `app/api/sse.py` 预先 `json.dumps`，保证 `data: <json>` 契约。
+
+## 许可（License）
+
+本仓库以 **GNU AGPL-3.0** 开源，全文见 [LICENSE](LICENSE)。
+
+要点（与版权相关的场景，不是法律意见）：
+
+- 整体仓库为 AGPL-3.0：复制、修改、再分发须以相同许可提供源码。本项目含
+  `skills/` 中的方法论与提示词，一并受此许可约束。
+- 三方组件各有其许可：其中 PDF 解析依赖 **PyMuPDF** 为 AGPL-3.0 或商业双许可，
+  与仓库许可天然一致；`sidecar/app/skills/humanizer-zh` 为第三方 **MIT** 技能，
+  其 LICENSE 与署名声明随文件保留。
+- 若需在 AGPL 之外获得商业授权（如闭源集成、SaaS 分发），请联系维护者另行洽谈。
