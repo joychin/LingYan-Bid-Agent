@@ -330,15 +330,53 @@ export function putOcrKeys(apiKey: string, secretKey: string): Promise<{ ok: boo
   })
 }
 
-/** 设置「测试」按钮：model=<profile id> 发最小 chat；ocr 用 AK/SK 换一次 access_token 探活。
+/** 文档解析探活（role=ocr）：用 AK/SK 换一次 access_token。
  *  X-Sidecar-Ping 自定义头为 sidecar 侧要求：跨站触发会被 CORS 预检挡住（防任意
- *  网页静默触发带 Key 的出站请求）。 */
-export function testModelConnection(
-  target: { model: string } | { role: 'ocr' },
-): Promise<{ ok: boolean }> {
-  const qs =
-    'model' in target ? `model=${encodeURIComponent(target.model)}` : `role=${target.role}`
-  return request(`/settings/test?${qs}`, { headers: { 'X-Sidecar-Ping': '1' } })
+ *  网页静默触发带 Key 的出站请求）。模型连通性改走 testModelDraft（测表单草稿值）。 */
+export function testModelConnection(target: { role: 'ocr' }): Promise<{ ok: boolean }> {
+  return request(`/settings/test?role=${target.role}`, { headers: { 'X-Sidecar-Ping': '1' } })
+}
+
+/** 测「表单当前值」的连通性：填好 Key/模型名即可测，不落库、不保存。
+ *  api_key 为空时用 key_ref 借用已保存 profile 的 Key（编辑未改 Key / 同厂商复用）。
+ *  上游连接问题也返回 200 + ok:false + 人话文案（就地展示）；入参非法才抛错。 */
+export interface DraftTestResult {
+  ok: boolean
+  message: string
+  latency_ms: number
+}
+
+export function testModelDraft(body: {
+  base_url: string
+  model: string
+  api_key?: string
+  key_ref?: string
+}): Promise<DraftTestResult> {
+  return request('/settings/test-model', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    // 服务端 ping 超时 15s：前端给足余量，别先于服务端结论断开
+  }, { timeoutMs: 20_000 })
+}
+
+/** 拉服务商 /models 真实清单（OpenAI 兼容协议）。失败返回 ok:false（前端静默回落静态预设）。 */
+export function fetchAvailableModels(body: {
+  base_url: string
+  api_key?: string
+  key_ref?: string
+}): Promise<{ ok: boolean; models: string[]; error: string | null }> {
+  return request('/settings/available-models', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }, { timeoutMs: 20_000 })
+}
+
+/** 同厂商 Key 复用：服务端读源写目标，Key 不出库、不返回。 */
+export function copyModelKey(fromModel: string, toModel: string): Promise<{ ok: boolean }> {
+  return request('/settings/keys/copy', {
+    method: 'PUT',
+    body: JSON.stringify({ from: fromModel, to: toModel }),
+  })
 }
 
 export function artifactKey(a: Pick<Artifact, 'kind' | 'schema_id' | 'schema_version'>): string {

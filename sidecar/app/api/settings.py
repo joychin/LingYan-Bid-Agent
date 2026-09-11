@@ -174,28 +174,101 @@ async def put_settings_ocr_keys(body: OcrKeysBody):
     return {"ok": True}
 
 
-def _test_model_sync(pid: str) -> str:
-    """同步最小连通性测试：向 profile 端点发一条 ping chat。"""
-    from openai import OpenAI
+class DraftTestBody(BaseModel):
+    """草稿态连通性测试：Key 来自表单正在填的值（api_key）或借用已保存 profile（key_ref）。"""
 
-    p = cfg.get_profile(pid)
-    if p is None:
-        raise HTTPException(status_code=404, detail=f"模型不存在：{pid}")
-    api_key = cfg.model_key(pid)
-    if not api_key:
-        raise HTTPException(status_code=400, detail=f"模型 {p.name} 未配置 API Key（Tauri 设置里保存）")
-    client = OpenAI(api_key=api_key, base_url=p.base_url, timeout=15.0, max_retries=0)
+    base_url: str
+    model: str
+    api_key: str | None = None
+    key_ref: str | None = None
+
+
+class AvailableModelsBody(BaseModel):
+    """拉取服务商模型清单：同样只收草稿 Key，不落库。"""
+
+    base_url: str
+    api_key: str | None = None
+    key_ref: str | None = None
+
+
+class CopyKeyBody(BaseModel):
+    """同厂商 Key 复用：服务端读源写目标，Key 不出库。"""
+
+    from_model: str = Field(alias="from")
+    to_model: str = Field(alias="to")
+
+
+def _resolve_draft_key(api_key: str | None, key_ref: str | None) -> str:
+    """草稿 Key 优先；为空时借用 key_ref 已保存的 Key（编辑未改 Key / 同厂商复用两条路径）。"""
+    k = (api_key or "").strip()
+    if k:
+        return k
+    ref = (key_ref or "").strip()
+    if ref:
+        return cfg.model_key(ref) or ""
+    return ""
+
+
+def _status_message(code: int, raw: str) -> str:
+    """上游 HTTP 状态 → 人话（首行给结论，帮助用户当场自救）。"""
+    if code in (401, 403):
+        return "API Key 无效或已失效——请检查 Key 是否正确、是否具备该模型的权限"
+    if code == 402:
+        return "账户额度不足（欠费）——请充值，或切换到其他模型"
+    if code == 404:
+        return "接口返回 404——多为模型名拼写错误，或接口地址缺少 /v1（也可点「获取模型列表」选择）"
+    if code == 429:
+        return "请求过于频繁（限流）——稍后重试"
+    if code >= 500:
+        return f"服务方错误（HTTP {code}）——稍后重试"
+    return f"连接失败（HTTP {code}）：{raw[:200]}"
+
+
+def _ping_model_sync(base_url: str, model: str, api_key: str) -> tuple[bool, str, int]:
+    """同步最小连通性测试，返回 (ok, 人话文案, 耗时 ms)。
+
+    上游失败不抛异常，归一成 ok=False + 人话，交给前端在弹窗里就地展示。
+    """
+    import time
+
+    from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
+
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=15.0, max_retries=0)
+    started = time.monotonic()
+
+    def elapsed() -> int:
+        return int((time.monotonic() - started) * 1000)
+
     try:
         resp = client.chat.completions.create(
-            model=p.model,
+            model=model,
             messages=[{"role": "user", "content": "ping"}],
             max_tokens=1,
         )
-    except Exception as e:  # noqa: BLE001 - 测试端点要把原始错误透给用户
-        raise HTTPException(status_code=502, detail=f"连通失败：{e}") from e
+    except APITimeoutError:
+        return False, "连接超时（15 秒无响应）——检查接口地址与网络", elapsed()
+    except APIConnectionError as e:
+        return False, f"无法连接到接口地址：{str(e)[:200]}", elapsed()
+    except APIStatusError as e:
+        return False, _status_message(e.status_code, str(e)), elapsed()
+    except Exception as e:  # noqa: BLE001 - 兜底要把原始错误透给用户
+        return False, f"连接失败：{str(e)[:200]}", elapsed()
     if not resp.choices:
-        raise HTTPException(status_code=502, detail="连通失败：响应无 choices")
-    return "ok"
+        return False, "服务方返回了空响应", elapsed()
+    return True, "连接正常", elapsed()
+
+
+def _list_models_sync(base_url: str, api_key: str) -> tuple[bool, list[str], str]:
+    """调 OpenAI 兼容 /models 拉清单。失败返回 (False, [], 错误)，前端静默回落静态预设。"""
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=15.0, max_retries=0)
+    try:
+        resp = client.models.list()
+    except Exception as e:  # noqa: BLE001 - 拉不到清单不是致命错误，交给前端兜底
+        return False, [], str(e)[:200]
+    ids = sorted({m.id for m in resp.data if getattr(m, "id", None)})
+    return True, ids, ""
 
 
 def _test_ocr_sync() -> str:
@@ -212,25 +285,73 @@ def _test_ocr_sync() -> str:
     return "ok"
 
 
+@router.post("/settings/test-model")
+async def test_model_draft(body: DraftTestBody):
+    """测「表单当前值」（base_url/model/key 尚未保存）：填好即可测，测试不再偷偷保存。
+
+    入参非法（地址/模型名缺失）→ 422；上游连接问题一律 200 + ok=false + 人话文案。
+    """
+    base_url = _validate_base_url(body.base_url)
+    model = (body.model or "").strip()
+    if not model:
+        raise HTTPException(status_code=422, detail="请填写模型名称")
+    api_key = _resolve_draft_key(body.api_key, body.key_ref)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="未提供 API Key——请填写 Key，或复用同厂商已配置的 Key")
+    ok, message, latency_ms = await asyncio.to_thread(_ping_model_sync, base_url, model, api_key)
+    return {"ok": ok, "message": message, "latency_ms": latency_ms}
+
+
+@router.post("/settings/available-models")
+async def available_models(body: AvailableModelsBody):
+    """用草稿 Key 调服务商 /models 拉真实清单（OpenAI 兼容协议）。
+
+    失败返回 ok=false + 错误（不是 4xx/5xx）——前端静默回落到内置常用清单。
+    """
+    base_url = _validate_base_url(body.base_url)
+    api_key = _resolve_draft_key(body.api_key, body.key_ref)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="未提供 API Key——请先填写 Key")
+    ok, models, err = await asyncio.to_thread(_list_models_sync, base_url, api_key)
+    return {"ok": ok, "models": models, "error": None if ok else err}
+
+
+@router.put("/settings/keys/copy")
+async def copy_settings_key(body: CopyKeyBody):
+    """同厂商 Key 复用：服务端读源写目标。Key 只写不读铁律不破——不出库、不返回。"""
+    src = (body.from_model or "").strip()
+    dst = (body.to_model or "").strip()
+    if not src or not dst:
+        raise HTTPException(status_code=422, detail="from / to 不能为空")
+    if src == dst:
+        raise HTTPException(status_code=422, detail="源与目标不能是同一个模型")
+    if cfg.get_profile(src) is None:
+        raise HTTPException(status_code=404, detail=f"源模型 {src} 不存在")
+    if cfg.get_profile(dst) is None:
+        raise HTTPException(status_code=404, detail=f"目标模型 {dst} 不存在，请先保存模型配置")
+    key = cfg.model_key(src)
+    if not key:
+        raise HTTPException(status_code=400, detail=f"源模型 {src} 未配置 API Key，无法复用")
+    cfg.set_model_key(dst, key)
+    await rebuild_agent()
+    return {"ok": True}
+
+
 @router.get("/settings/test")
 async def test_settings(
     request: Request,
     role: str | None = Query(default=None, pattern="^(ocr)$"),
-    model: str | None = None,
 ):
-    """轻量连通性测试：model=<profile id> 发最小 chat；role=ocr 用 AK/SK 换 token。
+    """轻量连通性测试（仅剩文档解析 role=ocr）。
 
-    要求自定义头 X-Sidecar-Ping（前端恒带）：GET 是免预检的简单请求，无此防护时
-    任意网站可静默触发「用存储的 Key 向已配置 base_url 发出站请求」（本机开发模式
-    无 token，主要是调用费消耗）；自定义头使跨站触发必须过 CORS 预检、被 origin
-    白名单挡住。本机 localhost 页面在开发模式下本就有完整 API 访问权，不在此防护
-    范围内。"""
+    模型连通性改走 POST /settings/test-model（测表单草稿值、不落库）。要求自定义头
+    X-Sidecar-Ping：GET 是免预检的简单请求，无此防护时任意网站可静默触发「用存储的
+    Key 向已配置 base_url 发出站请求」（本机开发模式无 token，主要是调用费消耗）；
+    自定义头使跨站触发必须过 CORS 预检、被 origin 白名单挡住。
+    """
     if (request.headers.get("x-sidecar-ping") or "") != "1":
         raise HTTPException(status_code=403, detail="缺少 X-Sidecar-Ping 头")
-    if model:
-        result = await asyncio.to_thread(_test_model_sync, model)
-        return {"ok": result == "ok", "model": model}
     if role == "ocr":
         result = await asyncio.to_thread(_test_ocr_sync)
         return {"ok": result == "ok", "role": role}
-    raise HTTPException(status_code=422, detail="必须提供 model 或 role=ocr 之一")
+    raise HTTPException(status_code=422, detail="必须提供 role=ocr")

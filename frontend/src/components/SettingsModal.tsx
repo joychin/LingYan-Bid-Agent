@@ -7,6 +7,8 @@ import { Loader } from '@/components/ai/Loader'
 import { Input } from '@/components/ui/input'
 import { ModalShell } from '@/components/ui/ModalShell'
 import {
+  copyModelKey,
+  fetchAvailableModels,
   getSettings,
   isTauri,
   putModelKey,
@@ -14,8 +16,11 @@ import {
   putOcrKeys,
   revealInFolder,
   testModelConnection,
+  testModelDraft,
+  type DraftTestResult,
   type ModelBody,
 } from '@/api/client'
+import { findKeySource, mergeModelOptions } from '@/lib/modelSettings'
 import { useToast } from '@/context/Toast'
 
 export interface SettingsModalProps {
@@ -320,24 +325,22 @@ function Card({ children, className }: { children: React.ReactNode; className?: 
   return <div className={cn('rounded-xl border border-line px-5 py-4', className)}>{children}</div>
 }
 
-/** 设置行：左「标题+描述」右控件。组内行标题 14/500，卡片独占行 cardTitle 15/600 */
+/** 设置行：左「标题+描述」右控件。 */
 function SettingRow({
   title,
   desc,
   children,
-  cardTitle,
   className,
 }: {
   title: React.ReactNode
   desc?: React.ReactNode
   children?: React.ReactNode
-  cardTitle?: boolean
   className?: string
 }) {
   return (
     <div className={cn('flex items-center justify-between gap-4', className)}>
       <div className="min-w-0">
-        <p className={cn('leading-snug', cardTitle ? 'text-[15px] font-semibold' : 'text-sm font-medium')}>{title}</p>
+        <p className="text-sm font-medium leading-snug">{title}</p>
         {desc && <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">{desc}</p>}
       </div>
       {children != null && <div className="shrink-0">{children}</div>}
@@ -383,6 +386,9 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
   // null=列表态；'new'=新增；否则=编辑该 id（弹窗盖在列表上）
   const [editing, setEditing] = useState<string | 'new' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // 两步删除（arming 中的行 id，3 秒复位）与高级区展开态
+  const [confirmDelId, setConfirmDelId] = useState<string | null>(null)
+  const [rolesOpen, setRolesOpen] = useState(false)
 
   useEffect(() => {
     if (settings) {
@@ -428,8 +434,8 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
     }
   }
 
+  // 二次确认在行内（两步删除），此处不再弹原生 confirm
   const removeModel = async (m: LocalModel) => {
-    if (!window.confirm(`删除模型「${m.name}」？其已保存的 API Key 将一并停用。`)) return
     const list = models.filter((x) => x.id !== m.id)
     let dflt = defaultModel
     if (dflt === m.id) dflt = list[0]?.id ?? ''
@@ -452,23 +458,17 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
 
   return (
     <div className="space-y-3">
-      <Card>
-        <SettingRow
-          cardTitle
-          title="本地配置"
-          desc="模型与 API Key 均保存在本机数据库，不上传；开启「图片输入」的模型用于知识库图片 / 扫描件识别（已配置文档解析时优先走百度云，此处为兜底）。"
-        >
-          <Button size="sm" onClick={() => setEditing('new')}>
-            <Plus className="mr-1 h-3.5 w-3.5" />
-            添加模型
-          </Button>
-        </SettingRow>
-      </Card>
+      <div className="flex items-center justify-between gap-4">
+        <p className="text-[13px] text-muted-foreground">模型与 API Key 只保存在本机，不上传</p>
+        <Button size="sm" onClick={() => setEditing('new')}>
+          <Plus className="mr-1 h-3.5 w-3.5" />
+          添加模型
+        </Button>
+      </div>
 
-      {models.length > 0 && <p className="text-[13px] font-medium text-muted-foreground">已保存模型</p>}
       {models.length === 0 && (
         <p className="rounded-xl border border-dashed border-line p-6 text-center text-sm text-muted-foreground">
-          还没有配置模型——点击「添加模型」，选一家厂商后只需填写 API Key
+          还没有配置模型——点击「添加模型」，选一家厂商后填写 API Key 与模型名
         </p>
       )}
 
@@ -502,43 +502,80 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
             >
               <Pencil className="h-4 w-4" />
             </button>
-            <button
-              type="button"
-              title="删除"
-              aria-label="删除"
-              onClick={() => void removeModel(m)}
-              className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-error"
-            >
-              <Trash2 className="h-4 w-4" />
-            </button>
+            {confirmDelId === m.id ? (
+              <span className="flex shrink-0 items-center gap-1 text-xs">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirmDelId(null)
+                    void removeModel(m)
+                  }}
+                  className="rounded-md bg-destructive px-2 py-1 font-medium text-destructive-foreground hover:opacity-90"
+                >
+                  确认删除
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmDelId(null)}
+                  className="rounded-md px-2 py-1 text-muted-foreground hover:bg-muted"
+                >
+                  取消
+                </button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                title="删除"
+                aria-label="删除"
+                onClick={() => {
+                  setConfirmDelId(m.id)
+                  window.setTimeout(() => setConfirmDelId((cur) => (cur === m.id ? null : cur)), 3000)
+                }}
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-error"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            )}
           </div>
         )
       })}
 
       {error && <p className="text-sm text-error">{error}</p>}
 
-      <Card className="space-y-4">
-        <p className="text-[15px] font-semibold">后台任务模型</p>
-        <SettingRow title="知识库 metadata 抽取" desc="为上传条目建议类型与字段（可指定便宜模型省 token）">
-          <RoleSelect
-            value={roles.extract}
-            emptyLabel="跟随默认模型"
-            options={models.map((m) => ({ id: m.id, label: m.name }))}
-            onChange={(pid) => void changeRole('extract', pid)}
-          />
-        </SettingRow>
-        <SettingRow title="知识库视觉转写" desc="图片 / 扫描页转文字（仅列已开启「图片输入」的模型）">
-          <RoleSelect
-            value={roles.vision}
-            emptyLabel="自动（默认模型优先）"
-            options={models.filter((m) => m.imageSupport).map((m) => ({ id: m.id, label: m.name }))}
-            onChange={(pid) => void changeRole('vision', pid)}
-          />
-        </SettingRow>
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          文档解析本身不走大模型（本地确定性解析 + PaddleOCR-VL 云端）；这里的模型只用于解析后的后台轻任务。
-        </p>
-      </Card>
+      <div className="rounded-xl border border-line px-5 py-4">
+        <button
+          type="button"
+          onClick={() => setRolesOpen(!rolesOpen)}
+          aria-expanded={rolesOpen}
+          className="flex w-full cursor-pointer items-center gap-1.5 text-left text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+        >
+          后台任务模型（高级）
+          <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', rolesOpen && 'rotate-180')} />
+        </button>
+        {rolesOpen && (
+          <div className="space-y-4 pt-4">
+            <SettingRow title="知识库 metadata 抽取" desc="为上传条目建议类型与字段（可指定便宜模型省 token）">
+              <RoleSelect
+                value={roles.extract}
+                emptyLabel="跟随默认模型"
+                options={models.map((m) => ({ id: m.id, label: m.name }))}
+                onChange={(pid) => void changeRole('extract', pid)}
+              />
+            </SettingRow>
+            <SettingRow title="知识库视觉转写" desc="图片 / 扫描页转文字（仅列已开启「图片输入」的模型）">
+              <RoleSelect
+                value={roles.vision}
+                emptyLabel="自动（默认模型优先）"
+                options={models.filter((m) => m.imageSupport).map((m) => ({ id: m.id, label: m.name }))}
+                onChange={(pid) => void changeRole('vision', pid)}
+              />
+            </SettingRow>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              文档解析本身不走大模型（本地确定性解析 + PaddleOCR-VL 云端）；这里的模型只用于解析后的后台轻任务。
+            </p>
+          </div>
+        )}
+      </div>
 
       {editing !== null && (
         <ModelDialog
@@ -739,19 +776,23 @@ function ProviderSelect({ value, onChange }: { value: string; onChange: (key: st
   )
 }
 
-/** 预设模型下拉：preset.models + 「自定义模型名…」逃生口 */
+/** 模型名下拉：服务商实际清单（拉取成功时）+ 内置常用预设，分组展示（拉取多时可搜）；
+ *  尾部「自定义模型名…」逃生口。未拉取到清单时退回纯预设列表（与旧行为一致）。 */
 function ModelNameSelect({
   preset,
+  fetched,
   value,
   onPick,
   onCustom,
 }: {
   preset: VendorPreset
+  fetched: string[]
   value: string
-  onPick: (m: { name: string; imageSupport: boolean }) => void
+  onPick: (m: { name: string; imageSupport?: boolean }) => void
   onCustom: () => void
 }) {
   const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
 
   useEffect(() => {
     if (!open) return
@@ -762,6 +803,13 @@ function ModelNameSelect({
     document.addEventListener('pointerdown', onDoc)
     return () => document.removeEventListener('pointerdown', onDoc)
   }, [open])
+
+  const groups = mergeModelOptions(fetched, preset.models)
+  const kw = q.trim().toLowerCase()
+  const shown = groups
+    .map((g) => ({ ...g, models: kw ? g.models.filter((m) => m.name.toLowerCase().includes(kw)) : g.models }))
+    .filter((g) => g.models.length > 0)
+  const showSearch = groups.some((g) => g.models.length > 8)
 
   return (
     <div
@@ -786,24 +834,42 @@ function ModelNameSelect({
 
       {open && (
         <div className="absolute left-0 right-0 top-full z-20 mt-1.5 max-h-64 overflow-y-auto rounded-xl border border-line bg-card py-1 shadow-md">
-          {preset.models.map((m) => (
-            <button
-              key={m.name}
-              type="button"
-              onClick={() => {
-                onPick(m)
-                setOpen(false)
-              }}
-              className={cn(
-                'flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm',
-                m.name === value ? 'bg-accent-soft' : 'hover:bg-secondary',
-              )}
-            >
-              <span className="min-w-0 flex-1 truncate font-mono text-[13px]">{m.name}</span>
-              {m.imageSupport && <ImageIcon className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="支持图片" />}
-              {m.name === value && <Check className="h-4 w-4 shrink-0 text-primary" />}
-            </button>
+          {showSearch && (
+            <div className="sticky top-0 flex items-center gap-2 border-b border-line bg-card px-3 py-2">
+              <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <input
+                autoFocus
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="搜索模型"
+                className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+              />
+            </div>
+          )}
+          {shown.map((g) => (
+            <div key={g.label}>
+              <p className="px-3 pb-1 pt-1.5 text-[11px] text-muted-foreground">{g.label}</p>
+              {g.models.map((m) => (
+                <button
+                  key={`${g.label}:${m.name}`}
+                  type="button"
+                  onClick={() => {
+                    onPick(m)
+                    setOpen(false)
+                  }}
+                  className={cn(
+                    'flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm',
+                    m.name === value ? 'bg-accent-soft' : 'hover:bg-secondary',
+                  )}
+                >
+                  <span className="min-w-0 flex-1 truncate font-mono text-[13px]">{m.name}</span>
+                  {m.imageSupport && <ImageIcon className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="支持图片" />}
+                  {m.name === value && <Check className="h-4 w-4 shrink-0 text-primary" />}
+                </button>
+              ))}
+            </div>
           ))}
+          {shown.length === 0 && <p className="px-3 py-2 text-sm text-muted-foreground">无匹配模型</p>}
           <div className="my-1 border-t border-line" />
           <button
             type="button"
@@ -926,9 +992,20 @@ function ModelDialog({
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 服务商实际模型清单（「获取模型列表」拉到后填充；失败保持空=回落常用预设）
+  const [fetched, setFetched] = useState<string[]>([])
+  const [fetching, setFetching] = useState(false)
+  // 连通性测试结果（就地展示，不落 toast、不保存）
+  const [testResult, setTestResult] = useState<DraftTestResult | null>(null)
 
   // 已保存过的 profile id 沿用（Key 按模型 id 存本地库）；新模型生成 uuid
   const [pid] = useState(initial?.id ?? `m_${crypto.randomUUID().slice(0, 8)}`)
+
+  // 同厂商已配 Key 的兄弟：Key 留空时复用其 Key（测试借用 / 保存时服务端 copy）
+  const keySource = findKeySource(models, baseUrl, isNew ? undefined : pid)
+  // key_ref 兜底：编辑已配 Key 的模型时借用自身已存 Key
+  const keyRef = key.trim() ? undefined : (keySource?.id ?? (keySaved ? pid : undefined))
+  const canFetch = !!key.trim() || !!keyRef
 
   // Escape 关本弹窗：必须挂 window 捕获段——点「添加模型」后焦点常停在弹窗后面的
   // 列表按钮上，keydown 目标不在卡片子树，卡片上的 React onKeyDown 不在传播路径里，
@@ -957,7 +1034,35 @@ function ModelDialog({
     } else {
       setCustomModel(true) // 自定义：保留当前地址供编辑
     }
+    setFetched([]) // 换厂商：旧的拉取清单作废
+    setTestResult(null)
     setError(null)
+  }
+
+  /** 用草稿/兄弟 Key 调服务商 /models，填充模型名下拉；失败静默回落常用预设。 */
+  const fetchModels = async () => {
+    setError(null)
+    setFetching(true)
+    try {
+      const r = await fetchAvailableModels({
+        base_url: baseUrl.trim(),
+        ...(key.trim() ? { api_key: key.trim() } : { key_ref: keyRef }),
+      })
+      if (r.ok && r.models.length > 0) {
+        setFetched(r.models)
+        setCustomModel(false)
+        if (!r.models.includes(model.trim())) setModel(r.models[0])
+        const meta = preset.models.find((m) => m.name === r.models[0])
+        if (meta) setImageSupport(meta.imageSupport)
+        toast(`已获取 ${r.models.length} 个模型`, 'success')
+      } else {
+        toast('无法获取模型列表，请手动填写模型名', 'error')
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error')
+    } finally {
+      setFetching(false)
+    }
   }
 
   /** 展开高级选项那一刻预填厂商建议窗口值（仅草稿层，点保存才落库；已手动选过不跟随）。
@@ -990,6 +1095,7 @@ function ModelDialog({
     if (list.length === 1) dflt = list[0].id
     try {
       await putModels(list.map(toModelBody), dflt)
+      // Key 处理：填了新值 → 写入；留空但有同厂商兄弟 Key → 复用（服务端读源写目标）
       if (key.trim()) {
         try {
           await putModelKey(pid, key.trim())
@@ -1002,6 +1108,16 @@ function ModelDialog({
           void queryClient.invalidateQueries({ queryKey: ['settings'] })
           const msg = e instanceof Error ? e.message : String(e)
           return `模型配置已保存，但 API Key 保存失败：${msg}`
+        }
+      } else if (!keySaved && keySource) {
+        try {
+          await copyModelKey(keySource.id, pid)
+          setKeySaved(true)
+        } catch (e) {
+          onCommit(list, dflt)
+          void queryClient.invalidateQueries({ queryKey: ['settings'] })
+          const msg = e instanceof Error ? e.message : String(e)
+          return `模型配置已保存，但复用「${keySource.name}」的 Key 失败：${msg}`
         }
       }
       onCommit(list, dflt)
@@ -1025,17 +1141,33 @@ function ModelDialog({
     onClose()
   }
 
+  /** 测「表单当前值」：填好即测，不保存、不落库（保存归「保存」按钮）。
+   *  Key 留空时借用同厂商兄弟的 Key（key_ref），与保存时的复用语义一致。 */
   const test = async () => {
     setError(null)
+    setTestResult(null)
+    const url = baseUrl.trim()
+    const name = model.trim()
+    if (!url) {
+      setError('请填写接口地址')
+      return
+    }
+    if (!name) {
+      setError('请填写模型名称')
+      return
+    }
+    if (!key.trim() && !keySource && !keySaved) {
+      setError('请填写 API Key（或先为同厂商的模型配置 Key 以便复用）')
+      return
+    }
     setTesting(true)
     try {
-      const err = await persist() // 先静默保存再测试，避免「测的是旧配置」
-      if (err) {
-        setError(err)
-        return
-      }
-      const r = await testModelConnection({ model: pid })
-      toast(r.ok ? '连接正常' : '连接失败', r.ok ? 'success' : 'error')
+      const r = await testModelDraft({
+        base_url: url,
+        model: name,
+        ...(key.trim() ? { api_key: key.trim() } : { key_ref: keyRef }),
+      })
+      setTestResult(r)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -1102,36 +1234,55 @@ function ModelDialog({
                 {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
+            {!key.trim() && keySource && (
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                留空将复用「{keySource.name}」已保存的 Key（同一接口地址）
+              </p>
+            )}
           </Field>
 
           <Field label="模型名称">
-            {preset.models.length > 0 && !customModel ? (
-              <ModelNameSelect
-                preset={preset}
-                value={model}
-                onPick={(m) => {
-                  setModel(m.name)
-                  setImageSupport(m.imageSupport)
-                }}
-                onCustom={() => {
-                  setCustomModel(true)
-                  setModel('')
-                }}
-              />
-            ) : (
-              <div className="flex gap-2">
-                <Input
+            <div className="flex gap-2">
+              {((preset.models.length > 0 || fetched.length > 0) && !customModel) ? (
+                <ModelNameSelect
+                  preset={preset}
+                  fetched={fetched}
                   value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  placeholder="输入模型参数值，例如 gpt-4o 或 openai/gpt-4o"
+                  onPick={(m) => {
+                    setModel(m.name)
+                    if (m.imageSupport != null) setImageSupport(m.imageSupport)
+                  }}
+                  onCustom={() => {
+                    setCustomModel(true)
+                    setModel('')
+                  }}
                 />
-                {preset.models.length > 0 && (
-                  <Button size="sm" variant="outline" className="shrink-0" onClick={() => setCustomModel(false)}>
-                    预设
-                  </Button>
-                )}
-              </div>
-            )}
+              ) : (
+                <>
+                  <Input
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder="输入模型参数值，例如 gpt-4o 或 openai/gpt-4o"
+                  />
+                  {(preset.models.length > 0 || fetched.length > 0) && (
+                    <Button size="sm" variant="outline" className="shrink-0" onClick={() => setCustomModel(false)}>
+                      列表
+                    </Button>
+                  )}
+                </>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+                disabled={fetching || !canFetch}
+                title={canFetch ? '从服务商拉取可用模型清单' : '请先填写 API Key（或为同厂商模型配置 Key）'}
+                onClick={() => void fetchModels()}
+              >
+                {fetching && <Loader variant="circular" size="xs" tone="current" />}
+                {fetching ? '获取中…' : '获取列表'}
+              </Button>
+            </div>
           </Field>
 
           <SettingRow
@@ -1166,23 +1317,37 @@ function ModelDialog({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 border-t border-line px-5 py-3.5">
-          {error ? (
-            <p className="min-w-0 flex-1 truncate text-sm text-error">{error}</p>
-          ) : (
-            <span className="flex-1" />
+        <div className="space-y-2 border-t border-line px-5 py-3.5">
+          {testResult && !error && (
+            <p
+              className={cn(
+                'text-[13px] leading-relaxed',
+                testResult.ok ? 'text-success' : 'text-error',
+              )}
+            >
+              {testResult.ok
+                ? `连接正常 · ${(testResult.latency_ms / 1000).toFixed(1)}s`
+                : testResult.message}
+            </p>
           )}
-          <Button size="sm" variant="outline" disabled={testing} onClick={test}>
-            {testing && <Loader variant="circular" size="xs" tone="current" />}
-            {testing ? '测试中…' : '测试'}
-          </Button>
-          <Button size="sm" variant="outline" onClick={onClose}>
-            取消
-          </Button>
-          <Button size="sm" disabled={saving} onClick={save}>
-            {saving && <Loader variant="circular" size="xs" tone="current" />}
-            {saving ? '保存中…' : '保存'}
-          </Button>
+          <div className="flex items-center gap-2">
+            {error ? (
+              <p className="min-w-0 flex-1 text-sm leading-relaxed text-error">{error}</p>
+            ) : (
+              <span className="flex-1" />
+            )}
+            <Button size="sm" variant="outline" disabled={testing} onClick={() => void test()}>
+              {testing && <Loader variant="circular" size="xs" tone="current" />}
+              {testing ? '测试中…' : '测试连接'}
+            </Button>
+            <Button size="sm" variant="outline" onClick={onClose}>
+              取消
+            </Button>
+            <Button size="sm" disabled={saving} onClick={() => void save()}>
+              {saving && <Loader variant="circular" size="xs" tone="current" />}
+              {saving ? '保存中…' : '保存'}
+            </Button>
+          </div>
         </div>
       </div>
     </div>

@@ -105,18 +105,20 @@ class AgentConfigError(RuntimeError):
 
 def _classify_error(exc: BaseException) -> tuple[str, str]:
     """错误定性 → (code, 人话文案)。code 取值域（agent.error/run.state 契约 additive
-    2026-09-08）：llm_auth=模型未配置/Key 失效；llm_unavailable=服务方过载/超时/断流；
+    2026-09-08）：llm_auth=模型未配置/Key 失效/账户欠费；llm_unavailable=服务方过载/超时/断流；
     internal=程序自身错误（兜底）。文案首行给人话、次行起原样保留服务方/异常原文
     （前端按 \\n 拆行渲染：首行主文案、其余小字），原文截 300 字符防超长。"""
     if isinstance(exc, AgentConfigError):
         return "llm_auth", str(exc)
-    # 建连阶段非 2xx 的 401/403 是类型化子类（流内错误是裸基类 APIError，见
-    # _is_llm_transient 注释）——Key 无效/额度被封在这里暴露
-    if isinstance(exc, APIStatusError) and exc.status_code in (401, 403):
-        return (
-            "llm_auth",
-            f"模型 API Key 无效或已失效，请在 设置 → 模型 中检查。\n服务方返回：{str(exc)[:300]}",
-        )
+    # 建连阶段非 2xx 的 401/403/402 是类型化子类（流内错误是裸基类 APIError，见
+    # _is_llm_transient 注释）——Key 无效/权限被封 401/403、账户欠费 402 都在这里暴露；
+    # 三者重试都救不了，统一归 llm_auth 让前端给「去设置」入口
+    if isinstance(exc, APIStatusError) and exc.status_code in (401, 403, 402):
+        if exc.status_code == 402:
+            human = "模型账户额度不足（欠费），请在 设置 → 模型 中充值，或切换到其他模型。"
+        else:
+            human = "模型 API Key 无效或已失效，请在 设置 → 模型 中检查。"
+        return "llm_auth", f"{human}\n服务方返回：{str(exc)[:300]}"
     if _is_llm_transient(exc):
         # 正常不该到这（内层重试循环已消化瞬时错误），留作外层兜底路径的保险
         return (

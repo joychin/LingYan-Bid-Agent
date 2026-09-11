@@ -8,7 +8,7 @@ _PING = {"X-Sidecar-Ping": "1"}
 
 def test_settings_test_requires_ping_header(client):
     """GET 是免预检简单请求：无自定义头一律 403（跨站触发被 CORS 预检挡住）。"""
-    assert client.get("/api/settings/test?model=default").status_code == 403
+    assert client.get("/api/settings/test?role=ocr").status_code == 403
 
 
 def test_put_key_rejects_unknown_model(client):
@@ -199,23 +199,10 @@ def test_ocr_keys_endpoint(client):
     assert client.put("/api/settings/ocr-keys", json={"api_key": "", "secret_key": "s"}).status_code == 422
 
 
-def test_settings_test_model(client):
-    client.put(
-        "/api/settings/models",
-        json={
-            "models": [
-                {"id": "m1", "name": "X", "base_url": "https://x.example/v1", "model": "x-1"},
-                {"id": "m2", "name": "Y", "base_url": "https://y.example/v1", "model": "y-1"},
-            ],
-            "default_model": "m1",
-        },
-    )
-    # 未配 key 的模型 → 400
-    r = client.get("/api/settings/test?model=m2", headers=_PING)
-    assert r.status_code == 400
+def test_settings_test_model_draft(client, monkeypatch):
+    """POST /settings/test-model：测表单草稿值——草稿 Key 直测 / key_ref 借用已存 Key / 入参校验。"""
+    import openai
 
-    # 配 key 后成功（mock OpenAI）
-    client.put("/api/settings/keys", json={"model_id": "m1", "api_key": "sk-test"})
     calls = {}
 
     class FakeResp:
@@ -223,27 +210,142 @@ def test_settings_test_model(client):
 
     class FakeCompletions:
         def create(self, **kwargs):
-            calls["kwargs"] = kwargs
+            calls.update(kwargs)
             return FakeResp()
 
     class FakeClient:
         chat = type("Chat", (), {"completions": FakeCompletions()})()
 
+    monkeypatch.setattr(openai, "OpenAI", lambda **kw: FakeClient())
+
+    # 草稿 Key 直测（不需要先保存模型、不落库）
+    r = client.post(
+        "/api/settings/test-model",
+        json={"base_url": "https://x.example/v1", "model": "x-1", "api_key": "sk-draft"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["message"] == "连接正常"
+    assert body["latency_ms"] >= 0
+    assert calls["model"] == "x-1"
+
+    # 未提供 Key（也无 key_ref）→ 400
+    assert client.post("/api/settings/test-model", json={"base_url": "https://x.example/v1", "model": "x-1"}).status_code == 400
+
+    # key_ref 借用已保存 profile 的 Key（编辑未改 Key / 同厂商复用两条路径）
+    client.put(
+        "/api/settings/models",
+        json={"models": [{"id": "m1", "name": "X", "base_url": "https://x.example/v1", "model": "x-1"}], "default_model": "m1"},
+    )
+    client.put("/api/settings/keys", json={"model_id": "m1", "api_key": "sk-saved"})
+    r = client.post("/api/settings/test-model", json={"base_url": "https://x.example/v1", "model": "x-1", "key_ref": "m1"})
+    assert r.status_code == 200 and r.json()["ok"] is True
+
+    # 入参非法 → 422（非本机 http 地址 / 空模型名）
+    assert client.post("/api/settings/test-model", json={"base_url": "http://evil.example/v1", "model": "x", "api_key": "k"}).status_code == 422
+    assert client.post("/api/settings/test-model", json={"base_url": "https://x.example/v1", "model": " ", "api_key": "k"}).status_code == 422
+
+
+def test_settings_test_model_upstream_error_is_200_with_human_message(client, monkeypatch):
+    """上游错误归一：401/402/404 都返回 200 + ok=false + 人话（前端就地展示，不靠 4xx 猜）。"""
+    import httpx
     import openai
 
-    original = openai.OpenAI
-    openai.OpenAI = lambda **kw: FakeClient()
-    try:
-        r = client.get("/api/settings/test?model=m1", headers=_PING)
-    finally:
-        openai.OpenAI = original
-    assert r.status_code == 200
-    assert r.json() == {"ok": True, "model": "m1"}
-    assert calls["kwargs"]["model"] == "x-1"
+    def make_client(status: int):
+        class FakeCompletions:
+            def create(self, **kwargs):
+                req = httpx.Request("POST", "https://x.example/v1/chat/completions")
+                resp = httpx.Response(status, request=req, json={"error": {"message": "boom"}})
+                raise openai.APIStatusError("boom", response=resp, body=None)
 
-    # 不存在的模型 → 404；两个参数都没有 → 422
-    assert client.get("/api/settings/test?model=nope", headers=_PING).status_code == 404
-    assert client.get("/api/settings/test", headers=_PING).status_code == 422
+        return type("C", (), {"chat": type("Chat", (), {"completions": FakeCompletions()})()})()
+
+    def make_openai(client_obj):
+        def factory(**_kw):
+            return client_obj
+        return factory
+
+    for status, keyword in ((401, "API Key 无效"), (402, "欠费"), (404, "404")):
+        monkeypatch.setattr(openai, "OpenAI", make_openai(make_client(status)))
+        r = client.post(
+            "/api/settings/test-model",
+            json={"base_url": "https://x.example/v1", "model": "x-1", "api_key": "k"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False
+        assert keyword in body["message"], f"status={status} 文案={body['message']!r}"
+
+
+def test_settings_available_models(client, monkeypatch):
+    """POST /settings/available-models：拉厂商 /models（去重排序）；失败归一 ok=false；无 Key 400。"""
+    import openai
+
+    class FakeModel:
+        def __init__(self, mid):
+            self.id = mid
+
+    class FakeModels:
+        def list(self):
+            return type("R", (), {"data": [FakeModel("b-1"), FakeModel("a-1"), FakeModel("a-1")]})()
+
+    monkeypatch.setattr(openai, "OpenAI", lambda **kw: type("C", (), {"models": FakeModels()})())
+    r = client.post("/api/settings/available-models", json={"base_url": "https://x.example/v1", "api_key": "k"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "models": ["a-1", "b-1"], "error": None}
+
+    # 未提供 Key → 400
+    assert client.post("/api/settings/available-models", json={"base_url": "https://x.example/v1"}).status_code == 400
+
+    # 上游不支持 /models → 200 + ok=false + error（前端静默回落静态预设）
+    class BoomModels:
+        def list(self):
+            raise RuntimeError("no /models endpoint")
+
+    monkeypatch.setattr(openai, "OpenAI", lambda **kw: type("C", (), {"models": BoomModels()})())
+    r = client.post("/api/settings/available-models", json={"base_url": "https://x.example/v1", "api_key": "k"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+    assert "no /models" in r.json()["error"]
+
+
+def test_settings_copy_key(client):
+    """PUT /settings/keys/copy：服务端读源写目标，Key 仍不出库；源/目标/同源校验齐全。"""
+    client.put(
+        "/api/settings/models",
+        json={
+            "models": [
+                {"id": "m1", "base_url": "https://x.example/v1", "model": "x-1"},
+                {"id": "m2", "base_url": "https://x.example/v1", "model": "x-2"},
+            ],
+            "default_model": "m1",
+        },
+    )
+    client.put("/api/settings/keys", json={"model_id": "m1", "api_key": "sk-shared"})
+    assert client.get("/api/settings").json()["models"][1]["key_configured"] is False
+
+    r = client.put("/api/settings/keys/copy", json={"from": "m1", "to": "m2"})
+    assert r.status_code == 200
+    data = client.get("/api/settings").json()
+    assert data["models"][1]["key_configured"] is True
+    assert "sk-shared" not in json.dumps(data)  # 依然永不回读
+
+    # 源无 Key → 400；未知源/目标 → 404；同源 → 422
+    client.put(
+        "/api/settings/models",
+        json={
+            "models": [
+                {"id": "m1", "base_url": "https://x.example/v1", "model": "x-1"},
+                {"id": "m3", "base_url": "https://x.example/v1", "model": "x-3"},
+            ],
+            "default_model": "m1",
+        },
+    )
+    assert client.put("/api/settings/keys/copy", json={"from": "m3", "to": "m1"}).status_code == 400
+    assert client.put("/api/settings/keys/copy", json={"from": "ghost", "to": "m1"}).status_code == 404
+    assert client.put("/api/settings/keys/copy", json={"from": "m1", "to": "ghost"}).status_code == 404
+    assert client.put("/api/settings/keys/copy", json={"from": "m1", "to": "m1"}).status_code == 422
 
 
 def test_settings_test_ocr_success(client, monkeypatch):
