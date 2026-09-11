@@ -6,8 +6,8 @@
 > evidence-linked section writing, human-in-the-loop commitments, and a
 > tracked-changes .docx as the final deliverable. No cloud service, no data leaving your machine.
 
-[![Release](https://img.shields.io/github/v/release/joychin/Bid_Copilot_client?label=%E4%B8%8B%E8%BD%BD)](https://github.com/joychin/Bid_Copilot_client/releases)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue)](https://github.com/joychin/Bid_Copilot_client/releases)
+[![Release](https://img.shields.io/github/v/release/joychin/LingYan-Bid-Agent?label=%E4%B8%8B%E8%BD%BD)](https://github.com/joychin/LingYan-Bid-Agent/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue)](https://github.com/joychin/LingYan-Bid-Agent/releases)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-orange)](LICENSE)
 
 ## 一条流水线，五步交付
@@ -85,7 +85,7 @@
 
 ### 方式一：下载安装包
 
-到 [Releases](https://github.com/joychin/Bid_Copilot_client/releases) 下载 macOS（.dmg）或
+到 [Releases](https://github.com/joychin/LingYan-Bid-Agent/releases) 下载 macOS（.dmg）或
 Windows 安装包，启动后在「设置 → 模型」里添加模型并填入 API Key 即可使用。
 
 ### 方式二：源码运行（开发者）
@@ -93,8 +93,8 @@ Windows 安装包，启动后在「设置 → 模型」里添加模型并填入 
 前置：Node ≥ 22、[uv](https://docs.astral.sh/uv/)（Python ≥ 3.12）、Rust stable。
 
 ```bash
-git clone https://github.com/joychin/Bid_Copilot_client.git
-cd Bid_Copilot_client
+git clone https://github.com/joychin/LingYan-Bid-Agent.git
+cd LingYan-Bid-Agent
 npm install                            # 根：Tauri CLI 等编排依赖
 (cd frontend && npm install)           # 前端依赖
 (cd sidecar && uv sync)                # Python 依赖（dev 模式 sidecar 从 .venv 启动）
