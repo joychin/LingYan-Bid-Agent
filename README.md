@@ -1,126 +1,160 @@
-# Tender Agent — 本地标书 AI Agent 桌面客户端（MVP）
+# 灵燕智能 · Tender Agent
 
-Local-first 桌面 AI Agent：Tauri 2 壳 + React 前端 + Python sidecar（DeepAgents）。
-用户自带 LLM API Key（BYOK，默认 DeepSeek），支持多轮对话与 SKILL.md 技能自动调用，
-领域方向为招投标标书（tender-analysis / tender-toc）。全程本地运行、无云端服务。
-需求与验收详见 `tender-agent-mvp-prd.md`（本仓库唯一事实来源）。
+**本地运行的标书写作 AI 智能体。** 上传招标文件和公司资料，它读原文、理要点、搭目录、逐节写出带出处的投标正文，最后合成一份带修订标记的整本 Word——全程在你自己的电脑上运行，模型 API Key 你自己带（BYOK）。
+
+> Local-first desktop AI agent that turns tender documents into bid proposals:
+> evidence-linked section writing, human-in-the-loop commitments, and a
+> tracked-changes .docx as the final deliverable. No cloud service, no data leaving your machine.
+
+[![Release](https://img.shields.io/github/v/release/joychin/Bid_Copilot_client?label=%E4%B8%8B%E8%BD%BD)](https://github.com/joychin/Bid_Copilot_client/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue)](https://github.com/joychin/Bid_Copilot_client/releases)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-orange)](LICENSE)
+
+## 一条流水线，五步交付
+
+```
+ 招标文件（.docx / .pdf / 扫描件）
+    │
+    │ ① 解析      章节结构识别（书签/目录链接/印刷目录/编号多级兜底），
+    │             扫描件走可选的百度云 OCR，每页内容带行号锚点
+    ▼
+ 关键要求清单   资质、工期、评分办法、履约、售后…逐项列出，
+    │ ② 提取要点  每条注明出自原文第几页、第几行——你确认口径
+    ▼
+ 投标目录       照评分办法组织章节，每节写什么、缺什么材料，
+    │ ③ 生成目录  先列清楚再动手——你确认目录
+    ▼
+ 正文（逐节）    有素材的改写你的素材；招标方给了格式件的照原件
+    │ ④ 逐节写作  拷贝填空；都没有才推理撰写。多节并行派发，
+    │             工期、质保这些承诺值先问你，拍板了才写
+    ▼
+ 整本 Word      封面、标题分级编号、页码、表格按标书惯例排好；
+    │ ⑤ 合册交付  AI 改动全部带修订标记，缺料/待办进批注——
+                你在 Word 里逐条接受修订、解决批注，就是终稿
+```
+
+## 写得快，也要靠得住
+
+快靠模型；靠得住靠的是三件事：
+
+- **每个结论都有出处。** 正文里的要求和数字后面跟着招标原文的章节与行号，写完还有机器校验——引用锚不到原文行号的内容过不了自查，评审对照、自己复核都能直接翻到那一段。
+- **重要事项先问你。** 不能拍脑袋的事（工期填多少、质保承诺几年、用哪份资质）它会停下来先问，你确认了才写进正文；问答和审批都发生在对话里，随时可停、可改、可重来。
+- **交付一份标准 Word。** 正文、表格、封面、证书图都在一个 .docx 里，版式走标书基准模板；AI 的全部改动带修订标记，审阅权在你手里；待办留在批注里，打印和导出 PDF 不会带出去。
+
+## 三个内容库，越攒越顺
+
+| 库 | 装什么 | 怎么用 |
+| --- | --- | --- |
+| **素材库** | 过往标书、公司文档，按目录树勾选区间拆成带出处的素材块 | 写正文时按节检索取用：引用保持原文，改写适配本项目；重复块自动检测 |
+| **知识库** | 营业执照、资质证书、合同案例、人员证书等公司证明材料 | 传一次，自动识别类型和有效期；投标要什么证明直接查，到期会提醒，证书扫描件可贴进正文 |
+| **版式库** | 版式模板（内置一份标书基准版式） | 上传你单位的模板设为默认即可统一观感；只影响之后新建的节，不动已写内容 |
 
 ## 架构
 
 ```
-Tauri 2（Rust）
-  窗口 · spawn/重启 sidecar · 钥匙串 · IPC（零业务逻辑）
-    └─ React（webview）：Chat · 会话列表 · 工具时间线 · Settings
-          │ HTTP + SSE（127.0.0.1:随机端口，Bearer token）
-Python sidecar（FastAPI + uvicorn）
-  /api/* REST + SSE 事件流（§5.5 契约）
-  DeepAgents（skills + tools + SqliteSaver checkpointer）
-  SQLite（data/app.db） + workspace（data/workspace/）
-    └─ 用户自己的 LLM API（BYOK）
+┌─────────────────────────────────────────────────┐
+│  Tauri 2（Rust）  窗口 · sidecar 进程管理 · IPC   │  零业务逻辑
+└────────────────────┬────────────────────────────┘
+                     │ webview
+┌────────────────────▼────────────────────────────┐
+│  React 19 + Vite + Tailwind                     │
+│  对话 · 任务 · 工作台 · 产物面板 · 三库 · 设置     │
+└────────────────────┬────────────────────────────┘
+                     │ HTTP + SSE（仅 127.0.0.1 本机回环）
+┌────────────────────▼────────────────────────────┐
+│  Python sidecar（FastAPI + DeepAgents）          │
+│   skills：document-parse / tender-analysis /     │
+│           tender-outline / tender-body / tender-qa │
+│   工具：解析 · 检索 · 发布 · docx 直出 · 校验 …    │
+│   SQLite（app.db）+ workspace 任务文件树           │
+└────────────────────┬────────────────────────────┘
+                     │ OpenAI 兼容协议
+        你自己的模型 API（BYOK，默认 DeepSeek，
+        多模型 profile，可选配百度云 OCR）
 ```
 
 三条铁律（任何实现不得违反）：
 
-1. Rust 不含任何业务逻辑。
-2. **API Key 永不出现于 HTTP 请求/响应与前端 JS 内存**：key 由 Rust 从钥匙串读取，
-   在 spawn sidecar 时通过环境变量注入。
-   > 注：PRD §6.1 允许设置页在 webview 输入 API Key（经 IPC command 存钥匙串）。输入过程
-   > 会瞬时存在于 JS state / IPC payload，但**不进入任何 HTTP 载荷**，保存后立即清空。
-3. 前端只消费 PRD §5.5 定义的事件 schema，不依赖 DeepAgents 内部流格式。
+1. Rust 壳不含任何业务逻辑。
+2. **API Key 只写不读**：Key 在应用「设置」里填写，存本地 SQLite（`app.db`），
+   `GET /settings` 永不回读 Key、只返回 `key_configured` 布尔；环境变量仅作开发兜底。
+3. 前端只消费 sidecar 的事件契约（`agent.started / agent.token / tool.called /
+   run.state …` SSE 事件），不依赖 agent 框架的内部格式。
+
+## 快速开始
+
+### 方式一：下载安装包
+
+到 [Releases](https://github.com/joychin/Bid_Copilot_client/releases) 下载 macOS（.dmg）或
+Windows 安装包，启动后在「设置 → 模型」里添加模型并填入 API Key 即可使用。
+
+### 方式二：源码运行（开发者）
+
+前置：Node ≥ 22、[uv](https://docs.astral.sh/uv/)（Python ≥ 3.12）、Rust stable。
+
+```bash
+git clone https://github.com/joychin/Bid_Copilot_client.git
+cd Bid_Copilot_client
+npm install                            # 根：Tauri CLI 等编排依赖
+(cd frontend && npm install)           # 前端依赖
+(cd sidecar && uv sync)                # Python 依赖（dev 模式 sidecar 从 .venv 启动）
+npx tauri dev                          # 桌面客户端一条命令拉起
+```
+
+首次启动在应用内「设置 → 模型」添加模型：内置主流厂商预设（DeepSeek / Kimi / 通义 /
+智谱 / 豆包 / OpenAI …），任意 OpenAI 兼容协议端点均可，保存即时生效、无需重启。
+可选在「设置 → 文档解析」配百度云 OCR（PaddleOCR-VL）Key，用于扫描件整本解析。
+
+### 方式三：浏览器开发模式（无 Tauri 壳）
+
+```bash
+cp sidecar/.env.example sidecar/.env    # 填 LLM_API_KEY 等（此模式下 Key 走 env）
+npm run dev:browser                     # 同时拉起 sidecar(8765) + Vite，打开 http://localhost:5173
+```
+
+> 国内网络：pypi / npm / cargo 镜像已随仓库配好（`.npmrc`、`sidecar/pyproject.toml`、
+> `src-tauri/.cargo/config.toml`），克隆后开箱可用。
 
 ## 目录结构
 
 ```
 ├── sidecar/            Python sidecar（FastAPI + DeepAgents）
 │   ├── app/
-│   │   ├── main.py     FastAPI 入口（--port；鉴权/CORS/lifespan；日志双写 stderr+文件）
-│   │   ├── config.py   env+settings.json 双角色配置（llm/vlm）
-│   │   ├── db.py       sqlite3：tasks/conversations/messages/runs/run_traces/artifact_index/kb（WAL）
-│   │   ├── db_migrations.py  user_version 编号迁移（schema 变更在此追加）
-│   │   ├── agent.py    build_agent + run_stream（实时发布事件/流式断点重试/协作取消）
-│   │   ├── events.py   LangGraph 流 → §5.5 事件的唯一映射层 + run 边界 payload 构造
-│   │   ├── contracts/  契约单一事实源（events/dto pydantic 模型 → 生成前端 TS 类型）
-│   │   ├── bus.py      每会话 asyncio.Queue 订阅表
-│   │   ├── api/        tasks/conversations/runs/settings/sse/files/artifacts/knowledge
-│   │   ├── tools/      LLM 工具（parse_document/assemble_tender/publish/read/…）
-│   │   ├── parse/      确定性解析注册表（docx/pdf/txt/md → md+outline+meta）
-│   │   ├── knowledge/  公司资料库（FTS5 jieba 检索/入库管线）
-│   │   └── skills/     document-parse + tender-analysis + tender-outline（SKILL.md）
-│   ├── scripts/        gen_ts_types.py（契约 TS 类型生成）
-│   └── data/           运行时生成（gitignore）：app.db / agent.db / workspace/ / logs/
-├── frontend/           React 19 + Vite + Tailwind（shadcn 风格，手写组件）
-│   └── src/            api(client/sse/events.gen/dto.gen) · hooks(含 runReducer+vitest) · components
-├── src-tauri/          Tauri 2 壳（sidecar 生命周期 / 钥匙串 / commands）
-│   ├── src/sidecar.rs  spawn·healthz·指数退避重启·进程树清理·双角色设置
-│   └── src/lib.rs      commands：get_sidecar_info / get/set_model_settings / get_api_key_has_value / reveal_in_folder
-└── tender-agent-mvp-prd.md
+│   │   ├── main.py     FastAPI 入口（鉴权/CORS/lifespan/日志）
+│   │   ├── agent.py    build_agent + run 流（流式/断点重试/协作取消/HITL 续跑）
+│   │   ├── events.py   agent 框架流 → SSE 事件契约的唯一映射层
+│   │   ├── contracts/  契约单一事实源（pydantic 模型 → 生成前端 TS 类型）
+│   │   ├── api/        tasks / conversations / runs / settings / sse / files /
+│   │   │               workbench / artifacts / knowledge / materials / templates
+│   │   ├── tools/      LLM 工具（parse_document / docx_ops / 检索 / 发布 / 校验…）
+│   │   ├── parse/      确定性文档解析（docx/pdf/txt/md → md + outline + meta）
+│   │   ├── knowledge/  知识库（FTS5 jieba 检索 / 入库管线）
+│   │   └── skills/     SKILL.md 技能（document-parse / tender-analysis /
+│   │                   tender-outline / tender-body / tender-qa）
+│   └── data/           运行时生成（gitignore）：app.db / agent.db / workspace / logs
+├── frontend/           React 19 + Vite + Tailwind（shadcn 风格手写组件）
+├── src-tauri/          Tauri 2 壳（sidecar 生命周期 / 进程自愈 / commands）
+├── website/            产品官网静态页（与应用代码独立，不进构建）
+└── docs/               打包指引等工程文档
 ```
 
-## 运行方式（三种）
+## 开发
 
-前置：`uv`（Python ≥3.12）、Node ≥20、Rust stable ≥1.85（本机已用 rsproxy 镜像）。
-
-```bash
-# 1) 纯 sidecar（无前端无壳）
-cd sidecar
-uv sync
-uv run --env-file .env python -m app.main --port 8765
-# 另开终端：curl localhost:8765/api/healthz
-
-# 2) 浏览器开发模式（sidecar 手动起在 8765）
-npm run dev:browser        # 一条命令：同时拉起 8765 sidecar + Vite（Ctrl+C 一起退出）
-# 或分开：cd sidecar && uv run --env-file .env python -m app.main --port 8765
-#         cd frontend && npm run dev
-# 连接地址在 frontend/.env.development 的 VITE_SIDECAR_URL
-
-# 3) Tauri 桌面（推荐，一条命令）
-npx tauri dev
-# sidecar 由 Tauri 自动拉起（随机端口 + 随机 token），key 从钥匙串读取注入
-```
-
-首次使用前把 API Key 存进钥匙串（Mac 钥匙串 App / 终端）：
-
-```bash
-security add-generic-password -U -s tender-agent -a llm-api-key -w '<你的 key>'
-# 或：窗口内「设置」→ 保存 API Key（仅 Tauri 环境显示该输入框）
-security find-generic-password -s tender-agent   # 验证
-```
-
-## 网络镜像（本机直连超时，必配）
-
-- **pypi**：`sidecar/pyproject.toml` 内置清华镜像。
-- **npm**：根与 frontend 的 `.npmrc` 已配 `registry.npmmirror.com`。
-- **cargo**：`src-tauri/.cargo/config.toml` 配 `rsproxy.cn` 镜像。
-- **rustup**：`RUSTUP_DIST_SERVER=https://rsproxy.cn`（升级 Rust 时用）。
-
-## 验收要点（对应 PRD 里程碑）
-
-- M1：`curl` 走通 healthz / 会话 CRUD / SSE（started→token→tool→completed）；重启后历史仍在。
-- M2：新建会话、流式打字、Markdown 表格、ToolTimeline、刷新后历史保留。
-- M3：`npx tauri dev` 一条命令；`kill -9 <python pid>` 后 10 秒内自动恢复；钥匙串可查。
-- M4：把 `招标文件.docx` 放入 `sidecar/data/workspace/`，窗口内让 tender-toc 走完整流水线，
-  `data/workspace/out/` 生成 `tender-response-docs.json` / `tender-directory.json` / `tender-directory.html`。
-
-## 已知坑（PRD §11，均已实现应对）
-
-1. skills 路径两种写法（`skills/` vs 带 root 前缀）以启动日志实测为准（当前 `skills/` 可用）。
-2. DeepAgents beta：库内部格式变化只改 `sidecar/app/events.py` 一个文件；deepagents 锁 0.7.7。
-3. uvicorn 不要开 `--reload`（与 Tauri 进程树管理冲突）。
-4. 解析支持 `.docx`（python-docx）与 `.pdf`（PyMuPDF 原生提取，无需 LibreOffice）；`.doc` 不支持（提示另存为 .docx）。
-5. **钥匙串**：`keyring` crate 在此 macOS 写入 Data Protection 钥匙串、`security` CLI 不可见，
-   故改为 Rust 调 `security` CLI 子进程读写 login 钥匙串（满足 PRD M3 验收）。
-6. sse-starlette 对 dict 的 `data` 会输出 Python repr（单引号非 JSON）——sidecar 在
-   `app/api/sse.py` 预先 `json.dumps`，保证 `data: <json>` 契约。
+- `./check.sh` — 提交前全量门禁：sidecar pytest + 前端 tsc / oxlint / build + Rust check / clippy。
+- 打安装包与跨平台构建见 [docs/packaging.md](docs/packaging.md)（macOS / Windows / Linux）。
+- `./dev.sh` — 交互式开发启动器（tauri / browser / sidecar / frontend / preview 五种模式）。
+- 产品官网静态页在 [website/](website/)，本地打开 `index.html` 即可。
+- 参与贡献前请先读 [AGENTS.md](AGENTS.md)（分层边界、契约演进与架构决策记录）。
 
 ## 许可（License）
 
-本仓库以 **GNU AGPL-3.0** 开源，全文见 [LICENSE](LICENSE)。
+本仓库以 **AGPL-3.0** 开源，全文见 [LICENSE](LICENSE)。
 
 要点（与版权相关的场景，不是法律意见）：
 
-- 整体仓库为 AGPL-3.0：复制、修改、再分发须以相同许可提供源码。本项目含
-  `skills/` 中的方法论与提示词，一并受此许可约束。
-- 三方组件各有其许可：其中 PDF 解析依赖 **PyMuPDF** 为 AGPL-3.0 或商业双许可，
-  与仓库许可天然一致；`sidecar/app/skills/humanizer-zh` 为第三方 **MIT** 技能，
-  其 LICENSE 与署名声明随文件保留。
+- 整体仓库为 AGPL-3.0：复制、修改、再分发须以相同许可提供源码。`skills/` 中的
+  方法论与提示词一并受此许可约束。
+- 三方组件各有其许可：PDF 解析依赖 **PyMuPDF** 为 AGPL-3.0 或商业双许可，与仓库
+  许可天然一致；`sidecar/app/skills/humanizer-zh` 为第三方 **MIT** 技能，其 LICENSE
+  与署名声明随文件保留。
 - 若需在 AGPL 之外获得商业授权（如闭源集成、SaaS 分发），请联系维护者另行洽谈。
