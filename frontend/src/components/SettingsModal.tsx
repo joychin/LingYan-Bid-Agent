@@ -1051,9 +1051,12 @@ function ModelDialog({
       if (r.ok && r.models.length > 0) {
         setFetched(r.models)
         setCustomModel(false)
-        if (!r.models.includes(model.trim())) setModel(r.models[0])
-        const meta = preset.models.find((m) => m.name === r.models[0])
-        if (meta) setImageSupport(meta.imageSupport)
+        // 只填空、不覆盖：用户已填的模型名保持不动（拉取只是给他更多候选）
+        if (!model.trim()) {
+          setModel(r.models[0])
+          const meta = preset.models.find((m) => m.name === r.models[0])
+          if (meta) setImageSupport(meta.imageSupport)
+        }
         toast(`已获取 ${r.models.length} 个模型`, 'success')
       } else {
         toast('无法获取模型列表，请手动填写模型名', 'error')
