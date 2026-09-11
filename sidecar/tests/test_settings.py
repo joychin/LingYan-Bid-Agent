@@ -252,12 +252,12 @@ def test_settings_test_model_upstream_error_is_200_with_human_message(client, mo
     import httpx
     import openai
 
-    def make_client(status: int):
+    def make_client(status: int, body_message: str = "boom"):
         class FakeCompletions:
             def create(self, **kwargs):
                 req = httpx.Request("POST", "https://x.example/v1/chat/completions")
-                resp = httpx.Response(status, request=req, json={"error": {"message": "boom"}})
-                raise openai.APIStatusError("boom", response=resp, body=None)
+                resp = httpx.Response(status, request=req, json={"error": {"message": body_message}})
+                raise openai.APIStatusError(body_message, response=resp, body=None)
 
         return type("C", (), {"chat": type("Chat", (), {"completions": FakeCompletions()})()})()
 
@@ -266,8 +266,17 @@ def test_settings_test_model_upstream_error_is_200_with_human_message(client, mo
             return client_obj
         return factory
 
-    for status, keyword in ((401, "API Key 无效"), (402, "欠费"), (404, "404")):
-        monkeypatch.setattr(openai, "OpenAI", make_openai(make_client(status)))
+    cases = [
+        (401, "boom", "API Key 无效"),
+        (402, "boom", "欠费"),
+        (404, "boom", "404"),
+        # 实测形态：DeepSeek 对未知模型名回 400、lfans 网关回 422，原文带模型线索
+        (400, "The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed bad-model.", "模型名不被该服务商支持"),
+        (422, "model not found: gpt-5.6-luna", "模型名不被该服务商支持"),
+        (400, "some other bad request", "连接失败（HTTP 400）"),
+    ]
+    for status, raw, keyword in cases:
+        monkeypatch.setattr(openai, "OpenAI", make_openai(make_client(status, raw)))
         r = client.post(
             "/api/settings/test-model",
             json={"base_url": "https://x.example/v1", "model": "x-1", "api_key": "k"},
@@ -276,6 +285,66 @@ def test_settings_test_model_upstream_error_is_200_with_human_message(client, mo
         body = r.json()
         assert body["ok"] is False
         assert keyword in body["message"], f"status={status} 文案={body['message']!r}"
+        assert body["image_ok"] is None  # 不带 with_image 时无图片探测字段值
+
+
+def test_settings_test_model_image_probe(client, monkeypatch):
+    """with_image=True：文本 ping 通过后附带图片探测；拒绝/接受/文本失败三态。"""
+    import httpx
+    import openai
+
+    def make_openai(reject_image: bool, text_fails: bool = False):
+        class FakeCompletions:
+            def create(self, **kwargs):
+                content = kwargs.get("messages", [{}])[0].get("content")
+                if isinstance(content, list):  # 图片 ping（content 为多段数组）
+                    if reject_image:
+                        req = httpx.Request("POST", "https://x.example/v1/chat/completions")
+                        resp = httpx.Response(400, request=req, json={"error": {"message": "image not supported"}})
+                        raise openai.APIStatusError("image not supported", response=resp, body=None)
+                elif text_fails:
+                    req = httpx.Request("POST", "https://x.example/v1/chat/completions")
+                    resp = httpx.Response(401, request=req, json={"error": {"message": "bad key"}})
+                    raise openai.APIStatusError("bad key", response=resp, body=None)
+
+                class FakeResp:
+                    choices = [object()]
+                return FakeResp()
+
+        client_obj = type("C", (), {"chat": type("Chat", (), {"completions": FakeCompletions()})()})()
+        return lambda **_kw: client_obj
+
+    def post(with_image):
+        return client.post(
+            "/api/settings/test-model",
+            json={"base_url": "https://x.example/v1", "model": "x-1", "api_key": "k", "with_image": with_image},
+        ).json()
+
+    # 图片被拒（文本模型）：主结果 ok + image_ok=false + 人话
+    monkeypatch.setattr(openai, "OpenAI", make_openai(reject_image=True))
+    body = post(with_image=True)
+    assert body["ok"] is True
+    assert body["image_ok"] is False
+    assert "不支持图片输入" in body["image_message"]
+
+    # 图片接受（视觉模型）：image_ok=true
+    monkeypatch.setattr(openai, "OpenAI", make_openai(reject_image=False))
+    body = post(with_image=True)
+    assert body["image_ok"] is True
+    assert "接受" in body["image_message"]
+    # 图片 ping 的载荷必须是多段 content（text + image_url）
+    # （由 make_openai 内 isinstance 分支隐式验证：list 路径才走拒绝逻辑）
+
+    # 文本 ping 就失败：不附带图片探测（image_ok 保持 None）
+    monkeypatch.setattr(openai, "OpenAI", make_openai(reject_image=False, text_fails=True))
+    body = post(with_image=True)
+    assert body["ok"] is False
+    assert body["image_ok"] is None
+
+    # 不带 with_image：不探测图片
+    monkeypatch.setattr(openai, "OpenAI", make_openai(reject_image=True))
+    body = post(with_image=False)
+    assert body["image_ok"] is None
 
 
 def test_settings_available_models(client, monkeypatch):

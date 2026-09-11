@@ -1169,6 +1169,8 @@ function ModelDialog({
         base_url: url,
         model: name,
         ...(key.trim() ? { api_key: key.trim() } : { key_ref: keyRef }),
+        // 「图片输入」开关开启时附带图片探测（1×1 PNG ping），验证声明是否属实
+        ...(imageSupport ? { with_image: true } : {}),
       })
       setTestResult(r)
     } catch (e) {
@@ -1290,7 +1292,7 @@ function ModelDialog({
 
           <SettingRow
             title="图片输入"
-            desc="开启后用于知识库图片 / 扫描件识别（已配置文档解析时优先走百度云，此处为兜底）"
+            desc="开启后用于知识库图片 / 扫描件识别（已配置文档解析时优先走百度云，此处为兜底）；「测试连接」会附带探测服务方是否接受图片"
           >
             <Switch checked={imageSupport} onChange={setImageSupport} label="图片输入" />
           </SettingRow>
@@ -1324,13 +1326,18 @@ function ModelDialog({
           {testResult && !error && (
             <p
               className={cn(
-                'text-[13px] leading-relaxed',
+                'whitespace-pre-line text-[13px] leading-relaxed',
                 testResult.ok ? 'text-success' : 'text-error',
               )}
             >
               {testResult.ok
                 ? `连接正常 · ${(testResult.latency_ms / 1000).toFixed(1)}s`
                 : testResult.message}
+            </p>
+          )}
+          {testResult && testResult.image_ok != null && (
+            <p className={cn('text-[13px] leading-relaxed', testResult.image_ok ? 'text-success' : 'text-error')}>
+              图片输入{testResult.image_message}
             </p>
           )}
           <div className="flex items-center gap-2">

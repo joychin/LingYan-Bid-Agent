@@ -339,11 +339,15 @@ export function testModelConnection(target: { role: 'ocr' }): Promise<{ ok: bool
 
 /** 测「表单当前值」的连通性：填好 Key/模型名即可测，不落库、不保存。
  *  api_key 为空时用 key_ref 借用已保存 profile 的 Key（编辑未改 Key / 同厂商复用）。
+ *  with_image=true 且文本连通时附带图片输入探测（image_ok/image_message）。
  *  上游连接问题也返回 200 + ok:false + 人话文案（就地展示）；入参非法才抛错。 */
 export interface DraftTestResult {
   ok: boolean
   message: string
   latency_ms: number
+  /** 图片探测结果：null=未探测（未带 with_image 或文本 ping 失败） */
+  image_ok?: boolean | null
+  image_message?: string | null
 }
 
 export function testModelDraft(body: {
@@ -351,6 +355,7 @@ export function testModelDraft(body: {
   model: string
   api_key?: string
   key_ref?: string
+  with_image?: boolean
 }): Promise<DraftTestResult> {
   return request('/settings/test-model', {
     method: 'POST',

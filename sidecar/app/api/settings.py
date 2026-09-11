@@ -175,12 +175,17 @@ async def put_settings_ocr_keys(body: OcrKeysBody):
 
 
 class DraftTestBody(BaseModel):
-    """草稿态连通性测试：Key 来自表单正在填的值（api_key）或借用已保存 profile（key_ref）。"""
+    """草稿态连通性测试：Key 来自表单正在填的值（api_key）或借用已保存 profile（key_ref）。
+
+    with_image=True 时文本 ping 通过后附带一次图片 ping（1×1 PNG data URI），
+    探测服务方是否接受图片输入——验证「图片输入」开关的声明是否属实。
+    """
 
     base_url: str
     model: str
     api_key: str | None = None
     key_ref: str | None = None
+    with_image: bool = False
 
 
 class AvailableModelsBody(BaseModel):
@@ -209,6 +214,24 @@ def _resolve_draft_key(api_key: str | None, key_ref: str | None) -> str:
     return ""
 
 
+_MODEL_ERROR_MARKERS = (
+    # 各厂商「模型名不存在」400 的措辞（实测 DeepSeek："The supported API model
+    # names are deepseek-flash, deepseek-v4-pro, but you passed ..."）
+    "model not found",
+    "does not exist",
+    "invalid model",
+    "unknown model",
+    "supported api model names",
+    "not a valid model",
+    "no such model",
+)
+
+
+def _looks_like_model_error(raw: str) -> bool:
+    low = (raw or "").lower()
+    return any(m in low for m in _MODEL_ERROR_MARKERS)
+
+
 def _status_message(code: int, raw: str) -> str:
     """上游 HTTP 状态 → 人话（首行给结论，帮助用户当场自救）。"""
     if code in (401, 403):
@@ -216,11 +239,15 @@ def _status_message(code: int, raw: str) -> str:
     if code == 402:
         return "账户额度不足（欠费）——请充值，或切换到其他模型"
     if code == 404:
-        return "接口返回 404——多为模型名拼写错误，或接口地址缺少 /v1（也可点「获取模型列表」选择）"
+        return "接口返回 404——多为模型名拼写错误，或接口地址缺少 /v1（也可点「获取列表」选择）"
     if code == 429:
         return "请求过于频繁（限流）——稍后重试"
     if code >= 500:
         return f"服务方错误（HTTP {code}）——稍后重试"
+    # 实测：DeepSeek 对未知模型名回 400、lfans 网关回 422（"model not found: x"），
+    # 原文里多带有效模型清单或名字回显
+    if code in (400, 422) and _looks_like_model_error(raw):
+        return f"模型名不被该服务商支持——检查拼写，或点「获取列表」从真实清单选择。\n服务方返回：{raw[:200]}"
     return f"连接失败（HTTP {code}）：{raw[:200]}"
 
 
@@ -271,6 +298,48 @@ def _list_models_sync(base_url: str, api_key: str) -> tuple[bool, list[str], str
     return True, ids, ""
 
 
+# 1×1 红色 PNG 的 data URI——图片探测用最小载荷（费用可忽略，无需外网图片 URL）
+_TINY_PNG_DATA_URI = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+def _ping_image_sync(base_url: str, model: str, api_key: str) -> tuple[bool, str]:
+    """图片输入探测：发一条带 1×1 PNG 的最小 chat 请求。
+
+    支持=服务方接受（200）；多数文本模型回 4xx 拒绝。已知边界：个别兼容网关会
+    静默忽略图片照常 200（假阳性接受）——探测语义是「服务方是否接受」，不是
+    「模型是否真理解图片内容」，提示文案按此措辞。
+    """
+    from openai import APIStatusError, OpenAI
+
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=15.0, max_retries=0)
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "ping"},
+                        {"type": "image_url", "image_url": {"url": _TINY_PNG_DATA_URI}},
+                    ],
+                }
+            ],
+            max_tokens=1,
+        )
+    except APIStatusError as e:
+        if e.status_code in (400, 404, 422):
+            return False, "未通过——服务方拒绝图片请求，该模型可能不支持图片输入（建议关闭开关）"
+        return False, f"未通过（HTTP {e.status_code}）：{str(e)[:200]}"
+    except Exception as e:  # noqa: BLE001 - 探测失败照常透给用户
+        return False, f"未通过：{str(e)[:200]}"
+    if not resp.choices:
+        return False, "未通过——服务方返回了空响应"
+    return True, "通过——服务方接受图片请求"
+
+
 def _test_ocr_sync() -> str:
     from ..baidu_ocr import BaiduOcrUnavailable, exchange_access_token
 
@@ -290,6 +359,7 @@ async def test_model_draft(body: DraftTestBody):
     """测「表单当前值」（base_url/model/key 尚未保存）：填好即可测，测试不再偷偷保存。
 
     入参非法（地址/模型名缺失）→ 422；上游连接问题一律 200 + ok=false + 人话文案。
+    with_image=True 且文本 ping 通过时，附带图片输入探测（image_ok/image_message）。
     """
     base_url = _validate_base_url(body.base_url)
     model = (body.model or "").strip()
@@ -299,7 +369,17 @@ async def test_model_draft(body: DraftTestBody):
     if not api_key:
         raise HTTPException(status_code=400, detail="未提供 API Key——请填写 Key，或复用同厂商已配置的 Key")
     ok, message, latency_ms = await asyncio.to_thread(_ping_model_sync, base_url, model, api_key)
-    return {"ok": ok, "message": message, "latency_ms": latency_ms}
+    image_ok: bool | None = None
+    image_message: str | None = None
+    if ok and body.with_image:
+        image_ok, image_message = await asyncio.to_thread(_ping_image_sync, base_url, model, api_key)
+    return {
+        "ok": ok,
+        "message": message,
+        "latency_ms": latency_ms,
+        "image_ok": image_ok,
+        "image_message": image_message,
+    }
 
 
 @router.post("/settings/available-models")
