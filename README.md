@@ -87,17 +87,36 @@
 
 ## 快速开始
 
-> **TODO：发布前补齐本节。** 建议包含：系统要求（Windows / macOS 版本）、安装方式（GitHub Releases 下载安装包，或源码构建步骤）、首次运行的模型服务配置示例。
+### 下载安装
+
+从 [Releases](https://github.com/joychin/LingYan-Bid-Agent/releases) 下载对应平台的安装包：
+
+- **Windows**（x64）：`Tender.Agent_x64-setup.exe`
+- **macOS**（Apple Silicon）：`Tender.Agent_aarch64.dmg`
+
+安装包未做代码签名：macOS 首次打开被 Gatekeeper 拦截时，在访达中右键点应用选「打开」；Windows 弹出 SmartScreen 提示时，选「仍要运行」。
+
+### 首次运行
+
+1. 进入 **设置 → 模型 → 添加模型**，填入你的模型服务信息（OpenAI 兼容协议：接口地址、API Key、模型名）。用哪家服务由你决定，密钥只保存在本机；
+2. （可选）在 **设置 → 文档解析** 配置百度云 OCR 密钥，用于解析扫描版招标文件；
+3. 新建任务、上传一份招标文件，走一遍「读原文 → 搭目录 → 写一节 → 导 Word」。
+
+### 从源码运行
+
+需要 [Rust](https://rustup.rs/)、Node 22、[uv](https://docs.astral.sh/uv/)：
 
 ```bash
-# TODO: 替换为真实的安装 / 构建命令
-# 示例结构：
-# 1. 从 Releases 下载对应平台的客户端
-# 2. 首次启动后配置你的模型服务（API 地址与密钥）
-# 3. 导入一份招标文件，走通「读原文 → 搭目录 → 写一节 → 导 Word」
+git clone https://github.com/joychin/LingYan-Bid-Agent.git
+cd LingYan-Bid-Agent
+npm install                            # 根目录开发依赖（Tauri CLI 等）
+(cd frontend && npm install)           # 前端依赖
+cp sidecar/.env.example sidecar/.env   # 环境变量模板（模型密钥也可在应用内配置）
+./dev.sh browser                       # 浏览器模式开发；完整客户端用 ./dev.sh tauri
 ```
 
-也可以在 [官网](https://ddmdj.com/#cta) 留下邮箱，获取一份可试用的客户端，并约一次 30 分钟的上手陪同。
+改动后用 `./check.sh` 做全栈检查；自行构建安装包见 [docs/packaging.md](docs/packaging.md)。
+
 
 ## 常见问题
 
@@ -126,7 +145,6 @@
 
 问题与建议请提 [Issue](https://github.com/joychin/LingYan-Bid-Agent/issues)。
 
-<!-- TODO: 如接受 PR，补充贡献流程；并确定开源协议后删除本行
 ## License
-TODO: 明确协议（如 Apache-2.0 / MIT）后在此声明。
--->
+
+本项目以 [AGPL-3.0-only](LICENSE) 协议开源，`skills/` 中的方法论与提示词一并受其约束。
