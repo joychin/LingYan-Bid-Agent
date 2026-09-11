@@ -799,6 +799,85 @@ describe('agent.retry（LLM 自动重试可见，2026-09-08 契约 additive）',
   })
 })
 
+describe('从断点继续清终态记账（terminalRuns，2026-09-12 review 修复）', () => {
+  const step: ToolStep = {
+    id: 's1',
+    tool: 'task',
+    args: {},
+    status: 'running',
+    summary: '',
+    toolCallId: 't1',
+    reasoning: '',
+    children: [],
+    startedAt: NOW,
+    endedAt: null,
+  }
+
+  it('started 把 run 移出 terminalRuns：续跑段的快照对账不再被闸', () => {
+    // run 错误终态（agent.error 在 SSE 层标记 terminalRuns，拦过期 HTTP 对账复活）
+    const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    const errored = runReducer(started, {
+      type: 'sse',
+      event: 'agent.error',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        error: '应用服务重启，任务被中断',
+        code: 'interrupted',
+        seq: 5,
+      },
+    }).state
+    expect(errored.terminalRuns.has('r1')).toBe(true)
+    // 会话内点「从断点继续」：乐观 started 后必须清位，否则紧随的
+    // restoreSnapshot / run.state running / 缺口对账全被守卫丢弃（续跑期丢事件无自愈）
+    const continued = runReducer(errored, { type: 'started', runId: 'r1', now: NOW, continuation: true }).state
+    expect(continued.terminalRuns.has('r1')).toBe(false)
+    const snapped = runReducer(continued, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools: [step],
+      todos: [],
+      reasoningText: '',
+      snapshotSeq: 9,
+    }).state
+    expect(snapped.tools).toHaveLength(1)
+    expect(snapped.lastSeq).toEqual({ runId: 'r1', seq: 9 })
+  })
+})
+
+describe('过程对账失败可见化（traceSyncIssue，2026-09-12）', () => {
+  it('二次失败置位 traceSyncIssue；成功快照清除', () => {
+    const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    // 首次失败（useRun 自动重试一次）→ 仍不置位；重试再败 → 置位出提示行
+    const failed = runReducer(started, { type: 'trace-sync-failed' }).state
+    expect(failed.traceSyncIssue).toBe(true)
+    // 用户点「重新同步」成功：snapshot 清除提示（活 run 语境）
+    const synced = runReducer(failed, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools: [],
+      todos: [],
+      reasoningText: '',
+    }).state
+    expect(synced.traceSyncIssue).toBe(false)
+  })
+
+  it('终态收敛（settle-completed/error/interrupt）不残留提示', () => {
+    const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    const failed = runReducer(started, { type: 'trace-sync-failed' }).state
+    expect(
+      runReducer(failed, { type: 'settle-completed' }).state.traceSyncIssue,
+    ).toBe(false)
+    expect(
+      runReducer(failed, { type: 'settle-error', error: '任务已停止', code: 'cancelled' }).state
+        .traceSyncIssue,
+    ).toBe(false)
+  })
+})
+
 describe('stream-batch（流式高频事件合并应用）', () => {
   const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
   const taskCall: Action = {

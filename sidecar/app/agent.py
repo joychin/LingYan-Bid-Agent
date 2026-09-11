@@ -115,7 +115,7 @@ def _classify_error(exc: BaseException) -> tuple[str, str]:
     # 三者重试都救不了，统一归 llm_auth 让前端给「去设置」入口
     if isinstance(exc, APIStatusError) and exc.status_code in (401, 403, 402):
         if exc.status_code == 402:
-            human = "模型账户额度不足（欠费），请在 设置 → 模型 中充值，或切换到其他模型。"
+            human = "模型账户额度不足（欠费）——请前往服务商平台充值，或切换到其他模型。"
         else:
             human = "模型 API Key 无效或已失效，请在 设置 → 模型 中检查。"
         return "llm_auth", f"{human}\n服务方返回：{str(exc)[:300]}"
@@ -420,39 +420,71 @@ class _DispatchEnrichMiddleware(AgentMiddleware):
         return handler(request)
 
 
-# 本地重工具超时封顶（秒）。对齐 Claude Code bash 工具「默认 2min/硬上限 10min」
-# 的机制纪律；LLM/HTTP 调用自带 180s 超时不在此列。
-_TOOL_TIMEOUT_SECONDS = 600
-# 超时管制的工具清单：本地解析/组装/docx 族（磁盘+CPU 密集、无自身超时）。
-_TIMEOUT_TOOLS = frozenset({
-    "parse_document",
-    "assemble_tender",
-    "docx_section_create",
-    "docx_section_read",
-    "docx_section_revise",
-    "docx_material_inject",
-    "docx_source_inject",
-    "docx_image_insert",
-    "docx_assemble_volume",
-})
+# 工具超时档位（秒）。重工具 600（磁盘+CPU 密集、无自身超时，对齐 Claude Code
+# bash「默认 2min/硬上限 10min」的机制纪律）；其余全部工具默认 120——2026-09-12
+# 从清单制改为兜底制：搜索/校验/发布/文件七件套 hang 时此前无上界，取消的事件
+# 边界永不到达，会话被 409 钉死到重启。task（子代理）不设硬上限：其内部每步自带
+# LLM 180s/工具超时、总量由主 worker 断流重试兜底，只参与取消感知。
+# ask_human 不包（瞬时中断型，真正的等待在 HITL 暂停语义里）。
+_TOOL_TIMEOUT_HEAVY = 600
+_TOOL_TIMEOUT_DEFAULT = 120
+_TOOL_TIMEOUTS: dict[str, int | None] = {
+    **{
+        name: _TOOL_TIMEOUT_HEAVY
+        for name in (
+            "parse_document",
+            "assemble_tender",
+            "docx_section_create",
+            "docx_section_read",
+            "docx_section_revise",
+            "docx_material_inject",
+            "docx_source_inject",
+            "docx_image_insert",
+            "docx_assemble_volume",
+        )
+    },
+    "task": None,
+}
+_TOOL_TIMEOUT_SKIP = frozenset({"ask_human"})
+# 取消感知的等待粒度（秒）：停止请求在任意工具执行期内 ≤ 此值即被察觉
+_TOOL_CANCEL_POLL = 0.5
+
+
+class _ToolCancelledError(RuntimeError):
+    """用户请求停止时从工具等待中抛出：节点失败、superstep 不落 checkpoint，悬空
+    tool_calls 由下一 run/续跑开头 PatchToolCalls 补插取消 ToolMessage 自愈——与
+    既有「取消不清 checkpoint」同口径。"""
 
 
 class _ToolTimeoutMiddleware(AgentMiddleware):
-    """本地重工具超时封顶：卡死的工具调用限时返回错误，run 不再被拖死。
+    """全工具超时封顶 + 取消感知（2026-09-12 从清单制扩展为兜底制）。
 
-    动因=本地工具（文件系统停顿/超大文件）挂住时 worker 线程永不返回——run 状态、
-    活树快照、用量桶全部永久驻留且占死线程池槽位。超时返回错误字符串走既有
+    超时：重工具 600 / 其余 120 / task 无硬上限。超时返回错误 ToolMessage 走既有
     tool error 通道，模型可自行缩小范围重试或绕行，run 正常收尾清理。
-    机制边界（明示）：Python 杀不掉线程——超时后底层工具线程（daemon）滞留至
-    自然结束，滞留计数=超时次数有界；wrap_tool_call 是同步链，故真 handler 在
-    复制了 contextvars 的新线程里执行（工具读任务上下文不受影响），本线程限时等待。
+    取消感知：等待循环按 _TOOL_CANCEL_POLL 粒度查 CANCEL_EVENTS——置位即抛
+    _ToolCancelledError 中止节点（worker 按 cancelled 收尾）。此前取消只能等工具
+    自然返回（LLM 死等最坏 180s、清单外工具无上界），停止形同虚设。
+    机制边界（明示）：Python 杀不掉线程——超时/中止后底层工具线程（daemon）滞留至
+    自然结束，滞留计数有界；task 中止后子代理在后台跑到下一边界（token 消耗有界）；
+    wrap_tool_call 是同步链，故真 handler 在复制了 contextvars 的新线程里执行
+    （工具读任务上下文不受影响），本线程限时等待。
     """
 
     def wrap_tool_call(self, request: "ToolCallRequest", handler):
         call = request.tool_call
-        if call.get("name") not in _TIMEOUT_TOOLS:
+        name = call.get("name") or ""
+        if name in _TOOL_TIMEOUT_SKIP:
             return handler(request)
-        ctx = contextvars.copy_context()
+        run_ctx = runctx.current_run()
+        rid = run_ctx.run_id if run_ctx is not None else None
+        timeout = _TOOL_TIMEOUTS.get(name, _TOOL_TIMEOUT_DEFAULT)
+        cancel_event = CANCEL_EVENTS.get(rid) if rid is not None else None
+        if cancel_event is None and timeout is None:
+            return handler(request)  # 无取消语境且无硬上限（task+独立实例）：包了只剩开销
+        # 取消预检：langgraph 若因本节点失败重试，重进即抛（快速耗尽重试策略）
+        if cancel_event is not None and cancel_event.is_set():
+            raise _ToolCancelledError(name)
+        ectx = contextvars.copy_context()
         box: list = []
         done = threading.Event()
 
@@ -465,21 +497,32 @@ class _ToolTimeoutMiddleware(AgentMiddleware):
                 done.set()
 
         threading.Thread(
-            target=ctx.run, args=(_run,), daemon=True, name="tool-timeout"
+            target=ectx.run, args=(_run,), daemon=True, name="tool-timeout"
         ).start()
-        if not done.wait(_TOOL_TIMEOUT_SECONDS):
-            return ToolMessage(
-                content=(
-                    f"[工具超时：{call.get('name')} 已运行 "
-                    f"{_TOOL_TIMEOUT_SECONDS // 60} 分钟未完成——多半是文件过大或底层卡死。"
-                    "注意：原调用可能仍在后台执行并最终写盘，请勿立即重写同一文件"
-                    "（后写者会整体覆盖先写者）；请缩小范围（分节/分文件/限行号区间）"
-                    "或换一条路径完成目标]"
-                ),
-                status="error",
-                tool_call_id=call.get("id") or "",
-                name=call.get("name") or "",
-            )
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not done.is_set():
+            now = time.monotonic()
+            if deadline is not None:
+                remaining = deadline - now
+                if remaining <= 0:
+                    return ToolMessage(
+                        content=(
+                            f"[工具超时：{name} 已运行 {int(timeout) // 60} 分钟未完成——多半是文件过大或底层卡死。"
+                            "注意：原调用可能仍在后台执行并最终写盘，请勿立即重写同一文件"
+                            "（后写者会整体覆盖先写者）；请缩小范围（分节/分文件/限行号区间）"
+                            "或换一条路径完成目标]"
+                        ),
+                        status="error",
+                        tool_call_id=call.get("id") or "",
+                        name=name,
+                    )
+                wait_for = min(_TOOL_CANCEL_POLL, remaining)
+            else:
+                wait_for = _TOOL_CANCEL_POLL
+            if done.wait(wait_for):
+                break
+            if cancel_event is not None and cancel_event.is_set():
+                raise _ToolCancelledError(name)
         result = box[0]
         if isinstance(result, BaseException):
             raise result
@@ -609,6 +652,18 @@ def _get_saver():
                 # sidecar 常驻进程需要连接全程存活，故自持连接、直接构造 SqliteSaver（内部自带线程锁）。
                 _saver = SqliteSaver(_saver_conn)
     return _saver
+
+
+def checkpoint_exists(cid: str) -> bool:
+    """该会话在 agent.db 里是否有 checkpoint（continue 端点前置校验，2026-09-12）：
+    断点续跑的前提是 thread 存在——agent.db 损坏/被删后记忆重建只产出纯文本对，
+    thread 缺失时续跑会在首个模型调用处异常落 internal 终态；提前挡掉给用户
+    「请重新执行」的明确出路。读失败按不存在处理（不放大成 500）。"""
+    try:
+        return _get_saver().get_tuple({"configurable": {"thread_id": cid}}) is not None
+    except Exception:
+        logger.exception("checkpoint 预检失败（cid=%s）", cid)
+        return False
 
 
 class _SubagentTagMiddleware(AgentMiddleware):
@@ -1263,12 +1318,15 @@ def _retire_broken_steps(top_steps: list[dict], rid: str, cid: str, _publish) ->
 def _run_agent_stream(
     agent, cid: str, rid: str, task_id: str | None, _publish, user_text: str | None, resume_decisions: list | None,
     cancel_event: threading.Event | None = None, thinking: str = "low",
-    resume_payload: dict | None = None,
+    resume_payload: dict | None = None, continue_from_checkpoint: bool = False,
 ) -> tuple[str, str | None, str | None, dict, dict | None]:
     """worker 线程里跑完整流，逐块实时回调 _publish(event, data)。
 
     首段（user_text）与续段（resume_decisions，Command(resume=...) 从 checkpoint
-    的 interrupt 处续跑）共用本函数。返回 (assistant_text, error, error_code, trace,
+    的 interrupt 处续跑）共用本函数；continue_from_checkpoint=True 是终态断点续跑
+    （2026-09-12）：input=None 与断流重试同款——langgraph 从 checkpoint 恢复 pending
+    任务只重跑未完成节点，上一段遗留的悬空 tool_calls 由 PatchToolCallsMiddleware
+    在开头补插取消 ToolMessage 自愈。返回 (assistant_text, error, error_code, trace,
     interrupt)：assistant_text 是**最终回复**（最后一段未被 tool.called 跟随的正文）；
     此前各轮的正文旁白在 tool_called 到达时封段挂到对应 trace 步骤的 text 字段
     （过程/结果分通道，前端 useRun 用同一条封段规则，SSE 契约零改动）。
@@ -1301,6 +1359,8 @@ def _run_agent_stream(
         stream_input: object = Command(resume=resume_payload)
     elif resume_decisions is not None:
         stream_input = Command(resume={"decisions": resume_decisions})
+    elif continue_from_checkpoint:
+        stream_input = None
     else:
         stream_input = {"messages": [("user", user_text or "")]}
     # 正文按轮次分段：cur_text_parts 是当前未封口段；主 agent 的 tool_called 到达即
@@ -1489,7 +1549,12 @@ def _run_agent_stream(
     except Exception as e:  # 永久错误（认证/参数）与其他意外错误：不重试
         logger.exception("agent stream failed")
         if not error:
-            error_code, error = _classify_error(e)
+            # 异常与取消竞态（含 _ToolCancelledError：取消感知 middleware 从工具等待中
+            # 抛出）——cancel 已置位时按 cancelled 收尾，不误归类 internal/llm_auth
+            if cancel_event is not None and cancel_event.is_set():
+                error_code, error = "cancelled", events.CANCELLED_MESSAGE
+            else:
+                error_code, error = _classify_error(e)
     finally:
         clear_live_trace(rid)
         runctx.clear_run()
@@ -1762,13 +1827,16 @@ async def run_stream(
     thinking: str = "low",
     model: str | None = None,
     resume_payload: dict | None = None,
+    continue_from_checkpoint: bool = False,
 ) -> None:
     """后台任务：驱动一段 agent 流式执行并实时发布 §5.5 事件。
 
     首段传 user_text；HITL 续段传 resume_decisions（同一 run 从 interrupt 处续跑，
     start_seq 接上一段的事件序号--前端按 run_id 去重，重置会吞掉续段事件）。
     多中断续段传 resume_payload（{interrupt_id: {"decisions": [...]}} 映射，
-    langgraph 对多个 pending interrupt 的恢复要求）。thinking 是本 run 的思考档位
+    langgraph 对多个 pending interrupt 的恢复要求）。continue_from_checkpoint=True
+    是终态断点续跑（2026-09-12，POST /runs/{rid}/continue）：无新输入，从 checkpoint
+    恢复 pending 任务只重跑未完成节点。thinking 是本 run 的思考档位
     （low/medium/high，续跑沿用首段存档值）。model 是本 run 选用的模型 profile id
     （None=default；续跑沿用首段存档值）。
     """
@@ -1828,7 +1896,7 @@ async def run_stream(
             start_files = None
         text, error, error_code, trace, interrupt = await asyncio.to_thread(
             _run_agent_stream, agent, cid, rid, task_id, _publish, user_text, resume_decisions,
-            cancel_event, thinking, resume_payload,
+            cancel_event, thinking, resume_payload, continue_from_checkpoint,
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
 
@@ -1964,7 +2032,12 @@ async def run_stream(
                 logger.exception("run_stream 异常收尾落库失败（cid=%s rid=%s）", cid, rid)
         try:
             seq = next_seq()
-            outer_code, outer_error = _classify_error(e)
+            # 异常与取消竞态：cancel 已置位按 cancelled 收尾（含取消感知 middleware 抛出的
+            # _ToolCancelledError 从 worker 外漏到本层的场景），不误归类 internal
+            if cancel_event.is_set():
+                outer_code, outer_error = "cancelled", events.CANCELLED_MESSAGE
+            else:
+                outer_code, outer_error = _classify_error(e)
             # 终态守卫：worker 分支已落的终态不被覆盖——error 分支写入的原始错误
             # 文案不被内部异常顶掉、completed 不被翻成 error（error 事件照发）
             db.finish_run_if_running(

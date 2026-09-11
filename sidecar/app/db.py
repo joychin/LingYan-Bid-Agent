@@ -853,7 +853,7 @@ def recover_stale_runs() -> int:
     try:
         cur = conn.execute(
             "UPDATE runs SET status='error', error=?, error_code='interrupted' WHERE status='running'",
-            ("sidecar 重启，任务中断",),
+            ("应用服务重启，任务被中断",),
         )
         return cur.rowcount
     finally:
@@ -872,6 +872,30 @@ def active_run_exists(cid: str) -> bool:
     finally:
         conn.close()
     return row is not None
+
+
+# 终态断点续跑（2026-09-12）可续的错误定性：服务重启中断 / 模型服务不稳重试耗尽 /
+# Key 失效或欠费（用户修好配置回来续）。cancelled 不提供——尊重用户停止意图；
+# internal 不提供——程序自身错误，续跑大概率原地再错（重新执行走新 run 有 PatchToolCalls 自愈）。
+RESUMABLE_ERROR_CODES = ("interrupted", "llm_unavailable", "llm_auth")
+
+
+def continue_run(rid: str) -> bool:
+    """终态断点续跑的抢占翻转（error → running）：仅 error 终态且 error_code 在
+    RESUMABLE_ERROR_CODES 内生效。条件 UPDATE 与并发双击互斥（一对一输，输家 409，
+    与 resume_run 同款语义）；last_seq 保留（续段事件序号接续，前端按 run_id 去重）；
+    error/error_code 清空（下次终态再写）。"""
+    codes = ",".join("?" for _ in RESUMABLE_ERROR_CODES)
+    conn = _conn()
+    try:
+        cur = conn.execute(
+            f"UPDATE runs SET status='running', error=NULL, error_code=NULL "
+            f"WHERE id=? AND status='error' AND error_code IN ({codes})",
+            (rid, *RESUMABLE_ERROR_CODES),
+        )
+        return cur.rowcount > 0
+    finally:
+        conn.close()
 
 
 def list_active_runs() -> list[dict]:

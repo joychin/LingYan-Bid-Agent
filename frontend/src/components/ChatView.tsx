@@ -4,7 +4,7 @@ import { getSettings } from '@/api/client'
 import { ArrowDown, CirclePause, Paperclip } from 'lucide-react'
 import { UploadDropzone } from '@/components/UploadDropzone'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
-import { ChatMessage, DeepThinking } from '@/components/ChatMessage'
+import { ChatMessage, DeepThinking, type InterruptAction } from '@/components/ChatMessage'
 import { MemoMarkdown, markdownComponents } from '@/components/ai/MemoMarkdown'
 import { Loader } from '@/components/ai/Loader'
 import { Duration } from '@/components/ai/Duration'
@@ -40,6 +40,7 @@ import { useToast } from '@/context/Toast'
 import { formatDay, cn } from '@/lib/utils'
 import { isLivePauseMessage, isRespondAnswer, lastInstructionText, splitMarker } from '@/lib/hitlMessage'
 import { computeWindowStart } from '@/lib/messageWindow'
+import { getLatestRun } from '@/api/client'
 import type { Artifact, Message, ThinkingLevel } from '@/api/client'
 
 /** 思考档位的本地记忆（App.tsx 的 LS_* 先例：tender-agent.<名字>） */
@@ -110,9 +111,12 @@ export function ChatView({
     interrupt,
     continuation,
     continuationKind,
+    traceSyncIssue,
     send,
     decide,
     cancel,
+    continueRun,
+    resyncTrace,
   } = useRun(convId)
   // 活卡存续的 run（执行中累积 / 等待输入冻结 / 续跑接续）：该 run 的暂停/中断半截
   // 消息不渲染独立卡（一张活卡贯穿 run 生命周期）；终态后为空，消息回到转录被
@@ -393,6 +397,53 @@ export function ChatView({
     [convId, running, send, onRequestCreate, pickedTaskId, thinking, model, toast],
   )
 
+  // 历史中断回合的一键续接入口（2026-09-12）：错误卡是内存态、刷新即消失，转录里
+  // 最后一个「已中断」回合给出口（MessageList 定位目标消息）。引用须稳定
+  // （MessageList/ChatMessage 均 memo）。error 卡可见时不挂（卡上已有同款按钮，
+  // 避免双入口）；运行/等待/加载中不挂。latest run 定性可续时升级为「从断点继续」
+  // （不重发消息、已完成的工作不重跑），否则维持「重新执行」。
+  const lastTurnInterrupted = useMemo(() => {
+    const last = messages[messages.length - 1]
+    return !!last && last.role === 'assistant' && splitMarker(last.content).marker === 'interrupted'
+  }, [messages])
+  const { data: latestRun } = useQuery({
+    queryKey: ['runs', 'latest', convId],
+    queryFn: () => getLatestRun(convId!),
+    enabled: !!convId && lastTurnInterrupted && !running && !interrupt && !error,
+    staleTime: 10_000,
+    retry: false,
+  })
+  const interruptAction = useMemo<InterruptAction | null>(() => {
+    if (running || interrupt || error || isLoading) return null
+    const last = messages[messages.length - 1]
+    if (!last || last.role !== 'assistant' || splitMarker(last.content).marker !== 'interrupted') {
+      return null
+    }
+    const run = latestRun?.run ?? null
+    if (
+      run &&
+      run.id === last.run_id &&
+      run.status === 'error' &&
+      run.error_code &&
+      RESUMABLE_ERROR_CODES.includes(run.error_code)
+    ) {
+      return { label: '从断点继续', onRun: () => void continueRun(run.id) }
+    }
+    const text = lastInstruction || lastInstructionText(messages)
+    if (!text.trim()) return null
+    return { label: '重新执行', onRun: () => void doSend(text).catch(() => {}) }
+  }, [
+    running,
+    interrupt,
+    error,
+    isLoading,
+    messages,
+    latestRun,
+    lastInstruction,
+    doSend,
+    continueRun,
+  ])
+
   // 无会话时 App 转发首发消息。StrictMode 开发模式会把本 effect 跑两遍
   // （挂载→cleanup→重挂载），无守卫会双发 POST，第二发撞 409「已有进行中的任务」
   const sentInitialRef = useRef<string | null>(null)
@@ -485,6 +536,7 @@ export function ChatView({
                   onOpenArtifact={onOpenArtifact}
                   onOpenWorkbench={onOpenWorkbench}
                   hiddenPauseRunId={liveRunId}
+                  interruptAction={interruptAction}
                 />
               </ErrorBoundary>
               {(running || interrupt) && (
@@ -503,6 +555,8 @@ export function ChatView({
                   continuation={continuation}
                   continuationKind={continuationKind}
                   continuationAnswer={continuationAnswer}
+                  traceSyncIssue={traceSyncIssue}
+                  onTraceResync={() => resyncTrace()}
                 />
               )}
               {error && (
@@ -512,6 +566,11 @@ export function ChatView({
                   retryText={retryText}
                   onRetry={() => void doSend(retryText).catch(() => {})}
                   onOpenSettings={onOpenSettings}
+                  onContinue={
+                    runId && errorCode && RESUMABLE_ERROR_CODES.includes(errorCode)
+                      ? () => void continueRun(runId)
+                      : undefined
+                  }
                 />
               )}
             </div>
@@ -654,6 +713,8 @@ function RunMessage({
   continuation,
   continuationKind,
   continuationAnswer,
+  traceSyncIssue,
+  onTraceResync,
 }: {
   running: boolean
   /** ask_human 等待裁决：活卡冻结呈现（不转圈、不计时，动作入口是下方提问卡） */
@@ -673,6 +734,10 @@ function RunMessage({
   continuation: boolean
   continuationKind: RunState['continuationKind']
   continuationAnswer: string
+  /** 过程对账重试后仍失败（2026-09-12）：过程树可能缺步骤/有死步——折叠头标出并给
+   *  「重新同步」出口，不再静默赌下一个缺口事件 */
+  traceSyncIssue: boolean
+  onTraceResync: () => void
 }) {
   // 状态行的三次 O(steps) 树遍历只在 tools 变化时重算（正文 token 流期间跳过）
   const hasSubagents = useMemo(() => hasTaskStep(tools), [tools])
@@ -719,7 +784,9 @@ function RunMessage({
             {paused ? (
               `已暂停${tools.length ? ` · ${tools.length} 步` : ''}`
             ) : running ? (
-              <TextShimmer>执行过程</TextShimmer>
+              <TextShimmer>{traceSyncIssue ? '执行过程（可能与实际有出入）' : '执行过程'}</TextShimmer>
+            ) : traceSyncIssue ? (
+              '执行过程（可能与实际有出入）'
             ) : (
               '执行过程'
             )}
@@ -727,6 +794,14 @@ function RunMessage({
           <ReasoningContent contentClassName="mt-2 space-y-2">
             {pauseNarration.trim() && (
               <NarrationLine text={capStreamingText(pauseNarration, undefined, '正文').text} />
+            )}
+            {traceSyncIssue && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <span>执行过程可能与实际有出入（同步失败）</span>
+                <button type="button" className="hover:underline" onClick={onTraceResync}>
+                  重新同步
+                </button>
+              </div>
             )}
             <RunTrace tools={tools} todos={todos} done={done} total={total} />
             {/* 思考块 = 当前未封口段（历史思考已按 tool.called 封段沉入步骤行），
@@ -776,14 +851,18 @@ const MessageList = memo(function MessageList({
   onOpenArtifact,
   onOpenWorkbench,
   hiddenPauseRunId,
+  interruptAction,
 }: {
   messages: Message[]
   convArtifacts: Artifact[]
   onOpenArtifact: (id: string) => void
-  /** 「本轮文件」chip -> 工作台面板（引用须稳定：浅比较 memo） */
+  /** 「本轮文件」chip -> 打开工作台面板（引用须稳定：浅比较 memo） */
   onOpenWorkbench: (path: string) => void
   /** 活卡存续的 run id（running 或等待输入）；null = 无活卡（终态），不隐藏任何消息 */
   hiddenPauseRunId?: string | null
+  /** 中断回合一键续接入口（引用须稳定：useMemo）：挂到转录最后一个「已中断」assistant
+   *  消息上——错误卡是内存态、刷新即消失，此前中断会话没有任何续接入口 */
+  interruptAction?: InterruptAction | null
 }) {
   type Item = { kind: 'solo'; m: Message } | { kind: 'group'; runId: string; items: Message[] }
   const items: Item[] = []
@@ -801,6 +880,22 @@ const MessageList = memo(function MessageList({
       items.push({ kind: 'solo', m })
     }
   }
+  // 中断续接入口的目标：转录最后一条消息是带「（任务中断）」标记的 assistant
+  // （后续还有消息说明会话已前进，重跑旧指令语义不成立——不挂）
+  const lastItem = items[items.length - 1]
+  const lastMsg = lastItem
+    ? lastItem.kind === 'group'
+      ? lastItem.items[lastItem.items.length - 1]
+      : lastItem.m
+    : null
+  const interruptTargetId =
+    interruptAction &&
+    lastMsg &&
+    lastMsg.role === 'assistant' &&
+    splitMarker(lastMsg.content).marker === 'interrupted'
+      ? lastMsg.id
+      : null
+
   // 产物卡挂回发布它的回合（placeArtifacts）：恒追加转录末尾的话，新消息一插
   // 进来产物卡就会被挤到用户气泡之后（2026-09-06 实测错位）
   const placed = placeArtifacts(
@@ -824,7 +919,14 @@ const MessageList = memo(function MessageList({
   for (const item of items) {
     if (item.kind === 'solo') {
       pushDay(item.m)
-      nodes.push(<ChatMessage key={item.m.id} message={item.m} onOpenWorkbench={onOpenWorkbench} />)
+      nodes.push(
+        <ChatMessage
+          key={item.m.id}
+          message={item.m}
+          interruptAction={item.m.id === interruptTargetId ? interruptAction : undefined}
+          onOpenWorkbench={onOpenWorkbench}
+        />,
+      )
       continue
     }
     pushDay(item.items[0])
@@ -863,6 +965,7 @@ const MessageList = memo(function MessageList({
               attach={attach}
               pauseNarration={lifted?.narration.join('\n\n')}
               pauseMarker={lifted?.marker}
+              interruptAction={m.id === interruptTargetId ? interruptAction : undefined}
               onOpenWorkbench={onOpenWorkbench}
             />
           )
@@ -886,13 +989,24 @@ const MessageList = memo(function MessageList({
  *  - llm_auth（模型未配置/Key 失效）：红卡 +「去设置」——重试救不了配置问题；
  *  - 其余（llm_unavailable/internal/旧 sidecar 无 code）：红卡 +「重试」。
  *  message 由 sidecar 拼好：首行人话、次行起为服务方/异常原文——按首行换行拆开渲染，
- *  原文降为小字灰（一眼人话、原文可查可复制）。 */
+ *  原文降为小字灰（一眼人话、原文可查可复制）。
+ *  非程序自身原因的中断（2026-09-12）附一行安抚提示：产出落文件系统（唯一真值），
+ *  重开由管线对账跳过已完成部分——长任务用户最大的恐惧是「全部重来」，这层兜底
+ *  必须说给人听。internal/无 code 不加（程序自己崩了，没有可承诺的兜底）。 */
+const ERROR_RECOVERY_HINT = '中断前已完成的产出都已保存，重新执行会基于现有成果继续，不会从零开始。'
+
+/** 「从断点继续」覆盖的错误定性（与 sidecar db.RESUMABLE_ERROR_CODES 对齐）：
+ *  服务重启中断 / 模型服务不稳重试耗尽 / Key 失效欠费（修好配置回来续）。
+ *  cancelled 尊重停止意图、internal 续跑大概率原地再错——都不提供。 */
+const RESUMABLE_ERROR_CODES: ReadonlyArray<string> = ['interrupted', 'llm_unavailable', 'llm_auth']
+
 function ErrorCard({
   message,
   code,
   retryText,
   onRetry,
   onOpenSettings,
+  onContinue,
 }: {
   message: string
   code: string | null
@@ -900,8 +1014,13 @@ function ErrorCard({
   onRetry: () => void
   /** llm_auth 的「去设置」入口（ChatView 已有设置窗开关回调；可缺省=浏览器无入口场景） */
   onOpenSettings?: () => void
+  /** 「从断点继续」（2026-09-12）：code 可续且调用方提供入口时显示为主按钮——
+   *  从 checkpoint 续跑，不重发消息、已完成的工作不重跑 */
+  onContinue?: () => void
 }) {
   const cancelled = code === 'cancelled' || code === 'interrupted'
+  const showHint =
+    code === 'cancelled' || code === 'interrupted' || code === 'llm_unavailable' || code === 'llm_auth'
   const [headline, ...detailLines] = message.split('\n')
   return (
     <div
@@ -919,10 +1038,16 @@ function ErrorCard({
           ))}
         </div>
       )}
+      {showHint && <div className="mt-1 text-xs leading-relaxed text-muted-foreground">{ERROR_RECOVERY_HINT}</div>}
       <span className="ml-2 inline-flex gap-2">
         {code === 'llm_auth' && onOpenSettings && (
           <button type="button" className="hover:underline" onClick={onOpenSettings}>
             去设置
+          </button>
+        )}
+        {onContinue && (
+          <button type="button" className="font-medium hover:underline" onClick={onContinue}>
+            从断点继续
           </button>
         )}
         {retryText.trim() && (

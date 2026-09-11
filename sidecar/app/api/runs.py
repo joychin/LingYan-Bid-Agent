@@ -1,4 +1,4 @@
-"""Run 端点：HITL 裁决续跑 + 用户主动停止。
+"""Run 端点：HITL 裁决续跑 + 用户主动停止 + 终态断点续跑。
 
 run.interrupt 暂停（status=waiting_input）后，用户在前端做出 decision
 （approve / reject+理由 / respond=回答 / edit），经本端点以
@@ -8,6 +8,9 @@ stop 端点对 running 的 run 置位协作式取消事件，worker 线程在下
 waiting_input 的 run 走逃生口分支——无活 worker，直接落 cancelled 终态
 （暂停消息标记改「任务中断」+ 发 agent.error code=cancelled），与 resume
 经条件 UPDATE 互斥抢占。
+continue 端点（2026-09-12）对 error 终态且定性可续（interrupted/llm_unavailable/
+llm_auth）的 run 从 checkpoint 断点续跑：不重发消息、已完成的工作不重跑——
+误杀进程/服务不稳耗尽后长任务不再只能整轮重开（重新执行重发消息=新 run 兜底仍在）。
 """
 
 import asyncio
@@ -18,7 +21,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from .. import bg, db, events
+from .. import agent, bg, db, events
 from ..agent import _frozen_ctx_cleanup, get_run_snapshot, request_cancel, run_stream
 from ..bus import publish as bus_publish
 
@@ -186,4 +189,58 @@ async def resume(rid: str, body: ResumeBody):
         )
     )
     logger.info("run %s 已按用户裁决续跑（%s）", rid, ",".join(d["type"] for d in decisions))
+    return {"ok": True, "run_id": rid}
+
+
+@router.post("/runs/{rid}/continue", status_code=202)
+async def continue_run(rid: str):
+    """终态断点续跑（2026-09-12）：error 终态且定性可续（db.RESUMABLE_ERROR_CODES）
+    的 run 直接从 checkpoint 续跑——无新输入、已完成的工作不重跑，worker 以
+    input=None 恢复 pending 任务（与断流重试同机制；悬空 tool_calls 由
+    PatchToolCalls 在开头自愈）。
+
+    前置：① 必须仍是会话最新 run（其后有新消息/新 run 说明会话已前进，续旧 run
+    会让模型记忆分叉）；② 会话无占用中 run；③ checkpoint 存在（agent.db 损坏/
+    重建后 thread 缺失时提前挡掉，给「请重新执行」的明确出路）。
+    条件 UPDATE 抢占（continue_run 内 WHERE error+code），并发双击一对一输 409。
+    """
+    run = db.get_run(rid)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run 不存在")
+    if run["status"] != "error":
+        status_label = _STATUS_LABELS.get(run["status"], run["status"])
+        raise HTTPException(status_code=409, detail=f"该任务不在可续跑状态（当前状态：{status_label}）")
+    if run.get("error_code") not in db.RESUMABLE_ERROR_CODES:
+        raise HTTPException(status_code=409, detail="该任务不支持从断点继续，可重新执行")
+    latest = db.get_latest_run(run["conversation_id"])
+    if not latest or latest["id"] != rid:
+        raise HTTPException(status_code=409, detail="该任务之后已有新的对话内容，请重新执行")
+    if db.active_run_exists(run["conversation_id"]):
+        raise HTTPException(status_code=409, detail="该会话已有进行中的任务")
+    if not agent.checkpoint_exists(run["conversation_id"]):
+        raise HTTPException(status_code=409, detail="断点数据缺失，请重新执行")
+    if not db.continue_run(rid):
+        raise HTTPException(status_code=409, detail="该任务已在别处续跑，请稍候")
+    try:
+        bg.spawn_background(
+            run_stream(
+                run["conversation_id"],
+                rid,
+                continue_from_checkpoint=True,
+                start_seq=run["last_seq"],
+                # 续跑沿用首段档位/模型（旧库空串兜底 low / default）
+                thinking=run.get("thinking") or "low",
+                model=run.get("model") or None,
+            )
+        )
+    except Exception:
+        # 抢占成功后的任何失败必须收尸（同 resume 端点纪律）：无 worker 的 running
+        # run 会把会话 409 钉死到重启
+        logger.exception("续跑 worker 启动失败（rid=%s）", rid)
+        try:
+            db.finish_run_if_running(rid, "error", "续跑启动失败，请重试")
+        except Exception:
+            logger.exception("幽灵 run 收尸失败（rid=%s）", rid)
+        raise HTTPException(status_code=500, detail="续跑启动失败，请重试")
+    logger.info("run %s 从断点继续（此前定性 %s）", rid, run.get("error_code"))
     return {"ok": True, "run_id": rid}

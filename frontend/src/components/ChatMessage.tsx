@@ -118,6 +118,14 @@ export function DeepThinking({
   )
 }
 
+/** 历史中断消息的重跑动作（2026-09-12）：转录里「已中断」的最后一个回合给出
+ *  一键续接入口——错误卡是内存态，刷新后消失，此前用户只能手动重打原话。
+ *  label 由调用方给（重新执行 / 从断点继续），点击行为也由调用方接线。 */
+export interface InterruptAction {
+  label: string
+  onRun: () => void
+}
+
 /** 助手消息：左对齐通栏（不套气泡），白底透明，15px 行高 1.7。
  *  过程区仿参考产品扁平时间线：一个「已完成/已暂停 · N 步」运行头统一折叠，内部按序平铺
  *  深度思考块（border-left）→ 工具行流（旁白正文穿插）→ 任务清单；最终正文在折叠区外。
@@ -131,12 +139,15 @@ export function AssistantMessage({
   attach,
   pauseNarration,
   pauseMarker,
+  interruptAction,
   onOpenWorkbench,
 }: {
   message: Message
   attach?: boolean
   pauseNarration?: string
   pauseMarker?: PauseMarker
+  /** 中断回合的一键续接入口：仅转录最后一个「已中断」回合携带（MessageList 定位） */
+  interruptAction?: InterruptAction | null
   /** 「本轮文件」chip -> 工作台面板编辑 */
   onOpenWorkbench?: (path: string) => void
 }) {
@@ -204,6 +215,15 @@ export function AssistantMessage({
           <MemoMarkdown text={body} components={markdownComponents} />
         </div>
       )}
+      {interruptAction && (
+        <button
+          type="button"
+          className="mt-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
+          onClick={interruptAction.onRun}
+        >
+          {interruptAction.label}
+        </button>
+      )}
       <RunFiles files={message.files} onOpen={onOpenWorkbench} />
       {message.content.trim() && (
         <HoverActions>
@@ -220,12 +240,14 @@ export const ChatMessage = memo(
     attach = false,
     pauseNarration,
     pauseMarker,
+    interruptAction,
     onOpenWorkbench,
   }: {
     message: Message
     attach?: boolean
     pauseNarration?: string
     pauseMarker?: PauseMarker
+    interruptAction?: InterruptAction | null
     onOpenWorkbench?: (path: string) => void
   }) {
     return message.role === 'user' ? (
@@ -236,6 +258,7 @@ export const ChatMessage = memo(
         attach={attach}
         pauseNarration={pauseNarration}
         pauseMarker={pauseMarker}
+        interruptAction={interruptAction}
         onOpenWorkbench={onOpenWorkbench}
       />
     )
@@ -248,5 +271,6 @@ export const ChatMessage = memo(
     prev.attach === next.attach &&
     prev.pauseNarration === next.pauseNarration &&
     prev.pauseMarker === next.pauseMarker &&
+    prev.interruptAction === next.interruptAction &&
     prev.onOpenWorkbench === next.onOpenWorkbench,
 )

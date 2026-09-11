@@ -231,6 +231,10 @@ pub(crate) struct SidecarManager {
     pub stopping: AtomicBool,
     /// 最近一次失败原因（红态横幅透出；探活成功时清除）。
     pub last_failure: Mutex<Option<FailureInfo>>,
+    /// 用户已在退出确认弹窗点「退出」（lib.rs 的 ExitRequested 拦截放行标志）：
+    /// 运行中任务的退出拦截（2026-09-12）——cmd+Q/应用菜单退出先拦下转发前端确认，
+    /// 确认后由 confirm_exit 命令置位本标志再真正退出。
+    pub allow_exit: AtomicBool,
 }
 
 fn pick_free_port() -> u16 {
@@ -467,6 +471,114 @@ fn sweep_port_orphans(port: u16) {
     }
 }
 
+/// 启动期孤儿 sidecar 清扫（2026-09-12）：壳被强杀（kill -9/OOM/崩溃）时 Exit 钩子
+/// 不执行，旧 sidecar 残留为孤儿（换端口绕开启动但无人清理）。sidecar 就绪时写
+/// data/sidecar.pid（Python 侧 lifespan），此处据其核身份后清扫：pid 已死仅删陈旧
+/// 文件；活着且命令行确认是我们的 sidecar（bundled 二进制名 / dev 的 uvicorn
+/// app.main:app）才杀——防 pid 复用误杀无辜进程。纯 plumbing，用户不可见。
+fn sweep_orphan_sidecar() {
+    let pidfile = data_dir().join("sidecar.pid");
+    let Ok(text) = std::fs::read_to_string(&pidfile) else { return };
+    let parsed = serde_json::from_str::<serde_json::Value>(&text).ok();
+    let pid = parsed
+        .as_ref()
+        .and_then(|v| v.get("pid"))
+        .and_then(|p| p.as_u64())
+        .unwrap_or(0) as u32;
+    if pid == 0 {
+        let _ = std::fs::remove_file(&pidfile);
+        return;
+    }
+    if pid == std::process::id() {
+        return;
+    }
+    match process_cmdline(pid) {
+        Some(cmdline) if is_our_sidecar(&cmdline) => {
+            log::info!("清扫孤儿 sidecar 进程 pid={pid}");
+            kill_orphan_graceful(pid);
+            let _ = std::fs::remove_file(&pidfile);
+        }
+        Some(_) => {
+            // pid 已被复用给别的进程：不杀，仅清掉陈旧 pidfile（宁可漏扫不可误杀）
+            log::warn!("sidecar.pid 指向 pid={pid}，命令行不符，跳过清扫（疑似 pid 复用）");
+            let _ = std::fs::remove_file(&pidfile);
+        }
+        None => {
+            let _ = std::fs::remove_file(&pidfile);
+        }
+    }
+}
+
+/// 进程命令行（身份核验用）。macOS 走 ps；Linux 读 /proc；Windows 的 tasklist 只给
+/// 镜像名（bundled 二进制名仍可匹配，dev 模式的 python 参数看不到——dev Windows
+/// 孤儿漏扫，接受：开发场景孤儿随手可清）。
+#[cfg(target_os = "macos")]
+fn process_cmdline(pid: u32) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+#[cfg(target_os = "linux")]
+fn process_cmdline(pid: u32) -> Option<String> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
+    let joined = s.replace('\0', " ");
+    if joined.trim().is_empty() { None } else { Some(joined) }
+}
+
+#[cfg(target_os = "windows")]
+fn process_cmdline(pid: u32) -> Option<String> {
+    let out = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() || s.contains("没有运行") || s.to_lowercase().contains("no tasks") {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn is_our_sidecar(cmdline: &str) -> bool {
+    let c = cmdline.to_lowercase();
+    c.contains("tender-agent-sidecar") || (c.contains("uvicorn") && c.contains("app.main:app"))
+}
+
+/// 杀孤儿进程（无句柄、无端口信息）：unix SIGTERM → ≤2s 轮询 → SIGKILL 兜底；
+/// Windows taskkill 整树强杀。
+#[cfg(unix)]
+fn kill_orphan_graceful(pid: u32) {
+    let pid = pid as i32;
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    for _ in 0..10 {
+        // kill(pid,0) 返回 ESRCH = 进程已亡（僵尸被 reap 后）；仍存活则继续等
+        if unsafe { libc::kill(pid, 0) } == -1 {
+            return;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn kill_orphan_graceful(pid: u32) {
+    taskkill_tree(pid);
+}
+
 fn wait_healthy(port: u16, nonce: &str, attempts: u32) -> bool {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(1))
@@ -550,6 +662,9 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
         LaunchMode::Bundled { .. } => "bundled",
     };
     log::info!("sidecar 启动模式: {mode_name}，数据目录: {}", mode.data_dir().display());
+    // 启动期孤儿清扫：壳被强杀（kill -9/崩溃）时 Exit 钩子不执行，上一次的 sidecar
+    // 可能残留为孤儿进程（握着 agent.db 连接占资源）——本次启动先按 pidfile 清掉
+    sweep_orphan_sidecar();
 
     thread::spawn(move || {
         let mut restart_waits = 0u32;

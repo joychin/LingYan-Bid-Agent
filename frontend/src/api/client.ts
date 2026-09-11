@@ -278,6 +278,12 @@ export function cancelRun(rid: string): Promise<{ ok: boolean; run_id: string }>
   return request(`/runs/${rid}/cancel`, { method: 'POST' })
 }
 
+/** 终态断点续跑（2026-09-12）：error 终态且定性可续（interrupted/llm_unavailable/
+ *  llm_auth）的 run 从 checkpoint 续跑——不重发消息、已完成的工作不重跑。 */
+export function continueRun(rid: string): Promise<{ ok: boolean; run_id: string }> {
+  return request(`/runs/${rid}/continue`, { method: 'POST' })
+}
+
 export function getSettings(): Promise<Settings> {
   return request('/settings')
 }

@@ -7,10 +7,12 @@
 """
 
 import argparse
+import json
 import logging
 import os
 import re
 import shutil
+import time
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 
@@ -146,7 +148,22 @@ async def lifespan(_app: FastAPI):
     if not cfg.sidecar_token():
         logger.warning("SIDECAR_TOKEN 未设置：/api/* 将不要求鉴权（仅限本机开发，勿用于真实数据目录）")
     logger.info("sidecar ready: base_url=%s model=%s", cfg.llm_base_url(), cfg.llm_model())
+    # 孤儿清扫锚点（2026-09-12）：壳被强杀（kill -9/崩溃）时 Exit 钩子不执行，本进程
+    # 可能残留为孤儿；下次启动 Rust 侧据本文件核身份后清扫（pid 已死/被复用则仅删
+    # 陈旧文件）。优雅关停时删除；写失败不阻断启动（清不到只是退化为现状）。
+    pidfile = cfg.data_dir() / "sidecar.pid"
+    try:
+        pidfile.write_text(
+            json.dumps({"pid": os.getpid(), "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}),
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.warning("sidecar.pid 写入失败（孤儿清扫将退化为不生效）", exc_info=True)
     yield
+    try:
+        pidfile.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 app = FastAPI(

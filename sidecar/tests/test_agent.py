@@ -486,6 +486,18 @@ def _auth_401_error() -> Exception:
     return AuthenticationError("Error code: 401 - Incorrect API key", response=response, body=None)
 
 
+def _payment_402_error() -> Exception:
+    """402 欠费：openai SDK 无专属子类，落到 APIStatusError 基类（DeepSeek 实测形态）。"""
+    from openai import APIStatusError
+
+    response = httpx.Response(
+        402,
+        request=httpx.Request("POST", "https://gw.example/v1/chat/completions"),
+        json={"error": {"code": "insufficient_balance", "message": "Insufficient Balance", "type": "invalid_request_error"}},
+    )
+    return APIStatusError("Error code: 402 - Insufficient Balance", response=response, body=None)
+
+
 def test_is_llm_transient_predicate():
     """类型命中 / 裸 httpx 流断连 / 网关流内错误 / 消息关键词兜底 / 永久错误判定。"""
     from app.agent import _is_llm_transient
@@ -582,7 +594,7 @@ def test_retry_publishes_agent_retry_event(monkeypatch):
 
 
 def test_classify_error_codes():
-    """错误定性（agent.error/run.state 的 code 取值域）：配置缺失/401→llm_auth、
+    """错误定性（agent.error/run.state 的 code 取值域）：配置缺失/401/402→llm_auth、
     瞬时→llm_unavailable、其余→internal；文案首行人话+原文次行。"""
     code, msg = agent_mod._classify_error(
         agent_mod.AgentConfigError("模型「X」未配置 API Key（设置 → 模型 → 填写并保存即生效）")
@@ -593,6 +605,12 @@ def test_classify_error_codes():
     assert code == "llm_auth"
     assert "API Key 无效" in msg
     assert "服务方返回" in msg
+    # 402 欠费（2026-09-12 实装）：同样归 llm_auth（重试救不了），文案指向服务商充值
+    code, msg = agent_mod._classify_error(_payment_402_error())
+    assert code == "llm_auth"
+    assert "额度不足" in msg
+    assert "服务商平台充值" in msg
+    assert "设置 → 模型" not in msg  # 设置里充不了值，不误导
     code, msg = agent_mod._classify_error(ModelConnectionError("peer closed connection"))
     assert code == "llm_unavailable"
     code, msg = agent_mod._classify_error(ValueError("路径越界"))
@@ -1318,7 +1336,8 @@ def test_live_trace_throttle_dense_events_share_one_copy(monkeypatch):
 
 def test_tool_timeout_middleware_wired():
     """超时中间件接进 build_agent 与两个 SUBAGENTS 条目（子代理直接调 docx 族
-    工具）；管制清单里的名字必须是真实注册的工具名（防漂移）。"""
+    工具）；重工具档的名字必须是真实注册的工具名（防漂移；task 来自 deepagents
+    注入、不在 TOOLS 注册表）。"""
     import inspect
 
     src = inspect.getsource(agent_mod.build_agent)
@@ -1327,15 +1346,18 @@ def test_tool_timeout_middleware_wired():
         agent_mod._TOOL_TIMEOUT_MW in (s.get("middleware") or []) for s in agent_mod.SUBAGENTS
     )
     names = {getattr(t, "name", None) for t in agent_mod.TOOLS}
-    assert agent_mod._TIMEOUT_TOOLS <= names
+    heavy = {k for k, v in agent_mod._TOOL_TIMEOUTS.items() if v == agent_mod._TOOL_TIMEOUT_HEAVY}
+    assert heavy <= names
+    # 兜底制（2026-09-12）：ask_human 之外的任意工具都有档（未列名走默认档）
+    assert agent_mod._TOOL_TIMEOUT_SKIP == frozenset({"ask_human"})
 
 
 def test_tool_timeout_middleware_times_out_and_passes_through(monkeypatch):
-    """超时中间件：管制工具限时等待，超时返回错误 ToolMessage（模型可缩小范围
-    重试、run 正常收尾）；正常完成/非管制工具/异常均原样透传。"""
+    """超时中间件：默认档兜底（未列名工具也限时）、超时返回错误 ToolMessage（模型
+    可缩小范围重试、run 正常收尾）；正常完成/异常原样透传；ask_human 不包。"""
     import time
 
-    monkeypatch.setattr(agent_mod, "_TOOL_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(agent_mod, "_TOOL_TIMEOUT_DEFAULT", 0.05)
     mw = agent_mod._ToolTimeoutMiddleware()
 
     class _Req:
@@ -1344,25 +1366,104 @@ def test_tool_timeout_middleware_times_out_and_passes_through(monkeypatch):
 
     def slow(_req):
         time.sleep(0.3)
-        return ToolMessage(content="不应到达", tool_call_id="tc_parse_document")
+        return ToolMessage(content="不应到达", tool_call_id="tc_read_file")
 
-    out = mw.wrap_tool_call(_Req("parse_document"), slow)
+    # 未列名工具走默认档（此前清单外工具 hang 无上界——会话被 409 钉死的死角）
+    out = mw.wrap_tool_call(_Req("read_file"), slow)
     assert isinstance(out, ToolMessage) and out.status == "error"
-    assert "工具超时" in out.content and "parse_document" in out.content
+    assert "工具超时" in out.content and "read_file" in out.content
 
     ok = ToolMessage(content="完成", tool_call_id="tc_docx_section_read")
     assert mw.wrap_tool_call(_Req("docx_section_read"), lambda _r: ok) is ok
-    plain = "非管制工具不包线程"
+    plain = "普通快速工具同步完成"
     assert mw.wrap_tool_call(_Req("read_file"), lambda _r: plain) is plain
+    # ask_human 瞬时中断型：不包线程（身份透传）
+    passthrough = object()
+    assert mw.wrap_tool_call(_Req("ask_human"), lambda _r: passthrough) is passthrough
 
     def boom(_req):
         raise ValueError("工具异常原样回传")
 
     try:
-        mw.wrap_tool_call(_Req("parse_document"), boom)
+        mw.wrap_tool_call(_Req("read_file"), boom)
         raise AssertionError("应当原样抛出")
     except ValueError:
         pass
+
+
+def test_tool_timeout_middleware_cancel_aware(monkeypatch):
+    """取消感知（2026-09-12）：等待循环查 CANCEL_EVENTS——置位即抛 _ToolCancelledError
+    中止节点（不再等工具自然返回），入口预检挡掉 langgraph 的节点重试空转；
+    task 档无硬上限、只靠取消停。"""
+    import time
+
+    from app import runctx
+
+    monkeypatch.setattr(agent_mod, "_TOOL_CANCEL_POLL", 0.02)
+    mw = agent_mod._ToolTimeoutMiddleware()
+    rid = "r_cancel_test"
+    event = threading.Event()
+    agent_mod.CANCEL_EVENTS[rid] = event
+    try:
+        runctx.set_run("c1", rid, None, "low")
+
+        class _Req:
+            def __init__(self, name):
+                self.tool_call = {"name": name, "id": f"tc_{name}", "args": {}}
+
+        def slow(_req):
+            time.sleep(0.5)
+            return "不应到达"
+
+        # 执行中置位取消（0.05s 后）→ ≤轮询粒度内抛出（0.5s 慢工具 vs 0.02 轮询）
+        threading.Timer(0.05, event.set).start()
+        t0 = time.monotonic()
+        try:
+            mw.wrap_tool_call(_Req("read_file"), slow)
+            raise AssertionError("取消后应当抛出 _ToolCancelledError")
+        except agent_mod._ToolCancelledError:
+            pass
+        assert time.monotonic() - t0 < 0.4
+
+        # 入口预检：取消已置位时不再起线程执行 handler
+        called = []
+
+        def probe(_req):
+            called.append(1)
+            return "不应执行"
+
+        try:
+            mw.wrap_tool_call(_Req("read_file"), probe)
+            raise AssertionError("应当预检抛出")
+        except agent_mod._ToolCancelledError:
+            pass
+        assert called == []
+
+        # task 档（无硬上限）取消同样生效
+        event.clear()
+        threading.Timer(0.05, event.set).start()
+        t0 = time.monotonic()
+        try:
+            mw.wrap_tool_call(_Req("task"), lambda _r: time.sleep(1))
+            raise AssertionError("task 取消后应当抛出")
+        except agent_mod._ToolCancelledError:
+            pass
+        assert time.monotonic() - t0 < 0.6
+    finally:
+        agent_mod.CANCEL_EVENTS.pop(rid, None)
+        runctx.clear_run()
+
+
+def test_tool_timeout_middleware_no_runctx_task_passthrough(monkeypatch):
+    """无 run 语境（独立实例）且无硬上限（task）时不包线程——只有开销没有收益。"""
+    mw = agent_mod._ToolTimeoutMiddleware()
+    runctx.clear_run()
+
+    class _Req:
+        tool_call = {"name": "task", "id": "tc_task", "args": {}}
+
+    sentinel = object()
+    assert mw.wrap_tool_call(_Req(), lambda _r: sentinel) is sentinel
 
 
 def test_wrap_tool_call_runs_off_event_loop_in_real_graph():

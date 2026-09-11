@@ -385,6 +385,52 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
    splitMarker(content)）零改动（已审计：message.tools 全前端唯一消费点=
    ChatMessage）。dto.gen.ts 已再生。首次点开历史过程多一次本地请求（有加载
    指示），运行中显示与折叠态界面零变化。
+   **契约 additive 扩展（2026-09-12 异常恢复批，断点续跑/退出拦截/全工具超时/
+   孤儿清扫）**：①`POST /api/runs/{rid}/continue`——error 终态且 error_code ∈
+   `db.RESUMABLE_ERROR_CODES`（interrupted/llm_unavailable/llm_auth；cancelled
+   尊重停止意图、internal 续跑大概率原地再错，都不提供）的 run 从 checkpoint
+   断点续跑：无新输入（run_stream 新参 `continue_from_checkpoint=True`→
+   stream_input=None，与断流重试同机制，悬空 tool_calls 由 PatchToolCalls 自愈）、
+   不写用户消息、agent.started 照发、start_seq/thinking/model 沿用 run 行存档、
+   token_usage 经 _usage_json_final 自动分段累计。前置链=404→非 error 409→
+   code 不在集合 409→**非会话最新 run 409**（防 thread 前进后续旧 run 分叉）→
+   `agent.checkpoint_exists(cid)` 预检（agent.db 损坏/重建后 thread 缺失提前
+   挡掉）→`db.continue_run` 条件 UPDATE 抢占（输家 409）→spawn 失败
+   finish_run_if_running 收尸。前端：ErrorCard 对可续 code 加主按钮「从断点继续」
+   （useRun.continueRun 乐观 started{continuation}，仿 decide）；**历史中断
+   turn 的续接入口**——错误卡是内存态刷新即失，转录最后一条「（任务中断）」
+   assistant 消息挂 interruptAction 按钮（MessageList 定位、ChatMessage memo
+   比较器同步），getLatestRun 进 ['runs','latest',cid] 缓存，code 可续显示
+   「从断点继续」否则「重新执行」。
+   ②**退出拦截**：running 态关窗/cmd+Q 先弹确认（误关=杀半小时任务是零摩擦
+   破坏路径）。窗口关闭=前端 `@tauri-apps/api`（本批新增依赖）onCloseRequested
+   →查 `/runs/active` **只数 running**（waiting_input 暂停存 checkpoint、重启后
+   仍可裁决，退出无害不打扰）→有则 ExitGuard 弹窗、无则 destroy()；cmd+Q=
+   Rust `RunEvent::ExitRequested`→`api.prevent_exit()`+emit app:exit-requested
+   →前端同款确认→`confirm_exit` 命令置 SidecarManager.allow_exit 再退。
+   capabilities 加 core:window:allow-destroy + core:event:default。
+   ③**_ToolTimeoutMiddleware 从清单制改兜底制+取消感知**：重工具 600s 不变、
+   **其余全部工具默认 120s**（此前清单外工具 hang=取消边界永不到达、会话 409
+   钉死到重启）、task 无硬上限只参与取消、ask_human 不包；等待循环 0.5s 粒度
+   查 CANCEL_EVENTS（经 runctx.run_id）→置位抛 `_ToolCancelledError` 中止节点
+   （superstep 不落 checkpoint，悬空 tool_calls 下跑自愈=既有取消口径）+入口
+   预检防 langgraph 节点重试空转；**异常与取消竞态归类兜底**——_run_agent_stream
+   与 run_stream 两处外层 except 在 _classify_error 前先查 cancel_event.is_set()
+   →按 cancelled 收尾（修掉竞态误归类 internal 的既有缺口）。
+   ④**孤儿 sidecar 清扫**：sidecar lifespan 就绪写 `data/sidecar.pid`（优雅
+   关停删）；Rust run_supervisor 启动先 `sweep_orphan_sidecar`——pidfile→
+   pid 存活检查→**命令行身份核验**（tender-agent-sidecar 或 uvicorn+app.main:app，
+   防 pid 复用误杀）→SIGTERM≤2s→SIGKILL；壳被强杀（kill -9/OOM）时的残留进程
+   不再永久占用资源（Windows tasklist 只见镜像名：bundled 可核、dev 漏扫接受）。
+   配套提示三件：interrupted 文案去黑话（sidecar 重启→应用服务重启，任务被中断）、
+   ErrorCard 可续中断附安抚行「产出已保存、重开不会从零开始」、409 toast 透传
+   服务端 detail（「正在等待你的回答/确认」能指路）；对账失败可见化——
+   restoreSnapshot 首败 6s 自动重试一次、再败置 traceSyncIssue（活卡过程区出
+   提示行+「重新同步」出口）。测试：test_run_continue.py 三例（端点矩阵/
+   continue 模式）+test_pidfile.py+test_agent 超时中间件四例（默认档兜底/
+   取消感知/task 无档/预检）+runReducer traceSyncIssue 两例；明确不做=SSE 断连
+   静默（重连+对账闭环，正确）、streamText 断连洞（终态即修复）、Retry-After
+   自适应退避、agent.db 损坏自动重建、LLM 死等 180s 内提前取消。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。

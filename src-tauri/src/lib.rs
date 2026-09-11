@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Manager, RunEvent, State};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 use tauri_plugin_opener::OpenerExt;
 
 use sidecar::{FailureInfo, SidecarInfo, SidecarManager, SidecarState};
@@ -164,7 +164,7 @@ fn reveal_in_folder(app: AppHandle, path: String) -> Result<(), String> {
         .map_err(|e| format!("无法解析工作区路径: {e}"))?;
     let data_root = sidecar::data_dir()
         .canonicalize()
-        .map_err(|e| format!("无法解析数据目录: {e}"))?;
+        .map_err(|e| format!("无法解析数据目录路径: {e}"))?;
     let target = PathBuf::from(&path)
         .canonicalize()
         .map_err(|e| format!("无法解析文件路径: {e}"))?;
@@ -174,6 +174,16 @@ fn reveal_in_folder(app: AppHandle, path: String) -> Result<(), String> {
     app.opener()
         .reveal_item_in_dir(target.to_str().ok_or("路径含非法字符")?)
         .map_err(|e| format!("打开所在目录失败: {e}"))
+}
+
+/// 退出确认放行（前端 ExitGuard 弹窗点「退出」后调用）：置 allow_exit 让
+/// ExitRequested 拦截放行，再触发应用退出。窗口关闭路径不走本命令（前端直接
+/// destroy()，见 ExitGuard）。
+#[tauri::command]
+fn confirm_exit(app: AppHandle, state: State<'_, Arc<SidecarManager>>) {
+    state.allow_exit.store(true, Ordering::SeqCst);
+    log::info!("用户确认退出（运行中任务将中断）");
+    app.exit(0);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -234,17 +244,39 @@ pub fn run() {
             get_sidecar_failure,
             export_diagnostics,
             reveal_sidecar_logs,
-            reveal_in_folder
+            reveal_in_folder,
+            confirm_exit
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| {
-        if let RunEvent::Exit = event {
+    app.run(|app_handle, event| match event {
+        // 退出拦截（2026-09-12）：cmd+Q/应用菜单退出在用户确认前拦下，转发给前端
+        // ExitGuard 弪窗（查活 run 后确认）；确认后 confirm_exit 置 allow_exit 再退出。
+        // 窗口关闭（X 钮）不走这里——由前端 onCloseRequested 拦截、确认后 destroy()；
+        // destroy 触发的 ExitRequested 到达时窗口已从管理表移除（wry 先清表再发事件），
+        // 拦下也无人能应答 confirm_exit——必须在 prevent 之前查窗口，拿不到就放行，
+        // 否则 app 变无窗口僵尸进程、Exit 不触发 sidecar 也不停。
+        RunEvent::ExitRequested { api, .. } => {
+            let allow = app_handle
+                .try_state::<Arc<SidecarManager>>()
+                .map(|s| s.allow_exit.load(Ordering::SeqCst))
+                .unwrap_or(true);
+            if allow {
+                return;
+            }
+            let Some(w) = app_handle.get_webview_window("main") else {
+                return;
+            };
+            api.prevent_exit();
+            let _ = w.emit("app:exit-requested", ());
+        }
+        RunEvent::Exit => {
             // 退出时杀 sidecar 进程树（state 同样是 Arc 包装，需按同一类型查询）
             if let Some(state) = app_handle.try_state::<Arc<SidecarManager>>() {
                 sidecar::shutdown(state.inner());
             }
         }
+        _ => {}
     });
 }

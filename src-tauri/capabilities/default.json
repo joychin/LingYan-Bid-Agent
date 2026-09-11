@@ -9,6 +9,8 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "core:event:default",
+    "core:window:allow-destroy",
     "opener:allow-reveal-item-in-dir"
   ]
 }

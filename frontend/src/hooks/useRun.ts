@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { getLatestRun, getRunSnapshot, resumeRun, cancelRun, sendMessage, type HitlDecision, type ThinkingLevel } from '@/api/client'
+import { getLatestRun, getRunSnapshot, resumeRun, cancelRun, continueRun as continueRunApi, sendMessage, type HitlDecision, type ThinkingLevel } from '@/api/client'
 import { subscribeSSE, type ToolStep } from '@/api/sse'
 import { useSidecarHealth } from '@/context/SidecarHealth'
 import { useToast } from '@/context/Toast'
@@ -16,6 +16,9 @@ const STREAM_BATCH_MS = 200
 /** 过程对账拉取的限频间隔（ms）：seq 缺口在洪峰下会连环触发（连环跳号），
  *  全树快照不便宜，5s 内只拉一次。 */
 const TRACE_PULL_MIN_INTERVAL = 5000
+
+/** 对账拉取失败后的自动重试延迟（ms）：比限频窗长一拍；重试仍失败才升级为可见提示。 */
+const TRACE_SYNC_RETRY_MS = 6000
 
 /** 合并窗口内攒下的流式增量（tokens=正文；mainReasoning=主 agent 思考；
  *  byAgent=各子代理思考，键=task 的 tool_call_id）。 */
@@ -48,6 +51,10 @@ export function useRun(convId: string | null) {
   const lastReconcileRef = useRef(0)
   // 过程对账快照拉取的限频记号（5s，见 TRACE_PULL_MIN_INTERVAL）
   const lastTracePullRef = useRef(0)
+  // 对账失败自动重试的记账：runId=已安排过一次重试的 run（每 run 每挂载一次），
+  // 定时器 id 供卸载清理（重试跨会话切换时由 runId 守卫拦下）
+  const traceSyncRetryRef = useRef<string | null>(null)
+  const traceSyncTimerRef = useRef<number | null>(null)
   // 流式合并缓冲与窗口定时器（见 dispatch 内说明）
   const batchRef = useRef<StreamBatch | null>(null)
   const batchTimerRef = useRef<number | null>(null)
@@ -179,6 +186,7 @@ export function useRun(convId: string | null) {
             (current.runId && current.runId !== runId)
           )
             return
+          traceSyncRetryRef.current = null
           dispatch({
             type: 'snapshot',
             runId,
@@ -190,12 +198,34 @@ export function useRun(convId: string | null) {
           })
         })
         .catch(() => {
-          /* snapshot 是恢复增强，SSE 主链路失败时保持现有状态 */
+          /* snapshot 是恢复增强，SSE 主链路失败时保持现有状态——但不再全静默
+           * （2026-09-12）：失败意味着死步/假「运行中」可能补不回来。首败 6s 后自动
+           * 重试一次；重试仍败置 traceSyncIssue，过程区折叠头出提示行给用户手动出口。 */
+          console.warn(`[trace] 过程快照拉取失败：${runId}`)
+          if (traceSyncRetryRef.current !== runId) {
+            traceSyncRetryRef.current = runId
+            traceSyncTimerRef.current = window.setTimeout(() => {
+              traceSyncTimerRef.current = null
+              lastTracePullRef.current = 0
+              restoreSnapshotRef.current(runId)
+            }, TRACE_SYNC_RETRY_MS)
+            return
+          }
+          dispatchRef.current({ type: 'trace-sync-failed' })
         })
     },
     [dispatch],
   )
   restoreSnapshotRef.current = restoreSnapshot
+
+  /** 过程区「重新同步」按钮（traceSyncIssue 提示行）的落点：绕限频强制重拉当前 run。 */
+  const resyncTrace = useCallback(() => {
+    const rid = stateRef.current.runId ?? stateRef.current.interrupt?.runId ?? null
+    if (!rid) return
+    lastTracePullRef.current = 0
+    traceSyncRetryRef.current = null
+    restoreSnapshot(rid)
+  }, [restoreSnapshot])
 
   /** 限频 best-effort 对账：查最新 run，确认已结束才收敛本地状态。
    *  SSE onError（断线对账）与 cancel 的 404/409（run 已结束/收尾竞态窗口）共用——
@@ -268,6 +298,11 @@ export function useRun(convId: string | null) {
         batchTimerRef.current = null
       }
       batchRef.current = null
+      if (traceSyncTimerRef.current != null) {
+        clearTimeout(traceSyncTimerRef.current)
+        traceSyncTimerRef.current = null
+      }
+      traceSyncRetryRef.current = null
     }
     // reconnectSeq 递增（sidecar 恢复/换端口）时重挂流
   }, [convId, queryClient, reconnectSeq, dispatch, restoreSnapshot, reconcile])
@@ -322,9 +357,12 @@ export function useRun(convId: string | null) {
           // 409 = 后端有活 run（running/waiting_input）而本地不知——状态滞后不是故障
           // （守卫空窗：重挂对账未达/202 后 started 未达）。对账恢复真实状态 + 轻提示，
           // 不置错误卡（「报错了还在跑」的误导源，2026-09-10 测查后修订）。抛出保留输入。
+          // toast 用服务端 detail（2026-09-12）：「正在等待你的回答/确认」这类原因能指路，
+          // 固定文案把 waiting 死锁的出路信息丢了。
           lastReconcileRef.current = 0 // 绕过限频（cancel 路径同款先例）
           void reconcile()
-          toast('任务进行中，这条消息没有发出')
+          const detail = e instanceof Error ? e.message.trim() : ''
+          toast(detail || '任务进行中，这条消息没有发出')
           throw e
         }
         // 发送失败（网络/服务错误）：展示错误并抛出，让调用方恢复输入框
@@ -424,5 +462,33 @@ export function useRun(convId: string | null) {
     }
   }, [convId, dispatch, queryClient, reconcile])
 
-  return { ...state, send, decide, cancel }
+  /** 终态断点续跑（2026-09-12）：error 终态且定性可续（interrupted/llm_unavailable/
+   *  llm_auth）的 run 从 checkpoint 续跑——不重发消息、已完成的工作不重跑。rid 缺省
+   *  用当前 runId（会话内点错误卡按钮）；刷新后的历史入口由调用方传入目标 run id。
+   *  乐观置 running 同 decide（202 到 SSE started 之间的发送窗口封住）；409 = 状态
+   *  已变（别处续跑/会话已前进/checkpoint 缺失），强制对账收敛并透传服务端原因。 */
+  const continueRun = useCallback(
+    async (rid?: string) => {
+      const cur = stateRef.current
+      const target = rid ?? cur.runId
+      if (!target || cur.running || cur.interrupt) return
+      try {
+        await continueRunApi(target)
+        dispatch({ type: 'started', runId: target, now: Date.now(), continuation: true })
+        void queryClient.invalidateQueries({ queryKey: ['runs', 'active'] })
+        restoreSnapshot(target)
+      } catch (e) {
+        if ((e as Error & { status?: number }).status === 409) {
+          lastReconcileRef.current = 0
+          void reconcile()
+          toast(e instanceof Error && e.message ? e.message : '该任务无法从断点继续', 'error')
+          return
+        }
+        toast(e instanceof Error ? e.message : '从断点继续失败，请重试', 'error')
+      }
+    },
+    [dispatch, queryClient, restoreSnapshot, reconcile, toast],
+  )
+
+  return { ...state, send, decide, cancel, continueRun, resyncTrace }
 }

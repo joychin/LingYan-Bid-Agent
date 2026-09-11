@@ -52,6 +52,9 @@ export interface RunState {
   lastSeq: { runId: string; seq: number } | null
   /** 已通过 SSE 收到终态的 run：HTTP 对账拿到的过期 running 状态不再复活它 */
   terminalRuns: Set<string>
+  /** 过程对账（快照拉取）重试后仍失败（2026-09-12）：过程区折叠头出提示行 +
+   *  「重新同步」出口——死步/假运行中此前既无重试也无提示，只能赌下一个缺口事件。 */
+  traceSyncIssue: boolean
   /** 步骤 id 计数（与 now 组合生成稳定 id） */
   stepCounter: number
 }
@@ -78,6 +81,7 @@ export const INITIAL_STATE: RunState = {
   continuationKind: null,
   lastSeq: null,
   terminalRuns: new Set(),
+  traceSyncIssue: false,
   stepCounter: 0,
 }
 
@@ -106,6 +110,9 @@ export type Action =
   | { type: 'send-failed'; error: string }
   | { type: 'stop-requested' }
   | { type: 'stop-failed' }
+  /** 过程对账重试后仍失败（useRun restoreSnapshot 二次失败时 dispatch）：置
+   *  traceSyncIssue，过程区出提示行 + 手动「重新同步」出口 */
+  | { type: 'trace-sync-failed' }
   | {
       type: 'snapshot'
       runId: string
@@ -377,6 +384,12 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
       const base = sameRun ? s : INITIAL_STATE
       // 同一 run 的 HITL 续跑会再次发 agent.started；它是执行段的边界通知，
       // 不是新 run，不能清掉暂停快照里的 task 卡、todos 或 reasoning。
+      // run 被显式重启（从断点继续的乐观路径 / 续段 started 到达）时移出终态
+      // 记账——否则续跑段的快照对账与 run.state 恢复全被 terminalRuns 守卫丢弃，
+      // 续跑期丢事件无自愈（settle 标记只该拦「过期 HTTP 对账复活已结束的 run」，
+      // 那条路走 run.state/snapshot，不经本动作，语义不受影响）。
+      const terminalRuns = new Set(s.terminalRuns)
+      terminalRuns.delete(action.runId)
       return result({
         ...base,
         running: true,
@@ -384,7 +397,7 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         startedAt: sameRun ? (s.startedAt ?? action.now) : action.now,
         lastInstruction: s.lastInstruction,
         continuationAnswer: s.continuationAnswer,
-        terminalRuns: s.terminalRuns,
+        terminalRuns,
         lastSeq: s.lastSeq,
         stepCounter: s.stepCounter,
         continuation: s.continuation || !!action.continuation,
@@ -413,6 +426,7 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         interrupt: null,
         continuation: false,
         continuationKind: null,
+        traceSyncIssue: false,
       })
     case 'settle-error':
       // sidecar 已把中断 run 的半截回复落库（带「（任务中断）」标记）：拉回消息让 UI 与
@@ -431,6 +445,7 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         interrupt: null,
         continuation: false,
         continuationKind: null,
+        traceSyncIssue: false,
       })
     case 'settle-interrupt':
       // 活卡原地冻结（一张活卡贯穿暂停与续跑）：工具树保留（running 步骤冻结为 paused，
@@ -453,6 +468,7 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         interrupt: { runId: action.runId, requests: action.requests },
         continuation: false,
         continuationKind: null,
+        traceSyncIssue: false,
       })
     case 'remember-instruction':
       return result({ ...s, lastInstruction: action.text, continuationAnswer: '' })
@@ -465,6 +481,8 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
     case 'stop-failed':
       // 网络层失败（请求未达 sidecar）：复位 stopping 解除按钮锁死，允许重试
       return result({ ...s, stopping: false })
+    case 'trace-sync-failed':
+      return result({ ...s, traceSyncIssue: true })
     case 'snapshot': {
       // 快照守卫单点收口：终态快照不应用；已终态的 run 不被旧快照复活；已切走的当前
       // run 不被覆盖。waiting_input 快照恢复冻结树与思考（等待期刷新/重连重建活卡）
@@ -502,6 +520,7 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         // settle-error 的真实错误
         error: null,
         errorCode: null,
+        traceSyncIssue: false,
         tools,
         todos: action.todos,
         // 清单计数随快照重算（丢过 todo.updated 的场景 items 修好了计数不能烂着）

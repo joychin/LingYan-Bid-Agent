@@ -9,6 +9,7 @@ import { TemplatesView } from '@/components/TemplatesView'
 import { SettingsModal } from '@/components/SettingsModal'
 import { ArtifactPanel } from '@/components/ArtifactPanel'
 import { SidecarBanner } from '@/components/SidecarBanner'
+import { ExitGuard } from '@/components/ExitGuard'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { reconcileContracts } from '@/artifacts/registry'
 import { cn } from '@/lib/utils'
@@ -154,6 +155,8 @@ export default function App() {
       />
       <main className="main">
         <SidecarBanner />
+        {/* 退出拦截：还有任务在跑时关窗/cmd+Q 先弹确认（2026-09-12）；浏览器模式自禁用 */}
+        <ExitGuard />
         {activeView === 'kb' ? (
           <KnowledgeView onGoLibrary={() => setActiveView('library')} />
         ) : activeView === 'library' ? (
