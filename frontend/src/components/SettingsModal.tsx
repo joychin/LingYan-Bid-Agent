@@ -20,7 +20,7 @@ import {
   type DraftTestResult,
   type ModelBody,
 } from '@/api/client'
-import { findKeySource, mergeModelOptions } from '@/lib/modelSettings'
+import { findKeySource, mergeModelOptions, sameBaseUrl } from '@/lib/modelSettings'
 import { useToast } from '@/context/Toast'
 
 export interface SettingsModalProps {
@@ -557,7 +557,7 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
             <SettingRow title="知识库 metadata 抽取" desc="为上传条目建议类型与字段（可指定便宜模型省 token）">
               <RoleSelect
                 value={roles.extract}
-                emptyLabel="跟随默认模型"
+                emptyLabel="自动（跟随列表首位）"
                 options={models.map((m) => ({ id: m.id, label: m.name }))}
                 onChange={(pid) => void changeRole('extract', pid)}
               />
@@ -565,7 +565,7 @@ function ModelsSection({ settings }: { settings: Awaited<ReturnType<typeof getSe
             <SettingRow title="知识库视觉转写" desc="图片 / 扫描页转文字（仅列已开启「图片输入」的模型）">
               <RoleSelect
                 value={roles.vision}
-                emptyLabel="自动（默认模型优先）"
+                emptyLabel="自动（按图片能力选择）"
                 options={models.filter((m) => m.imageSupport).map((m) => ({ id: m.id, label: m.name }))}
                 onChange={(pid) => void changeRole('vision', pid)}
               />
@@ -988,6 +988,9 @@ function ModelDialog({
   const [advOpen, setAdvOpen] = useState(false)
   const [key, setKey] = useState('')
   const [keySaved, setKeySaved] = useState(initial?.keySaved ?? false)
+  // 已存 Key 已知有效的地址：改地址后旧 Key 不再自动适用（「已保存」标识/借用/保存门
+  // 都按当前地址判断；服务端 key_ref 也有同款绑定校验，双保险）
+  const [savedBaseUrl, setSavedBaseUrl] = useState(initial?.baseUrl ?? '')
   const [showKey, setShowKey] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -1003,8 +1006,10 @@ function ModelDialog({
 
   // 同厂商已配 Key 的兄弟：Key 留空时复用其 Key（测试借用 / 保存时服务端 copy）
   const keySource = findKeySource(models, baseUrl, isNew ? undefined : pid)
-  // key_ref 兜底：编辑已配 Key 的模型时借用自身已存 Key
-  const keyRef = key.trim() ? undefined : (keySource?.id ?? (keySaved ? pid : undefined))
+  // 已存 Key 只对保存它的地址有效：改地址后 keyOnFile=false，不再借用自身旧 Key
+  const keyOnFile = keySaved && sameBaseUrl(baseUrl, savedBaseUrl)
+  // key_ref 兜底：编辑未改地址的已配 Key 模型时借用自身已存 Key
+  const keyRef = key.trim() ? undefined : (keySource?.id ?? (keyOnFile ? pid : undefined))
   const canFetch = !!key.trim() || !!keyRef
 
   // Escape 关本弹窗：必须挂 window 捕获段——点「添加模型」后焦点常停在弹窗后面的
@@ -1087,10 +1092,15 @@ function ModelDialog({
       model: model.trim(),
       imageSupport,
       contextWindow,
-      keySaved: keySaved || !!key.trim(),
+      keySaved: keyOnFile || !!key.trim(),
     }
     if (!draft.model) return '请填写模型名称'
     if (!draft.baseUrl) return '请填写接口地址'
+    // 阻止保存门（2026-09-12 拍板）：地址改了、Key 没填也没有同地址兄弟可复用——
+    // 旧 Key 属于旧地址，静默保存会让运行时拿旧 Key 请求新地址
+    if (!key.trim() && !keySource && keySaved && !keyOnFile) {
+      return '接口地址已更改，原保存的 Key 不适用于新地址——请填写新 Key，或从同地址的模型复用；取消编辑可保留原配置'
+    }
     const list = isNew ? [...models, draft] : models.map((m) => (m.id === pid ? draft : m))
     // 唯一一条时自动设为默认；默认模型被删时回落第一条
     let dflt = defaultModel
@@ -1104,6 +1114,7 @@ function ModelDialog({
           await putModelKey(pid, key.trim())
           setKey('')
           setKeySaved(true)
+          setSavedBaseUrl(baseUrl.trim())
         } catch (e) {
           // 半成功：模型列表已在服务器生效——照常提交本地并失效缓存保持两边一致，
           // 文案明确半成功；重按保存只重试 Key（putModels 幂等重放，无重复副作用）
@@ -1116,6 +1127,7 @@ function ModelDialog({
         try {
           await copyModelKey(keySource.id, pid)
           setKeySaved(true)
+          setSavedBaseUrl(baseUrl.trim())
         } catch (e) {
           onCommit(list, dflt)
           void queryClient.invalidateQueries({ queryKey: ['settings'] })
@@ -1159,8 +1171,12 @@ function ModelDialog({
       setError('请填写模型名称')
       return
     }
-    if (!key.trim() && !keySource && !keySaved) {
-      setError('请填写 API Key（或先为同厂商的模型配置 Key 以便复用）')
+    if (!key.trim() && !keySource && !keyOnFile) {
+      setError(
+        keySaved
+          ? '接口地址已更改，原 Key 不再自动使用——请填写该地址的 API Key'
+          : '请填写 API Key（或先为同厂商的模型配置 Key 以便复用）',
+      )
       return
     }
     setTesting(true)
@@ -1218,7 +1234,7 @@ function ModelDialog({
           <Field
             label={
               <>
-                API Key {keySaved && <span className="ml-1 font-normal text-success">已保存</span>}
+                API Key {keyOnFile && <span className="ml-1 font-normal text-success">已保存</span>}
               </>
             }
           >
@@ -1227,7 +1243,7 @@ function ModelDialog({
                 type={showKey ? 'text' : 'password'}
                 value={key}
                 onChange={(e) => setKey(e.target.value)}
-                placeholder={keySaved ? '已配置，输入新值可更换' : '输入你的 API Key'}
+                placeholder={keyOnFile ? '已配置，输入新值可更换' : '输入你的 API Key'}
                 className="pr-9"
               />
               <button

@@ -229,6 +229,8 @@ def test_settings_test_model_draft(client, monkeypatch):
     assert body["message"] == "连接正常"
     assert body["latency_ms"] >= 0
     assert calls["model"] == "x-1"
+    # ping 不带 token 上限：GPT-5/o 系拒绝 max_tokens，带了就是假失败（2026-09-12）
+    assert "max_tokens" not in calls
 
     # 未提供 Key（也无 key_ref）→ 400
     assert client.post("/api/settings/test-model", json={"base_url": "https://x.example/v1", "model": "x-1"}).status_code == 400
@@ -245,6 +247,55 @@ def test_settings_test_model_draft(client, monkeypatch):
     # 入参非法 → 422（非本机 http 地址 / 空模型名）
     assert client.post("/api/settings/test-model", json={"base_url": "http://evil.example/v1", "model": "x", "api_key": "k"}).status_code == 422
     assert client.post("/api/settings/test-model", json={"base_url": "https://x.example/v1", "model": " ", "api_key": "k"}).status_code == 422
+
+
+def test_settings_key_ref_binds_base_url(client, monkeypatch):
+    """key_ref 借用绑定地址（2026-09-12）：已存 Key 只允许发往其所属地址。
+
+    不一致 → 400 人话（Key 不出库、不发往陌生地址），test-model 与
+    available-models 两条路径同款收口；尾斜杠变体视为一致放行。
+    """
+    import openai
+
+    class FakeResp:
+        choices = [object()]
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return FakeResp()
+
+    monkeypatch.setattr(
+        openai,
+        "OpenAI",
+        lambda **kw: type("C", (), {"chat": type("Chat", (), {"completions": FakeCompletions()})()})(),
+    )
+    client.put(
+        "/api/settings/models",
+        json={"models": [{"id": "m1", "base_url": "https://x.example/v1", "model": "x-1"}], "default_model": "m1"},
+    )
+    client.put("/api/settings/keys", json={"model_id": "m1", "api_key": "sk-saved"})
+
+    # 地址不一致 → 400（不再拿 m1 的 Key 去连新地址）
+    r = client.post("/api/settings/test-model", json={"base_url": "https://evil.example/v1", "model": "x-1", "key_ref": "m1"})
+    assert r.status_code == 400
+    assert "不一致" in r.json()["detail"]
+
+    r = client.post("/api/settings/available-models", json={"base_url": "https://evil.example/v1", "key_ref": "m1"})
+    assert r.status_code == 400
+    assert "不一致" in r.json()["detail"]
+
+    # 尾斜杠变体视为一致 → 放行
+    r = client.post("/api/settings/test-model", json={"base_url": "https://x.example/v1/", "model": "x-1", "key_ref": "m1"})
+    assert r.status_code == 200 and r.json()["ok"] is True
+
+    # 草稿 api_key 直填不经绑定（用户自己填的 Key 自己负责去向）
+    r = client.post("/api/settings/test-model", json={"base_url": "https://evil.example/v1", "model": "x-1", "api_key": "sk-draft"})
+    assert r.status_code == 200
+
+    # key_ref 指向不存在的模型 → 400
+    r = client.post("/api/settings/test-model", json={"base_url": "https://x.example/v1", "model": "x-1", "key_ref": "ghost"})
+    assert r.status_code == 400
+    assert "不存在" in r.json()["detail"]
 
 
 def test_settings_test_model_upstream_error_is_200_with_human_message(client, monkeypatch):
@@ -293,9 +344,12 @@ def test_settings_test_model_image_probe(client, monkeypatch):
     import httpx
     import openai
 
+    create_kwargs: list[dict] = []
+
     def make_openai(reject_image: bool, text_fails: bool = False):
         class FakeCompletions:
             def create(self, **kwargs):
+                create_kwargs.append(kwargs)
                 content = kwargs.get("messages", [{}])[0].get("content")
                 if isinstance(content, list):  # 图片 ping（content 为多段数组）
                     if reject_image:
@@ -345,6 +399,9 @@ def test_settings_test_model_image_probe(client, monkeypatch):
     monkeypatch.setattr(openai, "OpenAI", make_openai(reject_image=True))
     body = post(with_image=False)
     assert body["image_ok"] is None
+
+    # 文本/图片 ping 均不带 token 上限（GPT-5/o 系拒绝 max_tokens，2026-09-12）
+    assert create_kwargs and all("max_tokens" not in kw for kw in create_kwargs)
 
 
 def test_settings_available_models(client, monkeypatch):

@@ -203,13 +203,31 @@ class CopyKeyBody(BaseModel):
     to_model: str = Field(alias="to")
 
 
-def _resolve_draft_key(api_key: str | None, key_ref: str | None) -> str:
-    """草稿 Key 优先；为空时借用 key_ref 已保存的 Key（编辑未改 Key / 同厂商复用两条路径）。"""
+def _norm_base_url(u: str) -> str:
+    """同厂商地址比较用：去首尾空白与尾斜杠（与前端 modelSettings.sameBaseUrl 同语义）。"""
+    return (u or "").strip().rstrip("/")
+
+
+def _resolve_draft_key(api_key: str | None, key_ref: str | None, base_url: str) -> str:
+    """草稿 Key 优先；为空时借用 key_ref 已保存的 Key（编辑未改 Key / 同厂商复用两条路径）。
+
+    借用必须绑定地址（2026-09-12）：已存 Key 只允许发往其所属 profile 的 base_url——
+    否则「编辑改地址 + Key 留空点测试」会把 A 厂商的 Key 发到 B 地址。归一化后
+    不一致 → 400 人话，引导为新地址填写 Key。
+    """
     k = (api_key or "").strip()
     if k:
         return k
     ref = (key_ref or "").strip()
     if ref:
+        p = cfg.get_profile(ref)
+        if p is None:
+            raise HTTPException(status_code=400, detail=f"引用的模型 {ref} 不存在，请重新选择")
+        if _norm_base_url(p.base_url) != _norm_base_url(base_url):
+            raise HTTPException(
+                status_code=400,
+                detail=f"所借 Key 属于接口地址 {p.base_url} 的模型，与当前填写地址不一致——请为新地址填写 API Key",
+            )
         return cfg.model_key(ref) or ""
     return ""
 
@@ -267,10 +285,11 @@ def _ping_model_sync(base_url: str, model: str, api_key: str) -> tuple[bool, str
         return int((time.monotonic() - started) * 1000)
 
     try:
+        # 不带 token 上限：OpenAI/Azure 的 GPT-5/o 系拒绝 max_tokens（只认
+        # max_completion_tokens），带了就是假失败；ping 回复成本可忽略
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": "ping"}],
-            max_tokens=1,
         )
     except APITimeoutError:
         return False, "连接超时（15 秒无响应）——检查接口地址与网络", elapsed()
@@ -316,6 +335,7 @@ def _ping_image_sync(base_url: str, model: str, api_key: str) -> tuple[bool, str
 
     client = OpenAI(api_key=api_key, base_url=base_url, timeout=15.0, max_retries=0)
     try:
+        # 同文本 ping：不带上限参数（GPT-5/o 系拒绝 max_tokens，见 _ping_model_sync）
         resp = client.chat.completions.create(
             model=model,
             messages=[
@@ -327,7 +347,6 @@ def _ping_image_sync(base_url: str, model: str, api_key: str) -> tuple[bool, str
                     ],
                 }
             ],
-            max_tokens=1,
         )
     except APIStatusError as e:
         if e.status_code in (400, 404, 422):
@@ -365,7 +384,7 @@ async def test_model_draft(body: DraftTestBody):
     model = (body.model or "").strip()
     if not model:
         raise HTTPException(status_code=422, detail="请填写模型名称")
-    api_key = _resolve_draft_key(body.api_key, body.key_ref)
+    api_key = _resolve_draft_key(body.api_key, body.key_ref, base_url)
     if not api_key:
         raise HTTPException(status_code=400, detail="未提供 API Key——请填写 Key，或复用同厂商已配置的 Key")
     ok, message, latency_ms = await asyncio.to_thread(_ping_model_sync, base_url, model, api_key)
@@ -389,7 +408,7 @@ async def available_models(body: AvailableModelsBody):
     失败返回 ok=false + 错误（不是 4xx/5xx）——前端静默回落到内置常用清单。
     """
     base_url = _validate_base_url(body.base_url)
-    api_key = _resolve_draft_key(body.api_key, body.key_ref)
+    api_key = _resolve_draft_key(body.api_key, body.key_ref, base_url)
     if not api_key:
         raise HTTPException(status_code=400, detail="未提供 API Key——请先填写 Key")
     ok, models, err = await asyncio.to_thread(_list_models_sync, base_url, api_key)

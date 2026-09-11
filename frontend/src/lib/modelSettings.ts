@@ -2,9 +2,15 @@
  *  抽出来的动因：前端无组件测试环境（无 jsdom/testing-library），可验证的部分
  *  一律做成纯函数，符合仓库「测试全是纯函数」的现状。 */
 
-/** 归一化 base_url 便于同厂商比较（去尾斜杠、小写主机不处理路径大小写）。 */
+/** 归一化 base_url 便于同厂商比较（去首尾空白与尾斜杠；与后端 _norm_base_url 同语义）。 */
 function normalizeBaseUrl(url: string): string {
   return url.trim().replace(/\/+$/, '')
+}
+
+/** 两个接口地址是否同一（归一化后比较）。后端 key_ref 借用绑定用同一语义，
+ *  前端「已保存 Key 是否适用于当前地址」的判断必须与之一致。 */
+export function sameBaseUrl(a: string, b: string): boolean {
+  return normalizeBaseUrl(a) === normalizeBaseUrl(b)
 }
 
 /** 找同厂商（同 base_url）且已配 Key 的兄弟 profile。
@@ -15,12 +21,9 @@ export function findKeySource<T extends { id: string; baseUrl: string; keySaved:
   baseUrl: string,
   excludeId?: string,
 ): T | null {
-  const target = normalizeBaseUrl(baseUrl)
-  if (!target) return null
+  if (!baseUrl.trim()) return null
   return (
-    models.find(
-      (m) => m.id !== excludeId && m.keySaved && normalizeBaseUrl(m.baseUrl) === target,
-    ) ?? null
+    models.find((m) => m.id !== excludeId && m.keySaved && sameBaseUrl(m.baseUrl, baseUrl)) ?? null
   )
 }
 

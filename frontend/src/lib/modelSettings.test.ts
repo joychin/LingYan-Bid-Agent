@@ -1,7 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { findKeySource, mergeModelOptions } from './modelSettings'
+import { findKeySource, mergeModelOptions, sameBaseUrl } from './modelSettings'
 
 const m = (id: string, baseUrl: string, keySaved: boolean) => ({ id, baseUrl, keySaved })
+
+describe('sameBaseUrl', () => {
+  it('去空白与尾斜杠后相等（与后端 _norm_base_url 同语义）', () => {
+    expect(sameBaseUrl('https://x.example/v1', 'https://x.example/v1/')).toBe(true)
+    expect(sameBaseUrl(' https://x.example/v1 ', 'https://x.example/v1//')).toBe(true)
+  })
+
+  it('不同地址不相等；空与空白视为相等、空与非空不相等', () => {
+    expect(sameBaseUrl('https://x.example/v1', 'https://y.example/v1')).toBe(false)
+    expect(sameBaseUrl('', 'https://x.example/v1')).toBe(false)
+    expect(sameBaseUrl('', '  ')).toBe(true)
+  })
+})
 
 describe('findKeySource', () => {
   it('命中同厂商已配 Key 的兄弟（尾部斜杠归一）', () => {
