@@ -115,6 +115,17 @@ def interrupt_payload(rid: str, cid: str, requests: list, seq: int) -> dict:
 # 前端活卡显示上一轮的工具卡）。子代理子图同名节点照常翻译（ns 归属不受影响）。
 _TOOL_EVENT_NODES = frozenset({"model", "tools"})
 
+# HITL 中间件伪节点（langchain HumanInTheLoopMiddleware）的唯一放行例外：interrupt
+# 在 after_model 钩子抛出，resume 后用户的 respond/reject 裁决被合成为「代答」
+# ToolMessage（content=回答原文 / reject 则 status=error）从同一伪节点的 updates
+# 下发，tool_call_id 沿用原调用（human_in_the_loop._process_decision，2026-09-12
+# 真链路实验实证）。它不在 _TOOL_EVENT_NODES 里被一并跳过时，ask_human 永远收
+# 不到 tool.result：前端复活后状态行整个续跑段卡「正在执行·向你提问」、历史
+# 问答组缺「你的回答」。只放行该伪节点的 ToolMessage——伪节点里的 AIMessage 是
+# 历史重写（改写 tool_calls 后的原消息），照译会重复 tool.called；其余伪节点
+# （尤其 PatchToolCalls 的悬空调用取消+历史重放）维持跳过。
+_HITL_NODE_PREFIX = "HumanInTheLoopMiddleware"
+
 # ---- 子代理归属注册表 ----
 # task 工具执行时（agent._SubagentTagMiddleware.wrap_tool_call）登记：tools 任务的
 # checkpoint_ns（形如 "tools:<tid>"，恰为子代理事件 ns 元组的第 0 段）→ task 的 tool_call_id。
@@ -345,6 +356,23 @@ def _hitl_requests(interrupts) -> dict:
     return {"requests": requests}
 
 
+def _tool_result_payload(m: ToolMessage, agent_id: str | None) -> dict:
+    """ToolMessage → tool.result 事件载荷（真实 tools 节点与 HITL 代答共用同一形状）。"""
+    content = getattr(m, "content", "")
+    error = None
+    if getattr(m, "status", None) == "error":
+        # task 抛出异常 / HITL reject 时 ToolMessage.content 是错误文本；作为
+        # tool_result 的 error 字段下发，让前端渲染「✗ 失败工具卡」并可展开查看详情
+        error = _summary(content, limit=800)
+    return {
+        "tool": getattr(m, "name", None) or "unknown",
+        "summary": _summary(content),
+        "error": error,
+        "tool_call_id": getattr(m, "tool_call_id", None),
+        "agent_id": agent_id,
+    }
+
+
 def iter_stream(stream: Iterator, rid: str | None = None) -> Iterator[tuple[str, object]]:
     """把 agent.stream(stream_mode=["messages","updates"], subgraphs=True) 的产出映射为归一化事件。
 
@@ -400,8 +428,14 @@ def iter_stream(stream: Iterator, rid: str | None = None) -> Iterator[tuple[str,
                             last_todos_key = key
                             yield ("todo_updated", todos)
                     # 消息→工具事件的翻译只认真实执行节点（见 _TOOL_EVENT_NODES 注释）；
-                    # 中间件伪节点的 messages 是历史重写，跳过
+                    # 中间件伪节点的 messages 是历史重写，跳过——唯一例外见 _HITL_NODE_PREFIX
                     if _node not in _TOOL_EVENT_NODES:
+                        if not _node.startswith(_HITL_NODE_PREFIX):
+                            continue
+                        # HITL 代答 ToolMessage → tool.result（resume 后的 respond/reject 裁决）
+                        for m in update.get("messages", []):
+                            if isinstance(m, ToolMessage):
+                                yield ("tool_result", _tool_result_payload(m, agent_id))
                         continue
                     messages = update.get("messages", [])
                     for m in messages:
@@ -417,20 +451,4 @@ def iter_stream(stream: Iterator, rid: str | None = None) -> Iterator[tuple[str,
                                     },
                                 )
                         elif isinstance(m, ToolMessage):
-                            content = getattr(m, "content", "")
-                            status = getattr(m, "status", None)
-                            error = None
-                            if status == "error":
-                                # task 抛出异常时 ToolMessage.content 是错误文本；作为 tool_result 的
-                                # error 字段下发，让前端渲染「✗ 失败工具卡」并可展开查看详情
-                                error = _summary(content, limit=800)
-                            yield (
-                                "tool_result",
-                                {
-                                    "tool": getattr(m, "name", None) or "unknown",
-                                    "summary": _summary(content),
-                                    "error": error,
-                                    "tool_call_id": getattr(m, "tool_call_id", None),
-                                    "agent_id": agent_id,
-                                },
-                            )
+                            yield ("tool_result", _tool_result_payload(m, agent_id))

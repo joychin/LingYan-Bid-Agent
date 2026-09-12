@@ -219,3 +219,44 @@ def test_pseudo_node_todos_still_flow():
     todos = [{"content": "a", "status": "pending"}]
     stream = _node_updates("PatchToolCallsMiddleware.before_agent", [{"todos": todos, "messages": []}])
     assert [k for k, _ in iter_stream(stream)] == ["todo_updated"]
+
+
+# ---------- HITL 伪节点代答 ToolMessage → tool.result（2026-09-12 ask_human 终态修复） ----------
+
+
+def _hitl_answer_update(answered: ToolMessage) -> dict:
+    """HumanInTheLoopMiddleware.after_model 在 resume 后下发的 update：
+    [改写 tool_calls 后的原 AIMessage（历史重写）, 代答 ToolMessage]。"""
+    ai_rewrite = AIMessage(
+        content="",
+        tool_calls=[{"name": "ask_human", "args": {"question": "选哪个？"}, "id": answered.tool_call_id, "type": "tool_call"}],
+    )
+    return {"messages": [ai_rewrite, answered]}
+
+
+def test_hitl_pseudo_node_answer_translated_to_tool_result():
+    """respond 裁决的代答 ToolMessage 翻译成 tool.result（tool_call_id 沿用原调用）；
+    同批的 AIMessage 是历史重写，不得产出重复 tool.called。"""
+    answered = ToolMessage(content="方案A", name="ask_human", tool_call_id="call_ask_1")
+    stream = _node_updates("HumanInTheLoopMiddleware.after_model", [_hitl_answer_update(answered)])
+    out = list(iter_stream(stream))
+    assert [k for k, _ in out] == ["tool_result"]
+    payload = out[0][1]
+    assert payload["tool"] == "ask_human"
+    assert payload["tool_call_id"] == "call_ask_1"
+    assert "方案A" in payload["summary"]
+    assert payload["error"] is None
+
+
+def test_hitl_pseudo_node_reject_carries_error():
+    """reject 裁决的代答 ToolMessage status=error → tool.result 带 error 字段（前端渲染失败态）。"""
+    rejected = ToolMessage(
+        content="User rejected the tool call for `ask_human`.",
+        name="ask_human",
+        tool_call_id="call_ask_2",
+        status="error",
+    )
+    stream = _node_updates("HumanInTheLoopMiddleware.after_model", [_hitl_answer_update(rejected)])
+    out = list(iter_stream(stream))
+    assert [k for k, _ in out] == ["tool_result"]
+    assert out[0][1]["error"] is not None

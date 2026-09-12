@@ -414,11 +414,58 @@ def test_resume_completion_merges_trace_and_writes_last_seq(tmp_path, monkeypatc
     trace = db.get_traces_for_messages([final["id"]])[final["id"]]
     assert [s["id"] for s in trace["tools"]] == ["c0", "t1", "c2"]
     assert {s["id"]: s["status"] for s in trace["tools"]}["t1"] == "done"
-
     # finish_run 回写终态 seq（此前 last_seq 永远停在暂停值）
     assert db.get_run(rid)["last_seq"] == out[-1][1]["seq"]
     # 暂停消息仍在，与最终消息同属一个 run（前端单回合聚合依据）
     assert pause["run_id"] == final["run_id"] == rid
+
+
+def test_resume_answered_ask_human_gets_terminal_state(tmp_path, monkeypatch):
+    """2026-09-12 修复：ask_human 的 respond 续跑段里，代答 ToolMessage（真链路由
+    HumanInTheLoopMiddleware.after_model 伪节点下发、模型节点不再重发该调用）翻译成
+    tool.result；续段树承接暂停段的 paused 步骤（_seed_resume_trace）并被回填为
+    done+回答摘要——事件流与最终落库 trace 双侧收敛，前端状态行不再整个续跑段卡
+    「正在执行·向你提问」、历史问答组的「你的回答」有了 summary 数据源。"""
+    cid, rid = _setup_conv(tmp_path, monkeypatch)
+    # 首段：ask_human 被拦下 → 暂停（trace 落 paused 步骤）
+    seg1 = [
+        ("updates", {"model": {"messages": [AIMessage(content="", tool_calls=[{"name": "ask_human", "args": {"question": "用哪个方案？"}, "id": "a1"}])]}}),
+        ("updates", {"__interrupt__": (_make_interrupt(),)}),
+    ]
+    out1 = _drive_run_stream(monkeypatch, _StubAgent(seg1), cid, rid, user_text="hi")
+    assert out1[-1][0] == "run.interrupt"
+    assert [s["status"] for s in db.get_run_trace(rid)["tools"]] == ["paused"]
+
+    # 续段（真链路形态）：HITL 伪节点下发 [改写后的原 AIMessage, 代答 ToolMessage]，
+    # 随后模型直接产出最终回复
+    answered = ToolMessage(content="方案A", name="ask_human", tool_call_id="a1")
+    seg2 = [
+        ("updates", {"HumanInTheLoopMiddleware.after_model": {"messages": [
+            AIMessage(content="", tool_calls=[{"name": "ask_human", "args": {"question": "用哪个方案？"}, "id": "a1"}]),
+            answered,
+        ]}}),
+        ("messages", (AIMessageChunk(content="好的，按方案A执行"), {})),
+    ]
+    out2 = _drive_run_stream(
+        monkeypatch, _StubAgent(seg2), cid, rid,
+        resume_decisions=[{"type": "respond", "message": "方案A"}],
+        start_seq=db.get_run(rid)["last_seq"],
+    )
+    assert out2[-1][0] == "agent.completed"
+
+    # 事件侧：代答作为 tool.result 下发（id 沿用原调用、summary 带回答、无重复 tool.called）
+    results = [d for e, d in out2 if e == "tool.result"]
+    assert len(results) == 1
+    assert results[0]["tool"] == "ask_human"
+    assert results[0]["tool_call_id"] == "a1"
+    assert "方案A" in results[0]["summary"]
+    assert results[0]["error"] is None
+    assert not any(e == "tool.called" and d.get("tool") == "ask_human" for e, d in out2)
+
+    # 落库侧：最终 trace 里 ask_human 步骤 done + 回答摘要（历史「你的回答：」行数据源）
+    [ask] = [s for s in db.get_run_trace(rid)["tools"] if s["tool"] == "ask_human"]
+    assert ask["status"] == "done"
+    assert "方案A" in ask["summary"]
 
 
 def test_resume_error_without_output_keeps_pause_trace(tmp_path, monkeypatch):

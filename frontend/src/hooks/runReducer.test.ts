@@ -185,6 +185,50 @@ describe('HITL 中断与续跑', () => {
     expect(resumed.total).toBe(1)
   })
 
+  it('ask_human 回答续跑：代答 tool.result 把复活步骤落终态（状态行不再卡「正在执行·向你提问」，2026-09-12）', () => {
+    // 暂停：ask_human 步骤冻结为 paused
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        tool: 'ask_human',
+        args: { question: '用哪个方案？' },
+        tool_call_id: 'ask_1',
+      },
+    }).state
+    s = runReducer(s, {
+      type: 'settle-interrupt',
+      runId: 'r1',
+      requests: [{ tool: 'ask_human', args: { question: '用哪个方案？' }, description: '确认', allowed: ['respond'] }],
+    }).state
+    expect(s.tools[0].status).toBe('paused')
+
+    // 用户回答 → 乐观 started{continuation} 复活全部 paused 步骤为 running
+    s = runReducer(s, { type: 'started', runId: 'r1', now: NOW, continuation: true, continuationKind: 'answer' }).state
+    expect(s.tools[0].status).toBe('running')
+
+    // 续段首事件 = HITL 伪节点代答 tool.result（sidecar 2026-09-12 起下发；此前
+    // 永远不来 → 步骤整个续跑段停在 running，状态行恒「正在执行 · 向你提问」）
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.result',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        tool: 'ask_human',
+        summary: '方案A',
+        tool_call_id: 'ask_1',
+      },
+    }).state
+    expect(s.tools[0].status).toBe('done')
+    expect(s.tools[0].summary).toBe('方案A')
+  })
+
   it('settle-interrupt 原地冻结：未封口正文转暂停旁白，running 步骤（含子级）转 paused', () => {
     let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
     s = runReducer(s, {

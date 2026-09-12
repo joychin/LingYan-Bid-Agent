@@ -1202,7 +1202,9 @@ def _attach_step(top_steps: list[dict], step: dict, agent_id: str | None) -> Non
 def _find_pending(steps: list[dict], payload: dict) -> dict | None:
     """在步骤树里按 tool_call_id（缺省退化按工具名）找可回填的步骤。
 
-    可回填 = running，或 error 但 error 是断流重试标记（2026-09-10 review：
+    可回填 = running / paused（HITL 续跑段经 _seed_resume_trace 承接的暂停
+    ask_human 步骤，段首代答 tool.result 到达时照常回填，与前端 fillStep 同口径），
+    或 error 但 error 是断流重试标记（2026-09-10 review：
     tools 节点失败的瞬时错误（子代理 LLM 断流上抛）重试时 langgraph 以同
     tool_call_id 复跑该工具调用——_retire_broken_steps 先行标死的步骤必须允许
     被真实 tool.result 覆写，否则重试成功后步骤永久显示「LLM 流中断」，而复用
@@ -1210,7 +1212,7 @@ def _find_pending(steps: list[dict], payload: dict) -> dict | None:
     error 态——同工具名多步骤时可能复活错步骤）。"""
     for s in reversed(steps):
         tcid = payload.get("tool_call_id")
-        revivable = s["status"] == "running" or (
+        revivable = s["status"] in ("running", "paused") or (
             bool(tcid) and s["status"] == "error" and s.get("error") == _RETRY_RETIRED_ERROR
         )
         if revivable:
@@ -1377,6 +1379,15 @@ def _run_agent_stream(
     error_code: str | None = None
     top_steps: list[dict] = []
     last_todos: list = []
+    if resume_decisions is not None or resume_payload is not None or continue_from_checkpoint:
+        # 续跑段（HITL 裁决 / 断点继续）先承接既有 run_traces 行的步骤树与 todos：
+        # 暂停段留下的 paused ask_human 步骤只存在于旧行，本段流开头 HITL 伪节点
+        # 下发的「代答」tool.result（events._HITL_NODE_PREFIX 放行）要能经
+        # _find_pending 回填它，段尾 _save_merged_trace 才把「已答 + 用户回答」落进
+        # 最终 trace——否则步骤永远 paused、历史问答组缺「你的回答」。断点继续路径
+        # 同样受益：活树快照与续段 trace 不再只剩本段步骤（2026-09-12）。
+        prior = _seed_resume_trace(rid)
+        top_steps, last_todos = prior
     interrupt: dict | None = None
     n_retries = 0
     try:
@@ -1704,6 +1715,23 @@ def _save_merged_trace(
     db.save_run_trace(
         rid, cid, message_id or existing.get("message_id"), merged_tools,
         trace["todos"], merged_duration, reasoning, files=merged_files,
+    )
+
+
+def _seed_resume_trace(rid: str) -> tuple[list[dict], list]:
+    """续跑段起步时承接既有 run_traces 行的步骤树与 todos（无行/读失败回空，行为同旧）。
+
+    deepcopy 防本段改写步骤 dict 时污染后续多次读到的同一份 JSON 解析产物。"""
+    try:
+        prior = db.get_run_trace(rid)
+    except Exception:
+        logger.exception("续跑段承接 trace 失败（rid=%s），按空树起步", rid)
+        return [], []
+    if not prior:
+        return [], []
+    return (
+        copy.deepcopy(prior.get("tools") or []),
+        copy.deepcopy(prior.get("todos") or []),
     )
 
 

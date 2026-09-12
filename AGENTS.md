@@ -431,6 +431,28 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
    取消感知/task 无档/预检）+runReducer traceSyncIssue 两例；明确不做=SSE 断连
    静默（重连+对账闭环，正确）、streamText 断连洞（终态即修复）、Retry-After
    自适应退避、agent.db 损坏自动重建、LLM 死等 180s 内提前取消。
+   **HITL 代答 tool.result 修复（2026-09-12 二批，SSE 契约零改动）**：症状=回答
+   ask_human 后活卡状态行整个续跑段卡「正在执行 · 向你提问」（run 本身正常在跑，
+   纯显示层谎言）；历史「已询问 N 个问题」组的「你的回答：」行从来没显示过
+   （summary 恒空）同根。根因三层实证：①langchain `HumanInTheLoopMiddleware`
+   的 interrupt 在 after_model 伪节点抛出，resume 后 respond/reject 裁决被合成为
+   「代答」ToolMessage（content=回答原文、tool_call_id 沿用原调用、reject 则
+   status=error）从**同一伪节点**的 updates 下发（真链路 create_deep_agent 实验
+   实证，模型节点不重发该调用）；②events 适配层 `_TOOL_EVENT_NODES={"model",
+   "tools"}` 把伪节点一律跳过 → ask_human 永远收不到 tool.result；③前端
+   started{continuation} 把 paused 全部复活成 running 等终态 → activeStatusLabel
+   取第一个 running 非 task 步骤=ask_human 恒占。修复三件：events 加
+   `_HITL_NODE_PREFIX` 唯一放行（只翻 ToolMessage 防历史重写 AIMessage 重复
+   tool.called；PatchToolCalls/Summarization 等其余伪节点维持跳过——2026-09-08
+   跨 run 重放守卫不动）；agent `_find_pending` 放开 paused 可回填（与前端
+   fillStep 同口径）；`_seed_resume_trace` 续跑段（resume/continue）起步从既有
+   run_traces 行 deepcopy 承接步骤树+todos（否则新段树里没有 ask_human 步骤可
+   回填、段尾合并落不了「已答+回答」）。前端零改动（fillStep/revive 既有语义
+   即收敛）；连带收益=断点继续与续跑段的活树快照不再只剩本段步骤。测试：
+   test_events 三例（代答翻译/reject 带 error/AI 重写不重复）+ test_hitl
+   respond 续段端到端一例（事件+落库双侧收敛）+ runReducer 复活→代答落终态
+   一例；明确不做=error 段落库 trace 里 running 死步的统一收尾（存量疣、
+   continue 段复活/重跑语义待单独批次）。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。
