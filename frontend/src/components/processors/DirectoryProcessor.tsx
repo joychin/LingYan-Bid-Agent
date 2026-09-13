@@ -18,6 +18,7 @@ import {
   ChevronRight,
   FileText,
   History,
+  Info,
 } from 'lucide-react'
 import type { ProcessorProps } from '@/artifacts/registry'
 import { getArtifactContent, getArtifactMeta, restoreArtifact, updateArtifactContent } from '@/api/client'
@@ -27,7 +28,8 @@ import { useAutoSave } from '@/hooks/useAutoSave'
 import { SaveStateBar } from '@/components/editors/SaveStateBar'
 import { SourceTraceDialog } from '@/components/processors/SourceTraceDialog'
 import { DirectoryEditor } from '@/components/processors/DirectoryEditor'
-import { structureSignature, type DirectoryData, type EditNode } from '@/components/processors/directoryTree'
+import { structureSignature, type DirectoryData, type EditDoc, type EditNode } from '@/components/processors/directoryTree'
+import { NUMBERING_OPTIONS, numberTree, type NumberedNode, type NumberingValue } from './directoryNumbering'
 
 /** 来源徽章配色（token 派生，暗色自动跟随）：MAND=danger 红 TPL=info 蓝 REQ=brand 青 SCORE=warning 琥珀
  *  （写作指引表格的依据 chips 同款配色，导出共用单源） */
@@ -52,17 +54,7 @@ export const BADGE_LABELS: Record<string, string> = {
   SCORE: '评分项',
 }
 
-type NumberingValue = NonNullable<DirectoryData['numbering']>
-
-/** 章节编号格式（合册按目录树序自动编号；真值存目录产物 numbering 字段） */
-const NUMBERING_OPTIONS: Array<{ value: NumberingValue; label: string }> = [
-  { value: 'chapter', label: '第一章 + 1.1' },
-  { value: 'decimal', label: '1 + 1.1' },
-  { value: 'gov', label: '一、（一）1.' },
-  { value: 'none', label: '不编号' },
-]
-
-/** 四色徽章图例：目录查看态头部与写作指引说明段共用（点击徽章=看登记原文与出处） */
+/** 四色徽章图例：写作指引说明段与目录 ⓘ 展开行共用（点击徽章=看登记原文与出处） */
 export function BadgeLegend() {
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
@@ -274,6 +266,10 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
         return { ...doc, directory: r.nodes as EditNode[] }
       })
     : data.response_documents!
+  // 编号预览（查看态）：先过滤后装饰——过滤保序，编号与全量一致；每册一次 numberTree（首章重起）
+  const numberedDocs = renderDocs.map((doc) =>
+    numberTree(doc.directory ?? [], data.numbering ?? 'chapter'),
+  )
 
   return (
     <div className="flex flex-col gap-4 text-sm">
@@ -322,7 +318,10 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
             完成编辑
           </button>
           <SaveStateBar state={auto.state} lastSavedAt={auto.lastSavedAt} onRetry={() => void auto.saveNow()} />
-          <label className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+          <label
+            className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground"
+            title="编号在生成整本 Word 时套用；此处目录树实时预览编号效果"
+          >
             章节编号
             <select
               value={docs?.numbering ?? 'chapter'}
@@ -394,30 +393,20 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
       )}
       {!editing && data.warning && <Banner tone="warn">{data.warning}</Banner>}
       {!editing && (unused.length > 0 || dangling.length > 0) && (
-        <Banner tone="warn">
-          来源核对：
-          {unused.length > 0 && ` ${unused.length} 个来源未被目录引用（${unused.join('、')}）`}
-          {dangling.length > 0 && ` ${dangling.length} 个引用悬空（${dangling.join('、')}）`}
-        </Banner>
+        <SourceCheckBanner unused={unused} dangling={dangling} />
       )}
 
       {data.meta && Object.keys(data.meta).length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {Object.entries(data.meta).map(([k, v]) => (
-            <span key={k} className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+            <span
+              key={k}
+              title={`${k}：${v}`}
+              className="max-w-[320px] truncate rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+            >
               {k}：{v}
             </span>
           ))}
-        </div>
-      )}
-      {!editing && <BadgeLegend />}
-      {!editing && (
-        <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span>章节编号（合册时按目录树序自动加）：</span>
-          <span className="rounded border border-line px-1.5 py-px font-medium text-foreground">
-            {NUMBERING_OPTIONS.find((o) => o.value === (data.numbering ?? 'chapter'))?.label}
-          </span>
-          <span>改格式请进「编辑目录」调整，重合册后生效</span>
         </div>
       )}
 
@@ -427,32 +416,19 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
           mutate={mutate}
           setDocs={(d) => setDocs(d)}
           markDirty={auto.markDirty}
+          numbering={docs.numbering ?? 'chapter'}
         />
       )}
 
       {!editing &&
         renderDocs.map((doc, idx) => (
-          <section key={doc.name ?? idx} className="rounded-lg border">
-            <header className="flex items-center gap-2 border-b bg-muted/30 px-3 py-2">
-              <FileText className="h-4 w-4 shrink-0 text-primary" />
-              <span className="font-semibold">{doc.name ?? '未命名响应文件'}</span>
-              <span className="text-xs text-muted-foreground">{(doc.directory ?? []).length} 个顶层章节</span>
-            </header>
-            {doc.scope && (
-              <p className="border-b px-3 py-2 text-xs leading-relaxed text-muted-foreground">{doc.scope}</p>
-            )}
-            <div className="px-3 py-2">
-              {(doc.directory ?? []).map((node, i) => (
-                <TreeNode
-                  key={filtering ? `q-${i}` : i}
-                  node={node}
-                  depth={0}
-                  defaultOpen={filtering}
-                  onTrace={setTraceId}
-                />
-              ))}
-            </div>
-          </section>
+          <DocSection
+            key={doc.name ?? idx}
+            doc={doc}
+            numberedList={numberedDocs[idx] ?? []}
+            filtering={filtering}
+            onTrace={setTraceId}
+          />
         ))}
 
       {registryEntries.length > 0 && <RegistrySection entries={registryEntries} />}
@@ -467,15 +443,122 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
   )
 }
 
+// ---------- 查看态册卡片（头部 ⓘ 图例 + 收起的编制说明 + 编号预览树） ----------
+
+function DocSection({
+  doc,
+  numberedList,
+  filtering,
+  onTrace,
+}: {
+  doc: EditDoc
+  /** 与 doc.directory 同序同构的编号装饰树 */
+  numberedList: NumberedNode[]
+  filtering: boolean
+  onTrace?: (id: string) => void
+}) {
+  const [legendOpen, setLegendOpen] = useState(false)
+  const directory = doc.directory ?? []
+  return (
+    <section className="rounded-lg border">
+      <header className="flex items-center gap-2 border-b bg-muted/30 px-3 py-2">
+        <FileText className="h-4 w-4 shrink-0 text-primary" />
+        <span className="font-semibold">{doc.name ?? '未命名响应文件'}</span>
+        <span className="text-xs text-muted-foreground">{directory.length} 个顶层章节</span>
+        <button
+          type="button"
+          onClick={() => setLegendOpen((v) => !v)}
+          className={cn(
+            'ml-auto rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground',
+            legendOpen && 'text-foreground',
+          )}
+          aria-label="来源标注说明"
+          title="来源标注说明"
+        >
+          <Info className="h-3.5 w-3.5" />
+        </button>
+      </header>
+      {legendOpen && (
+        <div className="border-b px-3 py-1.5">
+          <BadgeLegend />
+        </div>
+      )}
+      <ScopeText text={doc.scope} />
+      <div className="px-3 py-2">
+        {directory.map((node, i) => (
+          <TreeNode
+            key={filtering ? `q-${i}` : i}
+            numbered={numberedList[i] ?? { node, prefix: '', children: [] }}
+            depth={0}
+            defaultOpen={filtering}
+            onTrace={onTrace}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+/** 编制说明（册级 scope）：AI 的归章解释有价值但不该挡在树前面——默认收起两行，想读再展开。 */
+function ScopeText({ text }: { text?: string }) {
+  const [open, setOpen] = useState(false)
+  if (!text) return null
+  const clamped = !open && text.length > 90
+  return (
+    <div className="border-b px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+      <div className="flex items-start gap-2">
+        <span className="mt-px shrink-0 font-medium text-foreground/60">编制说明</span>
+        <div className="min-w-0 flex-1">
+          <p className={cn(clamped && 'line-clamp-2')}>{text}</p>
+          {text.length > 90 && (
+            <button
+              type="button"
+              onClick={() => setOpen((v) => !v)}
+              className="mt-0.5 text-primary hover:underline"
+            >
+              {open ? '收起' : '展开'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 来源核对横幅：完整度信号保留，主文案说人话；内部编号清单默认收起（查看编号展开）。 */
+function SourceCheckBanner({ unused, dangling }: { unused: string[]; dangling: string[] }) {
+  const [showIds, setShowIds] = useState(false)
+  return (
+    <Banner
+      tone="warn"
+      action={
+        <button
+          type="button"
+          onClick={() => setShowIds((v) => !v)}
+          className="shrink-0 rounded border border-warning/60 px-2 py-0.5 hover:bg-warning/15"
+        >
+          {showIds ? '收起编号' : '查看编号'}
+        </button>
+      }
+    >
+      {unused.length > 0 && `有 ${unused.length} 项招标要求还没安排进目录章节`}
+      {unused.length > 0 && dangling.length > 0 && '；'}
+      {dangling.length > 0 && `目录里引用了 ${dangling.length} 个不存在的来源编号`}
+      {showIds && <span className="mt-1 block break-all">（{[...unused, ...dangling].join('、')}）</span>}
+    </Banner>
+  )
+}
+
 // ---------- 查看态节点 ----------
 
 function TreeNode({
-  node,
+  numbered,
   depth,
   defaultOpen,
   onTrace,
 }: {
-  node: EditNode
+  /** 编号装饰树节点（prefix=编号前缀，none/封面为空串不渲染） */
+  numbered: NumberedNode
   depth: number
   /** 搜索过滤模式：只保留命中路径，全部展开 */
   defaultOpen?: boolean
@@ -484,6 +567,7 @@ function TreeNode({
 }) {
   // 深层默认折叠，避免长目录一次性铺满；children 键可能缺失（存储内容不物化默认值）
   const [open, setOpen] = useState(defaultOpen ?? depth < 1)
+  const node = numbered.node
   const children = node.children ?? []
   const hasChildren = children.length > 0
   const tooltip = [node.节点概述, node.归位理由].filter(Boolean).join('｜')
@@ -506,26 +590,33 @@ function TreeNode({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="leading-5" title={tooltip || undefined}>
+              {numbered.prefix && (
+                <span className="mr-0.5 text-muted-foreground">{numbered.prefix}</span>
+              )}
               {node.目录名称}
             </span>
-            {(node.来源位置 ?? []).map((id) =>
-              onTrace ? (
+            {(node.来源位置 ?? []).map((id) => {
+              const meaning = BADGE_LABELS[id.split('-')[0] ?? '']
+              const tip = meaning
+                ? `${id} ${meaning} · 点击看原文与出处`
+                : `查看 ${id} 的登记原文与出处`
+              return onTrace ? (
                 <button
                   key={id}
                   type="button"
                   style={badgeStyle(id)}
                   onClick={() => onTrace(id)}
-                  title={`查看 ${id} 的登记原文与出处`}
+                  title={tip}
                   className="cursor-pointer rounded px-1.5 py-px text-[10px] font-medium hover:brightness-95"
                 >
                   {id}
                 </button>
               ) : (
-                <span key={id} style={badgeStyle(id)} className="rounded px-1.5 py-px text-[10px] font-medium">
+                <span key={id} style={badgeStyle(id)} title={tip} className="rounded px-1.5 py-px text-[10px] font-medium">
                   {id}
                 </span>
-              ),
-            )}
+              )
+            })}
             {node.交付形态 && (
               <span className="rounded border border-line px-1.5 py-px text-[10px] text-muted-foreground">
                 {node.交付形态
@@ -541,10 +632,10 @@ function TreeNode({
       </div>
       {hasChildren && open && (
         <div>
-          {children.map((child, i) => (
+          {numbered.children.map((child, i) => (
             <TreeNode
               key={defaultOpen ? `q-${i}` : i}
-              node={child}
+              numbered={child}
               depth={depth + 1}
               defaultOpen={defaultOpen}
               onTrace={onTrace}

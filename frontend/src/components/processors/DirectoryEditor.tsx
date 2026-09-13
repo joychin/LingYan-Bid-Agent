@@ -38,6 +38,7 @@ import {
   type EditDoc,
   type EditNode,
 } from './directoryTree'
+import { numberTree, type NumberedNode, type NumberingValue } from './directoryNumbering'
 
 const HISTORY_LIMIT = 50
 
@@ -48,9 +49,11 @@ interface DirectoryEditorProps {
   /** undo/redo 直换整树（绕过 mutate 的 clone——快照本身即完整副本） */
   setDocs: (d: DirectoryData) => void
   markDirty: () => void
+  /** 章节编号格式（宿主编草稿现值）：行内灰色前缀实时预览，节点名仍存裸名 */
+  numbering: NumberingValue
 }
 
-export function DirectoryEditor({ docs, mutate, setDocs, markDirty }: DirectoryEditorProps) {
+export function DirectoryEditor({ docs, mutate, setDocs, markDirty, numbering }: DirectoryEditorProps) {
   const { toast } = useToast()
   const docsRef = useRef(docs)
   docsRef.current = docs
@@ -125,6 +128,8 @@ export function DirectoryEditor({ docs, mutate, setDocs, markDirty }: DirectoryE
   }, [undo, redo])
 
   const docsList: EditDoc[] = docs.response_documents ?? []
+  // 编号预览装饰树：与各册 directory 同序同构，切格式/移动节点即重算（纯函数，量小不 memo）
+  const numberedDirs = docsList.map((d) => numberTree(d.directory ?? [], numbering))
 
   const ops = {
     rename: (id: string, name: string) =>
@@ -223,10 +228,11 @@ export function DirectoryEditor({ docs, mutate, setDocs, markDirty }: DirectoryE
             <span className="text-xs text-muted-foreground">{(doc.directory ?? []).length} 个顶层章节</span>
           </header>
           <div className="px-3 py-2" onContextMenu={(e) => e.preventDefault()}>
-            {(doc.directory ?? []).map((node) => (
+            {(doc.directory ?? []).map((node, i) => (
               <EditNodeRow
                 key={node._id}
                 node={node}
+                numbered={numberedDirs[idx]?.[i] ?? { node, prefix: '', children: [] }}
                 depth={0}
                 ops={ops}
                 docsList={docsList}
@@ -277,6 +283,8 @@ function newNode(level: number): EditNode {
 
 interface EditRowProps {
   node: EditNode
+  /** 与 node 同位的编号装饰树节点（prefix=编号前缀；children 与 node.children 同序） */
+  numbered: NumberedNode
   depth: number
   ops: {
     rename: (id: string, name: string) => void
@@ -392,6 +400,11 @@ function EditNodeRow(p: EditRowProps) {
         )}
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
+            {p.numbered.prefix && (
+              <span className="shrink-0 text-xs leading-5 text-muted-foreground" title="章节编号预览（生成整本时套用）">
+                {p.numbered.prefix}
+              </span>
+            )}
             {p.renaming?.id === node._id ? (
               <input
                 autoFocus
@@ -462,8 +475,14 @@ function EditNodeRow(p: EditRowProps) {
       </div>
       {hasChildren && open && (
         <div>
-          {(children as EditNode[]).map((child) => (
-            <EditNodeRow key={child._id} {...p} node={child} depth={depth + 1} />
+          {(children as EditNode[]).map((child, i) => (
+            <EditNodeRow
+              key={child._id}
+              {...p}
+              node={child}
+              numbered={p.numbered.children[i] ?? { node: child, prefix: '', children: [] }}
+              depth={depth + 1}
+            />
           ))}
         </div>
       )}
