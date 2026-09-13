@@ -18,6 +18,7 @@ import {
 } from '@/components/ai/InterruptCard'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai/Reasoning'
 import { RunTrace, NarrationLine } from '@/components/ai/RunTrace'
+import { TodoPanel } from '@/components/ai/TodoPanel'
 import { TextShimmer } from '@/components/ai/TextShimmer'
 import { toolDisplayName } from '@/components/ai/toolDisplay'
 import { Message as WMessage } from '@/components/workspace/Message'
@@ -545,9 +546,6 @@ export function ChatView({
                   paused={!!interrupt && !running}
                   startedAt={startedAt}
                   tools={tools}
-                  todos={todos}
-                  done={done}
-                  total={total}
                   text={streamText}
                   reasoningText={reasoningText}
                   retrying={retrying}
@@ -585,6 +583,17 @@ export function ChatView({
               <ArrowDown className="h-3.5 w-3.5" />
               回到底部
             </button>
+          )}
+          {/* 任务清单常驻浮层（右上角）：run 存续期显示当前清单，活卡过程区不再内嵌
+              清单组（长任务里随卡片被淹没）——无 todo 不出现，终态消失、历史可回看 */}
+          {(running || interrupt) && todos.length > 0 && (
+            <TodoPanel
+              todos={todos}
+              done={done}
+              total={total}
+              running={running}
+              paused={!!interrupt && !running}
+            />
           )}
         </div>
         {interrupt && !running ? (
@@ -691,21 +700,19 @@ function activeStatusLabel(tools: RunState['tools'], startingSubagents = false):
   return startingSubagents ? '子代理启动中…' : '正在思考…'
 }
 
-/** 运行中的助手消息（活卡）：头像 + 状态 + 执行过程（Reasoning 折叠）+ 任务清单时间线（Steps）+ 流式正文。
+/** 运行中的助手消息（活卡）：头像 + 状态 + 执行过程（Reasoning 折叠）+ 流式正文。
  *  一张活卡贯穿 run 生命周期：running 累积 → ask_human 原地冻结（paused=true：胶囊转
  *  「等待你的输入」、折叠头转「已暂停 · N 步」、正文/思考/工具树全保留，pauseNarration
  *  是暂停时未封口的正文旁白行）→ 裁决后同一实例解冻续跑（React 不卸载，手动展开的
  *  折叠态全程保持）→ 完成时与落库最终消息同帧原子替换（settle-after-messages 时序）。
  *  continuationAnswer 是刚提交的问答回答--转录里不再有回答气泡，续跑期间在此显示一行
- *  防「提交后答案消失」的空窗，最终消息到达后随本占位组件一起退场。 */
+ *  防「提交后答案消失」的空窗，最终消息到达后随本占位组件一起退场。
+ *  任务清单不在卡内（2026-09-12 提取）：TodoPanel 常驻会话区右上角，见 ChatView。 */
 function RunMessage({
   running,
   paused,
   startedAt,
   tools,
-  todos,
-  done,
-  total,
   text,
   reasoningText,
   retrying,
@@ -721,9 +728,6 @@ function RunMessage({
   paused: boolean
   startedAt: number | null
   tools: RunState['tools']
-  todos: RunState['todos']
-  done: number
-  total: number
   text: string
   reasoningText: string
   /** LLM 瞬时错误自动重试等待期（agent.retry）：正文区显示「正在自动重试」shimmer，
@@ -776,7 +780,6 @@ function RunMessage({
       )}
       {(reasoningText ||
         tools.length > 0 ||
-        todos.length > 0 ||
         pauseNarration.trim() ||
         (continuation && hasSubagents)) && (
         <Reasoning isStreaming={running} className="mb-1.5">
@@ -803,7 +806,7 @@ function RunMessage({
                 </button>
               </div>
             )}
-            <RunTrace tools={tools} todos={todos} done={done} total={total} />
+            <RunTrace tools={tools} />
             {/* 思考块 = 当前未封口段（历史思考已按 tool.called 封段沉入步骤行），
                 放步骤区之后保持时序：先看到已发生的工具流水，再看到正在增长的思考 */}
             {shownReasoning && <DeepThinking text={shownReasoning} isStreaming={running} autoFollow />}
