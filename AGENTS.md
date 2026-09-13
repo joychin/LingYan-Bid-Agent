@@ -457,6 +457,29 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
    取消感知/task 无档/预检）+runReducer traceSyncIssue 两例；明确不做=SSE 断连
    静默（重连+对账闭环，正确）、streamText 断连洞（终态即修复）、Retry-After
    自适应退避、agent.db 损坏自动重建、LLM 死等 180s 内提前取消。
+   **agent.db checkpoint 安全清理（2026-09-13 磁盘治理批，纯 sidecar 内部件）**：
+   动因=langgraph SqliteSaver 每 superstep 写一份「全量消息历史」checkpoint
+   （单链平方增长）+子代理每条 task 派发再开独立链（ns=tools:<tid>，整本 run
+   数十条），实测 agent.db 1.86GB（308 条子代理链 1.6GB 占 98%、主图全部会话
+   仅 39MB、单链尾 blob 最大 2.1MB）；磁盘问题不影响进程内存（未开 mmap）。
+   安全性前提=**运行时只读链尾**：全 sidecar 对 checkpoint 的读取仅
+   checkpoint_exists 的 get_tuple 与 recover_agent_memory 的 get_state（都取
+   最新份）；历史回看走 app.db 的 messages/run_traces，与 agent.db 无关。
+   新模块 `app/checkpoint_prune.py`（原则 P0-P7 落为代码约束，模块头+测试
+   test_checkpoint_prune.py 六例逐条钉死）：P0 主图最新 3 份恒保留（链尾=会话
+   记忆锚点+两份父链保险）；P1 只删早于保留窗的主图中间份与子代理链；P2
+   可续态排除（running/waiting_input/最新 run error 且 code∈RESUMABLE_ERROR_
+   CODES 的会话一行不动）；P3 checkpoint_id≥保留窗起点的行不删（frontier——
+   取消态在途子代理链，删了退化为整节重写；checkpoint_id=time-ordered uuid
+   字典序=时间序）；P4 writes 只删随删 checkpoint_id、保留集一行不动；P5 每
+   thread 先 SELECT 算集合再分批双限定 DELETE、单会话失败只记日志；P6 删后
+   wal_checkpoint(TRUNCATE)+主文件+WAL>300MB 且无占用 run 时 VACUUM（SQLite
+   删行只留空页，删而不缩=白做）；P7 删行数/字节与 VACUUM 前后体积入日志。
+   孤儿 thread（app.db 无会话行）整链全删。触发点=lifespan 里 recover_stale_
+   runs 之后、recover_agent_memory 之前（后者首建 saver 长连接，清理先行=
+   独占写窗口；崩溃残留 run 已标 interrupted=可续自动落 P2 排除）；失败不
+   阻断启动。明确不做：设置开关/UI（内部运维件常开+门槛）、按时间保留策略
+   （保留窗是结构性的）、动 app.db、改 saver 行为（库外旁路清理）。
    **HITL 代答 tool.result 修复（2026-09-12 二批，SSE 契约零改动）**：症状=回答
    ask_human 后活卡状态行整个续跑段卡「正在执行 · 向你提问」（run 本身正常在跑，
    纯显示层谎言）；历史「已询问 N 个问题」组的「你的回答：」行从来没显示过
@@ -531,6 +554,102 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
    +2（noop 三态：同内容+同名→跳过/仅改名→照走完整路径/内容变→照发；rebuild 保留
    五列+删行+插默认行）+ test_assemble_tender 二次组装短路/输入真变重发 +
    test_publish_tool 同内容笔记重发消费草稿；sidecar 696 绿+check.sh 全绿。
+   **契约 additive 扩展（2026-09-13 交付物呈现信号）**：新事件
+   `deliverable.created`（payload：run_id/conversation_id/kind("artifact"|"file")/
+   artifact_id?/path?/display_name?/seq）。动因与设计=用户问「正文写完了自动打开
+   正文？」，初版按文件名/类型写死前端规则被用户否决（「写死了机制」）；行业调研
+   定方向——Claude artifacts（官方原文「创建即在右侧专用窗口显示」）/Cowork/
+   ChatGPT Canvas 一致走「**产物通道自带呈现语义**」：什么东西值得展示由**产出侧
+   声明**，UI 不带任何文件名/业务规则（Codex/WorkBuddy/Manus 则是变更清单+人工
+   审阅路线，不自动开）。落地=**声明权在发布管线成功点**（确定性、不靠模型纪律）：
+   publish.py 两条发布路径（publish_artifact JSON 产物 / publish_file_artifact
+   文件型 tender.volume=整本，同日合入——整本经产物身份获得呈现信号，
+   docx_assemble_volume 不再直接 note kind=file：工作台整本行已随 tender.volume
+   隐藏，防打开隐藏行）的成功分支 note kind=artifact；短路分支（内容未变）不声明
+   ——没新东西不打扰，与 artifact.created 短路语义天然对齐；kind=file 通道保留给
+   未来不走产物系统的文件型交付物（path 相对 work/、与「本轮文件」chips 同格式）。
+   收集层=`app/deliverables.py`：
+   按 run_id 分桶 deque（append/popleft 原子无需锁；contextvars 只能父→子传播
+   写不回 worker，工具线程 note→收尾 drain 跨线程靠模块级队列）。事件语义=
+   **瞬时呈现信号**：不落库、不重放、错过不补（刷新/断线后转录
+   产物卡+文件 chips 兜底，与 Claude artifacts 历史行为一致）；不进 bus
+   _MUST_DELIVER（呈现性质、积压可丢）；与 artifact.created 分工——后者仍是
+   run/段边界登记对账事件，不动。前端：runReducer 新 case 转 Effect
+   `present-deliverable`（不驱动渲染状态）→ useRun options.onDeliverable（经 ref
+   转发防 SSE 重订阅）→ ChatView prop → **App 守卫**：slotOriginRef 标记单槽来源
+   （user/auto/null，ref 非 state 防回调失稳）——用户手开的文件/产物/原件永不
+   被抢（Canvas「自动打开被打扰」社区抱怨的教训），auto 内容可被更新的交付物
+   接力替换，打开走既有 openArtifact/openWorkbenchFile('auto')（transient 展开
+   面板不写收起偏好）。非当前会话
+   天然不触发（SSE 按会话建连），切走视图 ChatView 卸载即跳过、回来不补开。
+   **二批（同日，用户拍板改定呈现时机）**：首版「产出即开」（_publish 发任意
+   事件前冲刷、段尾尾排水——交付物一产生就开面板）用户用后改为 **run 正常完成
+   时才开**：agent.py 移除冲刷/尾排水，completed 分支 drain 取**最后一个**声明
+   在终态 agent.completed 紧前发一次（多个声明只开最新的——先目录后整本自然选
+   整本，逐个发=毫秒内连环换页无意义）；error（含取消）/interrupt（等待输入）
+   段不呈现、随段丢弃（finally 清桶）——那时该看错误卡/提问卡，暂停段之前的
+   声明不跨段（续跑完成由续跑段新声明/转录产物卡兜底）。前端零改动（事件形状
+   与守卫不变，只是到达时机后移）。测试：test_deliverables.py 六例（无 run 跳过/
+   FIFO+clear/契约互证/发布短路对齐/completed 终态呈现最新一个+紧邻终态事件/
+   error 段丢弃）+ runReducer.test.ts 两例（file/artifact 转场/
+   未知 kind+重复投递）；events.gen.ts 已再生。
+   **契约 additive 扩展（2026-09-13 整本标书升格正式产物 tender.volume，文件型产物）**：
+   动因=用户问「正本标书、标书解析为什么没有产物卡」——此前流水线唯一登记产物是
+   目录，整本=派生物（09-06 拍板）留过程文件、解析/分析=中间输入；用户拍板**升格
+   整本为正式产物**（解析/分析维持过程文件）。新契约 `tender.volume/
+   tender-volume-docx@1`（task-multi 标注+editable=False+content_type=docx MIME，
+   ContractDef 新增可选 content_type 字段默认 json）：包内除 content.json（机器
+   元信息：filename/book/size/sha256/merged_sections/images/comments + note 字段
+   给模型「派生物勿读回当输入」指引）外还有 **docx 本体**（整本-<册名>.docx）。
+   发布入口=`publish.publish_file_artifact`（与 publish_artifact 并行的新函数，
+   JSON 路径零改动）：**身份复用键=任务+kind+display_name（册名）**——不走
+   task-multi「恒新建」（doc.note 语义不碰），多册各一条、同册重合册覆盖同一条；
+   **内容未变短路=zip 内容级比对**（`_zip_content_equal`：namelist 集合+逐部件
+   CRC32，忽略 zip 时间戳——python-docx 每次保存时间戳必变、逐字节比对永不相等；
+   lxml 序列化确定性使同内容 CRC 稳定）；**明确不设恢复点**（整本是派生交付物非
+   用户编辑内容，旧版可由节文件重合册复原，恢复点的受益场景不存在）。发布时机=
+   `docx_assemble_volume` 每册落盘后机械发布（每册独立 try/except，失败只加 ⚠️ 行
+   不影响合册返回；消费 `_unchanged` 文案「未重复发布」；deliverables.note 同步
+   声明 kind=artifact 与呈现信号批对齐）；LLM 的 staging 草稿流进不了二进制=机械
+   层天然防手滑。read_artifact 零改动（content.json 是合法 JSON）。API 新端点
+   `GET /artifacts/{aid}/file`（包内唯一 docx 流式下发、nosniff、containment 与
+   content 同标准）；`_to_api` 的 content_type 从硬编码改查契约注册表。**顺手修
+   潜在漏**：workbench 列表与唯一后缀兜底此前不跳 `work/artifacts/` 子树（包内
+   从无 .md/.docx 所以没漏过），包内有 docx 后必漏重复行——两处补 `rel.parts[0]
+   =="artifacts"` 跳过（与 run_files 口径对齐）。前端：`fetchArtifactFile`（rawFetch
+   无超时给大文件）；registry 三处注册 + `.ft-ico--vol` 色板；**VolumeProcessor**
+   （只读：统计行〔合并节/图片/待办批注〕+批注>0 时交付提醒行+下载 downloadBlob；
+   blob query key 带 content_seq〔重发布即取新字节〕、staleTime 30s/gcTime 2min
+   对齐 DocxView 内存治理、DocxPreviewBody 懒加载）；ArtifactPanel body 组 volume
+   产物行置顶（册序按目录树 volRank）+品牌色「整本 · 最终稿」徽章（FINAL_TAIL
+   常量与 wbRow 共用），**任务有任一 volume 产物时工作台 `整本-*.docx` 行隐藏**
+   （同一内容不重复两行；旧任务无产物维持文件行，重跑合册即补卡）。tender-body
+   SKILL.md 第 4/5 步同步（合册即自动发布、收尾指引用户从产物卡打开/下载）。
+   已知取舍：册改名=另立新卡旧卡保留（内容仍可打开）；多册个别册发布失败时工作台
+   整本行整体隐藏（产物卡仍在，罕见场合接受）；旧任务存量整本无卡，重跑一次合册
+   即补上。测试：test_publish +3（新建/zip 等价短路+内容变覆盖/册名身份键）+
+   test_docx_ops 合册发布与二次未变断言 + test_artifacts file 端点/契约清单 +
+   test_workbench 跳过子树；sidecar 746 绿 + 前端 tsc/oxlint/build 绿（ruff 对
+   本批文件零告警；test_deliverables.py 两处 I001 是并行批次文件未动）。
+   **整本预览空白修复（同日实测反馈）**：症状=打开「商务部分」产物卡统计行/横幅
+   正常、预览区永久空白无报错；磁盘 docx 完整（size/sha256 与 content.json 一致）、
+   端点正常，取字节失败或渲染 reject 都有红字/黄条兜底——是渲染成功后被清空。
+   根因=DocxPreviewBody 内存修复批的「cancelled resolve 后 `el.replaceChildren()`
+   补清」：同容器两次 renderAsync 并发时（StrictMode 双跑必现、blob 重取换数据
+   同样触发，**发布版非 dev 独有**）被取消的旧渲染后完成会把活渲染的 DOM 整体
+   清掉；6MB 整本解析秒级、完成顺序极易翻转所以整本高概率中招，小节文件窗口极小。
+   修复三件：①DocxPreviewBody 每次渲染写独立子容器 host——活渲染 resolve 后
+   `el.replaceChildren(host)` 换装上屏、取消/失败只 `host.remove()` 清自己，旧渲染
+   结构性碰不到活渲染；换数据重解析期间旧内容保持可见；解析 >400ms 显示
+   「正在渲染版式…」（防小文件闪烁的延迟出现），对外 props/样式契约不变、五个
+   使用方同时受益；②VolumeProcessor blob query key `['artifacts',…]` 前缀改
+   `['artifact-file', aid, content_seq]`——任何 `['artifacts']` 前缀 invalidate
+   不得连带重取几十 MB blob 并重开竞态；③顺手堵后端两暴露面：tools/publish.py
+   拒绝 LLM 经 JSON 草稿路径发布文件型契约（content_type≠json 一律拒——会造出
+   无 docx 本体的残包，列表可见、/file 410；整本由 docx_assemble_volume 机械
+   发布）+ /file 端点优先取 content.json `filename` 同名 docx（历史污染包盲取
+   字典序第一会发错册）。实测=playwright 实机开关循环 4/4 + 双册切换渲染稳定；
+   test_artifacts/test_publish_tool +2；check.sh 全绿。sidecar 两侧改动须重启生效。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。
@@ -640,7 +759,11 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
   每节写完跑 validate_analysis 机器校验（coverage/出处引用两层：锚定/文件名∈来源集合/
   L 行号≤原文 md 总行数——杀编造引用，提示不是门禁、收尾前必须全绿；
   **2026-09-04 模型写头已删**：产物不带首行元信息头，修订标记由服务端程序盖）；
-  purpose 下沉 references/ 文件级、单项可重跑；导航硬纪律=先读 work/parse/<文件名>/
+  purpose 下沉 references/ 文件级、单项可重跑；**收尾=摆要点停轮（2026-09-13 用户拍板）**：
+  汇报摆关键要点（废标/评分框架/资格硬门槛/递交形式，不只报条目数）+待澄清清单逐条
+  呈现+提醒在界面「分析」文件过目，本轮结束**不自动衔接目录**（原始请求覆盖后续环节
+  也停），继续由用户在输入框指示——**明确不用 ask_human**（分析→目录间无门禁也
+  不自动跑；纪律落在 SKILL.md 第 4 步+主 prompt 衔接句双层）；导航硬纪律=先读 work/parse/<文件名>/
   <文件名>.outline.json 按行号取区段、补充文件同纪律，禁止整读全文；**出处引用键**：
   必带行号区间「章节名（L412-L430，第23页）」，章节名在作者声明/自报档
   （docx-native/pdf-toc/pdf-link-toc/pdf-printed-toc）与编号档（docx-numbered/pdf-numbered，
@@ -680,9 +803,16 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
   叶子对账、目录产物 content.json mtime vs 正文 mtime 新鲜度——**该工具首次引入
   db/artifact 依赖**）②开工=生成 `work/body/写作指引.md`（每节一行：节｜模式｜依据｜
   素材｜缺口；模式=素材修订/格式跟随/推理撰写「+」组合；素材列记素材块 id、缺标【缺】
-  =备料对账）→ ask_human 确认（**提问文案自带面板查看路径**——run 期间工作台列表不刷新
-  的已知缺口缓解）→ ask_human 收承诺值落 `work/body/关键事实与承诺.md`（事项｜值｜
-  说明；**承诺只出自清单，拍板前不写正文**）③逐节生成按指引模式路由（模板填充列待填
+  =备料对账）→ 停轮汇报指引（摆模式分布/缺口逐条/承诺事项一次列全，提醒在界面
+  「写作指引」过目）→ 用户答复后承诺值落 `work/body/关键事实与承诺.md`（事项｜值｜
+  说明；**承诺只出自清单，拍板前不写正文**）→ 停轮汇报承诺清单、用户回复继续才
+  逐节生成。**2026-09-13 用户拍板：两道 ask_human 门（确认指引/收承诺值）弃用**——
+  与 tender-analysis 收尾同款「摆要点停轮」语义（总结要点+提醒查看+用户在输入框
+  说继续/给值，不用表单卡；「一口气写完整本」指令也停）；guide_path 参数与
+  「打开指引」按钮链路随之无人使用（ask_human 工具本身保留：解析概况门/目录 R1
+  拆分门/第 0 步重写范围门仍在用）；纪律=SKILL.md 第 1 步+主 prompt 衔接句双层、
+  test_skills 锚点同步换新（弃门守卫：旧两句教学文本不得回流）
+  ③逐节生成按指引模式路由（模板填充列待填
   清单/容器跳过/待核验问人；缺料【待补】不阻塞；待澄清内联）④validate_body 节级自查
   ⑤收尾待澄清/待补逐条点名。**素材先行五步**（references/section-writing.md）=检索→
   **列使用计划（记块 id）**→素材贴底稿→改写适配→自查——2026-09-06 用户实测教训
@@ -767,6 +897,165 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
   RT import 随之删除。历史已产出节文件不自动纠正（重注入/重写节才走新逻辑）。
   明确不做：素材库旧名元数据（零 LLM 是拍板设计，残留扫描弱级+显式名单兜底）、
   素材交叉引用跨块死链（跨文档引用无完美解，纸面无感，记录在案）。
+- **样式/编号迁移去重与拷贝卫生批（2026-09-13，整本目录乱号根因修复）**：动因=
+  用户实拍整本导航「1.3 16.1 工作目标…」式乱号，全链路审计实证一个缺陷族——
+  素材/招标件拷贝在注入与合册两层共用 `_merge_missing_styles`/
+  `_merge_missing_numbering`，迁移定义只按 styleId 去重：①**同名不查**（D1）：
+  「奥哲介绍」所在的腾励标书素材自带 styleId=3 name="heading 2" 挂多级编号
+  （素材库 8 个 docx 中 3 个「武装」，腾励带 19 个编号标题样式），迁入后与模板
+  内建同名并存——WPS/LibreOffice 按名解析把整本全部二级标题套上连续序号，**正文
+  98 行污染**（含全部节内小标题 1.4/1.7…），打印正文同样带号（交付级；旧任务
+  商务技术册见「1.1.1.1.3.10 流程校验」六级深编号上限与绑 Normal 的定义）；
+  ②**撞 id 异名静默跳过**（H1）：其他资料的 heading 3/4 段绑到先迁入者占用的无关
+  样式（'Default Paragraph Font'/'Body Text'），id 先到先得随树序漂移不可预测；
+  ③**编号 pStyle 链接不改写**（H2）：迁入多级编号仍指源样式 id，可绑到别人样式；
+  ④**直挂 outlineLvl 漏摘**（D2）：`_demote_extra_headings` 只认标题样式，格式件
+  段落（附件8/9/11、表1）与被写手改写过的整段正文带直接大纲级别混进导航。
+  修复五件（全 sidecar，模板/前端/Rust 零改动）：`_merge_missing_styles` 去重键
+  扩为 **styleId+样式名双维**——同 id 同名或定义等价（`_norm_style_xml` 剥
+  id/rsid/default）沿用宿主（「素材标题段自动吃宿主定义」09-08 拍板语义保持）、
+  同 id **异名**分配新 id 迁入并改写元素与迁入簇引用（pStyle/rStyle/tblStyle、
+  basedOn/link/next）、迁入副本**同名改命**（"heading 2 2"…直到唯一——断按名
+  合并路径，id 绑定与观感不变）+剥 `w:default`，返回 (moved, id_remap)；
+  `_merge_missing_numbering` 增 style_id_remap——迁入 abstractNum 的 lvl/pStyle
+  按表改写，且**解析到目标内建标题（heading 1-9/标题 1-9）或 Normal 的绑定一律
+  剥除**（「章节编号不走样式绑定」铁则的机械化防线；素材自有样式编号在新 id/
+  新名下照常保真——腾励「1.1 奥哲介绍」渲染原样）；新 `_strip_copy_residue`
+  接入素材/招标件/合册三处拷贝循环——剥拷入段直挂 outlineLvl（导航元数据非
+  版式，「保真」不含它）与 `_` 前缀死书签（_Toc 指向源文档目录域，同段拷多节
+  造成书签 id 重复）；`_demote_extra_headings` 判据扩为「标题样式 **或** 直挂
+  outlineLvl<9」（兜底存量节文件）；validate_body docx 节加提示级「〔大纲级别〕
+  N 段直挂」清点（读视图看不见的污染让模型可见）。验证：新增测试 10 例，sidecar
+  709 绿（knowledge_api 偶发 database is locked 为负载型 flake、排除新测试复跑
+  亦现、与批无关）；真实任务沙箱重合册——重名组 3→0、直挂大纲 6→0、书签重复
+  1→0、LibreOffice 书签 55→49 纯骨架、正文编号污染 98 行→0、素材段落（公司简介
+  等 18 段）正确绑回真样式（观感恢复；页数 103→121 系观感归位的正常变化）；真实
+  数据已重跑同款合册。存量节文件内部历史重名不回填（与注入修复批同口径：重写/
+  重注入才走新逻辑，合册侧兜底保证交付物干净）；**运行中的 sidecar 须重启**
+  （旧代码在内存里，模型再调合册会回退污染）。w14:paraId 重复（Word 重存自动
+  再分配）与 moveFrom/moveTo 修订形态（现网 0 处）记录在案不处理。
+- **读图撑爆上下文 + docx 并发互写坏修复批（2026-09-13，两刀全机械层）**：动因=
+  真实 run「资质证书」节写手一 turn 连发 8 条 docx_comment_add，ToolNode 真并行
+  执行原地 save 互写坏节文件（BadZipFile），写手转而 read_file 读知识库证书
+  PNG「看一眼」——deepagents 后端对非文本文件**把整文件 base64 内联进消息**
+  （无分页无截断），1,565,843 字符 → 下一次模型调用 1,113,773 token 撞 1M 上限
+  400；压缩自愈正确触发但数学上无解（巨型内容是刚返回的最新一条消息，摘要只
+  逐出旧消息；日志实证两次一模一样的 1113773 重试=截断点 cutoff≤0 什么都没删
+  ），最后靠「子代理失败→可重派一次」兜底活下来（47 节全成稿）。修两刀：
+  ①**fs_guard 读拦截**——GuardedBackend 覆写 read（异步 aread 是协议默认
+  asyncio.to_thread(self.read) 委托，覆写一处双路生效），扩展名命中图片
+  （png/jpg/jpeg/webp/gif/bmp/heic/heif）/PDF/Office（doc/docx/ppt/pptx）即返
+  `ReadResult(error="[读取被拒绝]…")`（error-only 是 schema 合法形态，不打崩
+  run），文案带正确出口：图片→docx_image_insert（image 参数直传路径）、pdf→
+  parse_document/按页渲染插图、office→docx_section_read/parse_document；自持
+  扩展名常量不 import 上游私有映射（升级不断）。文本读零变化（工具层自带 100
+  行限+80K 字符截断——唯一无上限的就是二进制分支，本刀已断）。技能/提示词
+  从未教模型 read_file 读二进制、docx_image_insert 自读文件不经后端，零冲突。
+  ②**docx_ops 同文件并发写防线**——模块级 `_PATH_LOCKS`（按解析后绝对路径
+  threading.Lock，条目只增不删）+ `_docx_path_lock` contextmanager 包住七个
+  改写工具的「开→改→存」整段（create 含恢复点轮换/comment/image/revise/
+  material_inject/source_inject 含重复注入探测的 check-then-act/assemble 按卷
+  输出），存盘统一 `_atomic_save`（uuid 后缀 tmp 同目录 + os.replace，
+  artifact_store 同款；合册原固定 `.tmp` 名并发互踩一并修掉）。读者零改动：
+  原子替换让 section_read/validate_body/合册读节永远看到完整旧版或新版；锁专治
+  并行写丢更新（证伪检验：patch 回旧形态跑并发测试，8 条批注只剩 1 条——后
+  完成者整存覆盖）。**锁=用户不可见 plumbing（原子落盘同类，用户已认可）**
+  ，不违「跨 run 无锁」铁则（那只管后台协调，此处是同进程文件写完整性）。
+  测试：test_fs_guard +3（图片/PDF/Office 拒绝与出口、文本不变）、test_docx_ops
+  +1 并发回归哨兵（Barrier 8 线程同文件批注：全成功/8 条不丢/无 tmp 残件，
+  contextvars.copy_context 逐线程拷贝复刻 ContextThreadPoolExecutor 生产形态
+  ——裸 Thread 不带 runctx）；sidecar 736 绿。明确不做：不改写手提示词（锁已
+  让并行调用安全，拒绝文案即教学）、不动 deepagents 逐出语义、不按模型视觉
+  能力差异化图片拒绝（本产品贴图唯一正道=docx_image_insert）。**须重启
+  sidecar 生效**。
+- **通用文件工具并发编辑丢更新修复（2026-09-13，fs_guard 全局写锁+原子落盘）**：
+  动因=用户报 edit_file 假「String not found」。DB 取证（run r_f7c2c322ec21）：
+  模型一 turn 并发 4 条 edit_file 打同一 structure.md（ToolNode 线程池真并行），
+  上游 `FilesystemBackend.edit` 是无锁 read→replace→O_TRUNC 写回，事故两类——
+  ①**假报错**：old_string 与 write_file 原文逐字节相等仍报 not found（读进了
+  他人截断窗口）；②**静默丢更新**：后写整存覆盖先写、工具报成功（step70 报
+  done 但文件未变、step73 重试成功也丢、文件尾多出撕裂残行；写作指引.md 另有
+  同款铁证=step26 报成功、step30 拿同一原文重改）。59 条 trace 扫描：14 处
+  「同批并发编辑同文件」暴露面、6 例 not found（5 例是真模型写错、1 例本并发）。
+  行业调研定案：Codex=契约层杜绝（apply_patch 同文件双 hunk 直接报错）、
+  Gemini CLI=调度层禁并行（EDIT_TOOL_NAMES 强制串行，最强形态）、opencode=
+  edit 工具按路径 semaphore（write/apply_patch 漏保）、Claude Code=事后探测
+  （自家 issue 记录同款静默丢编辑，最弱）；langgraph 无 per-tool 并发控制、
+  全局 max_concurrency=1 会废 8 路波次→调度路线不可行。修法=**fs_guard 加
+  模块级全局单锁 `_WRITE_LOCK`（只罩 write/edit/delete）+ `_atomic_write`
+  （uuid tmp 同目录+os.replace）**，各治一半：锁治丢更新（变更互斥串行），
+  原子替换治撕裂读（读者永远见完整旧版或新版）；读者（read/ls/grep/glob）
+  刻意不上锁（并行热路径）。全局锁而非按路径锁=临界区纯文件 IO 毫秒级、
+  跨文件串行代价≈0，省掉锁表增长与路径归一化簿记（docx_ops 按路径锁是因
+  操作秒级并发是刚需，量级不同取法不同）；锁永不嵌套故无死锁。覆盖面=主
+  代理/全部子代理/general-purpose 共享同一 backend 实例（deepagents graph.py
+  三处 FilesystemMiddleware 同源注入），压缩中间件落 conversation_history 的
+  写也经此层；edit 报错文案复用上游 perform_string_replacement（单源，模型
+  重试行为零变化）；delete 套锁只为与写者定序（unlink/rmtree 本无截断窗口）。
+  测试 test_fs_guard +2：并发编辑哨兵（Barrier 8 线程各改一行：全成功/8 处
+  全落盘/无 tmp 残件）+ 撕裂读哨兵（写者 80 次整存覆盖、读者自旋读，任意
+  时刻内容必须逐字节等于完整旧版或新版）；**反证**=同场景打上游裸
+  FilesystemBackend：7/8 成功、1 假报错、仅 3/8 落盘。sidecar 756 绿+check.sh
+  全绿。已知边界：工作台 HTTP 保存不经 backend，仍走既有 base_hash 409 探测
+  +用户裁决（铁则 4 原生形态），不进本批。**须重启 sidecar 生效**。
+- **任务清单陈旧提醒中间件（2026-09-13，机制+纪律）**：动因=整本正文生成 run
+  实测主 agent 在写作指引确认门（ask_human ×2 裁决）之后只字未再调 write_todos
+  ——40+ 次子代理派发、4 波 24 节全程零回写，TodoPanel 常驻浮层数小时停在
+  「4/8 · 确认写作指引进行中」与实际执行完全脱节；且 langchain
+  TodoListMiddleware 工具描述原文已要求「实时更新、完成立刻标、不要攒批」仍在场
+  失灵——纯纪律管不住的又一例（先例=派发塌方→dispatch_enrich、ask_human 参数
+  泄漏→机械归一化），且前端与 sidecar 内存真值逐字一致（修的是「模型不写」
+  不是「前端不显」）。修复=agent.py 新 `_TodoFreshnessMiddleware`（仅挂主
+  agent，子代理无 todos）：wrap_model_call 无状态推导——收集 write_todos 的
+  tool_call_id、倒序找最后一条命中 ToolMessage、其后消息数 ≥
+  `_TODO_STALE_THRESHOLD`(10) 即在**末条 ToolMessage 尾部**追加一句中文系统
+  提醒（含消息数实数；_annotate 同款 model_copy 手法）——只动请求级 messages
+  尾部，不落 checkpoint、不动 system_message，前缀缓存字节不变；末条是
+  HumanMessage（run 起点/HITL resume 后）不注入；本 run 从未写清单不提醒
+  （不逼聊天类 run 建清单）；模型回写后计数归零提醒自动消失；清单全
+  completed 但仍在派发时照提（正是错位场景）。机械层不做语义改写（哪项清单
+  对应哪段执行归模型）。配套纪律两句：主 prompt todo 句追加「阶段切换时也要
+  回写（裁决续跑后第一轮、每波派发前）」；tender-body SKILL.md 整本分波段
+  「一波返回、一句话汇报、再派下一波」补「波间汇报同一轮先回写任务清单」。
+  前端零改动（todo.updated 整组替换→TodoPanel 即时刷新，快照对账兜底）。
+  测试 test_agent 三例（触发含实数/四不触发含回写消失/前缀引用级保护）+ wired
+  守卫（主栈有、SUBAGENTS 无）；sidecar 712 绿。运行中的 sidecar 须重启生效。
+  明确不做：程序机械改写 todo 内容（语义归模型）、TodoPanel 滞后提示（拍板
+  不加）、提醒频控分带（阈值后每轮都提，波次循环每波仅 1-2 次模型调用，
+  实测吵再节流）。
+- **清单同步守卫=提醒升级为机制（2026-09-13 二批，治本）**：动因=提醒的固有
+  latency 一整波（8 路 ToolMessage 才攒够阈值 10，实测 13:49 才写 13:45 续跑后
+  的第一波）且**续跑首拍完全盲区**（回答 ask_human 后第一轮模型调用距基线不足
+  阈值、提醒不触发，面板 4 分钟停在「收承诺值 in_progress」而实际已在写正文，
+  用户实拍复现；后端事件链路健康——live 树/checkpoint/SSE todo.updated 三方
+  对账均新，纯「模型不写」）。行业佐证：纯纪律路线被证伪（OpenCode #28961
+  「模型执行中不主动更新 todowrite」同病、关闭不做），社区解法=工具边界有界
+  拒绝（opencode-auto-resume 插件：todo 真值 + task_complete 拒绝 +
+  maxRetries=3）。修复=`_TodoFreshnessMiddleware` 加 `after_model` 门卫（实现
+  手法对齐框架内先例 TodoListMiddleware.after_model 的并行 write_todos 拒绝）：
+  尾部 AIMessage 含 task 派发且清单滞后（距基线 ≥`_TODO_GATE_THRESHOLD`(6)，
+  或 `_todo_baseline` 识别出「ask_human 代答在最后一次 write_todos 之后」=
+  裁决后未回写、计数无关必拦）→ 为批内**每个** task 调用返回 error ToolMessage
+  （`〔清单同步守卫〕`文案：先 write_todos 回写、可与派发同轮）——路由层
+  （factory.py `pending_tool_calls` 过滤）把这些调用判为已应答不再执行、跳回
+  模型节点（HITL 同款既有路径）。全批原子=一波 8 个 task 全拒零漏跑（漏放行
+  半个批=带着旧清单继续执行，守卫失效）；**同批豁免**=AIMessage 里带
+  write_todos 即全放行（「回写+派发」同轮常态路径，免重试往返，最坏 1 次）；
+  **泄压阀**=`_TODO_GATE_VALVE`(3)——基线之后已有 3 条守卫拒绝仍不回写则放行
+  （按文案标记从消息序列无状态计数，防病态循环卡死 run，对齐 opencode 插件
+  maxRetries）；防御前置=state 异常/无清单（todos 空）/批内无 task 一律放行
+  （增强逻辑绝不打断 run）。`_todo_baseline` 纯函数为提醒与守卫共用基线
+  （write_ids/ask_ids 收集→倒序找最后 write 结果与代答位置→基线取 max）；
+  提醒层（阈值 10）保留覆盖非 task 阶段（解析/分析链）。拒绝消息对 SSE 不可见
+  （events 翻译只认真实执行节点，伪节点注入的 ToolMessage 跳过——不产生幻影
+  失败卡，前端零改动）。中间件仍仅挂主 agent。测试 test_agent +6（滞后整批拒/
+  同批豁免/五静默路径/**代答后未回写计数 0 也拒（当日事故回归）**/泄压阀 2 拦 3
+  放/aafter_model 转发——基类默认空实现不委托同步版，漏了异步图静默失灵）；
+  sidecar 736 绿 + check.sh 全绿（首轮 test_docx_ops 并发批注偶发失败为负载型
+  flake、复跑两轮均过）。运行中的 sidecar 须重启生效。明确不做：程序改写清单
+  内容（语义归模型铁律）、拦 ask_human（HITL interrupt 先于工具执行拦不到，
+  且波次守卫已覆盖全部观测事故形态）、「完成声称」门（run 收尾语义，另一问题
+  域，记录在案）。
 - **element_lines 坐标系统一（2026-09-10）**：parse/docx.py 表格从整块 append 改
   逐行 extend——此前表格 md 的内嵌换行不占 lines 下标，element_lines 落在折叠
   坐标系、md/outline 落在展开坐标系，表格后所有元素行号累计漂移（实测 13 表
@@ -881,6 +1170,32 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
   insert_after 挂样式断言+视图标签 Normal→Tender Body 三处更新，572 全绿。
   界面化（用户上传自定义模板替换单槽）**明确后置**——先验证内置版式，
   用户拍板后再做（预案：设置页上传口，模板在建节时生效、换模板只影响新节）。
+  **版式取值换参考件+主题引用防线（2026-09-13）**：版式档改为按用户提供的
+  版式参考件（一份高校学位论文格式规范，出处不具名）实测导出——标题降一号（H1 小二→
+  三号，H2-4 不变）、标题中西文同族（ascii=黑体，不再 Times 混排）、封面
+  两档改加粗、页码改右下角 Times 五号、新增 TOC Heading+toc 1..3（点线
+  前导+阶梯缩进）与 Tender Header 样式（不建页眉部件）、页眉距 1.5cm/
+  页脚距 1.75cm。**关键修复=ＭＳ 明朝根因**：python-docx 默认模板的
+  Heading/Title 等样式天生带 `w:*Theme` 字体引用（OOXML 里 *Theme **优先于**
+  同名显式属性），而 theme1.xml 东亚字形是**空串**——显式写的黑体/宋体被
+  主题引用压住从未生效，落空时 Word 回退应用默认东亚字体（Mac/无中文语言包
+  Office=ＭＳ 明朝），素材合并迁入的带引用样式同病。三层防线：`_set_fonts`
+  摘 *Theme 属性、`_harden_theme_and_defaults`（docDefaults 显式宋体+lang
+  eastAsia=zh-CN、theme major/minor 东亚字形填黑体/宋体——后者兜改不了的
+  素材迁入样式）；模板自检+test_docx_ops 加「无 *Theme 残留+theme 字形
+  非空」回归守卫。存量整本要**重跑合册**才吃到（合册每次现读模板）。
+  参考件条文写「四边 25mm」与文件实际（上下 2.54/左右 3.18）不符，取文件
+  实测值、常量留 MARGIN_V/MARGIN_H 两行可改。**二批（同日，版式库预览复现
+  后）**：①python-docx 默认模板还给每个内置标题配了**伴生字符样式**
+  （Heading1Char..4Char/TitleChar，Word 2007 旧配色 #365F91 蓝/Calibri/四级
+  斜体），段落样式 w:link 指向它们，docx-preview renderStyles 把链接字符
+  样式追加在同选择器 CSS 规则**后面**（同优先级后写者赢）→ 预览里标题永远
+  旧蓝脸而 Word 本体正常（预览即用户所见，修=伴生样式随段落样式同步硬化，
+  `_style_char_twin` 按 styleId 匹配）；四级标题斜体继承一并显式关掉。②
+  示例页重排成真实装订顺序三页**封面→目录→正文**（用户点名「封面在目录
+  下面很怪」）；分页用段首显式 w:br run——docx-preview 的 split 只认样式级
+  pageBreakBefore 与 w:br 元素，不认段落直接格式的 page_break_before。
+  模板自检与 test_base_template_layout 同批加伴生样式/斜体守卫。
   **拷贝内容的模板策略（2026-09-08 用户拍板：素材库归顺、招标件保真）**：
   docx_material_inject 拷贝循环给**无样式引用的素材正文段**挂 Tender Body
   （`_ensure_body_style`——获得标书缩进/行距，与 AI 正文段同观感；此前吃
@@ -1151,6 +1466,31 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
   docx_source_inject 的 lines 区间（治最重节 71 轮里 ~40 轮在找附件位置）。
   测试 test_dispatch_enrich +7 例（缺口透传/占位不拼/编号剥除 + 定位唯一命中/
   无命中不带/跨文件歧义/相邻壳合并）。
+- **写作指引缺口列读者分离（2026-09-13，用户主诉「这段备注真看不懂」）**：
+  根因=该列在设计上是**一个字段两个读者**——`guide-format.md` 规定它「随派发整段
+  送达写手」（`dispatch_enrich._gap_lines` 机械透传）、同时又是用户唯一可见的缺料
+  点名，于是工具名/行号与【缺：…】混写，且【缺】可用代词回指（实测「格式件：
+  docx_source_inject 拷第五章格式（L988-L1005）+revise 填应征人名称、单位性质、
+  ……【缺：上述公司信息与法定代表人身份证复印件】」——代词指代前半句的工具指令，
+  摘出来读不通）。存量规模：实测某真实指引 59 行里 27 行带工具名、2 行代词回指、
+  53 行带【缺…】。修法两层（**派发透传零改动**，写手侧语义不变）：①**前端分栏**
+  ——`lib/workbenchTable.parseGuideNote(note)` 纯函数按标记切成四段（gaps=
+  【缺：…】组，紧跟其后的「——解释」一并归入该条；knowledge=【知识库】到句末；
+  clarifies=⚠待澄清 到句末；rest=其余原文，**宽容解析不丢任何内容**，旧格式裸
+  「缺：xxx」不强行摘仍落 rest），`GuideDetail` 查看态渲染成「需要你提供」
+  「需要你确认」「已从你的资料中找到」三组条目 + 「AI 执行说明」默认收起的
+  Collapsible（复用 `components/ui/collapsible.tsx`；内容纯文本无浮层，不触
+  overflow 裁剪铁则）。②**生成侧纪律+警示**：guide-format.md 缺口列 bullet 规定
+  只写三类内容、**不写工具名与调用参数**（执行链路由模式列+派发说明自动补——依据
+  列含 TPL 编号时 `dispatch_enrich` 本就自动加「本节含格式件」与「原件定位」行，
+  手写纯属重复）、【缺：…】列**具体字段名禁代词回指**、行号仅在程序定位不到时以
+  「原件：<格式名> L起-L止」保留；`validate_body._validate_guide` 补该列读取
+  （此前该分支完全不读第 5 列）+两条 **warning 级**检查（工具名正则
+  `_TOOL_NAME_RE` / 代词 `_NOTE_ANAPHORA_RE`）——提示不是门禁，存量指引照常可用
+  （前端解析器天然兼容新旧两种写法）。测试：workbenchTable.test.ts +8 例（真实
+  身份证明行/公司介绍行/待澄清行/破折号归并/裸缺/裸【缺】/空值与纯文本/多条缺口）
+  + test_validate_body +2 例；真实数据两向验证（59 行解析零丢字、27 行工具名与
+  2 行代词警示准确命中）。
 - **写手最小工具集（2026-09-10）**：`agent._BODY_WRITER_TOOLS`（frozenset 13 个
   =docx 七件套+validate_body+check_name_residue+search_references+
   search_company_assets+parse_document+fetch_url——fetch_url 用户明令保留联网
@@ -1271,7 +1611,8 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
 - **frontend**：`src/artifacts/registry.ts`（kind/schema@version → Processor 注册表 + 启动契约对账）；
   `components/processors/`（DirectoryProcessor 目录树编辑 / NoteProcessor 通用笔记）；
   `components/ArtifactOpenHost.tsx`（通用容器，未命中契约明确报不支持，**无 JSON 兜底预览**）；
-  `components/TaskPicker.tsx`（新会话必选所属任务）；侧栏任务文件夹树（hover 新会话/重命名/删除）；
+  `components/HomeView.tsx`（任务首页，无会话选中时的主区；建任务入口=「开始新投标」
+  卡内命名/整页拖放，见「任务即房间」批）；侧栏任务文件夹树（hover 新会话/重命名/删除）；
   产物面板 v5（任务归属 + 单一当前版本 + 业务流任务树：产物按 kind 归业务夹 +
   工作表/fragments 与产物同夹并排靠图标徽章区分；
   `work/` 过程文件经 `WorkbenchViewer` 查看/编辑——409 探测/恢复点栈/修订标记/
@@ -1319,7 +1660,7 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
   （2026-09-09 用户明令「产物栏不设最大宽度」，上限仅剩窗口宽−360）。
   **写作指引/承诺清单结构化表格界面（2026-09-08）**：产物面板按**文件名分发**
   （basename=`写作指引.md`/`关键事实与承诺.md`，容忍模型 guide_path 前缀变体）
-  到 `components/workbench/` 的专用视图（GuideFileView 五列表 / PromiseFileView
+  到 `components/workbench/` 的专用视图（GuideFileView 两栏视图 / PromiseFileView
   三列表），其余照旧 WorkbenchViewer/DocxView。核心原则=**文件仍是唯一真值，
   界面只是另一个编辑器**：`useTableFile` 在 useAutoSave 之上包「rows↔md」双向
   （保存仍走 PUT /workbench/content，base_hash 冲突/恢复点/修订=用户标记全沿用）；
@@ -1403,6 +1744,56 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
   切片）、目录树徽章弹窗（SCORE-13→L461 价格分 30 行高亮）；跳转按钮全消失。
   `context/FileUpload.tsx` 带任务 scope（taskScope/setTaskScope，ChatView 按会话/选择器写入），
   文件 chips 只显示当前任务的文件、无任务禁传。
+  **行内内容行+查看态五列（2026-09-13，动因=用户「指引还是无法直观看到自己想要做的内容」；
+  原型 `docs/prototypes/guide-ui/I~M` 五张，素净标签形态实施）**：内容直出、不再只给编号黑话——
+  ①`iterLeaves` 带出目录叶子**节点概述/归位理由**（`DirLeaf.overview/reason`，同一 walk，实测
+  真实任务 39/39 节点有值）；②③素材底稿数据=`useQueries` 批量拉本表全部 blk id 的块内容
+  （queryKey 与 `useMtBlockContent` 同键共享缓存、staleTime 60s、单块失败静默降级，零后端
+  改动零契约改动）。**同批配套布局修复=查看态去掉「缺口/备注」列改 5 列并删表头 `min-w-[900px]`**
+  （此前窄面板该列被挤出可视区——而它恰是写作指令最密的列）。
+  **写作指引两栏重构（2026-09-13 同日二批，取代上段的五列表格；用户选 N/O 图=左树右详情）**：
+  `components/workbench/GuideFileView.tsx` 从单张表格改为**左树右详情两栏**——左栏
+  `GuideTree.tsx`（目录真实层级的章节树，含「未分配」=目录有节点但指引没给行、「不在目录」=
+  指引有行但目录里找不到；搜索框 + 筛选胶囊），右栏 `GuideDetail.tsx`（选中节点的作业单：查看态
+  直出「本节写什么·节点概述」「素材底稿·块首预览」`blockPreviewText` 120 字、备注；编辑态内联
+  编辑模式/依据/素材）。树派生抽为纯函数 `lib/guideTree.ts`（`guideTree`=目录层级+指引行→导航树，
+  选择键=叶子 leafKey；无目录产物回落平坦行、`leaf:null`；`pruneTree`/`countUnassigned`/
+  `leafKeysOf`/`offTreeRowsOf`），共用件 `guideBits.tsx`。上段的「内容行」实质全部保留、只是
+  从表格行内挪进右栏详情。**文件格式零改动**（仍 `| 节 | 模式 | 依据 | 素材 | 缺口/备注 |`
+  md 表、序列化唯一）；`guideTree.test.ts` 锁层级/对位/未分配/无目录回落/「不在目录」判定。
+- **「任务即房间」导航重构（2026-09-13，用户拍板）**：会话只从任务内诞生，主区按
+  「有会话选中 / 没有」二态分派。①**删草稿态**——`components/TaskPicker.tsx` 删除、
+  ChatView 的 `initialSend` 草稿链路全删，无会话时不再渲染输入框；②**任务首页
+  `components/HomeView.tsx`**（冷启动落此页，不再自动进最新会话）：卡片列已有任务 +
+  「继续上次」一行，建任务入口就在本页——「开始新投标」卡点击翻卡内命名创建、往本页
+  任意位置**拖招标文件 = 以文件名直接建任务**（`onCreateTask(title, files)` 交 App
+  `handleCreateTask`：建任务自带首个会话 → `setPendingFiles(files)` 转交 ChatView 上传）；
+  弹窗形态（原 NewTaskDialog）已弃。③侧栏「新建任务」= 导航到首页（`setSelectedId(null)`），
+  不再弹窗；ChatHeader「＋ 新会话」只在有任务时出现。④`lib/clipboardFiles.ts`（InputComposer
+  粘贴上传路径专用）：浏览器粘贴图片的通用自动名（image.png 等）在前端改名保共存
+  （任务文件 API 是任务内同名覆盖语义，不改名连贴互相覆盖；Finder 复制粘贴的真实文件名
+  保持原名）。
+- **拖放进输入框残留覆盖层修复（2026-09-13）**：症状=把文件拖到输入框上松手后，整区
+  覆盖层「松开上传到工作区」永久卡住（文件其实已上传、chip 已出现，覆盖层盖住输入区）。
+  根因=同批新增的输入框局部拖放反馈（`InputComposer` 的 `dragOver` 态）在 dragover/drop
+  都 `stopPropagation`，外层 `UploadDropzone` 既收不到 drop（冒泡段 `onDrop` 不触发）也
+  收不到 dragleave（从聊天区一路拖到输入框时指针始终在区内）→ `over` 无人置回 false。
+  修法两件：①`UploadDropzone` 加**捕获段** `onDropCapture={() => setOver(false)}`（捕获
+  先于冒泡，输入框的 stopPropagation 拦不住）收尾；②dragover 去掉 stopPropagation，改由
+  外层按拖拽目标逐帧裁决——`InputComposer` 的 `.box` 标 `data-drag-target`，外层
+  `onDragOver` 命中 `[data-drag-target]` 时让位（两层同时亮=双反馈打架）。drop 的
+  stopPropagation 保留（防双上传）。实机 Playwright 五场景验证（区内转输入框/直达输入框/
+  区内松手/移出/再入）全绿；前端 tsc+oxlint+vitest 264+build 全绿。
+- **前端内存修复批（2026-09-13，行业实践对齐，零契约改动）**：3GB 级内存占用的六处收口。
+  ①`components/ai/traceLive.ts`——`TraceLiveContext` 标记活卡（RunMessage 运行中/HITL
+  冻结卡）内部：子代理思考等长文本在活卡内**恒走尾部封顶**（`TRACE_LIVE_TEXT_CAP` 12000
+  字符 + 折叠提示），run 结束后的历史过程区（点开才拉、按需挂载）默认渲染全文——此前
+  活卡子代理卡随波次累积、终态整段思考 markdown 常驻是爬升主因。②`PdfPreviewBody`
+  画布回收（迟滞带 400px 渲染/2000px 回收）+ dpr 封顶 1.5。③workbench 与 materials
+  内容端点加**行/预览预算参数**：`GET /workbench/content` 行切片、`GET /materials
+  blocks/{id}/content?preview=N`（sections 按累计预算截断、`chars` 仍为真实总字数）。
+  ④多处 react-query gcTime 收窄（ChatMessage/DocxView/OriginalView 等）。
+
 - **产物查看/编辑重做（2026-09-04，方案真值 `docs/artifact-view-edit-redesign.md`）**：
   ①**编辑基建统一**——`hooks/useAutoSave.ts`（纯 core `createAutoSaveCore` 不绑 React
   直测竞态 + 薄 hook 壳；请求序号守卫 + inflight 串行化挂起续存 + 5s 轮询外部更新
