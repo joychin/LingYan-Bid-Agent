@@ -93,8 +93,8 @@ export function DocxView({ taskId, path }: { taskId: string | null; path: string
       </div>
       {isFinal && (
         <p className="shrink-0 border-b bg-warning/10 px-4 py-1.5 text-xs text-warning">
-          交付前请在 Word 中接受所有修订、解决全部批注（审阅 → 接受所有修订 / 删除批注）
-          ——本预览显示的是接受修订后的效果。
+          交付前请解决全部待办批注（正文旁高亮，Word 审阅侧栏可见）；修订已按接受
+          状态并入整本——本预览即交付效果。
         </p>
       )}
       {fallbackNote && mode === 'text' && (

@@ -28,8 +28,11 @@ docx 翻译成文本世界（读视图/编号寻址），写入全由程序机�
 - docx_assemble_volume：整本合册——按投标目录树序把各节 docx 合并成每册
   一个整本文件（容器节点发章标题——按树序自动编号（第X章/1.1，格式取目录
   产物 numbering 字段）、一级章前分页、页脚页码；模板填充类叶子
-  产出节文件即按树序并入、未产出按附件对待不占整本位；整本是派生产物，
-  内容真值在节文件，重新合册覆盖）
+  产出节文件即按树序并入、未产出按附件对待不占整本位；**整本=交付态**：
+  并入时按「接受全部修订」压平（节文件保留修订供审阅，改内容回节级改再
+  重合册）、拷入的树外标题段摘出大纲层级（导航窗格只剩章节骨架）、
+  目录页与实收章节机械对账不符点名；整本是派生产物，内容真值在节文件，
+  重新合册覆盖）
 
 寻址纪律：段落序号以 docx_section_read 视图为准（body 直属段落，不含表格内
 段落）；revise 提交 (序号, 期望原文 find) 双重校验防漂移，多条段落编辑按序号
@@ -47,6 +50,7 @@ import functools
 import json
 import re
 import tempfile
+import unicodedata
 from copy import deepcopy
 from datetime import datetime, timezone
 from io import BytesIO
@@ -55,6 +59,7 @@ from xml.sax.saxutils import escape
 
 import pymupdf
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls, qn
 from docx.shared import Cm
@@ -375,6 +380,156 @@ def _accepted_text(p_el) -> str:
     parts: list[str] = []
     _collect_accepted(p_el, parts)
     return "".join(parts)
+
+
+# ---------- 合册交付态：接受修订压平 + 树外标题摘大纲 + 目录页对账 ----------
+# 2026-09-12 目录乱象批：实测整本带 600+ 处修订标记——未接受修订前新旧标题
+# 成对交错（用户看到「目录乱」的主诉之一）；131 个节内小标题/素材自带标题
+# 用 Heading 样式进大纲，导航窗格一锅粥；目录页静态条目与实收章节脱节。
+# 修法全在合册侧（整本是派生产物，节文件层的修订审阅入口不动）。
+
+
+def _accept_revisions_inplace(el) -> bool:
+    """元素级「接受全部修订」压平：w:del 子树丢弃（w:delText 随之消失）、
+    w:ins 剥壳内容按原序上提、段落标记修订（rPr/trPr 内的 ins/del）与格式
+    变更记录（*Change）清除、表格行删除标记丢弃整行。
+
+    返回 False=元素整体消失（段落标记删除修订且内容已删净——_tracked_delete
+    形态，接受修订后整段不存在）。批注锚点（commentRangeStart/End/
+    commentReference）不是修订，原样保留。
+    """
+    # 表格行删除修订：接受=整行消失（先于段落压平，行内段落不再处理）
+    for tr in list(el.findall(".//" + qn("w:tr"))):
+        trpr = tr.find(qn("w:trPr"))
+        if trpr is not None and trpr.find(qn("w:del")) is not None:
+            tr.getparent().remove(tr)
+    # 先记录段落标记删除的段（rPr/w:del 会在下面的清除轮里被摘掉）
+    paras = ([el] if el.tag == qn("w:p") else []) + el.findall(".//" + qn("w:p"))
+    mark_deleted = [
+        p for p in paras
+        if (ppr := p.find(qn("w:pPr"))) is not None
+        and (rpr := ppr.find(qn("w:rPr"))) is not None
+        and rpr.find(qn("w:del")) is not None
+    ]
+    # w:del 子树丢弃：内容级删除（含「删除先前插入」的 ins>del 嵌套，整树带走）
+    for node in list(el.iter(qn("w:del"))):
+        parent = node.getparent()
+        if parent is not None:
+            parent.remove(node)
+    # w:ins 剥壳：子元素上提到父原位（run 级插入；rPr 里的空段落标记壳同样摘除）
+    for node in list(el.iter(qn("w:ins"))):
+        parent = node.getparent()
+        if parent is None:
+            continue
+        index = list(parent).index(node)
+        for ch in list(node):
+            parent.insert(index, ch)
+            index += 1
+        parent.remove(node)
+    # 残余标记：行级插入/删除标记（trPr）与格式变更记录——保留当前格式即接受
+    for tag in ("w:ins", "w:del", "w:rPrChange", "w:pPrChange",
+                "w:tblPrChange", "w:trPrChange", "w:sectPrChange"):
+        for node in list(el.iter(qn(tag))):
+            parent = node.getparent()
+            if parent is not None:
+                parent.remove(node)
+    # 段落标记删除且内容已删净 → 整段消失；仍有内容=罕见形态，保守保留（近似）
+    for p in mark_deleted:
+        if _accepted_text(p).strip():
+            continue
+        if p is el:
+            return False  # 顶层元素自身消失，调用方丢弃
+        parent = p.getparent()
+        if parent is not None:
+            parent.remove(p)
+            # OOXML 硬要求 w:tc 至少一个块级子元素：格内唯一段被删净时留空段，
+            # 否则病态素材会让整本被 Word 判损坏（正常 Word 编辑产生不了此形态）
+            if parent.tag == qn("w:tc") and not any(
+                ch.tag in (qn("w:p"), qn("w:tbl")) for ch in parent
+            ):
+                parent.append(parse_xml(f"<w:p {nsdecls('w')}/>"))
+    return True
+
+
+def _heading_style_ids(doc: Document) -> set[str]:
+    """样式表里大纲标题样式的 styleId 集：段落样式名含 heading/标题、或样式
+    定义自带 outlineLvl（素材迁入的自定义标题样式多带）。Word 导航窗格与
+    自动目录按样式的大纲层级取条目。"""
+    ids: set[str] = set()
+    for style in doc.styles:
+        if style.type != WD_STYLE_TYPE.PARAGRAPH or not style.style_id:
+            continue
+        el = style.element
+        name_el = el.find(qn("w:name"))
+        name = (name_el.get(qn("w:val")) or "").lower() if name_el is not None else ""
+        ppr = el.find(qn("w:pPr"))
+        has_outline = ppr is not None and ppr.find(qn("w:outlineLvl")) is not None
+        if "heading" in name or "标题" in name or has_outline:
+            ids.add(style.style_id)
+    return ids
+
+
+def _demote_extra_headings(doc: Document, elements) -> int:
+    """树外标题摘出大纲：拷入元素里命中标题样式的段落显式设 outlineLvl=9
+    （正文级）——整本导航窗格/自动目录只剩合册器按树发的章节骨架（发标题的
+    树对账已定，拷入面全是树外内容：节内小标题、素材自带章标题等）。
+    只改段落大纲层级，样式不动——视觉（字体字号缩进）零变化。"""
+    if not elements:
+        return 0
+    heading_ids = _heading_style_ids(doc)
+    if not heading_ids:
+        return 0
+    demoted = 0
+    for el in elements:
+        for p in ([el] if el.tag == qn("w:p") else []) + el.findall(".//" + qn("w:p")):
+            ppr = p.find(qn("w:pPr"))
+            pstyle = ppr.find(qn("w:pStyle")) if ppr is not None else None
+            if pstyle is None or (pstyle.get(qn("w:val")) or "") not in heading_ids:
+                continue
+            if ppr is None:
+                ppr = parse_xml(f"<w:pPr {nsdecls('w')}/>")
+                p.insert(0, ppr)
+            for old in ppr.findall(qn("w:outlineLvl")):
+                ppr.remove(old)
+            node = parse_xml(f'<w:outlineLvl {nsdecls("w")} w:val="9"/>')
+            anchor = None
+            for tail in (qn("w:rPr"), qn("w:sectPr"), qn("w:pPrChange")):
+                anchor = ppr.find(tail)
+                if anchor is not None:
+                    break
+            if anchor is not None:  # CT_PPr 顺序：outlineLvl 在 rPr/sectPr 之前
+                anchor.addprevious(node)
+            else:
+                ppr.append(node)
+            demoted += 1
+    return demoted
+
+
+_TOC_TAIL_PAGE = re.compile(r"[.·．…]{2,}\s*\d+\s*$")
+_TOC_NUMBER_PREFIXES = (
+    r"^第[一二三四五六七八九十百\d]+章\s*",
+    r"^[一二三四五六七八九十]+、",
+    r"^（[一二三四五六七八九十]+）",
+    r"^\d{1,2}(?:\.\d+)*\s*",
+)
+
+
+def _toc_normalize(text: str) -> str:
+    """目录页条目/章节标题的比对键：剥编号前缀（与 _SELF_NUMBERED 同形态）与
+    点线页码尾巴、NFKC 归一（全半角/大小写）、去空白——条目写法差异不误报。"""
+    s = _TOC_TAIL_PAGE.sub("", text.strip())
+    for pat in _TOC_NUMBER_PREFIXES:
+        s = re.sub(pat, "", s)
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", s)).lower()
+
+
+def _toc_match(key: str, keys: list[str]) -> bool:
+    """目录页条目与章节标题的宽松匹配：归一键相等、或双向前缀（短方 ≥4 字，
+    容忍条目简写/带尾巴的写法差异）。"""
+    return any(
+        key == k or (min(len(key), len(k)) >= 4 and (key.startswith(k) or k.startswith(key)))
+        for k in keys
+    )
 
 
 # ---------- 视图与图片迁移 ----------
@@ -1728,6 +1883,8 @@ def docx_assemble_volume() -> str:
         missing: list[str] = []
         unfilled: list[str] = []  # 模板填充类叶子未产出节文件（按附件对待）
         placeholders: list[str] = []  # 内联占位兜底扫描命中（正规落点=批注，此为防线）
+        issued_titles: list[str] = []  # 本册实际发出标题的节点（目录页对账的「实有」侧）
+        toc_lines: list[str] | None = None  # 「目录」节条目行（条目超长=说明文字，不当条目）
         seen_chapter = False
         for idx, (depth, title, is_container, mode) in enumerate(nodes):
             if _SELF_NUMBERED.match(title):
@@ -1746,6 +1903,7 @@ def docx_assemble_volume() -> str:
             else:
                 # 标题带编号发（对账剥节文件标题仍用裸 title，见 _is_title_para 调用处）
                 h = out.add_heading(numberer.prefix(depth) + title, min(depth, 9))
+                issued_titles.append(title)
                 if depth == 1:
                     if seen_chapter:
                         h.paragraph_format.page_break_before = True
@@ -1772,10 +1930,15 @@ def docx_assemble_volume() -> str:
             ]
             if children and children[0].tag.split("}")[-1] == "p" and _is_title_para(children[0], title):
                 children = children[1:]
+            if toc_lines is None and _toc_normalize(title) == "目录":
+                # 目录页条目行（非空、≤60 字——更长的行是说明文字不是条目）
+                toc_lines = [t for t in section_text_lines(src) if t.strip() and len(t.strip()) <= 60]
             copied: list = []
             for el in children:
                 new_el = deepcopy(el)
                 _strip_inner_sectpr(new_el)
+                if not _accept_revisions_inplace(new_el):
+                    continue  # 整段删除修订：接受后不存在
                 n_img += _migrate_images(src, out, new_el)
                 copied.append(new_el)
                 sect = out.element.body.find(qn("w:sectPr"))
@@ -1785,6 +1948,7 @@ def docx_assemble_volume() -> str:
                     out.element.body.append(new_el)
             _merge_missing_styles(src, out, copied)
             _merge_missing_numbering(src, out, copied)
+            _demote_extra_headings(out, copied)  # 树外标题摘出大纲（样式迁完再判——导航只剩骨架）
             n_comment += _merge_missing_comments(src, out, copied)
             merged += 1
         if merged == 0:
@@ -1819,6 +1983,29 @@ def docx_assemble_volume() -> str:
                 f"{vol}：模板填充类未产出 {len(unfilled)} 节（按附件对待，不占整本位）："
                 + "、".join(unfilled)
             )
+        if toc_lines:
+            # 目录页对账（探测+提示，不是门禁）：目录页条目 vs 实收章节——列了
+            # 整本没有的（未产出/树外）、漏了实有的，点名请修目录节文件后重合册。
+            # 「目录」「封面」两侧豁免：目录页列不列自己/封面都合理。
+            toc_pairs = [(t, _toc_normalize(t)) for t in toc_lines]
+            toc_keys = [k for _t, k in toc_pairs if k]
+            issued_pairs = [(t, _toc_normalize(t)) for t in issued_titles]
+            extra = [
+                t for t, k in toc_pairs
+                if k and k not in ("目录", "封面") and not _toc_match(k, [ik for _it, ik in issued_pairs if ik])
+            ]
+            absent = [
+                t for t, k in issued_pairs
+                if k and k not in ("目录", "封面") and not _toc_match(k, toc_keys)
+            ]
+            if extra or absent:
+                bits = f"⚠️ {vol}：目录页与正文对账不符"
+                if extra:
+                    bits += "——目录页列了但整本没有 " + str(len(extra)) + " 项：" + "、".join(extra[:6]) + ("…" if len(extra) > 6 else "")
+                if absent:
+                    bits += "；整本有但目录页未列 " + str(len(absent)) + " 项：" + "、".join(absent[:6]) + ("…" if len(absent) > 6 else "")
+                bits += "（修订目录节文件后重新合册；按附件对待未产出的节在目录页标注「另附」或不列）"
+                reports.append(bits)
         if self_numbered:
             shown = "、".join(self_numbered[:6]) + ("…" if len(self_numbered) > 6 else "")
             reports.append(

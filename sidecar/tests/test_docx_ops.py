@@ -13,11 +13,13 @@ from pathlib import Path
 
 import pytest
 from docx import Document
-from docx.oxml.ns import qn
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls, qn
 
 from app import runctx
 from app.knowledge import materials_lib as mlib
 from app.tools.docx_ops import (
+    _accept_revisions_inplace,
     _accepted_text,
     _flatten_rejected,
     docx_assemble_volume,
@@ -1184,7 +1186,11 @@ def test_assemble_includes_produced_format_node(env):
     assert "个节文件未并入" not in r  # 格式件文件已消费，不算孤儿
 
 
-def test_assemble_preserves_revision_marks_and_images(env):
+def test_assemble_accepts_revisions_and_keeps_images(env):
+    """整本=交付态：节内修订标记并入时按「接受全部修订」压平——整本零
+    w:ins/w:del（未在 Word 里接受修订前不再新旧并存，目录乱象主诉）、替换后
+    文本在场/被删文本消失、图片关系完好；节文件层修订原样保留（审阅入口
+    在节级，改内容回节级改再重合册）。"""
     _seed_dir_artifact(env, {
         "response_documents": [
             {"name": "技术部分", "scope": "", "directory": [
@@ -1201,14 +1207,138 @@ def test_assemble_preserves_revision_marks_and_images(env):
     assert docx_section_revise.invoke({"path": section, "edits": json.dumps([
         {"para": para_no, "action": "replace", "find": COMPANY, "text": "上海中信科技有限公司"},
     ])}).startswith("[已修订]")
+    # 整段删除修订（_tracked_delete 形态：run 全删+段落标记删）——压平后整段消失
+    assert docx_section_revise.invoke({"path": section, "edits": json.dumps([
+        {"para": 1, "action": "insert_after", "text": "删除演示段"},
+    ])}).startswith("[已修订]")
+    view = docx_section_read.invoke({"path": section})
+    del_no = next(int(ln.split("]")[0][2:]) for ln in view.splitlines() if "删除演示段" in ln)
+    assert docx_section_revise.invoke({"path": section, "edits": json.dumps([
+        {"para": del_no, "action": "delete"},
+    ])}).startswith("[已修订]")
 
     r = docx_assemble_volume.invoke({})
     assert r.startswith("[已合册]") and "含图片 1 张" in r, r
     chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
-    assert chk.element.body.find(".//" + qn("w:ins")) is not None  # 修订标记原样保留
-    assert chk.element.body.find(".//" + qn("w:del")) is not None
+    assert chk.element.body.find(".//" + qn("w:ins")) is None  # 交付态：修订已压平
+    assert chk.element.body.find(".//" + qn("w:del")) is None
+    texts = [p.text for p in chk.paragraphs]
+    assert any("上海中信科技有限公司" in t for t in texts)  # 替换后的新文本在场（压平后 p.text 直读）
+    assert not any(COMPANY in t for t in texts)  # 被删的旧公司名不在交付稿
+    assert "删除演示段" not in texts  # 整段删除修订的段不复存在
     for blip in chk.element.body.findall(".//" + qn("a:blip")):
         assert blip.get(qn("r:embed")) in chk.part.related_parts  # 图片关系完好
+    # 节文件层修订保留（审阅入口不动——面板/Word 审阅在节级）
+    sec = Document(str(_abs(env, section)))
+    assert sec.element.body.find(".//" + qn("w:ins")) is not None
+    assert sec.element.body.find(".//" + qn("w:del")) is not None
+
+
+def test_accept_revisions_keeps_table_cell_block_child():
+    """格内唯一段带「段落标记删除+内容删净」压平后留空段：OOXML 硬要求
+    w:tc 至少一个块级子元素，空格会让整本被 Word 判损坏（病态素材防御，
+    正常 Word 编辑产生不了此形态——标记删除语义=与后续段合并）。"""
+    tbl = parse_xml(
+        f'<w:tbl {nsdecls("w")}><w:tr><w:tc><w:tcPr/>'
+        "<w:p><w:pPr><w:rPr><w:del/></w:rPr></w:pPr>"
+        '<w:del><w:r><w:t>格内唯一段</w:t></w:r></w:del>'
+        "</w:p></w:tc></w:tr></w:tbl>"
+    )
+    assert _accept_revisions_inplace(tbl)
+    tc = tbl.find(".//" + qn("w:tc"))
+    assert tc.find(qn("w:p")) is not None  # 空段保命，格不再只剩 tcPr
+    # 多段格：删净段移除后仍有兄弟段，不额外补空段
+    tbl2 = parse_xml(
+        f'<w:tbl {nsdecls("w")}><w:tr><w:tc><w:tcPr/>'
+        "<w:p><w:pPr><w:rPr><w:del/></w:rPr></w:pPr>"
+        '<w:del><w:r><w:t>第一段</w:t></w:r></w:del></w:p>'
+        "<w:p><w:r><w:t>存活段</w:t></w:r></w:p>"
+        "</w:tc></w:tr></w:tbl>"
+    )
+    assert _accept_revisions_inplace(tbl2)
+    paras = tbl2.find(".//" + qn("w:tc")).findall(qn("w:p"))
+    assert len(paras) == 1 and _accepted_text(paras[0]) == "存活段"
+
+
+def test_assemble_demotes_off_tree_headings(env):
+    """树外标题摘出大纲：节内小标题/素材自带章标题并入时显式 outlineLvl=9
+    （正文级）——整本导航窗格/自动目录只剩合册器按树发的章节骨架；Heading
+    样式与文本不动（视觉零变化）；合册器自发的标题无 outlineLvl 覆盖
+    （样式自带层级，骨架完整）。"""
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "运维实施方案", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+            ]}
+        ]
+    })
+    assert docx_section_create.invoke({"path": "body/运维实施方案", "title": "运维实施方案"}).startswith("[已创建]")
+    # 节内小标题（写作模型自加，无编号，Heading 样式进大纲——乱象主诉之二）
+    assert docx_section_revise.invoke({"path": "body/运维实施方案", "edits": json.dumps([
+        {"para": 1, "action": "insert_after", "text": "沟通与报告机制", "style": "Heading 2"},
+    ], ensure_ascii=False)}).startswith("[已修订]")
+    # 素材自带章标题（与树标题不匹配的 mismatched 形态，同样进拷入面）
+    assert docx_material_inject.invoke(
+        {"block_id": env["block"]["id"], "dest": "body/运维实施方案.docx"}
+    ).startswith("[已注入]")
+
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]"), r
+    chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    headings = []
+    for p in chk.paragraphs:
+        if not p.style.name.startswith("Heading"):
+            continue
+        ppr = p._p.find(qn("w:pPr"))
+        lvl = ppr.find(qn("w:outlineLvl")) if ppr is not None else None
+        headings.append((p.style.name, lvl.get(qn("w:val")) if lvl is not None else None, p.text))
+    # 骨架=无 outlineLvl 覆盖的标题（合册器按树发，样式自带层级）
+    assert [h for h in headings if h[1] is None] == [
+        ("Heading 1", None, "第一章\u3000运维实施方案")
+    ]
+    # 树外标题全部显式降 9、样式不动（视觉不变，导航/自动目录不再收录）
+    demoted = {h[2]: h for h in headings if h[1] == "9"}
+    assert demoted["沟通与报告机制"][0] == "Heading 2"
+    assert demoted["运维服务方案"][0] == "Heading 1"  # 素材章标题同样摘出
+
+
+def test_assemble_toc_reconciliation(env):
+    """目录页对账（探测+提示，不是门禁）：目录页条目 vs 实收章节——列了整本
+    没有的（按附件对待未产出）、漏了实有的，逐项点名；编号前缀/点线页码写法
+    差异不误报；超长说明行不当条目；「目录」自身两侧豁免。"""
+    note = "说明" + "长" * 65  # 67 字：目录页说明行，超 60 不当条目
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "目录", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+                {"目录名称": "项目理解", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+                {"目录名称": "总体设计", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+                {"目录名称": "资质证明", "level": 1, "children": [],
+                 "交付形态": "模板或附件填充", "来源位置": []},
+            ]}
+        ]
+    })
+    # 目录页：项目理解（编号+点线页码写法）、资质证明（实为按附件对待未产出）、
+    # 说明行——漏列总体设计
+    assert docx_section_create.invoke({"path": "body/目录", "title": "目录", "paragraphs":
+        f"1.1 项目理解…………3\n资质证明\n{note}"}).startswith("[已创建]")
+    assert docx_section_create.invoke(
+        {"path": "body/项目理解", "title": "项目理解", "paragraphs": "正文"}).startswith("[已创建]")
+    assert docx_section_create.invoke(
+        {"path": "body/总体设计", "title": "总体设计", "paragraphs": "正文"}).startswith("[已创建]")
+
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    warn = next(ln for ln in r.splitlines() if "目录页与正文对账不符" in ln)
+    assert "资质证明" in warn  # 列了但整本没有（按附件对待未产出，目录页不该照列）
+    assert "总体设计" in warn  # 整本有但目录页未列
+    assert "项目理解" not in warn  # 编号/点线页码写法差异不误报
+    assert "说明" not in warn  # 超长说明行不当条目
+    assert "模板填充类未产出 1 节" in r  # 既有行不受影响
 
 
 def test_assemble_migrates_comments_and_warns_inline(env):
