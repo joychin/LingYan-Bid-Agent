@@ -513,6 +513,48 @@ def test_revise_insert_and_delete(env):
     )
 
 
+def test_revise_return_lists_edits_and_appends_view(env):
+    """返回逐条结果；插段批附最新视图、新段最终序号与落盘事实一致（回读收敛批
+    2026-09-13：此前返回只报计数，写手改完只能整读视图重锚定/确认，3.5 次/节）。"""
+    section, _ = _injected_section(env)
+    view = docx_section_read.invoke({"path": section})
+    para_no = next(int(ln.split("]")[0][2:]) for ln in view.splitlines() if COMPANY in ln)
+    tail_no = next(int(ln.split("]")[0][2:]) for ln in view.splitlines() if "服务期三年" in ln)
+    edits = [
+        {"para": para_no, "action": "replace", "find": COMPANY, "text": "上海中信科技有限公司"},
+        {"para": tail_no, "action": "delete"},
+        {"para": tail_no, "action": "insert_after", "text": "本章按本次招标文件要求编制。"},
+    ]
+    r = docx_section_revise.invoke({"path": section, "edits": json.dumps(edits)})
+    assert r.startswith("[已修订]") and "3 处" in r, r
+    assert f"P{para_no} 替换「" in r and "上海中信科技" in r
+    assert f"P{tail_no} 删除（原位保留删除标记" in r
+    assert "新段（插在原 P" in r
+    assert "最新读视图如下" in r  # 含插段 → 附视图（序号已位移）
+    # 返回里的新段序号与落盘事实一致：该序号段落确为新插内容
+    import re
+
+    m = re.search(r"P(\d+) 新段", r)
+    chk = Document(str(_abs(env, section)))
+    assert "本章按本次招标文件要求编制" in _accepted_text(
+        chk.paragraphs[int(m.group(1)) - 1]._p
+    )
+    # 附带视图里的序号即新序号：新插内容出现在视图块中
+    assert "本章按本次招标文件要求编制" in r.split("最新读视图如下", 1)[1]
+
+
+def test_revise_return_pure_replace_carries_no_view(env):
+    """纯替换批不附视图（删段/替换序号不变），返回带免回读注记。"""
+    section, _ = _injected_section(env)
+    view = docx_section_read.invoke({"path": section})
+    para_no = next(int(ln.split("]")[0][2:]) for ln in view.splitlines() if COMPANY in ln)
+    edits = [{"para": para_no, "action": "replace", "find": COMPANY, "text": "上海中信科技有限公司"}]
+    r = docx_section_revise.invoke({"path": section, "edits": json.dumps(edits)})
+    assert r.startswith("[已修订]") and f"P{para_no} 替换「" in r
+    assert "最新读视图如下" not in r
+    assert "不改变段落序号" in r
+
+
 def test_revise_find_mismatch_keeps_file(env):
     section, _ = _injected_section(env)
     before = _abs(env, section).read_bytes()

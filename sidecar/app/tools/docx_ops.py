@@ -1534,6 +1534,11 @@ def docx_section_revise(path: str, edits: str) -> str:
                接受视角顺序定位。多条段落编辑按序号从大到小应用（防位移），
                表格格编辑不改段落数、另批处理。表格插行/删行、嵌套表格不支持
                （在 Word 中改）。
+    返回：逐条结果（每处修订的定位与落点摘要）。删段/替换/填空**不改变段落
+               序号**（删除段原位保留删除标记，视图仍给原序号）；插段使其后
+               段落序号 +1 位移——含插段的批次返回直接附最新读视图（段落序号
+               已按插段后计），后续修订按返回定位即可，**无需再调 docx_section_read
+               回读确认**（逐条结果即确认）。
     """
     task_id = _task_id()
     if not task_id:
@@ -1594,6 +1599,14 @@ def docx_section_revise(path: str, edits: str) -> str:
     applied = 0
     body_style = _body_style(doc)
     body_style_id = body_style.element.get(qn("w:styleId")) if body_style else None
+    # 逐条结果行（2026-09-13 回读收敛：返回自带确认与新序号，模型不再回读视图——
+    # 99 次 revise 里 76 次紧跟整读、53 批含删/插段全是重锚定刚需）
+    done: list[str | None] = []
+    inserts_pending: list[tuple[int, object, str, int]] = []  # (原序号, 新段元素, 文本, done 下标)
+
+    def _snip(s: str, n: int = 20) -> str:
+        s = s.replace("\n", " ")
+        return s[:n] + ("…" if len(s) > n else "")
     # 段落从后往前：插入/删除改变段落数，先改大序号防位移；同段连续
     # insert_after 以「上次插入的新段」为锚保提交顺序（游标按段序号记）
     insert_anchors: dict[int, object] = {}
@@ -1608,6 +1621,9 @@ def docx_section_revise(path: str, edits: str) -> str:
         try:
             if act == "replace":
                 _tracked_replace(para, str(it["find"]), str(it["text"]), rev_id)
+                done.append(
+                    f"P{i} 替换「{_snip(str(it['find']))}」→「{_snip(str(it['text']))}」"
+                )
             elif act == "insert_after":
                 anchor = insert_anchors.get(i, para._p)
                 style_id = body_style_id
@@ -1618,11 +1634,15 @@ def docx_section_revise(path: str, edits: str) -> str:
                         style_notes.add(style_name.strip())
                     else:
                         style_id = resolved
-                insert_anchors[i] = _tracked_insert_after(
+                new_el = _tracked_insert_after(
                     anchor, str(it["text"]), rev_id, style_id=style_id
                 )
+                insert_anchors[i] = new_el
+                inserts_pending.append((i, new_el, str(it["text"]), len(done)))
+                done.append(None)  # 新序号待段落批结束后回填（删/插交互后的最终序号）
             else:
                 _tracked_delete(para, rev_id)
+                done.append(f"P{i} 删除（原位保留删除标记，序号不变）")
         except ValueError as e:
             return f"[修订失败] P{i}：{e}"
         applied += 1
@@ -1647,6 +1667,7 @@ def docx_section_revise(path: str, edits: str) -> str:
                     "read 视图取该格原文片段改用 replace"
                 )
             _tracked_fill(cell_paras[0], str(it["text"]), rev_id)
+            done.append(f"T{t_no} R{r}C{c} 填空「{_snip(str(it['text']))}」")
         else:
             find = str(it["find"])
             target = next((p for p in cell_paras if find in _accepted_text(p._p)), None)
@@ -1657,18 +1678,43 @@ def docx_section_revise(path: str, edits: str) -> str:
                 )
             try:
                 _tracked_replace(target, find, str(it["text"]), rev_id)
+                done.append(
+                    f"T{t_no} R{r}C{c} 替换「{_snip(find)}」→「{_snip(str(it['text']))}」"
+                )
             except ValueError as e:
                 return f"[修订失败] T{t_no}({r},{c})：{e}"
         applied += 1
+    # 插段最终序号回填：删段不挪元素（序号不变）、插段新增元素——段落批全部
+    # 落完后的 doc.paragraphs 顺序即最终序号（表格格编辑不动段落数）
+    if inserts_pending:
+        final_idx = {id(p._p): n for n, p in enumerate(doc.paragraphs, 1)}
+        for orig_i, el, text, di in inserts_pending:
+            n = final_idx.get(id(el))
+            done[di] = (
+                f"P{n} 新段（插在原 P{orig_i} 后）「{_snip(text)}」"
+                if n
+                else f"原 P{orig_i} 后插段「{_snip(text)}」"
+            )
     if _flatten_rejected(doc) != before:
         return "[修订失败] 修订标记一致性自校验未通过（未保存）——请重读视图核对序号与原文后重试"
     doc.save(dst)
     bits = (
         f"[已修订] work/{rel}：{applied} 处已落成 Word 修订标记（作者 {_AUTHOR}），"
-        f"在 Word 中审阅可逐条接受/拒绝。修订后建议 check_name_residue 扫旧名残留。"
+        f"在 Word 中审阅可逐条接受/拒绝：\n  " + "\n  ".join(str(x) for x in done)
     )
     if style_notes:
         bits += f"（注：样式 {'、'.join(sorted(style_notes))} 不存在，该段已用正文样式）"
+    if inserts_pending:
+        # 插段使其后序号 +1：直接附最新视图，模型无需再花一轮回读重锚定
+        bits += (
+            "\n（本批含插段，其后段落序号已位移；最新读视图如下——后续修订按此序号"
+            "定位即可，无需再调 docx_section_read）\n" + "\n".join(view_lines(doc))
+        )
+    else:
+        bits += (
+            "\n（删段/替换/填空均不改变段落序号——删除段原位保留删除标记、视图序号"
+            "不变，无需回读视图确认。修订后建议 check_name_residue 扫旧名残留。）"
+        )
     return bits
 
 
@@ -1833,12 +1879,17 @@ def docx_assemble_volume() -> str:
     """按投标目录树序把正文节 docx 合册成整本文件（每册一个，tender-body 收尾必调）。
 
     用途：全部节完成后调用，产出 work/body/整本-<册名>.docx。容器章由本工具发
-    标题（层级随树深，Word 可自动生成目录）、叶子节内容元素级拷入（图片/表格/
-    修订标记原样保留——在整本里继续用 Word 审阅逐条接受/拒绝）、一级章前分页、
-    页脚页码；模板填充类叶子（目录标非正文）**产出节文件即按树序并入**（拷原件
-    填空的格式件本就是标书组成部分）、未产出的按附件对待不占整本位（返回行点名）。
-    章节编号按树序自动生成（第一章/1.1；格式取目录产物的 numbering 字段，缺省
-    第X章+1.1；封面不占序，目录产物里可改为 1+1.1/一、（一）/不编号）。
+    标题（层级随树深，Word 可自动生成目录）、叶子节内容元素级拷入（图片/表格
+    原样保留）、一级章前分页、页脚页码；模板填充类叶子（目录标非正文）**产出
+    节文件即按树序并入**（拷原件填空的格式件本就是标书组成部分）、未产出的按
+    附件对待不占整本位（返回行点名）。章节编号按树序自动生成（第一章/1.1；
+    格式取目录产物的 numbering 字段，缺省第X章+1.1；封面不占序，目录产物里
+    可改为 1+1.1/一、（一）/不编号）。
+    **整本=交付态**：节内修订标记并入时按「接受全部修订」压平（未接受修订
+    前不再新旧内容并存；节文件保留修订供审阅，改内容回节文件层改再重合册）；
+    拷入的树外标题段（节内小标题/素材自带标题）摘出大纲层级——导航窗格与
+    自动目录只剩章节骨架，视觉样式不变；「目录」节并入后与实收章节机械对账，
+    不符（列了没有的/漏了实有的）点名提醒。
     树首节点为「封面」时（tender-outline 的结构约定）整本首页即封面页：跳过册名
     大标题与封面节点自身标题、开「首页不同」（封面页不带页眉页脚，页码从封面
     后一页起显示）。缺失的正文节文件逐个点名，不中断其余节。**整本是派生产物**：改内容
