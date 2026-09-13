@@ -235,6 +235,32 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
    捕获后当场压缩重试，会话不再有超限永久报废路径；未命中措辞的其余 400 记 warning
    日志。②`_GLOBAL_DIR_NAMES` 加 `conversation_history`（逐出历史落盘处，防幽灵任务）。
    check.sh 契约漂移守卫比对的是 git 索引：再生 dto.gen.ts 后须 `git add` 才算同步。
+   **压缩与窗口机制二批（2026-09-13，review 发现 1/2 修复）**：①**窗口取值四层兜底**
+   （`agent._apply_window_profile`，build 时先于压缩中间件构造）：用户手选（context_window
+   存档真值）> langchain_deepseek 注册表已知名（deepseek 系自带 1M 等）> **models.dev
+   社区注册表本地缓存**（新模块 `app/model_registry.py`：免费无 key、拍平成
+   {model_id: input} 存 `data/model_registry.json`；只在用户主动联网动作〔保存模型/
+   测试连接/获取模型列表〕后台 fire-and-forget 刷新、24h TTL、失败保旧缓存；
+   **lookup 纯读缓存零联网，run 路径永不联网**）> 保守默认 17 万。静态厂商建议值
+   机制**已删**（前端 VENDOR_PRESETS 的 contextWindow 与「展开预填」逻辑一并移除）——
+   动因=过期值有害（GLM-5.1 预设 256K > 官方 204.8K，配了照样撞线）且厂商每次更新
+   窗口都得跟版发程序；行业实践=数据活社区库（Cline←models.dev、LiteLLM 仓内 JSON），
+   程序只消费。②**撞线学习**（`_NoThinkingRetryCompletions` 增 on_overflow_window
+   回调）：超限归一化时从文案解析服务商披露的真实上限（两种主流措辞正则 + sanity
+   区间 16K~2M，宁缺勿错）→ 写回共享模型实例 profile（**内存态不落库**，「用户没做过
+   的选择不落库」同款铁则；rebuild 后重学，每进程最多撞一次线）。未知模型名因此
+   统一预设 17 万**进比例档**（85%/10%）——此前 profile None 走「17 万固定线+保留 6 条」，
+   学习校准 profile 后无法回馈档位（构造时定死），预设后比例档每轮活读 profile、学习
+   立即生效。③**摘要调用输入上限 200K**（`_SUMMARY_INPUT_CAP`）：deepagents 工厂默认
+   trim=None——压缩触发时摘要生成单发全部被逐出历史（≈窗口 75%，1M 模型一次 75 万
+   token、XML 序列化不吃前缀缓存全价新鲜计费）。修法=`_make_summarization_middleware`
+   自建实例（复刻库默认档仅改 trim），经 **deepagents 同名原地替换机制**接进主栈
+   middleware= 与两个 SUBAGENTS spec 的 middleware 列表、GP 自动按名继承主栈同名件
+   ——实例 `.name` 恰为 "SummarizationMiddleware"（公开别名直接构造），库行为守卫
+   测试钉死（升级改语义当场红）；窗口 ≤256K 时逐出 ≈192K<上限行为不变，完整历史
+   仍落盘 conversation_history 不丢信息。测试：test_model_registry.py 七例 +
+   test_agent 四层取值/工厂/同名替换守卫/接线守卫/学习三例；前端帮助文案同步
+   四层语义。
    **契约 additive 扩展（2026-08-31 本轮文件）**：GET /messages 的 assistant 消息加
    `files`（`[{path, op}]`，`RunFilePayload` 契约模型；SSE **零改动**——completed 后
    前端先重取消息再拆活卡，files 经消息接口到达）。数据来源=`app/run_files.py`：
@@ -453,6 +479,58 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
    respond 续段端到端一例（事件+落库双侧收敛）+ runReducer 复活→代答落终态
    一例；明确不做=error 段落库 trace 里 running 死步的统一收尾（存量疣、
    continue 段复活/重跑语义待单独批次）。
+   **压缩总结泄漏正文修复（2026-09-12 三批，SSE 契约零改动）**：症状=正文编写
+   run 期间整段「SESSION INTENT/SUMMARY/ARTIFACTS/NEXT STEPS」内部总结稿涌进
+   聊天正文与过程卡旁白（用户实拍全文即证据）。根因实证：langchain
+   `SummarizationMiddleware` 的压缩总结是一次**中间件内部模型调用**，打了
+   `lc_internal_call` 标记并靠 `InternalCallTransformer` 从 run.messages 滤掉——
+   但该过滤器只挂 v2 协议事件路径，我方 `agent.stream(stream_mode=["messages",
+   "updates"])` 走 v1 通道，且该通道下 invoke 也被流式回调拉着逐 token 上抛 →
+   总结全文当 agent.token 流出（英文思考同漏进 reasoning 通道）。触发背景=本地
+   首次真实压缩：模型 profile `deepseek-flash`（lfans 别名）不在 langchain_deepseek
+   注册表（认 deepseek-v4-flash 等、自带 1M 窗口）且用户未配 context_window →
+   deepagents 兜底档「17 万 token 固定触发+保留 6 条」（注册表模型为窗口 85%
+   比例档=85 万）；该会话贯穿 parse→analysis→outline 全程起步 9.8 万，正文准备轮
+   搬入 ~4 万（技能文件/目录 registry/8 路检索结果）后冲线。修复=events.py
+   `iter_stream` messages 分支前置 `_is_internal_call(meta)`（导入上游公开
+   INTERNAL_CALL_METADATA_KEY/internal_call_metadata，进程令牌精确比对防伪造、
+   键在令牌不符放行——与上游同口径）命中即 continue（token+reasoning 都不产出、
+   主/子代理两侧同口径；iter_stream 是 worker 唯一事件源，SSE/旁白封段/最终
+   回复/_last_narration 兜底/落库 trace 一处收口）。压缩机制本身零改动
+   （162K→34K、历史落盘 conversation_history、任务无缝继续，行为正确）。
+   运维两项：重启 sidecar 生效（触发线上的 run 跑完即换）；用户可选在设置给
+   deepseek-flash 配「上下文窗口」（后端为 v4-flash 则 1M）→ 触发线升 85 万，
+   整本任务基本不再压缩。测试：test_events +4（真标记丢弃（含子代理 ns）/
+   无标记照常/伪造令牌放行/**真实 langgraph 流守卫**——过滤押注「v1 messages
+   流的 (chunk, meta) 会带节点内 invoke 的 config metadata（含 lc_internal_call）」
+   这一上游假设，手造 meta 的单测锁不住：mini 图+假流式模型按 _create_summary
+   同款 invoke 形状走真 stream，langgraph 改 metadata 合并/回传当场红）。已知
+   残留=历史 trace 里已封的总结旁白（纯观感，
+   不自动清理）；写作指引/节 docx/ask 文案全查过无别处污染。
+   **产物发布去重与索引重建同步（2026-09-12 四批，SSE 契约零改动，前端零改动）**：
+   动因=用户主诉「目录产生后每轮回复都出现投标目录卡」+ 顺带查出 content_seq 账
+   对不上。DB/日志/恢复点三方对账实证双因：①模型几乎每 run 重调 assemble_tender
+   （真实会话 6 run 里 3 run 共 6 次成功发布，含「再次分析」轮顺手刷新、正文轮改
+   目录底稿后重发——重分析后刷新语义成立不设禁令），task-single 单例 + placeArtifacts
+   按 source.run_id 挂「最近发布回合」→ 卡逐轮后推；②**meta.json 的 source 是创建
+   时化石**（existing 发布路径只写 content.json+索引行，从不回写 meta），启动
+   rebuild 从 meta.source 恢复 last_run_id → 每次重启卡回卷到首次发布回合直到下次
+   发布；同因 content_seq 复位 1（目录编辑器拿它当版本号做外部更新探测，重启即
+   误报「外部已修改」）。修复两件：①publish.py existing 分支**内容未变短路**——
+   `read_content_resolved == content_text` 且显示名相同 → 不发布（seq/emitted/
+   last_run_id/恢复点全不动，pending_emit 捞不到即无 artifact.created），返回 meta
+   附 `_unchanged: True`（仅进程内返回值标记）；assemble_tender/tools-publish 消费
+   标记改「[组装完成]/[发布完成]…未重复发布」文案（统计行照带）。比对是**序列化
+   文本逐字节**：编辑器紧凑序列化 ≠ 发布 indent=2 → 用户编辑过则永不误短路（宁可
+   多发一次，方向保守）。②rebuild_artifact_index 从「清空重插+运行态复位」改
+   **同步语义**：幸存行（磁盘包还在）保留五列运行态 content_seq/updated_at/
+   last_run_id/last_thread_id/emitted，身份字段仍以 meta 为准（手改 meta 可拾起），
+   磁盘新增按默认插入、库有磁盘无删除；全量 DB 丢失回落复位语义。meta.json 刻意
+   不回写（保持创建记录语义，DB 幸存行保留已达目的）。既有 quirk 顺带记录：existing
+   路径本就不回写 display_name（重发布改名=静默忽略，未扩范围）。测试：test_publish
+   +2（noop 三态：同内容+同名→跳过/仅改名→照走完整路径/内容变→照发；rebuild 保留
+   五列+删行+插默认行）+ test_assemble_tender 二次组装短路/输入真变重发 +
+   test_publish_tool 同内容笔记重发消费草稿；sidecar 696 绿+check.sh 全绿。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。
@@ -1084,6 +1162,30 @@ website/         产品官网静态页（与应用代码独立，不进构建/�
   归主线程/零调用）。文件七件套由 FilesystemMiddleware 提供、不受 spec.tools
   控制自动随行。test_body_writer_minimal_toolset 三重守卫：名字∈TOOLS 注册表
   （防拼错=静默丢工具）、9 个禁用名不得「顺手加回」、spec 工具集与常量零漂移。
+- **整本交付态修复批（2026-09-12，用户主诉「最终产物 docx 目录乱」诊断后三批）**
+  ：诊断=骨架没乱（章节顺序/编号与树零错位），乱观感三层——①节文件带修订
+  原样合册（实测 603 处 w:ins+605 处 w:del，未在 Word 接受修订前新旧标题成对
+  交错）；②131 个节内小标题/素材自带标题用 Heading 样式进大纲（导航窗格/
+  自动目录混入杂项、层级常倒挂）；③目录页静态文本只照抄树（正文缺的 6 节
+  照列、无页码无目录域）+合册零警告。修法全在合册侧（整本是派生物、节文件层
+  审阅入口不动）：①`_accept_revisions_inplace` 元素级「接受全部修订」压平
+  （w:del 子树丢/w:ins 剥壳上提/段落标记与 *Change 清除/表格行删除丢弃整行；
+  整段删除修订压平后整段消失——格内唯一段删净时留空段保命，OOXML 硬要求
+  w:tc 至少一个块级子元素，病态素材会让整本被 Word 判损坏，review 后补；
+  批注锚非修订保留）——**整本=交付态**，警示行
+  改「解决全部待办批注」（DocxView）；②`_demote_extra_headings` 拷入面里命中
+  标题样式的段落显式 outlineLvl=9（发标题的树对账已定、拷入面全是树外内容；
+  只改大纲层级视觉零变化，导航窗格只剩章节骨架）；③目录页机械对账（探测+
+  提示不门禁）：`_toc_normalize`（剥编号前缀/点线页码/NFKC）+ `_toc_match`
+  （相等或双向前缀≥4 字）双向 diff 点名「列了整本没有的/整本有未列的」，
+  「目录」「封面」两侧豁免、条目行限 ≤60 字（说明行不进对账）。skill 接线
+  三处：SKILL.md 第 4 步合册行为描述更新+注意事项「目录页条目=实收章节
+  清单」、section-writing.md 通用纪律「节内小标题逐级递进不倒挂」。已知
+  边界（有意接受）：锚在被删修订段上的批注随段消失（=Word 手动接受修订
+  同语义，节文件层批注仍全量保留）；历史整本重合册即得。真实任务重合册
+  验证：0 修订标记/导航骨架 49 个（=程序编号标题全集）/树外摘出 131 个/
+  对账警告精准点名 6 节。测试 test_docx_ops：修订保留测试翻转为交付态断言
+  +树外摘大纲+目录对账三例，sidecar 692 绿+check.sh 全绿。
 - **内存/CPU 积累修复批（2026-09-08，行业实践对齐，零契约改动）**：系统排查
   （前端+sidecar 全量泄漏审计）后十项落地。①活树快照拷贝节流——`set_live_trace`
   500ms 窗口内只记 pending 引用不拷贝、下一个结构性事件或读侧超窗才真拷
