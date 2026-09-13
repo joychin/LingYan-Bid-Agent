@@ -115,7 +115,8 @@ async def lifespan(_app: FastAPI):
     cfg.data_dir().mkdir(parents=True, exist_ok=True)
     # §16 任务分组目录：任务子目录（sources/work/_meta）按需创建，启动不预建
     db.init_db()
-    # meta.json 是权威、索引可重建：启动时全量重扫（运行态复位，emitted 置 1）
+    # meta.json 是权威、索引与磁盘对账同步：幸存行保留运行态列
+    # （content_seq/last_run_id 等，2026-09-12——复位会让产物卡回卷+编辑器误报），磁盘消失的行删除
     from . import artifact_store
 
     rebuilt = db.rebuild_artifact_index(

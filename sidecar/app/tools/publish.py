@@ -138,6 +138,12 @@ def publish_artifact(contract: str, draft_path: str, display_name: str = "") -> 
     except OSError:
         pass
 
+    if meta.get("_unchanged"):
+        return (
+            f"[发布完成] {meta['display_name']}（{meta['artifact_id']}）"
+            "：内容与当前版本一致，未重复发布，当前成果保持不变。"
+        )
+
     suffix = "，已保存为当前成果。"
     if note_fallback:
         suffix = "（未注册类型，已按通用笔记保存）" + suffix

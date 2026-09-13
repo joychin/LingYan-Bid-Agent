@@ -99,8 +99,15 @@ def publish_artifact(
 
         if existing is not None:
             aid = existing["artifact_id"]
-            # 发布即覆盖（文件夹语义）：被覆盖的当前内容先留恢复点，用户可一键恢复上一版
+            # 内容未变短路（2026-09-12）：与当前发布内容逐字节一致且显示名未变 →
+            # 不重复发布（seq/emitted/last_run_id/恢复点全不动，run 收尾 pending_emit
+            # 捞不到 → 无 artifact.created → 聊天产物卡不挪位）。治「模型每轮重
+            # 组装目录」把单例产物卡逐轮后推。_unchanged 仅是返回值标记，不落盘。
             prev = artifact_store.read_content_resolved(aid, existing)
+            if prev == content_text and name == existing["display_name"]:
+                logger.info("artifact 内容未变跳过发布 %s (%s)", aid, contract_key)
+                return {**(artifact_store.read_meta(aid, existing) or {}), "_unchanged": True}
+            # 发布即覆盖（文件夹语义）：被覆盖的当前内容先留恢复点，用户可一键恢复上一版
             if prev is not None:
                 artifact_store.save_restore_point(aid, existing, existing["content_seq"], prev)
             artifact_store.replace_current_content(aid, existing, content_text)

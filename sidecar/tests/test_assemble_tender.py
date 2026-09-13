@@ -198,6 +198,34 @@ def test_reassemble_carries_over_numbering(env):
     assert "numbering" not in fresh
 
 
+def test_reassemble_identical_skips_republish(env):
+    """内容未变短路（2026-09-12）：同输入二次组装 → 未重复发布（seq 不变、无恢复点、
+    消息带「未重复发布」）——治「模型每轮重组装目录」把单例产物卡逐轮后推；
+    上游输入真变 → 照常重发布。"""
+    from app import db
+
+    assert assemble_tender.invoke({}).startswith("[组装发布成功]")
+    arts = [a for a in artifact_store.list_from_disk() if a["kind"] == "tender.directory"]
+    aid = arts[0]["artifact_id"]
+    assert db.get_artifact_index(aid)["content_seq"] == 1
+    assert artifact_store.latest_restore_point(aid, arts[0]) is None
+
+    r2 = assemble_tender.invoke({})
+    assert r2.startswith("[组装完成]"), r2
+    assert "未重复发布" in r2
+    assert "响应文件 1 个" in r2  # 统计行照常带，模型能读概况
+    assert db.get_artifact_index(aid)["content_seq"] == 1
+    assert artifact_store.latest_restore_point(aid, arts[0]) is None
+
+    # 上游 analysis 真变（REQ 原文改字）→ 内容变 → 照常重发布
+    (env["out"] / "analysis" / "requirements-business.md").write_text(
+        BIZ_MD.replace("提供三年免费运维服务", "提供四年免费运维服务"), encoding="utf-8"
+    )
+    r3 = assemble_tender.invoke({})
+    assert r3.startswith("[组装发布成功]"), r3
+    assert db.get_artifact_index(aid)["content_seq"] == 2
+
+
 def _node(name: str, ids: list[str], children: list[dict] | None = None) -> dict:
     return {"目录名称": name, "children": children or [], "来源位置": list(ids)}
 

@@ -100,6 +100,23 @@ def test_publish_tool_requires_task_context(env):
     assert db.list_artifact_index() == []
 
 
+def test_publish_tool_identical_content_skips_republish(env):
+    """内容未变短路（2026-09-12）：同内容重发布 → [发布完成] 未重复发布，seq 不动；
+    草稿照常消费（防「两个产物」以 JSON 残骸复活）。"""
+    runctx.set_run(env["conv"]["id"], "r_same", env["task"]["id"])
+    try:
+        _draft(env)
+        assert publish_tool.invoke({"contract": KEY, "draft_path": "toc.json"}).startswith("[发布成功]")
+        _draft(env)  # 首次发布已消费草稿，重建同内容草稿
+        out = publish_tool.invoke({"contract": KEY, "draft_path": "toc.json"})
+        assert out.startswith("[发布完成]")
+        assert "未重复发布" in out
+        assert not (_drafts_root(env) / "toc.json").exists()
+        assert db.list_artifact_index()[0]["content_seq"] == 1
+    finally:
+        runctx.clear_run()
+
+
 def test_publish_tool_via_guarded_backend_writes_staging(env):
     """回归网（2026-08-31 review blocker）：草稿必须能经 GuardedBackend 写入
     _meta/staging/——fs_guard 曾把 _meta 段级拦死，而本工具指示模型把草稿写到

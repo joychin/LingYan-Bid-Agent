@@ -1069,33 +1069,48 @@ def mark_emitted(aid: str) -> None:
 
 
 def rebuild_artifact_index(manifests: list[dict], content_path_of) -> int:
-    """用磁盘 meta.json 全量重建索引（meta 权威、索引可重建）。
+    """用磁盘 meta.json 与库内现存行做同步（meta 是身份权威，索引可重建）。
 
-    启动时调用：清空后重扫。运行态复位（content_seq=1、emitted=1——启动时无消费者，
-    残留 emitted=0 只会让 run 边界空转，直接置 1）。旧包 meta.json 里残留的
-    state/confirmed_at 键（两态时代化石）被显式字段映射天然忽略。
-    last_run_id/last_thread_id 从 meta.source 恢复：索引是 last_run_id 的唯一宿主
-    （meta.json 有 source），丢了它聊天产物卡无法按发布 run 归位（2026-09-06）。
-    content_path_of: meta -> content_path 的求值函数（注入避免依赖 store）。
-    返回重建行数。
+    启动时调用。2026-09-12 起不再「清空重插 + 运行态复位」：幸存行（磁盘包还在）
+    保留五列运行态 content_seq/updated_at/last_run_id/last_thread_id/emitted——
+    此前 content_seq 恒复位 1（目录编辑器拿 content_seq 当版本号做外部更新探测，
+    重启即误报「外部已修改」），last_run_id 回卷到 meta.source 的创建 run（meta
+    从不在重发布时回写 source，重启后聊天产物卡跳回首次发布回合直到下次发布）。
+    身份字段（display_name/content_path/cardinality 等）仍以 meta 为准，手改
+    meta.json 会被拾起；磁盘新增的包按现状默认插入；库有而磁盘无的行删除。
+    全量 DB 丢失时无幸存行可保留，回落复位语义（seq=1、emitted=1、last_run
+    取 meta.source）。旧包 meta.json 残留的 state/confirmed_at 键（两态时代
+    化石）被显式字段映射天然忽略。content_path_of: meta -> content_path 的
+    求值函数（注入避免依赖 store）。返回同步后的行数。
     """
-    rows = []
-    for m in manifests:
-        schema = m.get("schema", {})
-        source = m.get("source") or {}
-        rows.append(
-            (
-                m["artifact_id"], m.get("task_id"), m.get("conversation_id"), m["kind"],
-                schema.get("id", ""), schema.get("version", 1),
-                m.get("cardinality", "task-single"), m.get("display_name", ""),
-                content_path_of(m), 1,
-                m.get("created_at", _now()), source.get("run_id"), source.get("thread_id"),
-                1,
-            )
-        )
+    cols = _INDEX_COLS.split(", ")
     conn = _conn()
     try:
+        existing = {
+            r["artifact_id"]: dict(r)
+            for r in conn.execute(f"SELECT {_INDEX_COLS} FROM artifact_index")
+        }
         conn.execute("DELETE FROM artifact_index")
+        rows = []
+        for m in manifests:
+            schema = m.get("schema", {})
+            source = m.get("source") or {}
+            rec = {
+                "artifact_id": m["artifact_id"], "task_id": m.get("task_id"),
+                "conversation_id": m.get("conversation_id"), "kind": m["kind"],
+                "schema_id": schema.get("id", ""), "schema_version": schema.get("version", 1),
+                "cardinality": m.get("cardinality", "task-single"),
+                "display_name": m.get("display_name", ""),
+                "content_path": content_path_of(m),
+                "content_seq": 1, "updated_at": m.get("created_at", _now()),
+                "last_run_id": source.get("run_id"), "last_thread_id": source.get("thread_id"),
+                "emitted": 1,
+            }
+            prev = existing.pop(rec["artifact_id"], None)
+            if prev is not None:
+                for col in ("content_seq", "updated_at", "last_run_id", "last_thread_id", "emitted"):
+                    rec[col] = prev[col]
+            rows.append(tuple(rec[c] for c in cols))
         conn.executemany(
             f"INSERT INTO artifact_index({_INDEX_COLS}) "
             f"VALUES ({','.join('?' * _NUM_INDEX_COLS)})",

@@ -524,9 +524,16 @@ def assemble_tender() -> str:
             conversation_id=ctx.conversation_id if ctx else None,
         )
 
+        # 内容未变短路（publish 层判定）：未重复发布，seq/事件/恢复点均无变化
+        unchanged = bool(manifest.get("_unchanged"))
+        head = (
+            f"[组装完成] 投标目录（{manifest['artifact_id']}）："
+            if unchanged
+            else f"[组装发布成功] 投标目录（{manifest['artifact_id']}）："
+        )
         parts = [
-            f"[组装发布成功] 投标目录（{manifest['artifact_id']}）："
-            f"响应文件 {len(docs)} 个 / 目录节点 {total} 个 / "
+            head
+            + f"响应文件 {len(docs)} 个 / 目录节点 {total} 个 / "
             f"来源登记 MAND={len(mand_reg)} TPL={len(tpl_reg)} REQ={len(req_reg)} SCORE={len(score_reg)}",
         ]
         if fold_count:
@@ -534,10 +541,15 @@ def assemble_tender() -> str:
                 f"已按最深承载折叠 {fold_count} 处父子重复血缘（父级无需重复标注子级已答要求）"
             )
         parts.extend(f"⚠️ {w}" for w in warnings)
+        tail = (
+            "目录内容与当前发布版本一致，未重复发布（任务内唯一，后续阶段经 read_artifact 消费）。"
+            if unchanged
+            else "已发布为投标目录成果（任务内唯一，后续阶段经 read_artifact 消费）。"
+        )
         parts.extend(
             [
                 f"JSON 副本：{out_root.relative_to(workspace_dir())}/outline/tender-response-docs.json",
-                "已发布为投标目录成果（任务内唯一，后续阶段经 read_artifact 消费）。",
+                tail,
             ]
         )
         if dangling_ids:

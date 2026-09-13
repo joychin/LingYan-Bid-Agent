@@ -111,6 +111,73 @@ def test_list_from_disk_skips_conversation_history(env):
     assert artifact_store.list_from_disk() == []
 
 
+def test_publish_identical_content_noop(env):
+    """内容未变短路（2026-09-12）：同内容+同名重发布不产生新版本——seq/emitted/
+    last_run_id/恢复点全不动（run 收尾 pending_emit 捞不到 → 无 artifact.created →
+    聊天产物卡不挪位）；仅改显示名或内容 → 照常发布。"""
+    m1 = _pub(env, _content(), source={"skill": "t", "run_id": "r_1"})
+    db.mark_emitted(m1["artifact_id"])
+
+    m2 = _pub(env, _content(), source={"skill": "t", "run_id": "r_2"})
+    assert m2.get("_unchanged") is True
+    row = db.get_artifact_index(m1["artifact_id"])
+    assert row["content_seq"] == 1
+    assert row["emitted"] == 1
+    assert row["last_run_id"] == "r_1"  # 未随 r_2 更新——卡不挪位的关键
+    assert db.pending_emit("r_2") == []
+    assert artifact_store.latest_restore_point(m1["artifact_id"], m1) is None
+
+    # 仅改显示名（内容相同）→ 不短路、走完整发布路径（保守：输入有差就不省）；
+    # 注：existing 路径本就不回写 display_name（重发布改名=既有静默忽略，本批不动）
+    m3 = _pub(env, _content(), display_name="改名", source={"skill": "t", "run_id": "r_2"})
+    assert "_unchanged" not in m3
+    row = db.get_artifact_index(m1["artifact_id"])
+    assert row["content_seq"] == 2
+    assert row["last_run_id"] == "r_2"
+
+    # 内容变化 → 照常发布
+    m4 = _pub(env, _content("改版"), source={"skill": "t", "run_id": "r_3"})
+    assert "_unchanged" not in m4
+    assert db.get_artifact_index(m1["artifact_id"])["content_seq"] == 3
+
+
+def test_rebuild_preserves_runtime_state(env):
+    """启动重建同步语义（2026-09-12）：幸存行保留 content_seq/updated_at/last_run_id/
+    last_thread_id/emitted，不回卷到 meta.source 的创建 run（meta 从不在重发布时回写
+    source——旧重建语义让聊天产物卡跳回首次发布回合、编辑器把 content_seq 当版本号
+    探测外部更新也被重启归零误报）；库有磁盘无的行删除、磁盘有库无的行默认插入。"""
+    import shutil
+
+    to_path = lambda md: str(artifact_store.content_path(md["artifact_id"], md))  # noqa: E731
+    m1 = _pub(env, _content("初版"), source={"skill": "t", "thread_id": env["conv"]["id"], "run_id": "r_1"})
+    db.mark_emitted(m1["artifact_id"])
+    _pub(env, _content("新版"), source={"skill": "t", "thread_id": env["conv"]["id"], "run_id": "r_2"})
+    aid = m1["artifact_id"]
+    before = db.get_artifact_index(aid)
+    assert (before["content_seq"], before["emitted"], before["last_run_id"]) == (2, 0, "r_2")
+    # meta.source 是创建时化石（r_1）——重建不得回卷
+    assert artifact_store.read_meta(aid, m1)["source"]["run_id"] == "r_1"
+
+    assert db.rebuild_artifact_index(artifact_store.list_from_disk(), to_path) == 1
+    after = db.get_artifact_index(aid)
+    assert after["content_seq"] == 2
+    assert after["emitted"] == 0
+    assert after["last_run_id"] == "r_2"
+    assert after["last_thread_id"] == before["last_thread_id"]
+    assert after["updated_at"] == before["updated_at"]
+
+    # 库无磁盘有（索引被手删/全新 DB）→ 默认插入：seq=1、emitted=1、last_run 从 meta.source 兜底
+    db.delete_artifact_index(aid)
+    assert db.rebuild_artifact_index(artifact_store.list_from_disk(), to_path) == 1
+    fresh = db.get_artifact_index(aid)
+    assert (fresh["content_seq"], fresh["emitted"], fresh["last_run_id"]) == (1, 1, "r_1")
+
+    # 磁盘包删除 → 行删除
+    shutil.rmtree(artifact_store.artifact_dir(aid, m1))
+    assert db.rebuild_artifact_index(artifact_store.list_from_disk(), to_path) == 0
+    assert db.get_artifact_index(aid) is None
+
+
 def test_rebuild_index_from_metas(env):
     m = _pub(env, _content(), source={"skill": "t", "thread_id": env["conv"]["id"], "run_id": "r_1"})
     db.mark_emitted(m["artifact_id"])
