@@ -15,6 +15,17 @@ from tests.util import init_env
 
 _KEY = "tender.directory/tender-response-docs@1"
 
+# 内联写作方法论段的起始标记（dispatch_enrich 的固定抬头）。方法论文档自身含
+# 「REQ/MAND/SCORE/TPL-xx 是内部对账编号，一个都不写进正文」这类禁令句与
+# 「可用素材块」「公司材料与缺口」等段名，故「某数据块未出现」「编号零出现」
+# 这类断言必须只看程序拼装的数据部分，不能扫全串（否则被方法论自身措辞误伤）。
+_SKILL_MARK = "写作纪律（完整方法论已在下方给出"
+
+
+def _data_part(out: str) -> str:
+    """派发说明里程序拼装的数据部分（截去尾部内联的写作方法论）。"""
+    return out.split(_SKILL_MARK)[0]
+
 
 def _dir_content():
     return {
@@ -112,7 +123,51 @@ def test_thin_dispatch_enriched_with_all_blocks(env):
     assert "兄弟节开头摘要" in out and "门户与工作台" in out
     # 派发契约：编号零出现
     for tag in ("REQ-", "SCORE-", "MAND-", "TPL-"):
-        assert tag not in out
+        assert tag not in _data_part(out)
+
+
+def test_writer_skill_inlined_with_no_reread_hint(env):
+    """写作方法论内联（2026-09-12）：写手子代理无 SkillsMiddleware，此前每节都要自己
+    read_file 读一遍 section-writing.md（实测全库 215 次、205 次在子代理）；改为主代理
+    派发时附全文 + 明确「不要再读」，省一次往返与一份回灌。"""
+    tid = _seed(env)
+    out = build_enriched_description("写 3.1 项目理解", tid)
+    assert out is not None
+    assert "写作纪律" in out and "不要再 read_file" in out
+    # 内联的是方法论正文本身（标题为稳定锚点），不是路径引用
+    assert "# 逐节写作细则（素材先行）" in out
+    assert "## 素材修订（默认模式）" in out
+
+
+def test_writer_skill_inline_degrades_when_missing(env, monkeypatch):
+    """读不到方法论只损失该段，其余拼装照常（降级绝不打断派发）。"""
+    tid = _seed(env)
+    monkeypatch.setattr("app.dispatch_enrich._skill_text", lambda: None)
+    out = build_enriched_description("写 3.1 项目理解", tid)
+    assert out is not None
+    assert "写作纪律" not in out
+    assert f"输出路径：{tid}/work/body/3.1 项目理解与需求分析.docx" in out
+
+
+def test_skill_text_cached_across_calls(env):
+    """进程内缓存：同 run 多次派发复用同一字符串（单 run 内字节稳定，前缀缓存无伤）。"""
+    from app import dispatch_enrich
+
+    dispatch_enrich._skill_cache = None
+    first = dispatch_enrich._skill_text()
+    assert first and "逐节写作细则" in first
+    assert dispatch_enrich._skill_cache is first  # 二次调用命中缓存
+    assert dispatch_enrich._skill_text() is first
+
+
+def test_skill_inline_no_internal_ids(env):
+    """程序拼装的数据部分零编号（派发契约：REQ/MAND/SCORE/TPL 不进写手语境）。
+    内联方法论自身含一句「编号一个都不写进正文」的禁令，故只扫数据部分。"""
+    tid = _seed(env)
+    out = build_enriched_description("写 3.1 项目理解", tid)
+    assert out is not None
+    for tag in ("REQ-", "SCORE-", "MAND-", "TPL-"):
+        assert tag not in _data_part(out)
 
 
 def test_abbreviation_needle_matches(env):
@@ -194,7 +249,7 @@ def test_material_card_resolved_from_guide(env):
     assert "来源文件：历史标书-某政务项目.docx" in out
     assert "id：blk_abc123def456" in out
     assert "备注：通用运维章节，改项目名即可" in out
-    assert "SCORE-" not in out  # 派发契约：编号零出现
+    assert "SCORE-" not in _data_part(out)  # 派发契约：编号零出现
 
 
 def test_material_section_absent_or_stale(env):
@@ -204,7 +259,7 @@ def test_material_section_absent_or_stale(env):
     # 3.1 行素材列=—：无块段
     out = build_enriched_description("写 3.1 项目理解", tid)
     assert out is not None
-    assert "可用素材块" not in out
+    assert "可用素材块" not in _data_part(out)
     # 3.2 行素材列=blk_abc123def456 但素材库无此块（未 seed）：失效提示
     out = build_enriched_description("写 3.2 总体设计", tid)
     assert out is not None
@@ -241,7 +296,7 @@ def test_gap_column_empty_not_forwarded(env):
     tid = _seed(env)
     out = build_enriched_description("写 3.1 项目理解", tid)
     assert out is not None
-    assert "公司材料与缺口" not in out
+    assert "公司材料与缺口" not in _data_part(out)
 
 
 def test_gap_column_bare_ids_stripped(env):
@@ -286,7 +341,7 @@ def test_multi_volume_path_and_format_note(env):
     assert f"输出路径：{task['id']}/work/body/商务技术册/投标函.docx" in out
     assert "- 投标函格式见附件二（出处：第三章 附件二）" in out
     assert "本节含格式件" in out
-    assert "TPL-" not in out
+    assert "TPL-" not in _data_part(out)
 
 
 def test_multi_volume_path_sanitizes_volume_name(env):
@@ -379,7 +434,7 @@ def test_source_location_emitted_for_format_section(env):
     assert out is not None
     assert "原件定位：谈判文件.docx L666-L689（附件14：承诺书）" in out
     for tag in ("REQ-", "SCORE-", "MAND-", "TPL-"):
-        assert tag not in out
+        assert tag not in _data_part(out)
 
 
 def test_source_location_ambiguous_across_files(env):

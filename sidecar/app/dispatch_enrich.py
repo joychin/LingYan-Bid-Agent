@@ -32,7 +32,7 @@ import logging
 import re
 from datetime import date
 
-from . import artifact_store, db
+from . import artifact_store, config, db
 from .tools import body_contract, docx_ops
 
 # 注意：assemble_tender 在 tools/__init__ 里被同名 @tool 对象遮蔽，私有函数须走模块路径
@@ -50,6 +50,35 @@ _SIBLING_HEAD_CHARS = 200
 _ID_RE = re.compile(r"^(?:MAND|TPL|REQ|SCORE)-\d+$", re.IGNORECASE)
 _WRAPPER_RE = re.compile(r"^(?:重写|续写|新写|撰写|补写|写)\s*")
 _TAIL_RE = re.compile(r"(?:的)?(?:节|章节|小节|正文)$")
+
+# 写作纪律内联（2026-09-12）：写手子代理 spec 无 skills 字段（deepagents 的
+# SkillsMiddleware 只挂主代理），故每个写手开局都要 read_file 读一遍
+# section-writing.md——实测全库该文件被读 215 次、其中 205 次在子代理，每次都是一个
+# 完整往返 + 约 3.2K token 回灌。改为主代理派发时把这份方法论直接附进任务描述。
+# 进程内缓存：文件内容部署期固定（改技能需重启），跨派发复用同一字符串
+# （单 run 内字节稳定，遵守前缀缓存铁律）。
+_SKILL_DOC = ("tender-body", "references/section-writing.md")
+_skill_cache: str | None = None
+
+
+def _skill_text() -> str | None:
+    """写手方法论全文（section-writing.md）；不可用时返回 None（调用方跳过该段）。
+
+    读失败只损失这一段内联，绝不影响其余拼装（与 _material_lines 等降级同款）。
+    """
+    global _skill_cache
+    if _skill_cache is not None:
+        return _skill_cache
+    try:
+        path = config.skills_source_dir().joinpath(*_SKILL_DOC)
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return None
+        _skill_cache = text
+        return text
+    except Exception:
+        logger.debug("写手方法论内联读取失败，跳过该段", exc_info=True)
+        return None
 
 
 def _needle(desc: str) -> str:
@@ -405,6 +434,15 @@ def build_enriched_description(desc: str, task_id: str) -> str | None:
         if sibs:
             out.append("兄弟节开头摘要（避免重复展开）：")
             out.extend(sibs)
+        # 写作方法论内联：写手子代理没有 SkillsMiddleware，此前每节都要自己
+        # read_file 读一遍（205 次实测）；这段已在任务描述里，开局不必再读。
+        skill = _skill_text()
+        if skill:
+            out.append(
+                "写作纪律（完整方法论已在下方给出——**不要再 read_file "
+                "section-writing.md**，直接照此执行）："
+            )
+            out.append(skill)
         return "\n".join(out)
     except Exception:
         logger.debug("派发说明拼装失败，放行原文（task=%s）", task_id, exc_info=True)
