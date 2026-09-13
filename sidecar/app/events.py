@@ -15,6 +15,10 @@ import logging
 import re
 from typing import Iterator
 
+from langchain.agents.middleware.internal_call_transformer import (
+    INTERNAL_CALL_METADATA_KEY,
+    internal_call_metadata,
+)
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
 logger = logging.getLogger(__name__)
@@ -179,6 +183,22 @@ def _chunk_reasoning(msg: AIMessageChunk) -> str:
             elif isinstance(b, dict) and b.get("type") in ("text", "reasoning_text"):
                 parts.append(b.get("text", "") or "")
     return "".join(parts)
+
+
+def _is_internal_call(meta) -> bool:
+    """中间件内部模型调用（SummarizationMiddleware 压缩总结等）判定。
+
+    langchain 给这类调用打 lc_internal_call 标记（config metadata），配套的
+    InternalCallTransformer 只在 v2 协议事件路径上把它从 run.messages 滤掉；
+    本层消费的是 v1 messages 通道（(chunk, metadata) 元组、invoke 也会被回调
+    机制拉着走流式），过滤器够不着——不过滤会把整段「SESSION INTENT/SUMMARY/…」
+    压缩总结当正文 token 流给用户（2026-09-12 实证）。标记值是进程内随机令牌，
+    与上游同口径精确比对：键存在但令牌不符视为普通调用放行（防伪造语义不变）。
+    """
+    if not isinstance(meta, dict):
+        return False
+    expected = internal_call_metadata().get(INTERNAL_CALL_METADATA_KEY)
+    return meta.get(INTERNAL_CALL_METADATA_KEY) == expected
 
 
 def _deep_unescape(value):
@@ -398,6 +418,9 @@ def iter_stream(stream: Iterator, rid: str | None = None) -> Iterator[tuple[str,
         if mode == "messages":
             msg, _meta = chunk if isinstance(chunk, tuple) else (chunk, None)
             if isinstance(msg, AIMessageChunk):
+                if _is_internal_call(_meta):
+                    # 内部调用（压缩总结）不进正文/思考流；主/子代理两侧同口径
+                    continue
                 reason = _chunk_reasoning(msg)
                 if reason:
                     yield ("reasoning", {"text": reason, "agent_id": agent_id})

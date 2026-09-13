@@ -247,7 +247,11 @@ def test_subagent_specs():
         assert ref in writer["system_prompt"]
     assert "禁止调用 ask_human" in writer["system_prompt"]
     body = specs["tender-body-writer"]
-    assert "section-writing.md" in body["system_prompt"]  # 素材先行方法论单一真源
+    # 方法论单一真源=section-writing.md，但 2026-09-12 起由主代理派发时内联
+    # （dispatch_enrich._skill_text），写手 prompt 只留「已随任务描述给出、不要再读」
+    # 的指引——全库该文件此前被 215 次读取、205 次在子代理，每节白付一次往返。
+    assert "section-writing.md" in body["system_prompt"]  # 指出单一真源
+    assert "不要再 read_file" in body["system_prompt"] or "不要 read_file" in body["system_prompt"]
     # 素材复用纪律（2026-09-10 收口回归线）：派发已给块清单不再重检索素材库
     assert "直接采用" in body["system_prompt"]
     assert "不再调用 search_references" in body["system_prompt"]
@@ -797,7 +801,7 @@ def test_dispatch_enrich_middleware_wired():
     assert agent_mod._BODY_WRITER_NAME == "tender-body-writer"
     writer = next(s for s in agent_mod.SUBAGENTS if s["name"] == agent_mod._BODY_WRITER_NAME)
     prompt = writer["system_prompt"]
-    for kw in ("禁止调用", "check_pipeline_state", "禁止读 写作指引", "同一条消息里并发读完"):
+    for kw in ("禁止调用", "check_pipeline_state", "禁止读 写作指引", "一次读齐"):
         assert kw in prompt, f"写手 prompt 缺少开局瘦身禁令关键词：{kw}"
     # 派发拼装的目标必须确实是 SUBAGENTS 里的名字（防止常量与字面量漂移）
     assert any(

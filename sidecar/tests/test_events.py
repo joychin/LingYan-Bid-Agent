@@ -1,5 +1,9 @@
 """iter_stream 对 todos 的提取与去重（todo.updated 只发变化），以及 reasoning 增量提取。"""
 
+from langchain.agents.middleware.internal_call_transformer import (
+    INTERNAL_CALL_METADATA_KEY,
+    internal_call_metadata,
+)
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
@@ -150,6 +154,121 @@ def test_reasoning_content_list_of_blocks():
     )
     kinds = list(iter_stream(_messages([chunk])))
     assert kinds == [("reasoning", {"text": "推理片段", "agent_id": None})]
+
+
+# ---------- 中间件内部模型调用（压缩总结）不得流进正文/思考（2026-09-12 泄漏修复） ----------
+
+
+def _internal_meta() -> dict:
+    """langchain 内部调用标记：与 SummarizationMiddleware 打的标记同源同值。"""
+    return {"langgraph_node": "model", **internal_call_metadata()}
+
+
+def test_internal_call_chunks_not_streamed():
+    """带内部调用标记的 chunk（token+reasoning）不产出任何事件——压缩总结
+    （SESSION INTENT/SUMMARY/…）不得当正文/思考直播给用户；子代理 ns 同口径。"""
+    chunks = [
+        ((), "messages", (
+            AIMessageChunk(
+                content="## SESSION INTENT\n用户要编制标书……",
+                additional_kwargs={"reasoning_content": "Let me construct the summary."},
+            ),
+            _internal_meta(),
+        )),
+        (("tools:t1",), "messages", (
+            AIMessageChunk(
+                content="",
+                additional_kwargs={"reasoning_content": "subagent internal"},
+            ),
+            _internal_meta(),
+        )),
+    ]
+    assert list(iter_stream(iter(chunks))) == []
+
+
+def test_untagged_chunks_stream_normally():
+    """普通调用的元数据（无内部标记键）照常产出，不受过滤影响。"""
+    items = [
+        ((), "messages", (AIMessageChunk(content="正文", additional_kwargs={"reasoning_content": "思考"}), {"langgraph_node": "model"})),
+        ((), "messages", (AIMessageChunk(content="继续"), None)),
+    ]
+    assert list(iter_stream(iter(items))) == [
+        ("reasoning", {"text": "思考", "agent_id": None}),
+        ("token", "正文"),
+        ("token", "继续"),
+    ]
+
+
+def test_spoofed_marker_token_mismatch_streams():
+    """标记键存在但令牌不符（伪造形态）：与上游防伪同口径放行。"""
+    items = [
+        ((), "messages", (
+            AIMessageChunk(content="正文"),
+            {INTERNAL_CALL_METADATA_KEY: "not-the-real-token"},
+        )),
+    ]
+    assert list(iter_stream(iter(items))) == [("token", "正文")]
+
+
+def test_internal_call_marker_survives_real_graph_stream():
+    """守卫（上游假设）：过滤修复真正押注的是「图节点内带 lc_internal_call
+    标记的模型调用，其 chunk 会原样携带标记出现在 messages 流的 (chunk, meta)
+    元组里」——langchain 的 InternalCallTransformer 只挂 v2 事件路径够不着
+    v1 流，若 langgraph 升级改变 metadata 的合并/回传，泄漏会静默复发且上面
+    手工构造 meta 的测试仍绿。本例走真实 langgraph：假流式模型 + mini 图，
+    节点按 SummarizationMiddleware._create_summary 的同款 invoke 形状
+    （config metadata 携 internal_call_metadata()）调模型——与安装版
+    langchain.agents.middleware.summarization 逐字对齐。标记调用产出必须为
+    空、无标记对照正常流出。"""
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    class _StreamingProbeModel(BaseChatModel):
+        """模拟 streaming 档的真模型：invoke 内部走流式回调（总结漏出的路径）。"""
+
+        @property
+        def _llm_type(self) -> str:
+            return "probe"
+
+        def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+            for txt in ("SESSION SUMMARY ", "PART2"):
+                chunk = AIMessageChunk(content=txt)
+                if run_manager:
+                    run_manager.on_llm_new_token(txt, chunk=chunk)
+                yield ChatGenerationChunk(message=chunk)
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            final = None
+            for gen in self._stream(messages, stop=stop, run_manager=run_manager, **kwargs):
+                final = gen if final is None else final + gen
+            assert final is not None
+            return ChatResult(generations=[ChatGeneration(message=final.message)])
+
+    model = _StreamingProbeModel()
+
+    def build(marker: bool | None):
+        def node(state):
+            meta = (
+                {"lc_source": "summarization", **internal_call_metadata()}
+                if marker else {"langgraph_node": "model"}
+            )
+            return {"messages": [model.invoke(state["messages"], config={"metadata": meta})]}
+
+        builder = StateGraph(MessagesState)
+        builder.add_node("summarize", node)
+        builder.add_edge(START, "summarize")
+        builder.add_edge("summarize", END)
+        return builder.compile()
+
+    marked = build(marker=True).stream(
+        {"messages": [("user", "hi")]}, stream_mode=["messages", "updates"]
+    )
+    assert list(iter_stream(marked)) == []  # 压缩总结不得当正文直播
+    plain = build(marker=False).stream(
+        {"messages": [("user", "hi")]}, stream_mode=["messages", "updates"]
+    )
+    assert list(iter_stream(plain)) == [("token", "SESSION SUMMARY "), ("token", "PART2")]
 
 
 # ---------- 中间件伪节点的历史重放不得翻译成工具事件（2026-09-08 跨 run 重放修复） ----------
