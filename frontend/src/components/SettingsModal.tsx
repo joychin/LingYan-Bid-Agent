@@ -158,12 +158,14 @@ interface VendorPreset {
   baseUrl: string
   mono: string
   color: string
-  models: { name: string; imageSupport: boolean; contextWindow?: number }[]
+  models: { name: string; imageSupport: boolean }[]
 }
 
 /** 上下文窗口预设档（值=token 数；null=自动/未知）。下限 256K（2026-09-08 用户拍板，
- *  更小的档位在标书场景只有误配风险）。「自动」= 不干预压缩触发档位：langchain 注册表
- *  认识模型名（deepseek 系等）走窗口 85% 比例档，不认识的走保守固定线（17 万 token）+超限自愈 */
+ *  更小的档位在标书场景只有误配风险）。「自动」= 四层取值：用户未手选时按 langchain
+ *  注册表（DeepSeek 系）→ 社区模型库缓存（models.dev，设置动作时刷新）→ 17 万保守
+ *  线起步，撞到服务商上限后自动按报错披露的真实窗口校准。静态厂商建议值机制已删
+ *  （2026-09-13 拍板：过期值有害，且厂商每次更新窗口都得跟版发程序）。 */
 const CONTEXT_WINDOW_OPTIONS: { value: number | null; label: string }[] = [
   { value: null, label: '自动（默认）' },
   { value: 256000, label: '256K' },
@@ -199,9 +201,9 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'K',
     color: '#16191E',
     models: [
-      { name: 'kimi-k3', imageSupport: true, contextWindow: 256000 },
-      { name: 'kimi-k2-thinking', imageSupport: false, contextWindow: 256000 },
-      { name: 'kimi-k2.7-code', imageSupport: false, contextWindow: 256000 },
+      { name: 'kimi-k3', imageSupport: true },
+      { name: 'kimi-k2-thinking', imageSupport: false },
+      { name: 'kimi-k2.7-code', imageSupport: false },
     ],
   },
   {
@@ -212,7 +214,7 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'A',
     color: '#FF6A00',
     models: [
-      { name: 'qwen3-max', imageSupport: false, contextWindow: 256000 },
+      { name: 'qwen3-max', imageSupport: false },
       { name: 'qwen-plus', imageSupport: false },
       { name: 'qwen3-vl-plus', imageSupport: true },
     ],
@@ -225,8 +227,8 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'Z',
     color: '#3859FF',
     models: [
-      { name: 'glm-5.1', imageSupport: false, contextWindow: 256000 },
-      { name: 'glm-5', imageSupport: false, contextWindow: 256000 },
+      { name: 'glm-5.1', imageSupport: false },
+      { name: 'glm-5', imageSupport: false },
       { name: 'glm-4.6v', imageSupport: true },
     ],
   },
@@ -238,8 +240,8 @@ const VENDOR_PRESETS: VendorPreset[] = [
     mono: 'V',
     color: '#1664FF',
     models: [
-      { name: 'doubao-seed-1.6', imageSupport: true, contextWindow: 256000 },
-      { name: 'doubao-seed-1.6-flash', imageSupport: true, contextWindow: 256000 },
+      { name: 'doubao-seed-1.6', imageSupport: true },
+      { name: 'doubao-seed-1.6-flash', imageSupport: true },
     ],
   },
   {
@@ -1073,16 +1075,6 @@ function ModelDialog({
     }
   }
 
-  /** 展开高级选项那一刻预填厂商建议窗口值（仅草稿层，点保存才落库；已手动选过不跟随）。
-   *  不在切模型/切厂商时跟随，保持「用户看到的选择即他所做的选择」。 */
-  const changeAdvOpen = (open: boolean) => {
-    setAdvOpen(open)
-    if (open && contextWindow == null) {
-      const entry = preset.models.find((m) => m.name === model.trim())
-      if (entry?.contextWindow) setContextWindow(entry.contextWindow)
-    }
-  }
-
   /** 保存模型配置（+ 可选的新 Key）。返回错误文案，null=成功（不关弹窗，由调用方决定） */
   const persist = async (): Promise<string | null> => {
     const draft: LocalModel = {
@@ -1318,7 +1310,7 @@ function ModelDialog({
           <div className="border-t border-line pt-4">
             <button
               type="button"
-              onClick={() => changeAdvOpen(!advOpen)}
+              onClick={() => setAdvOpen(!advOpen)}
               aria-expanded={advOpen}
               className="flex w-full cursor-pointer items-center gap-1.5 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
             >
@@ -1330,7 +1322,9 @@ function ModelDialog({
                 <Field label="上下文窗口">
                   <ContextWindowSelect value={contextWindow} onChange={setContextWindow} />
                   <p className="text-xs leading-relaxed text-muted-foreground">
-                    模型单次能读入的最大 token 量，影响长会话自动压缩的触发时机。不清楚请保持「自动」；选大了会晚于真实窗口、依赖超限自动恢复，选小了会过早压缩上下文。
+                    模型单次能读入的最大 token 量，影响长会话自动压缩的触发时机。不清楚请保持「自动」：
+                    程序会自动识别（社区模型库数据 + 撞到服务商上限时自动校准），网关自定义模型名建议手动选档。
+                    选大了会晚于真实窗口、多一次失败重试，选小了会过早压缩上下文。
                   </p>
                 </Field>
               </div>

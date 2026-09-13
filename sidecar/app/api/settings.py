@@ -14,9 +14,22 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from .. import config as cfg
+from .. import model_registry
 from ..agent import rebuild_agent
 
 router = APIRouter()
+
+
+def _kick_registry_refresh() -> None:
+    """用户主动联网动作（保存模型/测试连接/获取模型列表）后台刷新社区模型库缓存。
+
+    fire-and-forget：不阻塞端点、失败静默（model_registry 内部有 TTL 守卫与
+    旧缓存保留）；run 路径零联网的铁律不受影响——只有设置动作会走到这里。
+    """
+    try:
+        asyncio.create_task(asyncio.to_thread(model_registry.maybe_refresh))
+    except RuntimeError:
+        pass  # 无事件循环的边缘调用环境：放弃刷新，缓存下次再补
 
 
 class ModelBody(BaseModel):
@@ -123,6 +136,7 @@ async def put_settings_models(body: ModelsBody):
         else None
     )
     cfg.save_models_and_roles(normalized, body.default_model, roles)
+    _kick_registry_refresh()
     # 模型列表变了：清 agent 缓存（按 profile 惰性重建，毫秒级；无 key 的 profile 在
     # 实际被选用时才报错，不影响其他 profile）
     await rebuild_agent()
@@ -388,6 +402,7 @@ async def test_model_draft(body: DraftTestBody):
     if not api_key:
         raise HTTPException(status_code=400, detail="未提供 API Key——请填写 Key，或复用同厂商已配置的 Key")
     ok, message, latency_ms = await asyncio.to_thread(_ping_model_sync, base_url, model, api_key)
+    _kick_registry_refresh()
     image_ok: bool | None = None
     image_message: str | None = None
     if ok and body.with_image:
@@ -412,6 +427,7 @@ async def available_models(body: AvailableModelsBody):
     if not api_key:
         raise HTTPException(status_code=400, detail="未提供 API Key——请先填写 Key")
     ok, models, err = await asyncio.to_thread(_list_models_sync, base_url, api_key)
+    _kick_registry_refresh()
     return {"ok": ok, "models": models, "error": None if ok else err}
 
 
