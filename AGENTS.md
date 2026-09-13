@@ -16,8 +16,9 @@ manifest 同步）——`skills/` 方法论与提示词一并受其约束；唯�
 src-tauri/       Tauri 2 壳（Rust）：只做窗口、sidecar 进程管理、IPC command。零业务逻辑
 frontend/        React 19 + Vite + Tailwind（shadcn 风格手写组件）；只通过 HTTP+SSE 与 sidecar 通信
 sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
-website/         产品官网静态页（与应用代码独立，不进构建/打包）
 ```
+
+（产品官网已迁出本仓，独立工程维护；原 `website/` 静态页见 git 历史 6643b4f。）
 
 三条铁律：
 
