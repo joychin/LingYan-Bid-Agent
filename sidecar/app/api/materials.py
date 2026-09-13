@@ -161,12 +161,35 @@ async def list_blocks(q: str | None = None):
 
 
 @router.get("/materials/blocks/{bid}/content")
-async def get_block_content(bid: str):
-    """块内容预览：分节切片（区间标签 + 正文），卡片展开区数据源。"""
+async def get_block_content(bid: str, preview: int | None = None):
+    """块内容预览：分节切片（区间标签 + 正文），卡片展开区数据源。
+
+    preview（可选，2026-09-13 内存修复批）：行内预览预算（字符）——设定时
+    sections 正文按累计预算截断（合计 ≤ preview、预算耗尽即停），chars 仍为
+    真实总字数；供写作指引表等「每行只显示百来字」的消费方避免整块拉全文
+    （几十个块的全量内容同时驻留内存）。不传行为不变。
+    """
     content = mlib.block_content(bid)
     if not content:
         raise HTTPException(status_code=404, detail="素材块不存在")
+    if preview is not None:
+        if preview < 1:
+            raise HTTPException(status_code=422, detail="preview 须为正整数")
+        content = _truncate_preview(content, preview)
     return content
+
+
+def _truncate_preview(content: dict, budget: int) -> dict:
+    """按累计预算截断 sections 正文（chars 保留真实总字数），预算耗尽即停。"""
+    out: list[dict] = []
+    used = 0
+    for sec in content.get("sections") or []:
+        room = max(0, budget - used)
+        out.append({**sec, "text": sec["text"][:room]})
+        used += len(sec["text"])
+        if used >= budget:
+            break
+    return {**content, "sections": out}
 
 
 # 挑章节预览单次跨度上限（防误点根节点一次拉整本）

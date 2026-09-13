@@ -28,6 +28,8 @@ class ContractDef:
     default_display_name: str
     # Pydantic 校验模型，发布时 model_validate 兜底结构合法性
     model: Type[BaseModel]
+    # 内容 MIME（文件型产物=docx 等；默认 application/json 走 content.json）
+    content_type: str = "application/json"
 
     @property
     def key(self) -> str:
@@ -36,10 +38,12 @@ class ContractDef:
 
 from .note import DOC_NOTE  # noqa: E402
 from .tender_directory import TENDER_DIRECTORY  # noqa: E402  （避免循环导入，置于类定义后）
+from .tender_volume import TENDER_VOLUME  # noqa: E402
 
 CONTRACTS: dict[str, ContractDef] = {
     TENDER_DIRECTORY.key: TENDER_DIRECTORY,
     DOC_NOTE.key: DOC_NOTE,
+    TENDER_VOLUME.key: TENDER_VOLUME,
 }
 
 

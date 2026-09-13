@@ -438,6 +438,55 @@ def test_materials_content_search_usage_flow(client):
     assert client.delete(f"/api/materials/files/{fid}").status_code == 200
 
 
+def test_materials_block_content_preview(client):
+    """块内容行内预览预算（2026-09-13 内存修复批）：sections 正文按累计预算截断、
+    chars 保真、预算耗尽即停；preview<1 422；不传行为不变（写作指引表等消费方
+    不再整块拉全文）。"""
+    import time
+
+    fid = client.post(
+        "/api/materials/files",
+        files={
+            "file": (
+                "预览预算.docx",
+                _docx_bytes(paras=20, line_tpl="等保合规建设内容第{i}行补充。"),
+                "application/octet-stream",
+            )
+        },
+    ).json()["id"]
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        outline = client.get(f"/api/materials/files/{fid}/outline").json()
+        if outline["parse_status"] in ("ready", "failed"):
+            break
+        time.sleep(0.05)
+    assert outline["parse_status"] == "ready"
+
+    bid = client.post(
+        f"/api/materials/files/{fid}/blocks",
+        json={"title": "双区块", "note": "", "ranges": [[2, 7], [9, 12]]},
+    ).json()["id"]
+
+    full = client.get(f"/api/materials/blocks/{bid}/content").json()
+    assert len(full["sections"]) == 2 and full["chars"] > 60
+
+    # 预算只够第一区的一部分：第一区截断、第二区不再出现；chars 仍是真实总字数
+    pv = client.get(f"/api/materials/blocks/{bid}/content", params={"preview": 20}).json()
+    assert len(pv["sections"]) == 1
+    assert pv["sections"][0]["text"] == full["sections"][0]["text"][:20]
+    assert pv["chars"] == full["chars"]
+
+    # 预算跨区：两区都保留、合计恰等于预算
+    budget = len(full["sections"][0]["text"]) + 5
+    pv2 = client.get(f"/api/materials/blocks/{bid}/content", params={"preview": budget}).json()
+    assert len(pv2["sections"]) == 2
+    assert sum(len(s["text"]) for s in pv2["sections"]) == budget
+    assert pv2["sections"][1]["text"] == full["sections"][1]["text"][:5]
+
+    assert client.get(f"/api/materials/blocks/{bid}/content", params={"preview": 0}).status_code == 422
+    assert client.delete(f"/api/materials/files/{fid}").status_code == 200
+
+
 def test_check_result_passthrough_and_human_confirm_marker(client):
     """核对结果随条目下发（解析后的 JSON）；PUT 人工确认后 business 无 auto 标记。"""
     from app import db

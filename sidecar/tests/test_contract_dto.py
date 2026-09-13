@@ -39,8 +39,11 @@ def test_task_conversation_settings_contracts_dto(client):
     dto.Task.model_validate(created["task"])  # POST 响应是 {task, conversation} 信封
     dto.Conversation.model_validate(created["conversation"])
     task = db.create_task("测试任务2")
-    dto.Task.model_validate(task)
+    # 裸库行不是线上形状（stage/last_activity_at 由 API 层派生、非 DB 列），故校验
+    # 三个端点应答：POST（上）/ GET 列表（下）/ PATCH（便签更新同样回 Task 行）
     dto.Task.model_validate(client.get("/api/tasks").json()["tasks"][0])
+    patched = client.patch(f"/api/tasks/{task['id']}", json={"progress_note": "x"}).json()
+    dto.Task.model_validate(patched)
 
     conv = client.post("/api/conversations", json={"task_id": task["id"]}).json()
     dto.Conversation.model_validate(conv)

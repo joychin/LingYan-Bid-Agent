@@ -248,3 +248,108 @@ def test_resolved_content_path_containment(env):
     target.unlink()
     target.symlink_to(secret)
     assert artifact_store.resolved_content_path(aid, m) is None
+
+
+# ---------- 文件型产物（tender.volume=整本标书 docx，2026-09-13） ----------
+
+VOLUME_KEY = "tender.volume/tender-volume-docx@1"
+
+
+def _make_volume_docx(env, filename: str, text: str):
+    from docx import Document
+
+    p = artifact_store.work_dir(env["task"]["id"]) / "body" / filename
+    p.parent.mkdir(parents=True, exist_ok=True)
+    doc = Document()
+    doc.add_paragraph(text)
+    doc.save(p)
+    return p
+
+
+def _pub_volume(env, path, book: str, run_id: str = "r_1"):
+    import hashlib
+
+    data = path.read_bytes()
+    return publish.publish_file_artifact(
+        VOLUME_KEY,
+        file_path=path,
+        content_meta={
+            "filename": path.name,
+            "book": book,
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "merged_sections": 2,
+            "images": 0,
+            "comments": 0,
+        },
+        display_name=book,
+        source={"skill": "tender-body", "thread_id": env["conv"]["id"], "run_id": run_id},
+        task_id=env["task"]["id"],
+        conversation_id=env["conv"]["id"],
+    )
+
+
+def test_publish_volume_creates_package_with_docx(env):
+    src = _make_volume_docx(env, "整本-技术册.docx", "初版正文")
+    m = _pub_volume(env, src, "技术册")
+    aid = m["artifact_id"]
+
+    assert m["kind"] == "tender.volume"
+    assert m["content_type"].startswith("application/vnd.openxmlformats")
+    # 包内唯一 docx 与源字节一致；content.json 是机器元信息（schema 校验对象）
+    files = artifact_store.package_files(aid, m)
+    assert [f.name for f in files] == ["整本-技术册.docx"]
+    assert files[0].read_bytes() == src.read_bytes()
+    meta = json.loads(artifact_store.read_content(aid, m))
+    assert meta["book"] == "技术册"
+    assert meta["filename"] == "整本-技术册.docx"
+    # 索引行：display_name=册名（身份键）、content_path 恒指包内 content.json（重启重建同口径，
+    # docx 本体不走该列、由 /file 端点按包内唯一 .docx 取）、run 边界可捞事件
+    row = db.get_artifact_index(aid)
+    assert row["display_name"] == "技术册"
+    assert row["content_path"].endswith("content.json")
+    assert db.pending_emit("r_1") == [row]
+
+
+def test_publish_volume_zip_equal_noop_and_change_publishes(env):
+    """zip 内容级去重：同内容重保存（zip 时间戳必变、CRC 不变）→ 短路（seq/
+    last_run_id/emitted 全不动）；内容变 → 覆盖发布 seq+1；文件型产物明确不留恢复点。"""
+    from docx import Document
+
+    src = _make_volume_docx(env, "整本-技术册.docx", "初版正文")
+    m1 = _pub_volume(env, src, "技术册")
+    db.mark_emitted(m1["artifact_id"])
+
+    doc = Document(str(src))
+    doc.save(src)  # 同内容重保存——字节必变（zip 时间戳），CRC 不变
+    m2 = _pub_volume(env, src, "技术册", run_id="r_2")
+    assert m2.get("_unchanged") is True
+    row = db.get_artifact_index(m1["artifact_id"])
+    assert (row["content_seq"], row["last_run_id"], row["emitted"]) == (1, "r_1", 1)
+    assert db.pending_emit("r_2") == []
+
+    doc = Document(str(src))
+    doc.add_paragraph("第二版正文")
+    doc.save(src)
+    m3 = _pub_volume(env, src, "技术册", run_id="r_3")
+    assert m3["artifact_id"] == m1["artifact_id"]
+    assert "_unchanged" not in m3
+    assert db.get_artifact_index(m1["artifact_id"])["content_seq"] == 2
+    assert db.pending_emit("r_3") != []
+    assert artifact_store.package_files(m1["artifact_id"], m1)[0].read_bytes() == src.read_bytes()
+    assert artifact_store.latest_restore_point(m1["artifact_id"], m1) is None
+
+
+def test_publish_volume_book_is_identity_key(env):
+    """身份复用键=任务+kind+册名：多册各一条；同册重发布（内容未变）复用同一条不增行。"""
+    src_t = _make_volume_docx(env, "整本-技术册.docx", "技术内容")
+    src_b = _make_volume_docx(env, "整本-商务册.docx", "商务内容")
+    m1 = _pub_volume(env, src_t, "技术册")
+    m2 = _pub_volume(env, src_b, "商务册")
+    assert m1["artifact_id"] != m2["artifact_id"]
+
+    m3 = _pub_volume(env, src_t, "技术册", run_id="r_2")
+    assert m3["artifact_id"] == m1["artifact_id"]
+    assert m3.get("_unchanged") is True
+    vrows = [r for r in db.list_artifact_index() if r["kind"] == "tender.volume"]
+    assert len(vrows) == 2

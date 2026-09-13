@@ -29,9 +29,9 @@ def ask_human(question: str, options: str = "", multiple: bool = False, guide_pa
     「已选：…」+ 补充文字的形式回传。候选项只写进 options 参数本身——不要在
     question 里写 options=…、guide_path=… 这样的赋值行，那行会原样显示给用户
     且候选项不会变成可点选项。完整调用形态（参数各归各位）：
-    ask_human(question="确认按写作指引开写吗？
-    指引逐节定了写作方式与依据，确认后逐节生成。",
-    options="确认，按指引开写（推荐）；重新生成指引", guide_path="body/写作指引.md")
+    ask_human(question="已写好的章节要重写哪些？
+    已写内容是有效产出，全量重写会多花时间与成本。",
+    options="全部重写；只重写我指定的章节（在补充说明里写明）；只重写自查不通过的节（推荐）")
 
     guide_path 可选：提问涉及让用户查看/修改某个工作台文件时，传该文件的
     work/ 相对路径（如 body/写作指引.md）——前端会在提问卡上渲染「打开」按钮，

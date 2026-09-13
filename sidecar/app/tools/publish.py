@@ -105,13 +105,23 @@ def publish_artifact(contract: str, draft_path: str, display_name: str = "") -> 
 
     # 未注册契约收拢为通用笔记（类型系统封闭：LLM 不能发明新类型，笔记兜底不中断记忆）
     note_fallback = False
-    if contracts.get_contract(contract) is None:
+    contract_def = contracts.get_contract(contract)
+    if contract_def is None:
         try:
             content = _as_note_content(content, display_name or None)
         except ValueError as e:
             return f"[发布失败] {e}"
         contract = NOTE_CONTRACT.key
         note_fallback = True
+    elif contract_def.content_type != "application/json":
+        # 文件型产物（docx 本体）只能由对应机械工具在产出点发布（如整本由
+        # docx_assemble_volume 合册时自动发布）；走 JSON 路径会造出没有本体
+        # 文件的残包（列表可见、文件端点 410），必须在工具层拒绝
+        return (
+            f"[发布失败] {contract_def.kind} 是文件型产物，不能经 JSON 草稿发布——"
+            "它由对应工具（如合册 docx_assemble_volume）自动发布，无需手动操作；"
+            "若要记录文字内容请改用 doc.note。"
+        )
 
     ctx = runctx.current_run()
     try:

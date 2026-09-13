@@ -330,6 +330,132 @@ def test_extract_docx_zip_guards(tmp_path, monkeypatch):
     assert len(images_mod._extract_docx(src)) == 2
 
 
+# ---------- PDF 整页渲染（2026-09-13：贴资料的单位是「那一页的复印件」） ----------
+
+_PAGE_W, _PAGE_H = 400.0, 600.0
+
+
+def _expected_px(pts: float) -> float:
+    from app.knowledge import images as images_mod
+
+    return pts * images_mod._RENDER_DPI / 72.0
+
+
+def test_pdf_renders_whole_page_not_embedded_image(tmp_path, monkeypatch):
+    """电子版证书（底图+文字浮层）：按嵌入图抽只剩空底框，整页渲染才拿到带字的页。
+
+    构造一张覆盖整页的底图（原生仅 100×100）+ 叠在上面的文字层——旧逐图抽取会
+    因短边 <200 被滤掉（0 张）；新路径渲染整页，尺寸=页面 150 DPI，文字在画里。
+    """
+    import fitz
+
+    from app.knowledge import images as images_mod
+
+    _setup(tmp_path, monkeypatch)
+    doc = fitz.open()
+    page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
+    base = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 100, 100))  # 小底图铺满整页
+    page.insert_image(page.rect, stream=base.tobytes("png"))
+    page.insert_text((60, 300), "ISO9001 CERTIFICATE 0350324Q30696R1M", fontsize=14)
+    src = store.kb_files_dir() / "iso证书.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    written, skipped = images_mod.extract_images(src, "iso证书.pdf")
+    assert written == 1 and skipped == 0
+    img = store.kb_images_dir("iso证书.pdf") / "img_001.png"
+    out = fitz.Pixmap(str(img))
+    assert abs(out.width - _expected_px(_PAGE_W)) <= 2
+    assert abs(out.height - _expected_px(_PAGE_H)) <= 2
+
+
+def test_pdf_vector_only_page_still_renders(tmp_path, monkeypatch):
+    """纯矢量/文字页（无任何嵌入图）——旧路径 0 张，渲染路径照出 1 张。"""
+    import fitz
+
+    from app.knowledge import images as images_mod
+
+    _setup(tmp_path, monkeypatch)
+    doc = fitz.open()
+    page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
+    page.insert_text((40, 80), "VECTOR ONLY CERTIFICATE", fontsize=18)
+    src = store.kb_files_dir() / "vector.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    written, skipped = images_mod.extract_images(src, "vector.pdf")
+    assert written == 1 and skipped == 0
+    assert len(images_mod.list_images("vector.pdf")) == 1
+
+
+def test_pdf_blank_page_skipped_and_page_numbering(tmp_path, monkeypatch):
+    """空白页跳过、文件名即页码（编号留空洞）——模型据页锚点可推回页图。"""
+    import fitz
+
+    from app.knowledge import images as images_mod
+
+    _setup(tmp_path, monkeypatch)
+    doc = fitz.open()
+    p1 = doc.new_page(width=_PAGE_W, height=_PAGE_H)
+    p1.insert_text((40, 80), "PAGE 1", fontsize=18)
+    doc.new_page(width=_PAGE_W, height=_PAGE_H)  # 第 2 页空白
+    p3 = doc.new_page(width=_PAGE_W, height=_PAGE_H)
+    p3.insert_text((40, 80), "PAGE 3", fontsize=18)
+    src = store.kb_files_dir() / "空白页.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    written, skipped = images_mod.extract_images(src, "空白页.pdf")
+    assert written == 2 and skipped == 1
+    names = [p.name for p in store.kb_images_dir("空白页.pdf").iterdir() if p.is_file()]
+    assert sorted(names) == ["img_001.png", "img_003.png"]  # 无 img_002
+
+
+def test_pdf_render_respects_max_images(tmp_path, monkeypatch):
+    """张数上限：写满即停，长文档不白渲染后续页。"""
+    import fitz
+
+    from app.knowledge import images as images_mod
+
+    _setup(tmp_path, monkeypatch)
+    doc = fitz.open()
+    for i in range(4):
+        page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
+        page.insert_text((40, 80), f"PAGE {i + 1}", fontsize=18)
+    src = store.kb_files_dir() / "四页.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    monkeypatch.setattr(images_mod, "_MAX_IMAGES", 2)
+    written, _ = images_mod.extract_images(src, "四页.pdf")
+    assert written == 2
+
+
+def test_docx_skips_emf_and_zip_dir_entries(tmp_path, monkeypatch):
+    """docx 侧两个坑：word/media/ 目录占位条目（0 字节）、EMF/WMF 矢量图（浏览器
+    不认）——都不落盘，PNG 照旧。"""
+    import zipfile
+
+    from app.knowledge import images as images_mod
+
+    _setup(tmp_path, monkeypatch)
+    src = store.kb_files_dir() / "混合.docx"
+    src.write_bytes(_make_docx_with_images(tmp_path))
+    # 追加一个 EMF 媒体条目 + 一个目录占位条目（重写 zip）
+    tmp_zip = src.with_suffix(".tmp.docx")
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(tmp_zip, "w") as zout:
+        for info in zin.infolist():
+            zout.writestr(info, zin.read(info.filename))
+        zout.writestr("word/media/", b"")                     # 目录占位
+        zout.writestr("word/media/vector1.emf", b"\x01\x00\x00\x00EMF")  # 矢量图
+    tmp_zip.replace(src)
+
+    raw = images_mod._extract_docx(src)
+    assert all(not n.endswith(".emf") for _d, n in raw)  # EMF 未被抽出
+    written, _ = images_mod.extract_images(src, "混合.docx")
+    assert written == 3  # 三张真实 PNG 照旧落盘
+
+
 # ---------- 锚点回文核对 + 自动确认（两主人模型） ----------
 
 _CERT_MD = (

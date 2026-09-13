@@ -4,6 +4,7 @@
 - GET  /api/artifacts                     索引列表（?task_id= 任务全部 / ?conversation_id= 按来源筛选）
 - GET  /api/artifacts/{aid}/meta          轻量探测（版本号，编辑器轮询用）
 - GET  /api/artifacts/{aid}/content       当前内容（application/json）
+- GET  /api/artifacts/{aid}/file          文件型产物原始字节（tender.volume docx）
 - PUT  /api/artifacts/{aid}/content       编辑保存（content_seq 探测 + force 用户裁决覆盖）
 - POST  /api/artifacts/{aid}/restore      恢复上一版（恢复点安全网）
 
@@ -15,7 +16,7 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from .. import artifact_store, contracts, db
@@ -65,7 +66,7 @@ def _to_api(row: dict) -> dict:
         "schema_version": row["schema_version"],
         "cardinality": row["cardinality"],
         "editable": contract.editable if contract else False,
-        "content_type": "application/json",
+        "content_type": contract.content_type if contract else "application/json",
         "updated_at": row["updated_at"],
         "content_seq": row["content_seq"],
         "restore_available": artifact_store.has_restore_point(row["artifact_id"], row),
@@ -110,6 +111,39 @@ async def get_artifact_content(aid: str):
     return Response(content=p.read_bytes(), media_type="application/json; charset=utf-8")
 
 
+@router.get("/artifacts/{aid}/file")
+async def get_artifact_file(aid: str):
+    """文件型产物的原始字节（tender.volume=整本标书 docx）：包内唯一 .docx 流式下发。
+
+    前端预览（docx-preview 渲染 Blob）与下载共用；containment 与 content 端点
+    同标准（resolve 后必须仍在 workspace 内）。
+    """
+    row = db.get_artifact_index(aid)
+    if not row:
+        raise HTTPException(status_code=404, detail="产物不存在")
+    files = artifact_store.package_files(aid, row)
+    if not files:
+        raise HTTPException(status_code=410, detail="产物包内没有文件（或路径越界）")
+    # 历史污染包可能残留多个 docx（旧版清理只在覆盖路径、短路分支不清理）：
+    # 优先取 content.json 登记的本体文件名，盲取字典序第一个会把旧册发给用户
+    target = files[0]
+    try:
+        meta = json.loads(artifact_store.read_content_resolved(aid, row) or "{}")
+    except ValueError:
+        meta = None
+    want = meta.get("filename") if isinstance(meta, dict) else None
+    if isinstance(want, str) and want:
+        target = next((f for f in files if f.name == want), files[0])
+    contract = contracts.get_contract(f"{row['kind']}/{row['schema_id']}@{row['schema_version']}")
+    media = contract.content_type if contract else "application/octet-stream"
+    return FileResponse(
+        target,
+        media_type=media,
+        filename=f"{row['display_name']}.docx",
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
 @router.put("/artifacts/{aid}/content")
 async def update_artifact_content(aid: str, body: ContentUpdate):
     """编辑保存：非 force 时 content_seq 不匹配返回 409（探测信号，客户端弹「拉取最新/保留我的」）；
@@ -127,6 +161,9 @@ async def update_artifact_content(aid: str, body: ContentUpdate):
     contract = contracts.get_contract(f"{row['kind']}/{row['schema_id']}@{row['schema_version']}")
     if contract is None:
         raise HTTPException(status_code=422, detail=f"契约 {row['kind']} 已不可用，无法保存")
+    if not contract.editable:
+        # 交付物型契约（tender.volume）：机器元信息由发布管线维护，不接受编辑
+        raise HTTPException(status_code=409, detail=f"「{row['display_name']}」是交付物，内容不可编辑")
     try:
         contract.model.model_validate(body.content)
     except Exception as e:
@@ -177,6 +214,9 @@ async def restore_artifact(aid: str):
 
     contract = contracts.get_contract(f"{row['kind']}/{row['schema_id']}@{row['schema_version']}")
     if contract is not None:
+        if not contract.editable:
+            # 交付物型契约无编辑语义，恢复也无从谈起（纵深：文件型产物本就不留恢复点）
+            raise HTTPException(status_code=409, detail=f"「{row['display_name']}」是交付物，不支持恢复")
         try:
             contract.model.model_validate(content)
         except Exception:

@@ -263,7 +263,44 @@ def test_guide_dash_mode_for_prose_leaf_warns(env):
     assert "3.1 项目理解与需求分析」被目录标为需正文但模式写了「—」" in r
 
 
-def test_section_without_block_ids_skips(env):
+def test_guide_note_tool_name_warns(env):
+    """缺口列混入工具名 → 提示级（2026-09-13 读者分离批）。
+
+    动因：该列同时是给写手的指令与给用户的缺料点名，实测用户看到
+    「格式件：docx_source_inject 拷第五章格式（L988-L1005）+revise 填…【缺：上述公司信息】」
+    原话反馈「真看不懂」。执行链路由模式列 + 派发说明自动补，工具名是噪声。
+    """
+    _seed_directory(env)
+    bid = _seed_block("园区方案.txt", "# 方案\n\n正文。\n", "块", (3, 3))
+    text = _guide(bid).replace(
+        "| 附件：资质证书复印件 | — | MAND-02 | — | 模板填充，列待填清单 |\n",
+        "| 附件：资质证书复印件 | — | MAND-02 | — | "
+        "格式件：docx_source_inject 拷第五章格式（L988-L1005）+revise 填空 |\n",
+    )
+    _write_body(env, "body/写作指引.md", text)
+    r = validate_body.invoke({"section": "body/写作指引.md"})
+    assert r.startswith("[校验通过]")  # 提示不是门禁
+    assert "缺口列混入工具名 docx_source_inject" in r
+    assert "原件：<格式名> L起-L止" in r
+
+
+def test_guide_note_anaphora_warns(env):
+    """【缺：上述…】代词回指 → 提示级（前端会把【缺】摘出来独立展示，代词摘出后读不通）。"""
+    _seed_directory(env)
+    bid = _seed_block("园区方案.txt", "# 方案\n\n正文。\n", "块", (3, 3))
+    text = _guide(bid).replace(
+        "| 附件：资质证书复印件 | — | MAND-02 | — | 模板填充，列待填清单 |\n",
+        "| 附件：资质证书复印件 | — | MAND-02 | — | "
+        "格式件：拷第五章格式；【缺：上述公司信息与法定代表人身份证复印件】 |\n",
+    )
+    _write_body(env, "body/写作指引.md", text)
+    r = validate_body.invoke({"section": "body/写作指引.md"})
+    assert r.startswith("[校验通过]")  # 提示不是门禁
+    assert "缺口项用了代词回指" in r
+    assert "请列具体字段名" in r
+
+
+
     _seed_directory(env)
     _write_body(env, "body/3.1 项目理解与需求分析.md", "正文内容。\n")
     r = validate_body.invoke({"section": "body/3.1 项目理解与需求分析.md"})
@@ -545,3 +582,24 @@ def test_global_dup_short_sections_not_flagged(env):
     r = validate_body.invoke({"section": "body"})
     assert "节间疑似重复" not in r
     assert "⚠️" not in r
+
+
+def test_section_docx_direct_outline_note(env):
+    """直挂大纲级别清点（提示级，2026-09-13 批）：历史拷贝残留的 outlineLvl 段
+    在读视图里不可见，导航窗格却出现树外条目——清点点名（合册会自动摘出，
+    不判不过）。"""
+    from docx import Document as _Doc
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    _make_docx_section(env, "body/3.1 项目理解.docx", "3.1 项目理解", "正文一段。")
+    p = _wroot(env[0]) / "body" / "3.1 项目理解.docx"
+    doc = _Doc(str(p))
+    para = doc.add_paragraph("附件11人员资格一览表")
+    para._p.get_or_add_pPr().append(parse_xml(f'<w:outlineLvl {nsdecls("w")} w:val="2"/>'))
+    doc.save(p)
+
+    r = validate_body.invoke({"section": "body/3.1 项目理解.docx", "block_ids": []})
+    assert r.startswith("[校验通过]")  # 提示不是门禁
+    assert "〔大纲级别〕1 段直挂大纲级别（P3）" in r
+    assert "合册会自动摘出" in r

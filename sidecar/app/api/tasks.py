@@ -11,7 +11,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .. import artifact_store, db
+from .. import artifact_store, db, task_stage
 from ..agent import delete_thread_memory
 
 router = APIRouter()
@@ -31,7 +31,9 @@ class UpdateTaskBody(BaseModel):
 
 @router.get("/tasks")
 async def list_tasks():
-    return {"tasks": db.list_tasks()}
+    # 附加 stage/last_activity_at（task_stage 批量推导；db.list_tasks 的 SQL 排序
+    # 不动——侧栏按创建序稳定不跳动，「按最近活动」由首页前端排）
+    return {"tasks": task_stage.enrich(db.list_tasks())}
 
 
 @router.post("/tasks", status_code=201)
@@ -43,7 +45,7 @@ async def create_task(body: NewTaskBody):
     # 预建 sources/work 骨架：agent 开工第一步的 ls 不再 path_not_found
     artifact_store.ensure_task_skeleton(task["id"])
     conversation = db.create_conversation(task["id"]) if body.with_conversation else None
-    return {"task": task, "conversation": conversation}
+    return {"task": task_stage.enrich([task])[0], "conversation": conversation}
 
 
 @router.patch("/tasks/{tid}")
@@ -57,7 +59,7 @@ async def update_task(tid: str, body: UpdateTaskBody):
             raise HTTPException(status_code=422, detail=str(e)) from e
     if body.progress_note is not None:
         db.update_task_progress(tid, body.progress_note[:20_000])
-    return db.get_task(tid)
+    return task_stage.enrich([db.get_task(tid)])[0]
 
 
 @router.delete("/tasks/{tid}")

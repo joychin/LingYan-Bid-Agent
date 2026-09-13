@@ -19,7 +19,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from . import artifact_store, contracts, db
+from . import artifact_store, contracts, db, deliverables
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +122,9 @@ def publish_artifact(
                 }
             )
             logger.info("artifact 更新 %s (%s) seq=%s", aid, contract_key, existing["content_seq"] + 1)
+            # 呈现信号（产出即开）：内容有变的真实更新才声明——上面的短路分支
+            # （内容未变）直接 return，不会走到这里，语义与 artifact.created 一致
+            deliverables.note("artifact", artifact_id=aid, display_name=name)
             return artifact_store.read_meta(aid, existing) or {}
 
         aid = artifact_store.new_artifact_id()
@@ -162,4 +165,174 @@ def publish_artifact(
             }
         )
         logger.info("artifact 发布 %s (%s)", aid, contract_key)
+        deliverables.note("artifact", artifact_id=aid, display_name=name)
+        return meta
+
+
+# ---------- 文件型产物（tender.volume：docx 本体进包，content.json 只存机器元信息） ----------
+
+
+def _zip_content_equal(a, b) -> bool:
+    """两个 zip（docx）内容级相等：部件名集合一致 + 每部件 CRC32 一致。
+
+    忽略 zip 时间戳——python-docx 每次保存都会写新的条目时间，逐字节比对
+    永不相等；CRC 是内容寻址，同内容重合册稳定相等（lxml 序列化确定性）。
+    任一文件读不了（损坏/非 zip）返回 False=走完整覆盖路径，方向保守。
+    """
+    import zipfile
+    from pathlib import Path
+
+    a, b = Path(a), Path(b)
+    try:
+        with zipfile.ZipFile(a) as za, zipfile.ZipFile(b) as zb:
+            if sorted(za.namelist()) != sorted(zb.namelist()):
+                return False
+            crc_a = {i.filename: i.CRC for i in za.infolist()}
+            crc_b = {i.filename: i.CRC for i in zb.infolist()}
+            return crc_a == crc_b
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return False
+
+
+def publish_file_artifact(
+    contract_key: str,
+    file_path,
+    content_meta: dict,
+    display_name: str | None = None,
+    source: dict | None = None,
+    task_id: str | None = None,
+    conversation_id: str | None = None,
+) -> dict:
+    """发布文件型产物（当前唯一契约 tender.volume=整本标书 docx），返回 meta。
+
+    与 publish_artifact 的差异（JSON 路径零改动，两函数并行）：
+    - 包内多一个二进制本体（file_path 拷入包，包内文件名=源文件名）；
+      content.json 只存机器元信息（schema 校验对象）。
+    - 身份复用键 = 任务 + kind + **display_name（册名）**——契约标 task-multi
+      但不走「恒新建」：同册重合册覆盖同一条（多册各一条），不碰 doc.note 的
+      task-multi 语义。册改名=另立新卡、旧卡保留（内容仍可打开）。
+    - 内容未变短路按 docx 内容级比对（_zip_content_equal，忽略 zip 时间戳）。
+    - **不设恢复点**：整本是派生交付物、非用户编辑内容，旧版随时可由节文件
+      重新合册复原（恢复点的受益者是「用户手改被覆盖」场景，这里不存在）。
+    """
+    from pathlib import Path
+
+    file_path = Path(file_path)
+    if not task_id and conversation_id:
+        conv = db.get_conversation(conversation_id)
+        task_id = (conv or {}).get("task_id")
+    if not task_id:
+        raise PublishError("发布必须指定所属任务（task_id）")
+    if db.get_task(task_id) is None:
+        raise PublishError(f"任务 {task_id} 不存在")
+
+    c = contracts.get_contract(contract_key)
+    if c is None:
+        raise PublishError(
+            f"未注册的 Artifact 契约「{contract_key}」，可用：{', '.join(sorted(contracts.CONTRACTS))}"
+        )
+    if contract_key not in _allowed_contracts(source):
+        raise PublishError(f"当前上下文无权发布契约「{contract_key}」")
+    if not file_path.is_file():
+        raise PublishError(f"文件不存在：{file_path}")
+
+    try:
+        c.model.model_validate(content_meta)
+    except Exception as e:
+        raise PublishError(f"元信息不符合契约 {contract_key}：{str(e).replace(chr(10), ' ')[:500]}")
+
+    name = (display_name or "").strip() or c.default_display_name
+    filename = file_path.name
+    source = source or {}
+    content_text = json.dumps(content_meta, ensure_ascii=False, indent=2)
+
+    with artifact_store.write_lock:
+        existing = None
+        for row in db.list_artifact_index(task_id=task_id):
+            if (
+                row["kind"] == c.kind
+                and row["schema_id"] == c.schema_id
+                and row["schema_version"] == c.schema_version
+                and row["display_name"] == name
+                and artifact_store.read_meta(row["artifact_id"], row) is not None
+            ):
+                existing = row
+                break
+
+        if existing is not None:
+            aid = existing["artifact_id"]
+            pkg_files = artifact_store.package_files(aid, existing)
+            # 内容未变短路：docx 内容级相等且显示名未变 → 不重复发布（seq/emitted/
+            # last_run_id 全不动，run 收尾 pending_emit 捞不到 → 无 artifact.created，
+            # 聊天产物卡不挪位）——与 JSON 路径的 2026-09-12 短路同款语义
+            if pkg_files and _zip_content_equal(pkg_files[0], file_path):
+                logger.info("artifact 文件内容未变跳过发布 %s (%s)", aid, contract_key)
+                return {**(artifact_store.read_meta(aid, existing) or {}), "_unchanged": True}
+            artifact_store.write_package_file(aid, existing, filename, file_path.read_bytes())
+            # 单文件不变量：册名清洗后文件名变了的话，摘掉包内旧 docx（file 端点
+            # 按「包内唯一 .docx」取文件）
+            for p in artifact_store.package_files(aid, existing):
+                if p.name != filename:
+                    p.unlink(missing_ok=True)
+            artifact_store.replace_current_content(aid, existing, content_text)
+            db.upsert_artifact_index(
+                {
+                    **existing,
+                    # content_path 恒指包内 content.json（机器元信息）——与 JSON 发布路径及
+                    # 重启 rebuild_artifact_index 的重算口径一致（该列无读者；写 docx 路径
+                    # 会在重启后被静默翻回，账目漂移）。
+                    "content_path": str(artifact_store.content_path(aid, existing)),
+                    "content_seq": existing["content_seq"] + 1,
+                    "updated_at": _now(),
+                    "last_run_id": source.get("run_id"),
+                    "last_thread_id": source.get("thread_id"),
+                    "emitted": 0,
+                }
+            )
+            logger.info("artifact 文件更新 %s (%s) seq=%s", aid, contract_key, existing["content_seq"] + 1)
+            deliverables.note("artifact", artifact_id=aid, display_name=name)
+            return artifact_store.read_meta(aid, existing) or {}
+
+        aid = artifact_store.new_artifact_id()
+        meta = {
+            "manifest_version": 1,
+            "artifact_id": aid,
+            "task_id": task_id,
+            "conversation_id": conversation_id,
+            "display_name": name,
+            "kind": c.kind,
+            "schema": {"id": c.schema_id, "version": c.schema_version},
+            "content_type": c.content_type,
+            "cardinality": c.cardinality,
+            "source": {
+                "skill": source.get("skill", ""),
+                "thread_id": source.get("thread_id"),
+                "run_id": source.get("run_id"),
+            },
+            "created_at": _now(),
+        }
+        # 先文件后 content.json 再 meta.json（meta 落盘即发布完成，与 create_package 同序）
+        artifact_store.write_package_file(aid, meta, filename, file_path.read_bytes())
+        artifact_store.create_package(meta, content_text)
+        db.upsert_artifact_index(
+            {
+                "artifact_id": aid,
+                "task_id": task_id,
+                "conversation_id": conversation_id,
+                "kind": c.kind,
+                "schema_id": c.schema_id,
+                "schema_version": c.schema_version,
+                "cardinality": c.cardinality,
+                "display_name": name,
+                # 同上：content_path 恒指 content.json（docx 本体经 /file 端点按包内唯一 .docx 取）
+                "content_path": str(artifact_store.content_path(aid, meta)),
+                "content_seq": 1,
+                "updated_at": meta["created_at"],
+                "last_run_id": source.get("run_id"),
+                "last_thread_id": source.get("thread_id"),
+                "emitted": 0,
+            }
+        )
+        logger.info("artifact 文件发布 %s (%s)", aid, contract_key)
+        deliverables.note("artifact", artifact_id=aid, display_name=name)
         return meta

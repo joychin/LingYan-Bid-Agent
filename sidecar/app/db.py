@@ -267,6 +267,44 @@ def list_task_conversation_ids(tid: str) -> list[str]:
     return [r["id"] for r in rows]
 
 
+def list_task_artifact_signals() -> dict[str, dict[str, str]]:
+    """全部任务的产物信号：{task_id: {schema_id: 该 schema 最新 updated_at}}。
+
+    供任务阶段批量推导（task_stage.py）——一条 GROUP BY 拿全量，避免逐任务
+    查询；idx_artifact_index_scope 以 task_id 打头，此查询走其前缀。
+    未归属任务的产物行（task_id NULL）不参与。
+    """
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT task_id, schema_id, MAX(updated_at) AS ts FROM artifact_index "
+            "WHERE task_id IS NOT NULL GROUP BY task_id, schema_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    out: dict[str, dict[str, str]] = {}
+    for r in rows:
+        out.setdefault(r["task_id"], {})[r["schema_id"]] = r["ts"]
+    return out
+
+
+def list_task_last_run() -> dict[str, str]:
+    """全部任务的最近一次 run 起始时间：{task_id: iso}（首页「最近活动」排序用）。
+
+    一条 JOIN + GROUP BY；runs 表行数=发消息次数，量级小。未归属任务的会话不参与。
+    """
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT c.task_id AS tid, MAX(r.created_at) AS ts FROM runs r "
+            "JOIN conversations c ON c.id = r.conversation_id "
+            "WHERE c.task_id IS NOT NULL GROUP BY c.task_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return {r["tid"]: r["ts"] for r in rows}
+
+
 def delete_task(tid: str) -> None:
     """删任务行及其全部会话数据与产物索引行（产物行带所属 task_id，随任务一并清理）。
     磁盘上任务目录的归档由调用方（API 层）先处理。六条 DELETE 在单事务内：

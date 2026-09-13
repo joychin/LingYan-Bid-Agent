@@ -55,7 +55,10 @@ def _unique_suffix_match(root: Path, path: str, task_id: str) -> Path | None:
     def _hit(p: Path) -> bool:
         if not p.is_file() or p.suffix not in (".md", ".docx") or p.name.startswith("."):
             return False
-        rel = p.relative_to(root).as_posix()
+        parts = p.relative_to(root).parts
+        if parts and parts[0] == "artifacts":  # 产物包文件走产物卡通道，不参与后缀兜底
+            return False
+        rel = "/".join(parts)
         return rel == cleaned or rel.endswith("/" + cleaned)
 
     hits = [p for p in root.rglob("*") if _hit(p)]
@@ -183,13 +186,20 @@ def _entry(p: Path, root: Path) -> dict:
 
 @router.get("/workbench")
 async def list_workbench(task_id: str):
-    """列出 work/ 全部 markdown 与 docx（json/隐藏文件排除），扁平相对路径清单。"""
+    """列出 work/ 全部 markdown 与 docx（json/隐藏文件排除），扁平相对路径清单。
+
+    work/artifacts/（登记产物包）子树跳过——包内文件（tender.volume 的整本 docx）
+    走产物卡通道，不进工作台列表（此前包内无 .md/.docx 所以不漏，文件型产物
+    落地后必漏，2026-09-13 补上；与 run_files 的收录口径对齐）。
+    """
     _require_task(task_id)
     root = artifact_store.work_dir(task_id)
     entries: list[dict] = []
     if root.is_dir():
         for p in sorted(list(root.rglob("*.md")) + list(root.rglob("*.docx"))):
             if not p.name.startswith(".") and p.is_file():
+                if p.relative_to(root).parts[0] == "artifacts":
+                    continue
                 entries.append(_entry(p, root))
     return {"files": entries}
 
@@ -222,20 +232,37 @@ async def read_meta(task_id: str, path: str):
 
 
 @router.get("/workbench/content")
-async def read_content(task_id: str, path: str):
+async def read_content(task_id: str, path: str, start: int | None = None, end: int | None = None):
+    """工作文件全文（md 文本）。可选 start/end（1 基闭区间行号，2026-09-13 内存
+    修复批）：行切片形态——溯源卡等「只看几十行上下文」的消费方不再整份拉 MB 级
+    解析稿回来 split。两参须成对、start≥1、end≥start（422）；越界向文件实际行数
+    clamp；切片时响应附 total_lines（additive）。hash/revised 恒按全文算（与编辑
+    保存链路的 base_hash 口径一致）。不传两参行为不变。
+    """
     _require_task(task_id)
     target = _resolve(task_id, path)
     if not target.is_file():
         raise HTTPException(status_code=404, detail="工作文件不存在")
     _reject_docx(target, writing=False)
+    if (start is None) != (end is None):
+        raise HTTPException(status_code=422, detail="start/end 行号须成对提供")
+    if start is not None and (start < 1 or end < start):
+        raise HTTPException(status_code=422, detail="行号区间无效")
     text = target.read_text(encoding="utf-8")
-    return {
+    resp = {
         "content": text,
         "hash": _hash(text),
         "revised": _revised(text),
         "editable": not path.startswith("parse/"),
         "has_restore": _has_restore(target),
     }
+    if start is not None:
+        lines = text.split("\n")
+        total = len(lines)
+        s, e = min(start, total), min(end, total)
+        resp["content"] = "\n".join(lines[s - 1 : e])
+        resp["total_lines"] = total
+    return resp
 
 
 @router.get("/workbench/docx-view")

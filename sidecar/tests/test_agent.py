@@ -11,7 +11,7 @@ import types
 
 import httpx
 from langchain_core.exceptions import ModelConnectionError
-from langchain_core.messages import AIMessage, AIMessageChunk, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 
 from app import agent as agent_mod
 from app import config as cfg
@@ -259,6 +259,14 @@ def test_subagent_specs():
     # 承诺纪律与共享写边界（并发下唯一写边界，漏写=子代理改清单/编承诺值）
     assert "承诺清单" in body["system_prompt"]
     assert "禁止改写写作指引与关键事实与承诺清单" in body["system_prompt"]
+    # 素材异议出口（2026-09-13）：用户手选素材与本节要求不符时，写手此前只有
+    # 「顺从」和「沉默」两种反应——没有反弹回路。现放开一条受限异议通道：
+    # 仍照常注入+改写（不动产物路径、不丢素材图），只额外留一条「素材异议」批注
+    # 并在摘要单列。这三句是配套的：不许跳过/不许换块（否则产物路径分叉）、
+    # 批注固定前缀（可机械识别）、摘要单列（带回给用户与主 agent）。
+    assert "素材异议" in body["system_prompt"]
+    assert "不得自行跳过该块或改换" in body["system_prompt"]
+    assert "仍须照常注入并改写" in body["system_prompt"]
 
 
 def test_system_prompt_response_guidelines():
@@ -1427,6 +1435,204 @@ def test_subagent_compass_injection():
     assert "【路径罗盘】" in seen["content"] and "t_x9/" in seen["content"]
     agent_mod._SUBAGENT_COMPASS_MW.wrap_model_call(req, handler)  # 无任务上下文
     assert seen["content"] == "子代理提示词"
+
+
+def _todo_stale_messages(n_rounds: int, *, with_write: bool = True) -> list:
+    """构造「write_todos 之后又跑了 n 轮工具」的消息序列（每轮 AI 派发+结果两条）。"""
+    msgs = [HumanMessage(content="开写整本")]
+    if with_write:
+        msgs.append(AIMessage(content="", tool_calls=[{"name": "write_todos", "args": {}, "id": "w1"}]))
+        msgs.append(ToolMessage(content="Updated todo list to [...]", tool_call_id="w1"))
+    for i in range(n_rounds):
+        cid = f"t{i}"
+        msgs.append(AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": cid}]))
+        msgs.append(ToolMessage(content=f"节 {i} 完成", tool_call_id=cid))
+    return msgs
+
+
+def test_todo_freshness_middleware_nudges_when_stale():
+    """清单陈旧提醒：距上次 write_todos 超阈值 → 末条 ToolMessage 尾部追加提醒
+    （含消息数实数）；system 与其余消息原对象不动（前缀缓存字节不变）。"""
+    import dataclasses as dc
+
+    @dc.dataclass
+    class _Req:
+        system_message: object
+        messages: list
+
+    msgs = _todo_stale_messages(6)  # write_todos 之后 12 条 ≥ 阈值 10
+    req = _Req(system_message=SystemMessage(content="主提示词"), messages=msgs)
+    seen = {}
+
+    def handler(r):
+        seen["msgs"] = r.messages
+        seen["system"] = r.system_message
+        return "resp"
+
+    agent_mod._TodoFreshnessMiddleware().wrap_model_call(req, handler)
+    out = seen["msgs"]
+    assert out[-1].content.endswith("再继续当前工作。")
+    assert "12 条消息未更新" in out[-1].content
+    assert seen["system"] is req.system_message
+    assert all(a is b for a, b in zip(out[:-1], msgs[:-1]))  # 只有末条是拷贝
+    assert out[-1] is not msgs[-1]
+
+
+def test_todo_freshness_middleware_quiet_paths():
+    """四不提醒：清单新鲜 / 本 run 从未写清单 / 末条是 HumanMessage（HITL resume 后
+    不往用户消息上贴）；回写后（新一轮 write_todos 落在尾部附近）提醒消失。"""
+    import dataclasses as dc
+
+    @dc.dataclass
+    class _Req:
+        system_message: object
+        messages: list
+
+    mw = agent_mod._TodoFreshnessMiddleware()
+
+    def run(req):
+        seen = {}
+
+        def handler(r):
+            seen["msgs"] = r.messages
+            return "resp"
+
+        mw.wrap_model_call(req, handler)
+        return seen["msgs"]
+
+    fresh = _Req(system_message=None, messages=_todo_stale_messages(3))  # 6 条 < 10
+    assert run(fresh) is fresh.messages
+    never = _Req(system_message=None, messages=_todo_stale_messages(6, with_write=False))
+    assert run(never) is never.messages
+    hitl = _Req(
+        system_message=None,
+        messages=_todo_stale_messages(6) + [HumanMessage(content="确认，按指引开写")],
+    )
+    assert run(hitl) is hitl.messages
+    rewritten = _todo_stale_messages(6) + [
+        AIMessage(content="", tool_calls=[{"name": "write_todos", "args": {}, "id": "w2"}]),
+        ToolMessage(content="Updated todo list to [...]", tool_call_id="w2"),
+    ]
+    out = run(_Req(system_message=None, messages=rewritten))
+    assert out[-1].content == "Updated todo list to [...]"
+
+
+def test_todo_freshness_middleware_wired():
+    """陈旧提醒只挂主 agent（TodoListMiddleware 旁）；SUBAGENTS 不挂——子代理
+    没有 todos（tools 步骤树按 agent_id 归子代理、todo.updated 仅主图）。"""
+    import inspect
+
+    src = inspect.getsource(agent_mod.build_agent)
+    assert "_TodoFreshnessMiddleware()" in src
+    assert not any(
+        isinstance(m, agent_mod._TodoFreshnessMiddleware)
+        for s in agent_mod.SUBAGENTS
+        for m in (s.get("middleware") or [])
+    )
+
+
+# ---- 清单同步守卫（after_model，2026-09-13 二批） ----
+
+
+def _gate_state(msgs, todos=None):
+    """after_model 的 state 形状：messages + todos（None=用非空默认，模拟已建清单）。"""
+    if todos is None:
+        todos = [{"content": "写正文", "status": "in_progress"}]
+    return {"messages": msgs, "todos": todos}
+
+
+def test_todo_sync_gate_rejects_stale_dispatch_batch():
+    """滞后超阈值 + 纯 task 批 → 每个 task 调用得 error ToolMessage（带对应 id 与
+    指引文案）；路由层把这些调用判为「已应答」不再执行、跳回模型节点——零个派发
+    落地（全批原子，漏放行半个批=带着旧清单继续执行）。"""
+    msgs = _todo_stale_messages(6)  # write_todos 之后 12 条 ≥ 守卫阈值 6
+    msgs.append(AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": f"b{i}"} for i in range(3)]))
+    out = agent_mod._TodoFreshnessMiddleware().after_model(_gate_state(msgs), None)
+    assert out is not None and len(out["messages"]) == 3
+    errs = out["messages"]
+    assert {e.tool_call_id for e in errs} == {"b0", "b1", "b2"}
+    assert all(e.status == "error" and e.name == "task" for e in errs)
+    assert all(agent_mod._TODO_GATE_MARK in e.content for e in errs)
+    assert "距上次回写" in errs[0].content
+
+
+def test_todo_sync_gate_same_batch_write_exemption():
+    """同批豁免：write_todos 与 task 同一 AIMessage → 放行（「回写+派发」同轮的
+    常态路径，免重试往返；write_todos 禁并行的只是多个 write_todos）。"""
+    msgs = _todo_stale_messages(6)
+    msgs.append(AIMessage(content="", tool_calls=[
+        {"name": "write_todos", "args": {}, "id": "w9"},
+        {"name": "task", "args": {}, "id": "b0"},
+    ]))
+    assert agent_mod._TodoFreshnessMiddleware().after_model(_gate_state(msgs), None) is None
+
+
+def test_todo_sync_gate_quiet_paths():
+    """放行：清单新鲜（刚回写）/ 会话从未建清单（todos 空）/ 批内无 task 调用 /
+    纯文本回复无 tool_calls / state 缺消息键（防御，增强逻辑绝不打断 run）。"""
+    mw = agent_mod._TodoFreshnessMiddleware()
+    fresh = _todo_stale_messages(0)  # [Human, AI(write), Tool(write)]
+    fresh.append(AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": "b0"}]))
+    assert mw.after_model(_gate_state(fresh), None) is None  # 距基线 1 条 < 6
+    stale = _todo_stale_messages(6)
+    stale.append(AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": "b0"}]))
+    assert mw.after_model(_gate_state(stale, todos=[]), None) is None  # 无清单不逼建
+    other = _todo_stale_messages(6)
+    other.append(AIMessage(content="", tool_calls=[{"name": "read_file", "args": {}, "id": "f1"}]))
+    assert mw.after_model(_gate_state(other), None) is None  # 非 task 批不拦
+    plain = _todo_stale_messages(6) + [AIMessage(content="阶段汇报")]
+    assert mw.after_model(_gate_state(plain), None) is None
+    assert mw.after_model({"todos": [{"content": "x", "status": "pending"}]}, None) is None
+
+
+def test_todo_sync_gate_forces_refresh_after_hitl_answer():
+    """裁决后未回写即派发 → 计数再低也拒（2026-09-13 实测事故的回归用例：回答完
+    直接派第一波、面板停在上一阶段 4 分钟）。代答识别 = tool_call_id 对应
+    ask_human 调用、位于最后一次 write_todos 结果之后。"""
+    msgs = [
+        HumanMessage(content="开写整本"),
+        AIMessage(content="", tool_calls=[{"name": "write_todos", "args": {}, "id": "w1"}]),
+        ToolMessage(content="Updated todo list to [...]", tool_call_id="w1"),
+        AIMessage(content="", tool_calls=[{"name": "ask_human", "args": {}, "id": "a1"}]),
+        ToolMessage(content="已选：确认，按指引开写（推荐）", tool_call_id="a1"),  # HITL 代答
+        AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": "b0"}]),
+    ]
+    out = agent_mod._TodoFreshnessMiddleware().after_model(_gate_state(msgs), None)
+    assert out is not None and "你刚收到用户的回答" in out["messages"][0].content
+
+
+def test_todo_sync_gate_valve_opens_after_bounded_rejections():
+    """泄压阀：同一基线之后已有 3 条守卫拒绝仍不回写 → 放行派发（有界拒绝防病态
+    循环卡死 run）；2 条时仍在拦。拒绝按文案标记从消息序列无状态计数。"""
+    mw = agent_mod._TodoFreshnessMiddleware()
+    base = _todo_stale_messages(6)
+    for n in (2, 3):
+        msgs = list(base)
+        for i in range(n):
+            msgs.append(AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": f"r{i}"}]))
+            msgs.append(ToolMessage(
+                content=f"{agent_mod._TODO_GATE_MARK}任务清单已滞后实际进度（距上次回写 13 条消息）。",
+                tool_call_id=f"r{i}", status="error", name="task",
+            ))
+        msgs.append(AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": "b0"}]))
+        out = mw.after_model(_gate_state(msgs), None)
+        if n < agent_mod._TODO_GATE_VALVE:
+            assert out is not None
+        else:
+            assert out is None
+
+
+def test_todo_sync_gate_aafter_model_delegates():
+    """基类默认 aafter_model 空实现不委托同步版（框架按执行模式择一调用）——
+    显式转发必须有，否则异步图里守卫静默失灵。"""
+    msgs = _todo_stale_messages(6)
+    msgs.append(AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": "b0"}]))
+
+    async def _run():
+        return await agent_mod._TodoFreshnessMiddleware().aafter_model(_gate_state(msgs), None)
+
+    out = asyncio.run(_run())
+    assert out is not None and out["messages"][0].tool_call_id == "b0"
 
 
 def test_sub_reasoning_buffer_collapses_to_single_copy():

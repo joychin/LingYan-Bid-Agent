@@ -215,3 +215,103 @@ def test_artifacts_list_filters_missing_package(client):
     shutil.rmtree(artifact_store.artifact_dir(aid, m))
     assert client.get("/api/artifacts").json()["artifacts"] == []
     assert client.get(f"/api/artifacts/{aid}/content").status_code == 410
+
+
+# ---------- 文件型产物（tender.volume=整本标书 docx，2026-09-13） ----------
+
+VOLUME_KEY = "tender.volume/tender-volume-docx@1"
+
+
+def test_volume_artifact_file_endpoint(client):
+    """GET /artifacts/{aid}/file：包内唯一 docx 流式下发（docx MIME + 附件名）；
+    列表行的 content_type 走契约注册表、editable=False。"""
+    import hashlib
+
+    from docx import Document
+
+    task, conv = _task_conv()
+    body_dir = artifact_store.work_dir(task["id"]) / "body"
+    body_dir.mkdir(parents=True, exist_ok=True)
+    src = body_dir / "整本-技术册.docx"
+    doc = Document()
+    doc.add_paragraph("整本正文")
+    doc.save(src)
+
+    m = publish.publish_file_artifact(
+        VOLUME_KEY,
+        file_path=src,
+        content_meta={
+            "filename": src.name,
+            "book": "技术册",
+            "size": src.stat().st_size,
+            "sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
+            "merged_sections": 1,
+        },
+        display_name="技术册",
+        source={"skill": "tender-body", "thread_id": conv["id"], "run_id": "r_1"},
+        task_id=task["id"],
+        conversation_id=conv["id"],
+    )
+    aid = m["artifact_id"]
+
+    r = client.get(f"/api/artifacts/{aid}/file")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument")
+    assert r.content == src.read_bytes()
+    assert "attachment" in r.headers.get("content-disposition", "")
+
+    a = next(a for a in client.get("/api/artifacts").json()["artifacts"] if a["artifact_id"] == aid)
+    assert a["content_type"].startswith("application/vnd.openxmlformats")
+    assert a["editable"] is False
+    assert a["restore_available"] is False  # 文件型产物明确不做恢复点
+
+    # editable=False 纵深：PUT content / restore 均拒绝（此前无校验，直调 API 可改机器元信息）
+    r = client.put(f"/api/artifacts/{aid}/content", json={"content": {}, "base_content_seq": 1})
+    assert r.status_code == 409
+    assert client.post(f"/api/artifacts/{aid}/restore").status_code == 409
+
+    assert client.get("/api/artifacts/nope/file").status_code == 404
+
+    # 契约目录端点含新 key（客户端启动对账能看到）
+    keys = [c["key"] for c in client.get("/api/contracts").json()["contracts"]]
+    assert VOLUME_KEY in keys
+
+
+def test_volume_artifact_file_prefers_content_filename(client):
+    """污染包择包防呆：包内残留多个 docx 时优先下发 content.json 登记的
+    filename（旧版清理只走覆盖路径，短路分支不清理，历史包可能多 docx），
+    盲取字典序第一会把旧册发给用户。"""
+    import hashlib
+
+    from docx import Document
+
+    task, conv = _task_conv()
+    body_dir = artifact_store.work_dir(task["id"]) / "body"
+    body_dir.mkdir(parents=True, exist_ok=True)
+    src = body_dir / "整本-技术册.docx"
+    Document().save(src)  # 空文档即可，只比对字节
+
+    m = publish.publish_file_artifact(
+        VOLUME_KEY,
+        file_path=src,
+        content_meta={
+            "filename": src.name,
+            "book": "技术册",
+            "size": src.stat().st_size,
+            "sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
+            "merged_sections": 1,
+        },
+        display_name="技术册",
+        source={"skill": "tender-body", "thread_id": conv["id"], "run_id": "r_1"},
+        task_id=task["id"],
+        conversation_id=conv["id"],
+    )
+    aid = m["artifact_id"]
+
+    # 塞一个字典序更早的旧册 docx（"aaa" < "技"），模拟历史污染包
+    decoy = artifact_store.artifact_dir(aid, m) / "整本-aaa旧册.docx"
+    decoy.write_bytes(b"stale-bytes")
+
+    r = client.get(f"/api/artifacts/{aid}/file")
+    assert r.status_code == 200
+    assert r.content == src.read_bytes()

@@ -98,10 +98,32 @@ def test_tender_outline_unused_ids_disclosure():
 
 
 def test_tender_body_kickoff_and_material_first():
-    """tender-body 开工纪律锚点：指引确认门+承诺拍板、素材先行、派发短名+系统自动补全
+    """tender-body 开工纪律锚点：两份确认件停轮汇报（2026-09-13 用户拍板弃
+    ask_human 门，改为摆要点等用户输入框指示）、素材先行、派发短名+系统自动补全
     （2026-09-08 起模型罗列的必带清单改为程序拼装，见 dispatch_enrich）。"""
     text = (skills_source_dir() / "tender-body" / "SKILL.md").read_text(encoding="utf-8")
     for kw in ("写作指引", "关键事实与承诺", "素材先行", "block_ids", "待补", "待澄清",
-               "validate_body", "guide_path", "tender-body-writer", "兄弟节开头摘要",
-               "由系统在派发时自动补全", "只重写我指定的章节", "封面"):
+               "validate_body", "停轮汇报指引", "停轮汇报承诺清单", "tender-body-writer",
+               "兄弟节开头摘要", "由系统在派发时自动补全", "只重写我指定的章节", "封面"):
         assert kw in text, f"tender-body/SKILL.md 缺少开工纪律关键词：{kw}"
+    # 弃门拍板守卫：开工两道 ask_human 门（确认指引/收承诺值）已删，正文里不再教
+    # 这两处用 ask_human（第 0 步重写范围门保留，是另一码事）
+    assert "ask_human 请用户确认" not in text and "ask_human 收承诺值" not in text
+
+
+def test_tender_body_material_objection_channel():
+    """素材异议出口（2026-09-13）：用户手选素材与本节要求不符时，写手此前只有
+    「顺从」和「沉默」两种反应（不许重检索、不许跳过注入、不许改指引、不许问人），
+    没有反弹回路。现放开一条受限通道：仍照常注入改写（不动产物路径），另留一条
+    「素材异议」批注 + 摘要单列，收尾逐条点名、改不改归用户拍板。
+    三处必须配套（缺一处即通道断开）：写手侧规则、方法论细则、主线程收尾点名。
+    """
+    root = skills_source_dir() / "tender-body"
+    skill = (root / "SKILL.md").read_text(encoding="utf-8")
+    # 主线程收尾点名 + 素材列归用户拍板（写手无改指引权限）
+    for kw in ("素材异议", "归用户拍板", "重派该节"):
+        assert kw in skill, f"tender-body/SKILL.md 缺少素材异议收尾关键词：{kw}"
+    detail = (root / "references" / "section-writing.md").read_text(encoding="utf-8")
+    # 方法论细则：仍注入 + 批注带回（跳过=丢图丢样式，改换块=路径分叉）
+    for kw in ("素材异议", "仍照常注入并改写", "docx_comment_add"):
+        assert kw in detail, f"section-writing.md 缺少素材异议细则关键词：{kw}"

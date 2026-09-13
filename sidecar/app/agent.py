@@ -26,13 +26,13 @@ from deepagents import create_deep_agent
 from deepagents.middleware.summarization import SummarizationMiddleware, compute_summarization_defaults
 from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware, ToolErrorMiddleware
 from langchain_core.exceptions import ContextOverflowError, ModelConnectionError, ModelRateLimitError, ModelTimeoutError
-from langchain_core.messages import SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from openai import APIError, APIStatusError, BadRequestError, InternalServerError
 
-from . import artifact_store, db, dispatch_enrich, events, model_registry, run_files, runctx, token_usage
+from . import artifact_store, db, deliverables, dispatch_enrich, events, model_registry, run_files, runctx, token_usage
 from . import config as cfg
 from .bus import publish
 from .fs_guard import GuardedBackend
@@ -617,7 +617,12 @@ SUBAGENTS: list[dict] = [
             "【待补】【待澄清】占位文字**（会随交付稿打印出去，validate_body 判不过）；"
             "docx 素材块必须先"
             " docx_material_inject 注入贴底稿再 revise 适配，禁止跳过注入直接自写——"
-            "素材块内的图片只有注入能带进正文（自写=图全丢）；证书复印件等独立图片"
+            "素材块内的图片只有注入能带进正文（自写=图全丢）；认为指引指派的素材块"
+            "与本节要求明显不符时（如历史标书讲的行业/产品与本节主题无关、块内容与"
+            "本节依据的要求对不上），**仍须照常注入并改写**，不得自行跳过该块或改换"
+            "其他块——另用 docx_comment_add 留一条以「素材异议」开头的批注（锚定相关"
+            "段落）：写清哪一块 blk_…、为什么不符、本节如何处理（已淡化/未采用其某"
+            "部分）；证书复印件等独立图片"
             "用 docx_image_insert 插入（图源路径用 search_company_assets 命中行的"
             "「含图 N 张」提示，PDF 原件传路径+页号）；物理附件/复印件节任务描述标了"
             "【知识库】命中（含图）的，建节后按其图源路径逐张贴图产出节文件，库里"
@@ -630,7 +635,7 @@ SUBAGENTS: list[dict] = [
             "禁止调用 ask_human（无人应答）：需要用户裁决的用 docx_comment_add 加批注带回。\n"
             "禁止改写写作指引与关键事实与承诺清单（共享文件只归主线程维护）。\n"
             "完成后返回简短中文摘要：节名、字数、使用素材块与重叠率、自查结果、"
-            "待办批注清单。"
+            "素材异议（无则写「无」；有则逐条列块 id 与理由）、待办批注清单。"
         ),
         "interrupt_on": {},
         "middleware": [_SUBAGENT_COMPASS_MW, _SUBAGENT_SCOPE_MW, _PATH_RESCUE_MW, _TOOL_TIMEOUT_MW],
@@ -825,6 +830,165 @@ class _TaskContextMiddleware(AgentMiddleware):
             request, system_message=SystemMessage(content=f"{base}\n\n{block}" if base else block)
         )
         return handler(request)
+
+
+# 任务清单陈旧阈值：距上一次 write_todos 的消息条数超过它才提醒。整本逐节生成的
+# 主代理每波派发/返回约产生 8~20 条消息，10 ≈ 滞后一到两拍——不在模型正常工作
+# 节奏里制造噪音，也不让清单停在上一阶段数小时（2026-09-13 实测：确认门之后
+# 40+ 次子代理派发零 write_todos，面板停在 4/8 而实际已跑到第 4 波）。
+_TODO_STALE_THRESHOLD = 10
+# 清单同步守卫（二批，2026-09-13）：滞后超过它时拒绝 task 派发，逼模型先回写
+# 清单。6 ≈ 一整波（8 路）的 ToolMessage 数——波内不拦（清单标 in_progress 本就
+# 正确），跨波未回写必拦。
+_TODO_GATE_THRESHOLD = 6
+# 泄压阀：同一段内守卫已拒绝这么多次仍不回写 → 放行派发（防病态循环卡死 run；
+# 对齐 opencode-auto-resume 插件 maxRetries=3 的有界拒绝实践）。
+_TODO_GATE_VALVE = 3
+# 守卫拒绝文案标记：泄压阀从消息序列无状态计数的锚点（勿改文案前缀）。
+_TODO_GATE_MARK = "〔清单同步守卫〕"
+
+
+def _todo_baseline(msgs: list) -> tuple[bool, int, bool, int]:
+    """清单基线推导（消息序列纯函数，提醒与守卫共用）。
+
+    返回 (写过清单, 距基线的消息条数, 裁决后未回写, 基线位置)。基线取「最后一条
+    write_todos 结果」；若其后存在 ask_human 的代答 ToolMessage（HITL resume 合成
+    的用户回答/respond，tool_call_id 沿用原调用），基线抬到代答处并置
+    resume_pending——「刚回答完用户、清单还没刷新」是消息序列可机械识别的边界
+    （2026-09-13 实测事故：续跑后 4 分钟面板仍停在上一阶段，提醒层对该首拍盲区）。
+    """
+    write_ids: set[str] = set()
+    ask_ids: set[str] = set()
+    for m in msgs:
+        if isinstance(m, AIMessage):
+            for tc in getattr(m, "tool_calls", None) or []:
+                if not tc.get("id"):
+                    continue
+                if tc.get("name") == "write_todos":
+                    write_ids.add(tc["id"])
+                elif tc.get("name") == "ask_human":
+                    ask_ids.add(tc["id"])
+    if not write_ids:
+        return False, 0, False, -1
+    last_write = last_answer = None
+    for i in range(len(msgs) - 1, -1, -1):
+        m = msgs[i]
+        if not isinstance(m, ToolMessage):
+            continue
+        if last_write is None and m.tool_call_id in write_ids:
+            last_write = i
+        if last_answer is None and m.tool_call_id in ask_ids:
+            last_answer = i
+        if last_write is not None and last_answer is not None:
+            break
+    if last_write is None:
+        return False, 0, False, -1
+    base, resume_pending = last_write, False
+    if last_answer is not None and last_answer > last_write:
+        base, resume_pending = last_answer, True
+    return True, len(msgs) - 1 - base, resume_pending, base
+
+
+class _TodoFreshnessMiddleware(AgentMiddleware):
+    """任务清单陈旧提醒 + 同步守卫（只挂主 agent——子代理没有 todos）。
+
+    提醒（2026-09-13 一批）：距上次 write_todos 太久时，在最新工具结果尾部追加
+    一句系统提醒，模型回写清单后自动消失。动因：langchain TodoListMiddleware 的
+    工具描述原文已要求「实时更新、完成立刻标、不要攒批」，但整本逐节生成的波次
+    循环里模型就是不调，任务清单数小时停在确认门之前的旧阶段。纪律在场的失灵
+    先例：派发说明塌方→dispatch_enrich 程序拼装、ask_human 参数泄漏→机械归一化。
+
+    守卫（2026-09-13 二批，治本）：提醒固有 latency=一整波（8 路 ToolMessage 才
+    攒够阈值 10），且续跑后首拍完全盲区（实测复现：回答完 4 分钟面板不动）。
+    after_model 在派发落地前整批拒绝滞后的 task 调用——子代理派发不可能带着滞后
+    清单执行，这才是保证。实现手法对齐框架内先例 TodoListMiddleware.after_model
+    的并行 write_todos 拒绝（error ToolMessage 应答 tool_call → 路由层判「无
+    pending 调用」跳回模型节点，factory.py 既有路径，HITL 同款）；行业佐证：
+    OpenCode #28961（同病、纪律路线证伪、官方关闭不做）+ opencode-auto-resume
+    插件（todo 真值 + 工具边界有界拒绝）。机械层不做语义改写（哪项清单对应哪段
+    执行归模型判断），只强制回写时机。
+
+    两层状态全从 messages 现推导（无跨调用状态）；本会话从未写清单不提醒不拦
+    （不逼聊天类 run 建清单）。拒绝消息对 SSE 不可见（events 翻译只认真实执行
+    节点，伪节点注入的 ToolMessage 被跳过——不产生幻影失败卡，前端零改动）。
+    """
+
+    def wrap_model_call(self, request, handler):
+        msgs = request.messages
+        wrote, count, _resume_pending, _base = _todo_baseline(msgs)
+        if not wrote or count < _TODO_STALE_THRESHOLD:
+            return handler(request)
+        tail = msgs[-1]
+        if not (isinstance(tail, ToolMessage) and isinstance(tail.content, str)):
+            return handler(request)
+        note = (
+            f"〔系统提醒〕任务清单已 {count} 条消息未更新，与当前实际进度可能脱节；"
+            "继续之前先调用 write_todos 把清单回写为真实进度"
+            "（已完成标 completed、正在做标 in_progress），再继续当前工作。"
+        )
+        patched = tail.model_copy(update={"content": f"{tail.content}\n\n{note}"})
+        request = dataclasses.replace(request, messages=[*msgs[:-1], patched])
+        return handler(request)
+
+    def after_model(self, state, runtime) -> dict | None:
+        """清单同步守卫：滞后（或裁决后未回写）的 task 派发整批拒绝。
+
+        放行条件按序短路：state 异常 / 无清单 / 尾部 AIMessage 无 task 调用 /
+        同批已带 write_todos（「回写+派发」同轮的常态路径，免重试往返）/ 新鲜 /
+        泄压阀已计满。命中才全批拒绝——漏放行半个批=带着旧清单继续执行，守卫
+        失效；故必须逐个 task 调用应答，路由层随即跳回模型节点。
+        """
+        try:
+            msgs = state["messages"]
+            todos = state.get("todos")
+        except Exception:
+            return None
+        if not isinstance(msgs, list) or not msgs or not todos:
+            return None
+        try:
+            ai = next(m for m in reversed(msgs) if isinstance(m, AIMessage))
+            calls = getattr(ai, "tool_calls", None) or []
+        except StopIteration:
+            return None
+        task_calls = [tc for tc in calls if tc.get("name") == "task"]
+        if not task_calls or any(tc.get("name") == "write_todos" for tc in calls):
+            return None
+        wrote, count, resume_pending, base = _todo_baseline(msgs)
+        if not wrote:
+            return None
+        if not resume_pending and count < _TODO_GATE_THRESHOLD:
+            return None
+        rejects = sum(
+            1
+            for m in msgs[base + 1:]
+            if isinstance(m, ToolMessage)
+            and isinstance(m.content, str)
+            and _TODO_GATE_MARK in m.content
+        )
+        if rejects >= _TODO_GATE_VALVE:
+            return None
+        reason = "你刚收到用户的回答" if resume_pending else f"距上次回写 {count} 条消息"
+        text = (
+            f"{_TODO_GATE_MARK}任务清单已滞后实际进度（{reason}）。"
+            "请先调用 write_todos 把清单回写为真实进度"
+            "（已完成标 completed、正在做标 in_progress），再重新派发子代理；"
+            "write_todos 可以与派发放在同一轮。"
+        )
+        return {
+            "messages": [
+                ToolMessage(
+                    content=text,
+                    status="error",
+                    tool_call_id=tc.get("id") or "",
+                    name="task",
+                )
+                for tc in task_calls
+            ]
+        }
+
+    async def aafter_model(self, state, runtime) -> dict | None:
+        # 基类默认空实现不委托同步版（框架按执行模式择一调用），显式转发
+        return self.after_model(state, runtime)
 
 
 # 思考档位 -> OpenAI 风格 reasoning_effort（标准 API 参数）。模型本身默认开思考，
@@ -1110,7 +1274,9 @@ def build_agent(profile: cfg.ModelProfile | None = None):
         tools=TOOLS,
         subagents=[{**spec, "middleware": [summ, *spec["middleware"]]} for spec in SUBAGENTS],
         skills=["skills/"],  # 未加载时在 main 启动日志提示换写法（见 README）
-        # 子代理归属插桩；todos 工具；任务上下文按 run 注入；task 子代理异常收敛
+        # 子代理归属插桩；todos 工具；任务清单陈旧提醒（波次循环里模型不回写
+        # 清单→面板数小时停在旧阶段，2026-09-13）；任务上下文按 run 注入；
+        # task 子代理异常收敛
         # （deepagents 内置工具不守「失败返回错误字符串」纪律，无此层时子代理
         # 永久错误会打死整个主 run——见 _task_failure_content）；文件工具路径自愈
         # （子代理各自 ToolNode 独立，故 SUBAGENTS 条目里还挂了一份）；tender-body-writer
@@ -1121,6 +1287,7 @@ def build_agent(profile: cfg.ModelProfile | None = None):
             summ,
             _SubagentTagMiddleware(),
             TodoListMiddleware(),
+            _TodoFreshnessMiddleware(),
             _TaskContextMiddleware(),
             ToolErrorMiddleware(on_error=_task_failure_content, tools=["task"]),
             _PATH_RESCUE_MW,
@@ -1137,6 +1304,12 @@ def build_agent(profile: cfg.ModelProfile | None = None):
             "编写响应文件正文用 tender-body；"
             "就招标文件回答单个具体问题用 tender-qa；"
             "去除文本中的 AI 写作痕迹、让中文读起来更自然用 humanizer-zh。"
+            "环节衔接：要点提取（tender-analysis）完成后必须停下——收尾汇报摆出"
+            "关键要点与待澄清清单、提醒用户查看，本轮结束；即使用户的原始请求"
+            "覆盖后续环节（如「帮我把标书做出来」）也不要自动生成投标目录，"
+            "用户回复继续后再走 tender-outline。正文开工的两份确认件（写作指引、"
+            "关键事实与承诺）同样：每份生成后汇报要点与缺口清单、停下等用户回复"
+            "继续或给出承诺值，不用 ask_human 提问。"
             "向用户介绍能力、流程或产物时只说你确定的内容，不虚构具体章节名、"
             "步骤名、字段名；没读技能文件前说到概括层（如「按招标文件结构提取"
             "七个方面的要点」）。用户请求你没有的能力时，如实说明做不到并指出"
@@ -1161,7 +1334,9 @@ def build_agent(profile: cfg.ModelProfile | None = None):
                 "完整的进展与结论只在最终回复（不再调用工具的那一轮）给出。"
                 "任务清单（write_todos）是给用户的进度承诺：收尾汇报前把清单回写为"
                 "真实终态——已完成项标 completed，确未做的如实保留 pending 并在最终"
-                "回复说明原因；不要把半程状态的清单留给用户。"
+                "回复说明原因；不要把半程状态的清单留给用户。阶段切换时也要回写："
+                "用户裁决续跑后的第一轮、整本逐节生成每波派发前，把清单更新为当前"
+                "真实进度，不要等收尾。"
                 "派发子代理（task）时，description 第一行只写短名本身——不超过 16 字、"
                 "概括该子代理的任务（如「检索中石化 dify 相关招标」），不要以「你是……」"
                 "之类的角色自述开头，并发派发时各卡短名要能相互区分；详细任务说明从"
@@ -2128,6 +2303,21 @@ async def run_stream(
         # 执行过程快照与 assistant 消息关联落库（与暂停段合并成全程一棵树，
         # 历史会话/刷新后执行过程仍可见）
         _save_merged_trace(rid, cid, msg["id"], trace, duration_ms, files=segment_files)
+        # 交付物呈现（2026-09-13 二批改定：run 正常完成时呈现）：本轮 run 内声明的
+        # 交付物取**最后一个**在终态事件前发出（多个时面板只开最新的一个，先目录后
+        # 整本自然选整本；逐个发会在毫秒内连环换页）。只在 completed 分支发——
+        # error（含取消）/interrupt（等待输入）段不呈现：那时该看错误卡/提问卡，
+        # 暂停段声明的交付物随之丢弃（finally 清桶），续跑完成后由**续跑段**的新
+        # 声明或转录产物卡兜底。
+        items = deliverables.drain(rid)
+        if items:
+            await publish(
+                cid,
+                {
+                    "event": events.EVENT_DELIVERABLE_CREATED,
+                    "data": events.deliverable_created_payload(items[-1], rid, cid, next_seq()),
+                },
+            )
         seq = next_seq()
         db.finish_run(rid, "completed", last_seq=seq, token_usage_json=_usage_json_final(rid))
         _frozen_ctx_cleanup(rid)
@@ -2185,3 +2375,4 @@ async def run_stream(
             logger.exception("run_stream 终态落库/事件发布失败（cid=%s rid=%s）", cid, rid)
     finally:
         CANCEL_EVENTS.pop(rid, None)
+        deliverables.clear(rid)  # 清呈现信号桶：防异常路径残留累积（正常路径 drain 已空）

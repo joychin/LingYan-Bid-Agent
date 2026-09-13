@@ -196,7 +196,10 @@ def _extract_images_sync(item: dict, src: Path) -> None:
             meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
             warns = meta.get("warnings") or []
             if skipped:
-                warns.append(f"已抽取 {written} 张文档图片供查看（其余 {skipped} 张经附件区/装饰过滤或超限跳过）")
+                warns.append(
+                    f"已抽取 {written} 张文档图片供查看"
+                    f"（其余 {skipped} 页/张经空白、附件区、装饰或矢量格式过滤，或超限跳过）"
+                )
             meta["warnings"] = warns
             meta["extracted_images"] = written
             write_atomic(meta_path, json.dumps(meta, ensure_ascii=False, indent=2))

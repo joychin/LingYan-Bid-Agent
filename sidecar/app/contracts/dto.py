@@ -27,6 +27,11 @@ class Task(_ContractModel):
     title: str
     progress_note: str
     created_at: str
+    # 阶段（task_stage.py 机械推导，零 LLM）：new/parsed/analyzed/outlined/drafting/
+    # delivered——首页列表的「这个标走到哪」；last_activity_at=创建/最近run/最近产物
+    # 三者最大值，供首页按最近活动排序（后端 GET /tasks 排序不动，侧栏保持创建序）
+    stage: str
+    last_activity_at: str
 
 
 class Conversation(_ContractModel):

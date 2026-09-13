@@ -27,6 +27,7 @@ import re
 from pathlib import Path, PurePosixPath
 
 from docx import Document
+from docx.oxml.ns import qn
 from langchain_core.tools import tool
 
 from .. import db, runctx
@@ -47,6 +48,14 @@ _OVERLAP_HINT = 0.10
 # （同块多派/原文照搬的实测形态在 78%+；50% 线避开共享承诺值等短重叠）
 _DUP_RATIO = 0.50
 _SHINGLE = 10
+
+# 缺口/备注列读者分离（2026-09-13）：该列同时是给写手的指令与给用户的缺料点名，
+# 前端会把【缺：…】摘成「需要你提供」独立展示。两类写法在摘出后失效，只提示。
+_TOOL_NAME_RE = re.compile(r"\b(?:docx_\w+|check_name_residue|parse_document|search_\w+|"
+                           r"read_artifact|publish_artifact|assemble_tender|list_templates)\b")
+# 代词回指（「【缺：上述公司信息】」实测原话——摘出来读不通）；「本文/本项目」等
+# 正常措辞不在此列，「上述」限定紧跟【缺： 之后的首字符语境
+_NOTE_ANAPHORA_RE = re.compile(r"【缺[：:]\s*(?:上述|以上|前述|前面|前面所|以上所)")
 
 
 def _normalize(text: str) -> str:
@@ -207,6 +216,25 @@ def _validate_guide(lines: list[str], task_id: str) -> tuple[list[str], list[str
         dep = cells[idx["依据"]].strip() if idx.get("依据", 2) < len(cells) else ""
         if not dep and content and key in prose_keys:
             warnings.append(f"写作指引.md:{lineno} 「{key}」依据列为空——纯过渡章允许；应写节须挂 REQ/SCORE/MAND ID")
+
+        # 缺口/备注列读者分离（2026-09-13，两条均提示级——前端已能把【缺】摘出来
+        # 独立展示，混写只是观感与可读性问题，不是门禁；存量指引照常可用）
+        note = cells[idx["缺口/备注"]].strip() if idx.get("缺口/备注", 4) < len(cells) else ""
+        if note and note != "—":
+            tool_hit = _TOOL_NAME_RE.search(note)
+            if tool_hit:
+                warnings.append(
+                    f"写作指引.md:{lineno} 「{key}」缺口列混入工具名 {tool_hit.group(0)}——"
+                    "执行链路由模式列与派发说明自动补（依据列含 TPL 编号时程序自动加"
+                    "「本节含格式件」与「原件定位」行），该列是给用户看的缺料清单，删工具名；"
+                    "行号仅在程序定位不到时以「原件：<格式名> L起-L止」保留"
+                )
+            if _NOTE_ANAPHORA_RE.search(note):
+                warnings.append(
+                    f"写作指引.md:{lineno} 「{key}」缺口项用了代词回指（上述/以上/前面）——"
+                    "该列会被摘成「需要你提供」独立展示，代词摘出来后指代丢失，"
+                    "请列具体字段名（如「公司全称、注册地址、成立时间、法定代表人姓名」）"
+                )
 
     # 同块多派：同一素材块出现在多行 → 注入两节=正文逐字重复（2026-09-08 实测事故：
     # 同一 625 段素材块全文进了两个节）。issue 级——与 docx_material_inject 的
@@ -493,6 +521,22 @@ def validate_body(section: str, block_ids: list[str] | None = None) -> str:
                 f"{loc}〔批注〕：{t[:50]}{'…' if len(t) > 50 else ''}"
                 for loc, t in section_comments_labeled(doc)
             )
+            # 直挂大纲级别清点（提示级，2026-09-13 批）：素材/格式件拷入可能带
+            # outlineLvl，无标题样式形态在读视图里不可见、导航窗格却会出现树外
+            # 条目；新拷贝已被注入层剥除（_strip_copy_residue），命中多为历史
+            # 残留——合册会自动摘出，不进交付稿，故只清点不判不过
+            outline_paras = [
+                str(i) for i, para in enumerate(doc.paragraphs, 1)
+                if (ppr := para._p.find(qn("w:pPr"))) is not None
+                and ppr.find(qn("w:outlineLvl")) is not None
+            ]
+            if outline_paras:
+                shown = "、".join(f"P{x}" for x in outline_paras[:6]) + ("…" if len(outline_paras) > 6 else "")
+                notes.append(
+                    f"〔大纲级别〕{len(outline_paras)} 段直挂大纲级别（{shown}）——"
+                    "历史拷贝残留，Word 导航窗格会出现树外条目（合册会自动摘出）；"
+                    "如需正文层级请改用标题样式"
+                )
         elif p.suffix == ".md":
             lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
             if pure.name == "写作指引.md" and "body" in pure.parts:

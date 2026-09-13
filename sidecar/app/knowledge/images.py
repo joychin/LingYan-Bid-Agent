@@ -1,11 +1,15 @@
-"""文档图片抽取（确定性零 LLM；2026-09-04 降级重构）：
+"""文档图片抽取（确定性零 LLM；2026-09-04 降级重构，2026-09-13 PDF 改整页渲染）：
 
-把文档里的嵌入图抽出来**仅供内容页「本文档图片」折叠区查看**——与素材库彻底
-脱钩（不写 materials.json、不进检索），证书扫描件在此核实红章/签名等视觉证据。
-- docx：解包 word/media/*；PDF：逐页提取嵌入图（记出处页）。
-- 程序过滤装饰图：短边 <200px 丢弃；PDF 图面积占页面 <10% 丢弃（icon/背景/分割线）。
-- 浏览器原生不解码 TIFF/BMP——落盘前转 PNG。
-- 限额 _MAX_IMAGES：证书扫描类文档可能几百张，超限截断（查看场景够用）。
+把文档里可贴进标书的图抽出来**仅供内容页「本文档图片」折叠区查看**——与素材库
+彻底脱钩（不写 materials.json、不进检索）。这个功能的用途是「贴资料」：贴的单位
+永远是**那一页的复印件**（边框/红章/文字都在），所以：
+- PDF：**逐页整页渲染**（不再提取嵌入图）——电子版证书的边框/水印是底层大图、
+  文字是浮在上面的文字层，按嵌入图抽只会拿到一张空底框；矢量证书（无嵌入图）
+  也会被漏成 0 张。渲染看到的才是页面真实视觉；文件名即页码（img_007.png=第 7 页）。
+- docx：解包 word/media/*（word 没有「页」的概念，内嵌图本身就是贴进去的资料原件）。
+- docx 过滤装饰图：短边 <200px 丢弃；PDF 无需此过滤（整页渲染天然无装饰图）。
+- 浏览器/Word 不认的格式：docx 侧 TIFF/BMP 落盘前转 PNG，EMF/WMF 跳过。
+- 限额 _MAX_IMAGES：长文档超限截断（要贴的证书包远不到 60 页）。
 """
 
 from __future__ import annotations
@@ -18,9 +22,11 @@ from . import store
 
 logger = logging.getLogger(__name__)
 
-_MIN_EDGE = 200      # 短边下限（px）——过滤 icon/分割线
-_MIN_PAGE_RATIO = 0.10  # PDF 图面积/页面积下限——过滤装饰图
+_MIN_EDGE = 200      # docx 短边下限（px）——过滤 icon/分割线
 _MAX_IMAGES = 60     # 单文件抽取上限
+_RENDER_DPI = 150    # PDF 整页渲染 DPI（与 docx_image_insert 现场渲染、扫描页 VLM 同档）
+# Word 里常见的矢量图格式（EMF/WMF）——浏览器不认且无转码器，落盘即裂图，跳过
+_VECTOR_UNSUPPORTED = {".emf", ".wmf"}
 _CONSEC_SCAN = 6     # 连续 N 张图无正文间隔 → 附件扫描区，跳过
 # zip 解压护栏（声明值，读前检查——KB 上传白名单收 docx、文件天然来自对手方，
 # 高压缩比 media 条目可在几 KB 压缩包里声明数 GB 解压量，不设限即 OOM 打死 sidecar）
@@ -46,11 +52,11 @@ def _sniff_ext(data: bytes, fallback: str) -> str:
 def to_png(data: bytes) -> bytes | None:
     """TIFF/BMP → PNG（MuPDF 解码转码；CMYK 先转 RGB；失败返回 None）。"""
     try:
-        import fitz
+        import pymupdf
 
-        pix = fitz.Pixmap(data)
+        pix = pymupdf.Pixmap(data)
         if pix.colorspace and pix.colorspace.n > 3:
-            pix = fitz.Pixmap(fitz.csRGB, pix)
+            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
         out = pix.tobytes("png")
         pix = None  # noqa: F841  释放
         return out
@@ -70,9 +76,9 @@ def as_browser_friendly(data: bytes, ext: str) -> tuple[bytes, str]:
 def _image_size(data: bytes) -> tuple[int, int] | None:
     """读图片宽高（PyMuPDF Pixmap 解码；失败返回 None）。"""
     try:
-        import fitz
+        import pymupdf
 
-        pix = fitz.Pixmap(data)
+        pix = pymupdf.Pixmap(data)
         w, h = pix.width, pix.height
         pix = None  # noqa: F841  释放
         return w, h
@@ -119,6 +125,11 @@ def _extract_docx(src: Path) -> list[tuple[bytes, str]]:
             name = info.filename
             if not name.startswith("word/media/") or name in media_skip:
                 continue
+            if info.is_dir():
+                continue  # zip 目录占位条目（0 字节）——不是图
+            if Path(name).suffix.lower() in _VECTOR_UNSUPPORTED:
+                logger.info("图片抽取跳过矢量图（浏览器不认）：%s（%s）", name, src.name)
+                continue
             if info.file_size > _MAX_MEMBER_BYTES:
                 logger.warning(
                     "图片抽取跳过超大条目 %s（声明解压 %.0fMB > 上限）：%s",
@@ -140,56 +151,72 @@ def _extract_docx(src: Path) -> list[tuple[bytes, str]]:
     return out
 
 
-def _extract_pdf(src: Path) -> list[tuple[bytes, str]]:
-    """PDF → [(图数据, 扩展名)]；按页面积占比过滤装饰图。"""
-    import fitz
+def _blank_page(page) -> bool:
+    """空白页判定：无文字、无图、无矢量绘制——纯噪音，无需渲染。"""
+    if page.get_text().strip():
+        return False
+    if page.get_images():
+        return False
+    return not page.get_drawings()
 
-    out: list[tuple[bytes, str]] = []
-    doc = fitz.open(src)
+
+def _render_pdf_pages(src: Path, img_dir: Path) -> tuple[int, int]:
+    """PDF → 逐页整页渲染 PNG 落盘（→ (写入张数, 跳过张数)）。
+
+    贴资料的单位是「那一页的复印件」，不是 PDF 内嵌的某张图——整页渲染才能拿到
+    边框/红章/文字俱全的页面视觉（电子版证书的文字是浮在底图上的文字层，抽嵌入图
+    只剩空底框）。文件名即页码（img_007.png=第 7 页），空白页跳过、编号留空洞，
+    模型据转录 md 的 <!-- p:N --> 页锚点即可推回页图。
+    """
+    import pymupdf
+
+    written = 0
+    skipped = 0
+    doc = pymupdf.open(src)
     try:
         for pno in range(len(doc)):
+            if written >= _MAX_IMAGES:
+                break
             page = doc[pno]
-            page_area = page.rect.width * page.rect.height
-            seen_xrefs: set[int] = set()
-            for info in page.get_images(full=True):
-                xref = info[0]
-                if xref in seen_xrefs:
-                    continue
-                seen_xrefs.add(xref)
-                try:
-                    pix = fitz.Pixmap(doc, xref)
-                    if pix.width * pix.height < page_area * _MIN_PAGE_RATIO:
-                        continue
-                    if pix.colorspace and pix.colorspace.n > 3:
-                        pix = fitz.Pixmap(fitz.csRGB, pix)
-                    data = pix.tobytes("png")
-                    out.append((data, ".png"))
-                    pix = None  # noqa: F841
-                except Exception:
-                    continue
+            if _blank_page(page):
+                skipped += 1
+                continue
+            pix = page.get_pixmap(dpi=_RENDER_DPI)
+            pix.save(str(img_dir / f"img_{pno + 1:03d}.png"))
+            pix = None  # noqa: F841  释放
+            written += 1
     finally:
         doc.close()
-    return out
+    return written, skipped
 
 
 def extract_images(src: Path, file_name: str) -> tuple[int, int]:
     """源文件 → 抽图落盘 parse/<stem>/images/（幂等：每次全量重抽覆盖）。
 
     → (写入张数, 跳过张数)。与素材/检索零关系，仅供内容页查看。
+    PDF 走整页渲染（文件名即页码），docx 走内嵌图抽取。
     """
-    ext = src.suffix.lower()
-    try:
-        raw = _extract_pdf(src) if ext == ".pdf" else (_extract_docx(src) if ext == ".docx" else [])
-    except Exception:
-        logger.exception("图片抽取失败（%s）", file_name)
-        return 0, 0
-
     img_dir = store.kb_images_dir(file_name)
     img_dir.mkdir(parents=True, exist_ok=True)
     # 幂等重抽：清掉旧文件（含历史遗留的 .tif——转码后已改存 .png）
     for old in img_dir.iterdir():
         if old.is_file():
             old.unlink(missing_ok=True)
+
+    ext = src.suffix.lower()
+    if ext == ".pdf":
+        try:
+            return _render_pdf_pages(src, img_dir)
+        except Exception:
+            logger.exception("PDF 整页渲染失败（%s）", file_name)
+            return 0, 0
+
+    try:
+        raw = _extract_docx(src) if ext == ".docx" else []
+    except Exception:
+        logger.exception("图片抽取失败（%s）", file_name)
+        return 0, 0
+
     written = 0
     passed = 0
     for data, iext in raw:

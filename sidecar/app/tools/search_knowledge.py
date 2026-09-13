@@ -30,8 +30,9 @@ _SNIPPET_CHARS = 300
 def _kb_image_hint(file_name: str) -> str:
     """命中条目的可用图提示（证书贴正文的入口指引；无图返回空串）。
 
-    图片抽取产物在 knowledge/parse/<stem>/images/（每文档一目录、无 DB 记录，
-    listdir 即清单）；证书扫描 PDF 的抽取图每页一张、文件序号即页序。
+    图片产物在 knowledge/parse/<stem>/images/（每文档一目录、无 DB 记录，listdir
+    即清单）；PDF 是**整页渲染图，文件名即页码**（img_007.png=第 7 页，空白页跳过），
+    docx 是内嵌图（文件序号即顺序）。
     """
     from ..knowledge import images as kb_images
 
@@ -44,8 +45,8 @@ def _kb_image_hint(file_name: str) -> str:
     first = imgs[0]["name"]
     return (
         f"\n  含图 {len(imgs)} 张——贴证书复印件用 docx_image_insert 插入正文节："
-        f"knowledge/parse/{Path(file_name).stem}/images/{first}…（文件序号即页序，"
-        "任选一张；PDF 原件也可按页渲染插入）"
+        f"knowledge/parse/{Path(file_name).stem}/images/{first}…（PDF 为整页渲染图，"
+        "文件名即页码（img_007.png=第 7 页，空白页跳过）；docx 为文档内嵌图）"
     )
 
 
@@ -172,7 +173,7 @@ def search_company_assets(query: str, doc_type: str | None = None) -> str:
 
     Returns:
         命中列表（统一命中头：角色｜类型｜确认状态｜时效；行号区间、摘录、引用键）与
-        精读指引；条目含抽取图时附图片路径——证书复印件用 docx_image_insert 贴进
+        精读指引；条目含图（PDF 整页渲染 / docx 内嵌图）时附图片路径——证书复印件用 docx_image_insert 贴进
         正文节。纪律：**来自历史标书的业绩描述可引用但须与合同/验收核对**；「拟投入
         N 人」「承诺 7×24」类是当年投标承诺，**不是公司现状事实**；数字一律重核；
         过期证书不得写为有效；标注「AI 整理」的说明段引用数字须回原文核对。

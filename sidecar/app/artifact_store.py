@@ -150,6 +150,42 @@ def replace_current_content(aid: str, scope: Mapping, content_text: str) -> None
     _atomic_write(content_path(aid, scope), content_text)
 
 
+# ---------- 文件型产物（tender.volume：包内除 content.json 外还有 docx 本体） ----------
+
+
+def package_files(aid: str, scope: Mapping, pattern: str = "*.docx") -> list[Path]:
+    """包内文件清单（containment 版）：resolve 后必须仍在 workspace 内，越界跳过。
+
+    读侧统一入口（API file 端点 / 发布去重比对）；写入位置由纯函数派生无用户
+    输入分量，与 content.json 同一威胁模型。
+    """
+    if not _aid_ok(aid):
+        return []
+    d = artifact_dir(aid, scope)
+    if not d.is_dir():
+        return []
+    try:
+        ws = workspace_dir().resolve()
+        return [p.resolve() for p in sorted(d.glob(pattern)) if p.is_relative_to(ws)]
+    except OSError:
+        return []
+
+
+def write_package_file(aid: str, scope: Mapping, filename: str, data: bytes) -> None:
+    """包内二进制文件原子落盘（tmp + replace，与 _atomic_write 同款防并发截断）。
+
+    filename 由发布管线从册名确定性派生（sanitize 后无路径分隔符），仍做一次
+    防御性拒绝——包内不允许子路径/上跳。
+    """
+    if not filename or "/" in filename or "\\" in filename or filename.startswith("."):
+        raise ValueError(f"包内文件名不合法：{filename!r}")
+    p = artifact_dir(aid, scope) / filename
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(f"{p.name}.{uuid.uuid4().hex[:8]}.tmp")
+    tmp.write_bytes(data)
+    tmp.replace(p)
+
+
 def archive_task(task_id: str) -> bool:
     """删任务软归档：任务目录**整体移入** workspace/archive/<task_id>/
     （move 失败返回 False，调用方不得删库——目录原样保留，用户可重试或手工处理）。

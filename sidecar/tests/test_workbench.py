@@ -64,6 +64,36 @@ def test_read_and_containment(client):
         assert rr.status_code == 404, bad
 
 
+def test_read_content_line_slice(client):
+    """行切片取文（2026-09-13 内存修复批）：溯源卡按行取文不整份拉。成对/区间
+    校验、越界 clamp、hash 恒按全文算（与编辑保存的 base_hash 同口径）；不传
+    两参行为不变（响应无 total_lines 键）。"""
+    task = create_task(client)["task"]
+    tid = task["id"]
+    p = "parse/招标文件.docx/招标文件.docx.md"
+    _seed_out(tid, p, "\n".join(f"第{i}行" for i in range(1, 11)))
+
+    full = client.get("/api/workbench/content", params={"task_id": tid, "path": p}).json()
+    assert "total_lines" not in full
+
+    d = client.get(
+        "/api/workbench/content", params={"task_id": tid, "path": p, "start": 3, "end": 5}
+    ).json()
+    assert d["content"] == "第3行\n第4行\n第5行"
+    assert d["total_lines"] == 10 and d["hash"] == full["hash"] and d["editable"] is False
+
+    # 越界 clamp（右侧向文件实际行数收）
+    d2 = client.get(
+        "/api/workbench/content", params={"task_id": tid, "path": p, "start": 8, "end": 99}
+    ).json()
+    assert d2["content"] == "第8行\n第9行\n第10行"
+
+    # 成对与区间校验
+    for bad in ({"start": 3}, {"end": 5}, {"start": 0, "end": 5}, {"start": 6, "end": 2}):
+        rr = client.get("/api/workbench/content", params={"task_id": tid, "path": p, **bad})
+        assert rr.status_code == 422, bad
+
+
 def test_path_fuzzy_resolution(client):
     """唯一后缀兜底（2026-09-07 guide_path 事故回归）：模型给的路径少前缀
     （body/ 下相对）/多前缀（work/、<task_id>/）时仍能打开同一真实文件；
@@ -311,3 +341,20 @@ def test_raw_endpoint(client):
     _seed_out(tid, "analysis/evaluation.md", "内容")
     assert client.get("/api/workbench/raw", params={"task_id": tid, "path": "analysis/evaluation.md"}).status_code == 400
     assert client.get("/api/workbench/raw", params={"task_id": tid, "path": "../sources/a.docx"}).status_code == 404
+
+
+def test_list_skips_artifacts_subtree(client):
+    """work/artifacts/（登记产物包）子树不进工作台列表——文件型产物（tender.volume）
+    落地后包内有 .docx，不跳过会以重复行污染面板（2026-09-13 补上，与 run_files 口径对齐）。"""
+    task = create_task(client)["task"]
+    body = artifact_store.work_dir(task["id"]) / "body"
+    body.mkdir(parents=True, exist_ok=True)
+    (body / "整本-技术册.docx").write_bytes(b"PK\x03\x04fake-docx")
+    pkg = artifact_store.work_artifacts_dir(task["id"]) / "art_000000000001"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "整本-技术册.docx").write_bytes(b"PK\x03\x04package-copy")
+
+    r = client.get("/api/workbench", params={"task_id": task["id"]})
+    assert r.status_code == 200
+    paths = [f["path"] for f in r.json()["files"]]
+    assert paths == ["body/整本-技术册.docx"]

@@ -944,9 +944,13 @@ def test_base_template_layout_on_create_and_assemble(env):
     """建节/合册从标书基准模板起建（格式与内容分离，模板由
     scripts/make_base_template.py 维护）：中文 eastAsia 定死、正文段挂
     Tender Body（1.5 倍行距+首行缩进 2 字符）、标题黑体加粗黑色（默认英文
-    模板的蓝色英文脸是「生成的 Word 难看」的根源）、封面两档居中、A4+页脚
-    页码域。"""
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    模板的蓝色英文脸是「生成的 Word 难看」的根源）、封面两档居中、目录样式带
+    点线前导、A4+右下角页码域。版式取值对照用户版式参考件实测档（2026-09-13）。"""
+    from docx.enum.text import (
+        WD_ALIGN_PARAGRAPH,
+        WD_TAB_ALIGNMENT,
+        WD_TAB_LEADER,
+    )
     from docx.shared import Pt, RGBColor
 
     from app import publish
@@ -961,18 +965,47 @@ def test_base_template_layout_on_create_and_assemble(env):
     assert _east(doc, "Normal") == "宋体"
     assert _east(doc, "Heading 1") == "黑体"
     h1 = doc.styles["Heading 1"]
-    assert h1.font.color.rgb == RGBColor(0, 0, 0) and h1.font.size == Pt(18)
+    assert h1.font.color.rgb == RGBColor(0, 0, 0) and h1.font.size == Pt(16)  # 三号
+    assert doc.styles["Heading 2"].font.size == Pt(15)  # 小三
+    assert doc.styles["Heading 3"].font.size == Pt(14)  # 四号
+    assert doc.styles["Heading 4"].font.size == Pt(12)  # 小四
+    # 标题中西文同族（参考件标题 ascii 也是黑体，不吃 Times 混排）
+    assert _east(doc, "Heading 1") == "黑体"
+    h1_fonts = h1.element.find(qn("w:rPr")).find(qn("w:rFonts"))
+    assert h1_fonts.get(qn("w:ascii")) == "黑体"
+    assert h1.paragraph_format.keep_together is True
+    # 主题引用防线（ＭＳ 明朝回归守卫，2026-09-13）：*Theme 属性会压住显式字体名，
+    # 而 python-docx 默认模板的 Heading/Title 天生带引用、theme 东亚字形为空串，
+    # 落空即回退应用默认东亚字体（Mac Office=ＭＳ 明朝）——显式名必须无引用残留
+    import re
+    import zipfile
+
+    from app.tools import docx_ops as _docx_ops
+
+    for sid_name in ("Normal", "Heading 1", "Heading 2", "Heading 3", "Heading 4", "Title"):
+        rf = doc.styles[sid_name].element.find(qn("w:rPr")).find(qn("w:rFonts"))
+        for theme_attr in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+            assert rf.get(qn(f"w:{theme_attr}")) is None, f"{sid_name} 残留 {theme_attr}"
+    tpl_zip = zipfile.ZipFile(_docx_ops._BASE_TEMPLATE)
+    theme_xml = tpl_zip.read("word/theme/theme1.xml").decode("utf-8")
+    eas = re.findall(r'<a:(?:majorFont|minorFont)>.*?<a:ea typeface="([^"]+)"', theme_xml, re.S)
+    assert len(eas) == 2 and all(eas), f"theme 东亚字形应非空（兜素材合并样式），实际 {eas}"
     body = doc.styles["Tender Body"]
     assert body.paragraph_format.line_spacing == 1.5
     ind = body.element.get_or_add_pPr().find(qn("w:ind"))
     assert ind.get(qn("w:firstLineChars")) == "200"
     cover = doc.styles["Tender Cover"]
     assert _east(doc, "Tender Cover") == "黑体"
-    assert cover.font.size == Pt(22)
+    assert cover.font.size == Pt(22) and cover.font.bold is True  # 二号加粗
     assert cover.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.CENTER
     sub = doc.styles["Tender Cover Sub"]
-    assert sub.font.size == Pt(15) and sub.font.bold is False
+    assert sub.font.size == Pt(15) and sub.font.bold is True  # 小三加粗
     assert sub.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    # 目录：「目录」二字三号黑体居中，条目小四宋体 + 右对齐点线前导
+    assert doc.styles["TOC Heading"].font.size == Pt(16)
+    assert doc.styles["TOC Heading"].paragraph_format.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    tab = doc.styles["toc 1"].paragraph_format.tab_stops[0]
+    assert tab.alignment == WD_TAB_ALIGNMENT.RIGHT and tab.leader == WD_TAB_LEADER.DOTS
     assert doc.paragraphs[0].style.name == "Heading 1"
     assert doc.paragraphs[1].style.name == "Tender Body"
     # 模板带的样式示例段在建节产物中整段剥离（body 只留版面）
@@ -1090,6 +1123,19 @@ def test_assemble_tree_order_headings_and_missing(env):
     assert "缺失 1 节未并入：总体设计方案" in r
     assert "模板填充类未产出 1 节（按附件对待，不占整本位）：附件：资质证书复印件" in r
 
+    # 合册成功即自动发布 tender.volume 产物（2026-09-13）：索引行 + 包内 docx 字节一致
+    from app import artifact_store as _astore
+    from app import db as _adb
+
+    assert "已发布为整本标书成果" in r
+    vrows = [r_ for r_ in _adb.list_artifact_index() if r_["kind"] == "tender.volume"]
+    assert len(vrows) == 1
+    assert vrows[0]["display_name"] == "技术部分"
+    assert vrows[0]["content_seq"] == 1
+    pkg_docx = _astore.package_files(vrows[0]["artifact_id"], vrows[0])
+    assert len(pkg_docx) == 1 and pkg_docx[0].name == "整本-技术部分.docx"
+    assert pkg_docx[0].read_bytes() == _abs(env, "body/整本-技术部分.docx").read_bytes()
+
     chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
     paras = chk.paragraphs
     assert paras[0].style.name == "Title" and paras[0].text == "技术部分"
@@ -1101,9 +1147,12 @@ def test_assemble_tree_order_headings_and_missing(env):
     assert not any("资质证书复印件" in t for t in texts)  # 未产出格式件不进整本
     # 页脚页码域（可打印闭环）
     assert "PAGE" in chk.sections[0].footer.paragraphs[0]._p.xml
-    # 重复合册：整本自身不算孤儿（派生产物；缺失节点名的「未并入」仍在）
+    # 重复合册：整本自身不算孤儿（派生产物；缺失节点名的「未并入」仍在）；
+    # docx 内容未变 → 不重复发布（seq 不动，无新卡）
     r2 = docx_assemble_volume.invoke({})
     assert "个节文件未并入" not in r2
+    assert "未重复发布" in r2
+    assert _adb.get_artifact_index(vrows[0]["artifact_id"])["content_seq"] == 1
 
 
 _DIR_COVER = {
@@ -1828,3 +1877,342 @@ def test_comment_add_anchor_view_and_errors(env):
     assert "段落号超范围" in docx_comment_add.invoke({"path": rel, "after": "99", "text": "x"})
     assert "after 须为段落号" in docx_comment_add.invoke({"path": rel, "after": "P", "text": "x"})
     assert "文件不存在" in docx_comment_add.invoke({"path": "body/无此节.docx", "text": "x"})
+
+
+# ---------- 样式/编号迁移去重 + 拷贝卫生（2026-09-13 目录乱号批） ----------
+# 实证背景：素材自带「styleId=3 name="heading 2" + 挂多级编号」样式随注入/合册
+# 迁入，与目标内建 heading 2 同名并存——WPS/LibreOffice 按名解析把整本全部二级
+# 标题套上无意义连续序号（真实任务 98 行正文污染）；撞 id 定义不同则被静默跳过、
+# 拷贝段绑到无关样式；直挂 outlineLvl 段（格式件标题/被改写的正文段）漏摘进导航。
+
+
+def _add_para_style(doc, sid: str, name: str, ppr: str = "", default: bool = False) -> None:
+    d = ' w:default="1"' if default else ""
+    doc.styles.element.append(parse_xml(
+        f'<w:style {nsdecls("w")} w:type="paragraph" w:styleId="{sid}"{d}>'
+        f'<w:name w:val="{name}"/>{ppr}</w:style>'
+    ))
+
+
+def _ref_para(doc, sid: str, text: str = "段"):
+    p = doc.add_paragraph(text)
+    p._p.get_or_add_pPr().insert(0, parse_xml(f'<w:pStyle {nsdecls("w")} w:val="{sid}"/>'))
+    return p._p
+
+
+def _style_name_map(doc) -> dict[str, str]:
+    out = {}
+    for st in doc.styles.element.findall(qn("w:style")):
+        ne = st.find(qn("w:name"))
+        out[st.get(qn("w:styleId"))] = (ne.get(qn("w:val")) if ne is not None else "") or ""
+    return out
+
+
+def test_merge_styles_same_name_renames_and_keeps_numbering():
+    """同名样式迁入改名（治 D1）：目标仍只有一个 "heading 2"（内建、无编号），
+    素材样式改名 "heading 2 2"、id 与编号引用原样——观感不变，按名合并的
+    污染路径（整本标题被套连续序号）被断掉。"""
+    from app.tools.docx_ops import _merge_missing_styles
+
+    src = Document()
+    _add_para_style(
+        src, "3", "heading 2",
+        '<w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="11"/></w:numPr></w:pPr>',
+    )
+    el = _ref_para(src, "3", "素材小节标题")
+    dst = Document()  # 默认模板自带 heading 1-9
+
+    moved, remap = _merge_missing_styles(src, dst, [el])
+    names = _style_name_map(dst)
+    h2 = [sid for sid, nm in names.items() if nm.lower() == "heading 2"]
+    assert len(h2) == 1 and h2[0] == "Heading2"  # 内建唯一、未被素材顶掉
+    assert moved == 1 and remap == {}  # id 不撞：原 id 迁入
+    assert names.get("3") == "heading 2 2"  # 同名 → 改名迁入
+    st3 = next(s for s in dst.styles.element.findall(qn("w:style"))
+               if s.get(qn("w:styleId")) == "3")
+    assert st3.find(qn("w:pPr")).find(qn("w:numPr")) is not None  # 编号定义保留
+    assert el.find(qn("w:pPr")).find(qn("w:pStyle")).get(qn("w:val")) == "3"
+
+
+def test_merge_styles_id_collision_different_def_remaps():
+    """撞 id 且定义不同 → 新 id 迁入 + 引用改写（治 H1）：此前静默跳过会把
+    拷贝段绑到目标里同 id 的无关样式（id 先到先得随合并序漂移，观感错位）。"""
+    from app.tools.docx_ops import _merge_missing_styles
+
+    src = Document()
+    _add_para_style(src, "9", "my heading", "<w:pPr><w:b/></w:pPr>")
+    el = _ref_para(src, "9")
+    dst = Document()
+    _add_para_style(dst, "9", "my body", "<w:pPr><w:i/></w:pPr>")
+
+    moved, remap = _merge_missing_styles(src, dst, [el])
+    assert moved == 1 and set(remap) == {"9"}
+    new_sid = remap["9"]
+    names = _style_name_map(dst)
+    assert names[new_sid] == "my heading"  # 无同名冲突：名字不改
+    assert names["9"] == "my body"  # 目标原样式不动
+    assert el.find(qn("w:pPr")).find(qn("w:pStyle")).get(qn("w:val")) == new_sid
+
+
+def test_merge_styles_equivalent_definition_reuses():
+    """撞 id 但定义等价 → 沿用目标（原行为回归），不重复迁入。"""
+    from app.tools.docx_ops import _merge_missing_styles
+
+    src = Document()
+    _add_para_style(src, "77", "shared style", "<w:pPr><w:b/></w:pPr>")
+    el = _ref_para(src, "77")
+    dst = Document()
+    _add_para_style(dst, "77", "shared style", "<w:pPr><w:b/></w:pPr>")
+    n_before = len(dst.styles.element.findall(qn("w:style")))
+
+    moved, remap = _merge_missing_styles(src, dst, [el])
+    assert moved == 0 and remap == {}
+    assert len(dst.styles.element.findall(qn("w:style"))) == n_before
+    assert el.find(qn("w:pPr")).find(qn("w:pStyle")).get(qn("w:val")) == "77"
+
+
+def test_merge_styles_strips_default_flag():
+    """源文档的默认样式标记不迁入（w:default 顶掉目标默认会让全文档换底样式）。"""
+    from app.tools.docx_ops import _merge_missing_styles
+
+    src = Document()
+    _add_para_style(src, "88", "src normal", default=True)
+    el = _ref_para(src, "88")
+    dst = Document()
+
+    moved, _remap = _merge_missing_styles(src, dst, [el])
+    st = next(s for s in dst.styles.element.findall(qn("w:style"))
+              if s.get(qn("w:styleId")) == "88")
+    assert moved == 1 and st.get(qn("w:default")) is None
+
+
+def test_numbering_style_links_guarded_and_remapped():
+    """迁入编号的 pStyle 绑定（治 H2）：解析到目标内建标题/Normal 的剥除——
+    章节编号按树序写进标题文本，样式绑定会把拷入标题一起计数打乱章序；
+    样式换 id 后按重映射表改写，不绑到目标里同 id 的无关样式。"""
+    from app.tools.docx_ops import _merge_missing_numbering
+
+    def _armed(src, abs_id: str, num_id: str, pstyle: str):
+        np_ = src.part.numbering_part.element
+        ab = parse_xml(
+            f'<w:abstractNum {nsdecls("w")} w:abstractNumId="{abs_id}">'
+            '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+            f'<w:lvlText w:val="%1"/><w:pStyle w:val="{pstyle}"/></w:lvl></w:abstractNum>'
+        )
+        first = np_.find(qn("w:num"))
+        first.addprevious(ab) if first is not None else np_.append(ab)
+        np_.append(parse_xml(
+            f'<w:num {nsdecls("w")} w:numId="{num_id}"><w:abstractNumId w:val="{abs_id}"/></w:num>'
+        ))
+        p = src.add_paragraph("带列表段")
+        p._p.get_or_add_pPr().append(parse_xml(
+            f'<w:numPr {nsdecls("w")}><w:ilvl w:val="0"/><w:numId w:val="{num_id}"/></w:numPr>'
+        ))
+        return p._p
+
+    # ① 绑定指向目标内建 Heading2 → 迁入时剥除
+    src1, dst1 = Document(), Document()
+    el1 = _armed(src1, "90", "30", "Heading2")
+    _merge_missing_numbering(src1, dst1, [el1])
+    ab1 = next(a for a in dst1.part.numbering_part.element.findall(qn("w:abstractNum"))
+               if a.get(qn("w:abstractNumId")) == "90")
+    assert ab1.find(qn("w:lvl")).find(qn("w:pStyle")) is None
+
+    # ② 样式 id 重映射 → 绑定改写到新 id
+    src2, dst2 = Document(), Document()
+    el2 = _armed(src2, "91", "31", "4")
+    _merge_missing_numbering(src2, dst2, [el2], style_id_remap={"4": "77"})
+    ab2 = next(a for a in dst2.part.numbering_part.element.findall(qn("w:abstractNum"))
+               if a.get(qn("w:abstractNumId")) == "91")
+    assert ab2.find(qn("w:lvl")).find(qn("w:pStyle")).get(qn("w:val")) == "77"
+
+
+def test_demote_extra_headings_direct_outline():
+    """摘大纲扩判据（治 D2）：无标题样式、直挂 outlineLvl<9 的段落也摘——
+    招标格式件标题/被写手改写过的正文段的漏网形态；普通段不动。"""
+    from app.tools.docx_ops import _demote_extra_headings
+
+    doc = Document()
+    p1 = doc.add_paragraph("直挂大纲段")
+    p1._p.get_or_add_pPr().append(parse_xml(f'<w:outlineLvl {nsdecls("w")} w:val="2"/>'))
+    p2 = doc.add_paragraph("普通段")
+
+    n = _demote_extra_headings(doc, [p1._p, p2._p])
+    ol = p1._p.find(qn("w:pPr")).find(qn("w:outlineLvl"))
+    assert n == 1 and ol is not None and ol.get(qn("w:val")) == "9"
+    p2pr = p2._p.find(qn("w:pPr"))
+    assert p2pr is None or p2pr.find(qn("w:outlineLvl")) is None
+
+
+def test_source_inject_strips_outline_and_toc_bookmarks(env):
+    """拷入卫生：招标件段落的直挂大纲级别与 _Toc 死书签被剥（保真=版式，
+    不含导航元数据/源文档内部书签——同段拷进多节会造成书签 id 重复）；
+    普通书签保留。"""
+    from app.artifact_store import sources_dir
+
+    p = sources_dir(env["task"]["id"]) / "格式附件.docx"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    doc = Document()
+    doc.add_heading("资格一览表", 1)
+    para = doc.add_paragraph("附件11人员资格一览表")
+    para._p.get_or_add_pPr().append(parse_xml(f'<w:outlineLvl {nsdecls("w")} w:val="2"/>'))
+    para._p.append(parse_xml(f'<w:bookmarkStart {nsdecls("w")} w:id="146" w:name="_Toc268191677"/>'))
+    para._p.append(parse_xml(f'<w:bookmarkEnd {nsdecls("w")} w:id="146"/>'))
+    para._p.append(parse_xml(f'<w:bookmarkStart {nsdecls("w")} w:id="147" w:name="keepme"/>'))
+    para._p.append(parse_xml(f'<w:bookmarkEnd {nsdecls("w")} w:id="147"/>'))
+    doc.save(p)
+
+    section = _make_section()
+    r = docx_source_inject.invoke({"source": "格式附件.docx", "dest": section})
+    assert r.startswith("[已注入]"), r
+    body = Document(str(_abs(env, section))).element.body
+    assert body.findall(f".//{qn('w:outlineLvl')}") == []
+    starts = list(body.iter(qn("w:bookmarkStart")))
+    assert not [b for b in starts if (b.get(qn("w:name")) or "").startswith("_")]
+    assert any(b.get(qn("w:name")) == "keepme" for b in starts)
+
+
+def _make_armed_material_docx(path: Path) -> None:
+    """复刻腾励标书形态的「武装」素材：styleId=3 name="heading 2" 挂多级编号
+    （abstractNum 带 pStyle 链接 2/3），段落引用之——拷贝即引入同名编号标题样式。"""
+    doc = Document()
+    doc.styles.element.append(parse_xml(
+        f'<w:style {nsdecls("w")} w:type="paragraph" w:styleId="3">'
+        '<w:name w:val="heading 2"/><w:basedOn w:val="1"/><w:next w:val="1"/>'
+        '<w:uiPriority w:val="9"/><w:qFormat/>'
+        '<w:pPr><w:keepNext/><w:numPr><w:ilvl w:val="1"/><w:numId w:val="11"/></w:numPr>'
+        '<w:outlineLvl w:val="1"/></w:pPr></w:style>'
+    ))
+    np_ = doc.part.numbering_part.element
+    ab = parse_xml(
+        f'<w:abstractNum {nsdecls("w")} w:abstractNumId="95">'
+        '<w:multiLevelType w:val="hybridMultilevel"/>'
+        '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+        '<w:lvlText w:val="%1"/><w:pStyle w:val="2"/></w:lvl>'
+        '<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+        '<w:lvlText w:val="%1.%2"/><w:pStyle w:val="3"/></w:lvl></w:abstractNum>'
+    )
+    first = np_.find(qn("w:num"))
+    first.addprevious(ab) if first is not None else np_.append(ab)
+    np_.append(parse_xml(f'<w:num {nsdecls("w")} w:numId="11"><w:abstractNumId w:val="95"/></w:num>'))
+    p = doc.add_paragraph("素材小节标题甲")
+    p._p.get_or_add_pPr().insert(0, parse_xml(f'<w:pStyle {nsdecls("w")} w:val="3"/>'))
+    doc.add_paragraph("素材正文一句，内容足够构成检索块。")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(path)
+
+
+def test_assemble_disarms_armed_styles_and_strips_outline(env):
+    """端到端（注入+合册两层同治）：武装素材注入节文件、合册成整本后——
+    目标唯一 "heading 2"（骨架样式无编号）；素材样式改名迁入、自身编号保留；
+    编号定义不绑内建标题/Normal；无直挂大纲级别段、无 _Toc 死书签。"""
+    _seed_dir_artifact(env, _DIR_SINGLE)
+    section = "body/项目理解与需求分析.docx"
+    r = docx_section_create.invoke(
+        {"path": section, "title": "项目理解与需求分析", "paragraphs": "项目理解正文第一段。"}
+    )
+    assert r.startswith("[已创建]"), r
+
+    src = mlib.mt_files_dir() / "同名编号标题素材.docx"
+    _make_armed_material_docx(src)
+    from app import db
+
+    f = db.mt_insert_file("同名编号标题素材.docx", "hash_armed_1")
+    mlib.run_parse(f["id"])
+    blk = mlib.create_block(f["id"], "公司介绍", "奥哲介绍素材", ranges=[[1, 10 ** 6]])
+    ri = docx_material_inject.invoke({"block_id": blk["id"], "dest": section})
+    assert ri.startswith("[已注入]"), ri
+    # 节文件层：同名即改名（注入层与合册层共用同一迁移函数）
+    sec_names = _style_name_map(Document(str(_abs(env, section))))
+    assert [s for s, nm in sec_names.items() if nm.lower() == "heading 2"] == ["Heading2"]
+
+    # 存量残留模拟：历史节文件里的直挂大纲段 + _Toc 书签（注入剥除对存量无效，
+    # 合册侧 _strip_copy_residue + _demote_extra_headings 兜底）
+    sec_doc = Document(str(_abs(env, section)))
+    p = sec_doc.add_paragraph("历史残留的直挂大纲段")
+    p._p.get_or_add_pPr().append(parse_xml(f'<w:outlineLvl {nsdecls("w")} w:val="2"/>'))
+    p._p.append(parse_xml(f'<w:bookmarkStart {nsdecls("w")} w:id="146" w:name="_TocX"/>'))
+    p._p.append(parse_xml(f'<w:bookmarkEnd {nsdecls("w")} w:id="146"/>'))
+    sec_doc.save(str(_abs(env, section)))
+
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]"), r
+    final = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    names = _style_name_map(final)
+    assert [s for s, nm in names.items() if nm.lower() == "heading 2"] == ["Heading2"]
+    # 素材样式改名迁入、编号引用保留（素材自己的段落照常编号，观感不变）
+    assert names.get("3") == "heading 2 2"
+    st3 = next(s for s in final.styles.element.findall(qn("w:style"))
+               if s.get(qn("w:styleId")) == "3")
+    assert st3.find(qn("w:pPr")).find(qn("w:numPr")) is not None
+    # 骨架样式无编号（编号按树序写进标题文本，不走样式绑定）
+    h2 = next(s for s in final.styles.element.findall(qn("w:style"))
+              if s.get(qn("w:styleId")) == "Heading2")
+    h2ppr = h2.find(qn("w:pPr"))
+    assert h2ppr is None or h2ppr.find(qn("w:numPr")) is None
+    # 迁入编号不绑内建标题/Normal
+    guard = {f"heading {i}" for i in range(1, 10)} | {"normal"}
+    for a in final.part.numbering_part.element.findall(qn("w:abstractNum")):
+        for lv in a.findall(qn("w:lvl")):
+            ps = lv.find(qn("w:pStyle"))
+            if ps is not None:
+                assert names.get(ps.get(qn("w:val")), "").lower() not in guard
+    # 直挂大纲段被剥（余下的 outlineLvl 全是摘除标记 9）、无 _Toc 书签
+    body = final.element.body
+    ols = body.findall(f".//{qn('w:outlineLvl')}")
+    assert ols and all(o.get(qn("w:val")) == "9" for o in ols)
+    assert not [b for b in body.iter(qn("w:bookmarkStart"))
+                if (b.get(qn("w:name")) or "").startswith("_")]
+
+
+# ---------- 同文件并发写防线（2026-09-13 事故批） ----------
+
+
+def test_parallel_comment_add_same_file(env):
+    """并发写坏节文件事故的回归哨兵（机制断言）。
+
+    事故形态：模型一 turn 连发 8 条 docx_comment_add 打同一节文件，ToolNode
+    真并行执行，原地 save 互相覆盖把 zip 写坏（BadZipFile）→ 写手转而 read_file
+    读证书图 → base64 内联撑爆上下文。修法=按路径互斥 + 原子存盘；本测试
+    Barrier 对齐 8 线程同时开火，断言三条：全部成功、8 条批注一条不丢（锁
+    防丢更新）、无 .tmp 残件且文件完好可开（原子替换）。
+    """
+    import contextvars
+    import threading
+
+    from app.artifact_store import work_dir
+    from app.tools.docx_ops import _comment_texts
+
+    rel = _make_section("body/并发批注.docx")
+    n = 8
+    barrier = threading.Barrier(n)
+    results: list[str] = []
+    rlock = threading.Lock()
+
+    def worker(i: int):
+        try:
+            barrier.wait(timeout=10)
+            r = docx_comment_add.invoke({"path": rel, "after": "P1", "text": f"待办 {i}：需用户确认"})
+        except Exception as e:  # noqa: BLE001
+            r = f"[异常] {type(e).__name__}: {e}"
+        with rlock:
+            results.append(r)
+
+    # 生产形态：ToolNode 的 ContextThreadPoolExecutor 逐任务拷贝 context
+    # （runctx 的 task_id 走 contextvar）——裸 Thread 不带上下文，须显式 ctx.run
+    threads = [
+        threading.Thread(target=contextvars.copy_context().run, args=(lambda i=i: worker(i),))
+        for i in range(n)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert len(results) == n
+    bad = [r for r in results if not r.startswith("[已加批注]")]
+    assert not bad, bad  # 零 BadZipFile、零异常
+    dst = work_dir(env["task"]["id"]) / "body" / "并发批注.docx"
+    doc = Document(str(dst))  # 文件完好可开（未写坏）
+    assert len(_comment_texts(doc)) == n  # 8 条批注全在——并行不丢更新
+    assert not list(dst.parent.glob("*.tmp"))  # 原子存盘无残件

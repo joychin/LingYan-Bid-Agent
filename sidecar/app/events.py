@@ -31,6 +31,15 @@ EVENT_COMPLETED = "agent.completed"
 EVENT_ERROR = "agent.error"
 EVENT_TODO_UPDATED = "todo.updated"
 EVENT_ARTIFACT_CREATED = "artifact.created"
+# 交付物呈现信号（契约 additive 2026-09-13；同日二批改定呈现时机）：产出侧声明
+# 「这是值得展示给用户的交付物」（publish 两条发布路径的成功分支——JSON 产物与
+# 文件型 tender.volume），前端收到后自动打开产物面板。声明在工具成功点即时入队，
+# **事件在 run 正常完成时**取最后一个声明、在终态事件前发出（首版「产出即开」
+# 被用户调整为 run 结束才开——Claude artifacts / Cowork / Canvas 同款通道语义，
+# 时机更安静）。瞬时信号：不落库、不重放、错过不补（转录产物卡/chips 兜底）；
+# 与 artifact.created 分工——后者是 run/段边界的登记对账事件（落库、emitted
+# 去重），不动。
+EVENT_DELIVERABLE_CREATED = "deliverable.created"
 # 推理模型（DeepSeek reasoner）的 chain-of-thought 增量文本；非推理模型不产生该事件
 EVENT_REASONING = "agent.reasoning"
 # LLM 瞬时错误自动重试的等待期通知（契约 additive 2026-09-08）：前端在输出区显示
@@ -72,6 +81,19 @@ def artifact_created_payload(row: dict, rid: str | None, cid: str, seq: int) -> 
         "task_id": task_id,
         "seq": seq,
     }
+
+def deliverable_created_payload(item: dict, rid: str, cid: str, seq: int) -> dict:
+    """deliverable.created 的 data 载荷（item 即 deliverables.note 的声明形状）。"""
+    return {
+        "run_id": rid,
+        "conversation_id": cid,
+        "kind": item.get("kind", "file"),
+        "artifact_id": item.get("artifact_id"),
+        "path": item.get("path"),
+        "display_name": item.get("display_name"),
+        "seq": seq,
+    }
+
 
 # ---- run 边界事件 payload 构造 ----
 # 与 artifact_created_payload 同款先例：构造集中在本文件，契约形状的单一事实源在

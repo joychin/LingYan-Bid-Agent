@@ -117,6 +117,23 @@ def test_publish_tool_identical_content_skips_republish(env):
         runctx.clear_run()
 
 
+def test_publish_tool_rejects_file_type_contract(env):
+    """文件型契约（tender.volume=docx 本体）不能经 JSON 草稿路径发布——会造出
+    没有本体文件的残包（列表可见、/file 端点 410）；整本由合册工具机械发布。"""
+    _draft(env, name="vol.json", obj={"filename": "整本-x.docx"})
+    runctx.set_run(env["conv"]["id"], "r_vol", env["task"]["id"])
+    try:
+        out = publish_tool.invoke(
+            {"contract": "tender.volume/tender-volume-docx@1", "draft_path": "vol.json"}
+        )
+        assert out.startswith("[发布失败]")
+        assert "文件型产物" in out
+        assert db.list_artifact_index() == []
+        assert (_drafts_root(env) / "vol.json").exists()  # 发布未成功，草稿不消费
+    finally:
+        runctx.clear_run()
+
+
 def test_publish_tool_via_guarded_backend_writes_staging(env):
     """回归网（2026-08-31 review blocker）：草稿必须能经 GuardedBackend 写入
     _meta/staging/——fs_guard 曾把 _meta 段级拦死，而本工具指示模型把草稿写到

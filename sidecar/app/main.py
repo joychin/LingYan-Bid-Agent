@@ -141,6 +141,16 @@ async def lifespan(_app: FastAPI):
     # 存量待确认条目补跑锚点回文核对（在检索段全量重建之前，改库即被重建收口）
     autocheck_sweep()
     rebuild_kb_index()
+    # agent.db checkpoint 安全清理（2026-09-13）：每 superstep 全量快照 + 子代理
+    # 独立链让库平方级增长（实测 1.86GB）。此刻是独占写窗口——recover_stale_runs
+    # 已把崩溃残留标为可续（清理侧自动排除这些会话）、recover_agent_memory 还没
+    # 首建 saver 长连接。原则与实现见 app/checkpoint_prune.py 模块头（P0-P7）。
+    from .checkpoint_prune import prune_agent_db
+
+    try:
+        prune_agent_db()
+    except Exception:
+        logger.exception("agent.db checkpoint 清理失败（不影响启动，下次启动重试）")
     # checkpoint 是记忆真值，messages 表是恢复源：agent.db 丢失/损坏的会话在此重建记忆
     from .agent import recover_agent_memory
 
