@@ -5,6 +5,8 @@ import { MemoMarkdown } from '@/components/ai/MemoMarkdown'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai/Reasoning'
 import { TextShimmer } from '@/components/ai/TextShimmer'
 import { subagentStepTitle, toolDisplayName } from '@/components/ai/toolDisplay'
+import { SkillBatch } from '@/components/ai/ToolStepRow'
+import { segmentToolSteps } from '@/components/ai/traceGroups'
 import {
   Collapsible,
   CollapsibleContent,
@@ -38,11 +40,11 @@ function ChildStep({ step }: { step: ToolStep }) {
         )}
         {isRunning ? (
           <TextShimmer className="truncate">
-            {toolDisplayName(step.tool)} · {statusText}
+            {toolDisplayName(step.tool, step.args)} · {statusText}
           </TextShimmer>
         ) : (
           <>
-            <span className="truncate">{toolDisplayName(step.tool)}</span>
+            <span className="truncate">{toolDisplayName(step.tool, step.args)}</span>
             <span className="shrink-0 text-xs text-muted-foreground/60">· {statusText}</span>
           </>
         )}
@@ -179,11 +181,21 @@ export const SubagentCard = memo(function SubagentCard({ step }: { step: ToolSte
           {step.reasoning && <StepReasoning text={step.reasoning} isStreaming={isRunning} />}
           {step.children.length > 0 && (
             <div className="space-y-0.5">
-              {step.children.map((c, i) =>
-                c.tool === 'task' ? (
-                  <SubagentCard key={c.id ?? c.toolCallId ?? i} step={c} />
+              {/* children 走同一条分段规则（traceGroups）：技能文件读取连续段收进
+                  SkillBatch——子代理开局各自读技能文档是常态（实测 section-writing.md
+                  全库 215 次读取、205 次在子代理），平铺会刷满整张卡。其余形态
+                  （ask/grep 折叠组是主线程过程区的视觉语义）在此维持既有平铺。 */}
+              {segmentToolSteps(step.children).flatMap((seg, i) =>
+                seg.kind === 'task' ? (
+                  [<SubagentCard key={seg.step.id ?? seg.step.toolCallId ?? i} step={seg.step} />]
+                ) : seg.kind === 'skill' ? (
+                  [<SkillBatch key={`skill-${seg.steps[0]?.id ?? i}`} steps={seg.steps} embedded />]
+                ) : seg.kind === 'tool' ? (
+                  [<ChildStep key={seg.step.id ?? seg.step.toolCallId ?? i} step={seg.step} />]
                 ) : (
-                  <ChildStep key={c.id ?? c.toolCallId ?? i} step={c} />
+                  seg.steps.map((c, j) => (
+                    <ChildStep key={c.id ?? c.toolCallId ?? `${i}-${j}`} step={c} />
+                  ))
                 ),
               )}
             </div>

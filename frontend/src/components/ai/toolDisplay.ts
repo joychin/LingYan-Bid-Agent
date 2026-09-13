@@ -1,6 +1,7 @@
 /** 工具显示名映射（§6，写死在前端；未映射工具直接显示原始名）。 */
 import {
   BookMarked,
+  BookOpen,
   Bot,
   Building2,
   ClipboardCheck,
@@ -65,7 +66,46 @@ export const TOOL_DISPLAY: Record<string, string> = {
   docx_comment_add: '添加批注',
 }
 
-export function toolDisplayName(tool: string): string {
+/** 技能目录名 → 中文显示名。技能全文由模型 read_file 读入（deepagents SkillsMiddleware
+ *  渐进披露：system prompt 只带技能名/描述/路径，正文按需读），事件层没有技能专用工具名，
+ *  故这里按路径识别。未收录的（将来新增技能）回退目录名，不丢信息。 */
+const SKILL_LABELS: Record<string, string> = {
+  'document-parse': '文档解析',
+  'tender-analysis': '投标分析',
+  'tender-outline': '投标目录',
+  'tender-body': '正文写作',
+  'tender-qa': '投标问答',
+  'humanizer-zh': '写作润色',
+  _shared: '共享规范',
+}
+
+/** 技能读取判据：路径含 `/skills/<技能名>/` 段即算。实测有 5 种前缀拼写
+ *  （`skills/`、`/skills/`、`<task>/skills/`、`/workspace/<task>/skills/`），
+ *  按段匹配全部覆盖；非技能路径返回 null，调用方各自回退原有显示。 */
+export function skillFileInfo(
+  path: unknown,
+): { skill: string; label: string; file: string } | null {
+  if (typeof path !== 'string') return null
+  const m = /(?:^|\/)skills\/([^/]+)\/(.+)$/.exec(path)
+  if (!m) return null
+  const skill = m[1]
+  return { skill, label: SKILL_LABELS[skill] ?? skill, file: m[2] }
+}
+
+/** 技能读取的步骤行标题：SKILL.md（技能正文）只报技能名，附属参考文件附文件名主干。 */
+export function skillStepTitle(info: { label: string; file: string }): string {
+  const stem = (info.file.replace(/\.md$/, '').split('/').pop() ?? '').trim()
+  return !stem || stem.toLowerCase() === 'skill' ? info.label : `${info.label} · ${stem}`
+}
+
+/** 技能加载动作的措辞单源（步骤行标题「加载技能：投标分析」与折叠组头
+ *  「加载技能 ×3」共用，防两处文案漂移）。 */
+export const SKILL_LOAD_LABEL = '加载技能'
+
+export function toolDisplayName(tool: string, args?: Record<string, unknown>): string {
+  // 只有 read_file 走技能识别（write/edit 的 file_path 指向技能目录会被 fs_guard 拒绝）
+  const skill = tool === 'read_file' ? skillFileInfo(args?.file_path) : null
+  if (skill) return `${SKILL_LOAD_LABEL}：${skill.label}`
   return TOOL_DISPLAY[tool] ?? tool
 }
 
@@ -123,6 +163,11 @@ const TOOL_ARG_KEY: Record<string, string> = {
 }
 
 export function stepArgLabel(tool: string, args?: Record<string, unknown>): string {
+  // 技能读取：参数行不裸露内部路径（skills/<名>/… 对用户无意义），改报技能名+文件名
+  if (tool === 'read_file') {
+    const skill = skillFileInfo(args?.file_path)
+    if (skill) return skillStepTitle(skill)
+  }
   const key = TOOL_ARG_KEY[tool]
   if (!key || !args) return ''
   const value = args[key]
@@ -163,6 +208,8 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
   docx_comment_add: MessageCircle,
 }
 
-export function toolIcon(tool: string): LucideIcon {
+export function toolIcon(tool: string, args?: Record<string, unknown>): LucideIcon {
+  // 技能读取换书本图标：与普通文件读取在流水里一眼可分
+  if (tool === 'read_file' && skillFileInfo(args?.file_path)) return BookOpen
   return TOOL_ICONS[tool] ?? Wrench
 }

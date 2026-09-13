@@ -176,7 +176,9 @@ function OptionList({
 function ApprovalDetail({ req }: { req: InterruptRequest }) {
   return (
     <div className="rounded-md border border-line bg-background px-2 py-1.5">
-      <div className="text-[12px] font-medium text-ink">{toolDisplayName(req.tool)}</div>
+      <div className="text-[12px] font-medium text-ink">
+        {toolDisplayName(req.tool, req.args)}
+      </div>
       {req.description && <div className="mt-0.5 text-xs text-ink-2">{req.description}</div>}
       {Object.keys(req.args ?? {}).length > 0 && (
         <details className="mt-1">

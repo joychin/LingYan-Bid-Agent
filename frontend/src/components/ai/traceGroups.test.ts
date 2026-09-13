@@ -20,10 +20,20 @@ function step(tool: string, over: Partial<ToolStep> = {}): ToolStep {
 function grep(pattern: string, over: Partial<ToolStep> = {}): ToolStep {
   return step('grep', { args: { pattern }, ...over })
 }
+/** skill 读取步骤（read_file 指向 skills/ 目录，判据同 toolDisplay.skillFileInfo） */
+function skillRead(file = 'SKILL.md', over: Partial<ToolStep> = {}): ToolStep {
+  return step('read_file', { args: { file_path: `skills/tender-analysis/${file}` }, ...over })
+}
+/** 普通文件读取（同工具名但路径不在技能目录——不得被技能组吞掉） */
+function plainRead(path = 't_x/work/parse/a.docx.md', over: Partial<ToolStep> = {}): ToolStep {
+  return step('read_file', { args: { file_path: path }, ...over })
+}
 /** 段落形状速记：组带数量、单步骤只带工具名，便于整列断言 */
 function shape(segments: TraceSegment[]): string[] {
   return segments.map((s) =>
-    s.kind === 'ask' || s.kind === 'grep' ? `${s.kind}(${s.steps.length})` : `${s.kind}:${s.step.tool}`,
+    s.kind === 'ask' || s.kind === 'grep' || s.kind === 'skill'
+      ? `${s.kind}(${s.steps.length})`
+      : `${s.kind}:${s.step.tool}`,
   )
 }
 
@@ -97,6 +107,86 @@ describe('segmentToolSteps', () => {
     expect(shape(segmentToolSteps([step('ls'), step('write_file')]))).toEqual([
       'tool:ls',
       'tool:write_file',
+    ])
+  })
+})
+
+describe('segmentToolSteps · 技能加载组', () => {
+  it('连续技能读取 ≥2 收进一组（分析类 run 的 12 连读形态）', () => {
+    const steps = [
+      skillRead('SKILL.md'),
+      skillRead('references/structure.md'),
+      skillRead('references/requirements-business.md'),
+    ]
+    expect(shape(segmentToolSteps(steps))).toEqual(['skill(3)'])
+  })
+
+  it('单个技能读取不成组（子代理开局读一份技能文档占一行更清楚）', () => {
+    expect(shape(segmentToolSteps([skillRead('references/section-writing.md')]))).toEqual([
+      'tool:read_file',
+    ])
+  })
+
+  it('普通文件读取不被技能组吞并，且隔断两侧技能批', () => {
+    expect(
+      shape(
+        segmentToolSteps([
+          skillRead('a/SKILL.md'),
+          skillRead('b/SKILL.md'),
+          plainRead(),
+          skillRead('c/SKILL.md'),
+          skillRead('d/SKILL.md'),
+        ]),
+      ),
+    ).toEqual(['skill(2)', 'tool:read_file', 'skill(2)'])
+  })
+
+  it('旁白/思考断组：同轮首个调用携带封段标记即开新组', () => {
+    const steps = [
+      skillRead('a/SKILL.md', { text: '先加载分析规范' }),
+      skillRead('b/SKILL.md'),
+      skillRead('c/SKILL.md', { reasoning: '换一批参考文档' }),
+      skillRead('d/SKILL.md'),
+    ]
+    expect(shape(segmentToolSteps(steps))).toEqual(['skill(2)', 'skill(2)'])
+  })
+
+  it('与 grep/ask 交界互不吞并、按序 flush', () => {
+    expect(
+      shape(
+        segmentToolSteps([
+          skillRead('a/SKILL.md'),
+          skillRead('b/SKILL.md'),
+          grep('无效'),
+          grep('否决'),
+          step('ask_human'),
+          skillRead('c/SKILL.md'),
+          skillRead('d/SKILL.md'),
+        ]),
+      ),
+    ).toEqual(['skill(2)', 'grep(2)', 'ask(1)', 'skill(2)'])
+  })
+
+  it('task 透传且隔断两侧技能批', () => {
+    expect(
+      shape(
+        segmentToolSteps([
+          skillRead('a/SKILL.md'),
+          skillRead('b/SKILL.md'),
+          step('task'),
+          skillRead('c/SKILL.md'),
+          skillRead('d/SKILL.md'),
+        ]),
+      ),
+    ).toEqual(['skill(2)', 'task:task', 'skill(2)'])
+  })
+
+  it('旧 trace 快照无 args：不误判为技能读取（维持普通步骤行）', () => {
+    const legacy = step('read_file')
+    delete (legacy as Partial<ToolStep>).args
+    expect(shape(segmentToolSteps([legacy, legacy]))).toEqual([
+      'tool:read_file',
+      'tool:read_file',
     ])
   })
 })
