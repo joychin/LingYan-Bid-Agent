@@ -774,7 +774,9 @@ def test_gateway_thinking_fallback_wired():
     import inspect
 
     src = inspect.getsource(agent_mod.build_agent)
-    assert "_NoThinkingRetryCompletions(model.client)" in src
+    assert "_NoThinkingRetryCompletions(model.client" in src
+    # 撞线学习回调必须接到共享模型实例的 profile（比例档压缩中间件活读它）
+    assert "on_overflow_window=_learn_overflow_window" in src
 
 
 def test_task_error_middleware_wired():
@@ -1062,7 +1064,7 @@ def test_context_window_merged_into_model_profile():
     import inspect
 
     src = inspect.getsource(agent_mod.build_agent)
-    assert "max_input_tokens" in src, "build_agent 缺少 context_window → model.profile 合并"
+    assert "_apply_window_profile(model, p)" in src, "build_agent 缺少窗口四层取值接线"
 
     m = agent_mod._RunAwareChatDeepSeek(
         api_key="sk-test", base_url="https://example.invalid/v1", model="deepseek-v4-flash"
@@ -1074,6 +1076,142 @@ def test_context_window_merged_into_model_profile():
     for k, v in auto.items():
         if k != "max_input_tokens":
             assert m.profile[k] == v, f"注册表能力键 {k} 不应被窗口覆盖抹掉"
+
+
+def test_apply_window_profile_four_layers(monkeypatch):
+    """窗口四层取值：用户手选 > DeepSeek 注册表 > 社区缓存 > 保守默认 17 万。"""
+    monkeypatch.setattr(
+        agent_mod.model_registry,
+        "lookup",
+        lambda name: 131072 if name == "gw-alias" else None,
+    )
+
+    def _model(name):
+        return agent_mod._RunAwareChatDeepSeek(
+            api_key="sk-test", base_url="https://example.invalid/v1", model=name
+        )
+
+    def _profile(name, context_window=None):
+        return cfg.ModelProfile(
+            id="p1", name="A", base_url="https://example.invalid/v1",
+            model=name, context_window=context_window,
+        )
+
+    # 层1：用户手选最高优先（注册表已知名也覆盖）
+    m = _model("deepseek-v4-flash")
+    agent_mod._apply_window_profile(m, _profile("deepseek-v4-flash", context_window=128000))
+    assert m.profile["max_input_tokens"] == 128000
+
+    # 层2：注册表已知名（deepseek 系）不覆盖
+    m2 = _model("deepseek-v4-flash")
+    agent_mod._apply_window_profile(m2, _profile("deepseek-v4-flash"))
+    assert m2.profile["max_input_tokens"] == 1000000
+
+    # 层3：社区注册表缓存命中
+    m3 = _model("gw-alias")
+    agent_mod._apply_window_profile(m3, _profile("gw-alias"))
+    assert m3.profile["max_input_tokens"] == 131072
+
+    # 层4：兜底保守默认（并进入比例档——学习校准后档位能立即生效的前提）
+    m4 = _model("another-custom")
+    agent_mod._apply_window_profile(m4, _profile("another-custom"))
+    assert m4.profile["max_input_tokens"] == agent_mod._FALLBACK_WINDOW_TOKENS == 170_000
+
+
+def test_make_summarization_middleware_caps_trim():
+    """自建压缩中间件：复刻库默认档（比例/固定随 profile 有无），仅 trim 改 200K。"""
+    m = agent_mod._RunAwareChatDeepSeek(
+        api_key="sk-test", base_url="https://example.invalid/v1", model="deepseek-v4-flash"
+    )
+    mw = agent_mod._make_summarization_middleware(m, backend=object())
+    assert mw._lc_helper.trigger == ("fraction", 0.85)
+    assert mw._lc_helper.keep == ("fraction", 0.1)
+    assert mw._lc_helper.trim_tokens_to_summarize == agent_mod._SUMMARY_INPUT_CAP == 200_000
+
+    # 未知模型名且未预设 profile：与库工厂同款固定档（build_agent 实际路径总是先
+    # _apply_window_profile 兜底进比例档，此处验证工厂本身不私改无档案行为）
+    m2 = agent_mod._RunAwareChatDeepSeek(
+        api_key="sk-test", base_url="https://example.invalid/v1", model="custom-gw-name"
+    )
+    mw2 = agent_mod._make_summarization_middleware(m2, backend=object())
+    assert mw2._lc_helper.trigger == ("tokens", 170000)
+    assert mw2._lc_helper.keep == ("messages", 6)
+
+
+def test_deepagents_same_name_replacement_semantics():
+    """库行为守卫：middleware 列表里同名实例原地顶掉内置压缩中间件——本批接线
+    （主栈/subagent spec/GP 继承）全部押在这个语义上，deepagents 升级若改掉当场红。"""
+    from deepagents.backends import StateBackend
+    from deepagents.graph import _apply_custom_middleware
+    from deepagents.middleware.summarization import create_summarization_middleware
+
+    m = agent_mod._RunAwareChatDeepSeek(
+        api_key="sk-test", base_url="https://example.invalid/v1", model="deepseek-v4-flash"
+    )
+    ours = agent_mod._make_summarization_middleware(m, backend=StateBackend())
+    assert ours.name == "SummarizationMiddleware", "公开别名直接构造的实例名必须恰为同名替换键"
+
+    base = [create_summarization_middleware(m, StateBackend())]
+    out = _apply_custom_middleware(base, [ours], core_names={base[0].name})
+    assert out[0] is ours, "同名条目应原地替换而非追加（追加=双压缩中间件）"
+
+
+def test_summarization_middleware_wired_in_build_agent():
+    """接线守卫：主栈与 subagent spec 都注入自建压缩中间件（同名替换路径）。"""
+    import inspect
+
+    src = inspect.getsource(agent_mod.build_agent)
+    assert "_make_summarization_middleware(model, backend)" in src
+    assert 'subagents=[{**spec, "middleware": [summ, *spec["middleware"]]} for spec in SUBAGENTS]' in src
+    assert "middleware=[\n            summ," in src
+
+
+def test_overflow_400_learns_window_from_message():
+    """撞线学习：超限文案披露真实上限时回调校准（DeepSeek/OpenAI 兼容主流措辞）。"""
+    import pytest
+    from langchain_core.exceptions import ContextOverflowError
+
+    learned = []
+    inner = _RecordingCompletions(
+        [
+            _overflow_400(
+                "This model's maximum context length is 131072 tokens. However, you "
+                "requested 150000 tokens. Please reduce the length of the messages."
+            )
+        ]
+    )
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, on_overflow_window=learned.append)
+    with pytest.raises(ContextOverflowError):
+        wrapper.create(model="m", messages=[])
+    assert learned == [131072]
+
+
+def test_overflow_400_learn_rejects_unparseable_wordings():
+    """宁缺勿错：无数字措辞 / 数字超 sanity 区间都不学（学到偏大值会压不住撞线）。"""
+    import pytest
+    from langchain_core.exceptions import ContextOverflowError
+
+    # Anthropic 措辞（数字不在两种受认模式里）→ 不学
+    learned = []
+    inner = _RecordingCompletions([_overflow_400("prompt is too long: 210000 tokens > 200000 maximum")])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, on_overflow_window=learned.append)
+    with pytest.raises(ContextOverflowError):
+        wrapper.create(model="m", messages=[])
+    assert learned == []
+
+    # 数字位数爆炸（截取前 9 位 = 999999999 > sanity 上限 2M）→ 不学
+    learned2 = []
+    inner2 = _RecordingCompletions(
+        [_overflow_400("maximum context length is 99999999999999 tokens")]
+    )
+    wrapper2 = agent_mod._NoThinkingRetryCompletions(inner2, on_overflow_window=learned2.append)
+    with pytest.raises(ContextOverflowError):
+        wrapper2.create(model="m", messages=[])
+    assert learned2 == []
+
+    # 纯解析函数边界：三位数不匹配 \d{4,9}
+    assert agent_mod._parse_context_limit("maximum context length is 999 tokens") is None
+    assert agent_mod._parse_context_limit("context window is 131072") == 131072
 
 
 def test_merge_trace_trees_fills_empty_text_reasoning():

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 from deepagents import create_deep_agent
+from deepagents.middleware.summarization import SummarizationMiddleware, compute_summarization_defaults
 from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware, ToolErrorMiddleware
 from langchain_core.exceptions import ContextOverflowError, ModelConnectionError, ModelRateLimitError, ModelTimeoutError
 from langchain_core.messages import SystemMessage, ToolMessage
@@ -31,7 +32,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from openai import APIError, APIStatusError, BadRequestError, InternalServerError
 
-from . import artifact_store, db, dispatch_enrich, events, run_files, runctx, token_usage
+from . import artifact_store, db, dispatch_enrich, events, model_registry, run_files, runctx, token_usage
 from . import config as cfg
 from .bus import publish
 from .fs_guard import GuardedBackend
@@ -851,8 +852,31 @@ class _RunAwareChatDeepSeek(ChatDeepSeek):
         return payload
 
 
+# 撞线学习：超限文案里解析服务商披露的真实窗口（纯函数，供测试直击）。
+# 只认两种最主流措辞（OpenAI 兼容生态 fact standard，DeepSeek/各网关实测同款），
+# 数字限 4-9 位（16K~2M 量级），再按 sanity 区间过滤——宁缺勿错：学到偏大值的
+# 最坏情形=间隔很长的重复撞线自愈（非死循环），学到偏小=提前压缩（安全方向）。
+_CONTEXT_LIMIT_PATTERNS = (
+    "maximum context length is {}",
+    "context window is {}",
+)
+_LEARNED_WINDOW_SANITY = (16384, 2_000_000)
+
+
+def _parse_context_limit(msg_lower: str) -> int | None:
+    import re
+
+    for pattern in _CONTEXT_LIMIT_PATTERNS:
+        m = re.search(pattern.format(r"(\d{4,9})"), msg_lower)
+        if m:
+            value = int(m.group(1))
+            if _LEARNED_WINDOW_SANITY[0] <= value <= _LEARNED_WINDOW_SANITY[1]:
+                return value
+    return None
+
+
 class _NoThinkingRetryCompletions:
-    """网关「思考回传」400 兜底 + 超限 400 归一化。
+    """网关「思考回传」400 兜底 + 超限 400 归一化 + 撞线学习真实窗口。
 
     网关（ingress.lfans.cn）2026-08-29 起对思考模式 + 历史含 tool_calls 的冷回放
     （HITL resume 重放 checkpoint 是唯一命中场景；热会话有服务端状态不校验）
@@ -882,8 +906,11 @@ class _NoThinkingRetryCompletions:
         "input length and `max_tokens`",
     )
 
-    def __init__(self, inner):
+    def __init__(self, inner, on_overflow_window=None):
         self._inner = inner
+        # 撞线学习回调（build_agent 注入：写回共享模型实例的 profile）——比例档
+        # 压缩中间件每轮活读 model.profile，下一轮即按真实窗口触发/保留
+        self._on_overflow_window = on_overflow_window
 
     def create(self, **kwargs):
         try:
@@ -893,6 +920,7 @@ class _NoThinkingRetryCompletions:
             msg_lower = msg.lower()
             if any(m in msg_lower for m in self._OVERFLOW_MARKERS):
                 logger.warning("上下文超限 400（%.200s），归一化为 ContextOverflowError 走压缩自愈", msg)
+                self._learn_window(msg_lower)
                 raise ContextOverflowError(msg) from e
             if "reasoning_text" not in msg or kwargs.get("reasoning_effort") == "none":
                 logger.warning("模型 400（%.400s）", msg)
@@ -913,6 +941,24 @@ class _NoThinkingRetryCompletions:
         except Exception:
             logger.debug("token 用量提取失败（不影响主流程）", exc_info=True)
         return resp
+
+    def _learn_window(self, msg_lower: str) -> None:
+        """撞线学习：解析真实窗口 → 回调写回共享模型实例 profile（内存态，不落库）。
+
+        「用户没做过的选择不落库」同款铁则：学习只修正本进程内 agent 实例的派生
+        档位，settings 存档不动；rebuild（改设置/重启）后回到四层取值序、必要时
+        重学，每个进程生命周期最多撞一次线。回调异常不影响归一化主路径。
+        """
+        if self._on_overflow_window is None:
+            return
+        learned = _parse_context_limit(msg_lower)
+        if learned is None:
+            return
+        try:
+            self._on_overflow_window(learned)
+            logger.info("撞线学习：按服务商披露校准上下文窗口为 %d token", learned)
+        except Exception:
+            logger.debug("撞线学习回调失败（不影响压缩自愈）", exc_info=True)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -960,6 +1006,58 @@ class _UsageCapturingStream:
         return getattr(self._inner, name)
 
 
+# 上下文窗口取值优先序的兜底层（前两层：用户手选 > langchain_deepseek 注册表已知名）：
+# 未知模型名统一给 17 万保守档并**进入比例模式**（85% 触发/保留 10%）——此前 profile
+# 为 None 时 deepagents 走「17 万固定线+保留 6 条消息」，撞线学习校准 profile 后无法
+# 回馈档位（构造时已定死）；预设了 max_input_tokens 后比例档每轮活读 profile，
+# 学习立即生效（详见 model_registry 模块头与 _NoThinkingRetryCompletions 撞线学习）。
+_FALLBACK_WINDOW_TOKENS = 170_000
+
+# 摘要调用输入上限（token）：deepagents 工厂默认 trim=None——压缩触发时摘要生成
+# 单发**全部**被逐出历史（≈窗口 75%，1M 模型一次 75 万 token，XML 序列化不吃前缀
+# 缓存全价新鲜计费）。设 200K 上限后摘要只 recap 最近一段；完整历史仍落盘
+# conversation_history（摘要消息内嵌文件路径可 read_file 回看，信息不丢）。窗口
+# ≤256K 时逐出 ≈192K < 上限，行为与库默认一致——上限只对大窗口生效。
+_SUMMARY_INPUT_CAP = 200_000
+
+
+def _apply_window_profile(model, p: cfg.ModelProfile) -> None:
+    """上下文窗口四层取值，就地合并进 model.profile（保留注册表能力键）。
+
+    1. 用户手选（p.context_window，设置 → 模型 → 高级选项，存档真值）
+    2. langchain_deepseek 注册表已知名（profile 自带窗口）→ 不动
+    3. models.dev 社区注册表本地缓存命中（model_registry.lookup，零联网）
+    4. 保守默认 17 万（比例档起步；真实窗口更小则撞一次线后由撞线学习校准）
+    """
+    if p.context_window:
+        model.profile = {**(model.profile or {}), "max_input_tokens": p.context_window}
+        return
+    profile = model.profile
+    if isinstance(profile, dict) and isinstance(profile.get("max_input_tokens"), int):
+        return
+    window = model_registry.lookup(p.model) or _FALLBACK_WINDOW_TOKENS
+    model.profile = {**(profile or {}), "max_input_tokens": window}
+
+
+def _make_summarization_middleware(model, backend) -> SummarizationMiddleware:
+    """压缩中间件自建实例：复刻库工厂的模型感知默认档，仅改摘要输入上限。
+
+    同名替换机制（deepagents 官方支持）：本实例 .name 恰为 "SummarizationMiddleware"，
+    经 create_deep_agent 的 _apply_custom_middleware **原地顶掉**内置件并占其原栈位
+    （主 agent middleware= 与 SubAgent spec 的 middleware 列表同机制；自动补的
+    general-purpose 按名字继承主栈同名件）——不 monkey-patch、不 exclusion。
+    """
+    defaults = compute_summarization_defaults(model)
+    return SummarizationMiddleware(
+        model=model,
+        backend=backend,
+        trigger=defaults["trigger"],
+        keep=defaults["keep"],
+        trim_tokens_to_summarize=_SUMMARY_INPUT_CAP,
+        truncate_args_settings=defaults["truncate_args_settings"],
+    )
+
+
 def build_agent(profile: cfg.ModelProfile | None = None):
     """按模型 profile 构造 DeepAgents 实例（profile=None 走 default profile）。
 
@@ -989,24 +1087,27 @@ def build_agent(profile: cfg.ModelProfile | None = None):
     # stream_usage（自定义 base_url 默认关），不开则不带 stream_options.include_usage、
     # 服务端不回 usage——run 级 token 用量统计（_UsageCapturingStream）就拿不到数。
     model.stream_usage = True
-    # 用户显式配置的上下文窗口（设置 → 模型 → 高级选项）覆盖进 langchain 的 model
-    # profile——deepagents SummarizationMiddleware 检测到 max_input_tokens 后自动按
-    # 窗口比例（85% 触发/保留 10%）触发压缩。与注册表自动解析的档案**合并**而非整体
-    # 替换：已知模型（deepseek 系）保留 image_inputs/tool_calling 等能力键，未知模型
-    # 则从零建一份。deepseek 系不配也已是比例档（注册表自带 1M 窗口）。
-    if p.context_window:
-        model.profile = {**(model.profile or {}), "max_input_tokens": p.context_window}
-    # 网关思考回传 400 兜底（_NoThinkingRetryCompletions）：client 是 init 时缓存的
-    # SDK 资源实例字段，直接换成交包装层
-    model.client = _NoThinkingRetryCompletions(model.client)
+    # 上下文窗口四层取值（用户手选 > DeepSeek 注册表 > models.dev 缓存 > 保守默认），
+    # 必须先于压缩中间件构造——deepagents 的默认档在构造时按 profile 有无定比例/固定
+    _apply_window_profile(model, p)
+    # 网关思考回传 400 兜底 + 超限归一化 + 撞线学习（client 是 init 时缓存的 SDK
+    # 资源实例字段，直接换成交包装层；学习回调写回本实例 profile，下轮即生效）
+    def _learn_overflow_window(window: int) -> None:
+        model.profile = {**(model.profile or {}), "max_input_tokens": window}
+
+    model.client = _NoThinkingRetryCompletions(model.client, on_overflow_window=_learn_overflow_window)
+    # 写保护后端：通用文件工具对来源/产物包/谱系暂存/归档/技能目录只读（fs_guard）
+    # ——读完全放开，work/ 下过程文件（parse/analysis/outline/body）正常可写
+    backend = GuardedBackend(root_dir=str(cfg.workspace_dir()))
+    # 压缩中间件自建实例（摘要输入上限 200K，见 _SUMMARY_INPUT_CAP）：主栈与两个
+    # SUBAGENTS 条目经同名替换顶掉内置件；general-purpose 自动继承主栈同名件
+    summ = _make_summarization_middleware(model, backend)
 
     agent = create_deep_agent(
         model=model,
-        # 写保护后端：通用文件工具对来源/产物包/谱系暂存/归档/技能目录只读（fs_guard）
-        # ——读完全放开，work/ 下过程文件（parse/analysis/outline/body）正常可写
-        backend=GuardedBackend(root_dir=str(cfg.workspace_dir())),
+        backend=backend,
         tools=TOOLS,
-        subagents=SUBAGENTS,
+        subagents=[{**spec, "middleware": [summ, *spec["middleware"]]} for spec in SUBAGENTS],
         skills=["skills/"],  # 未加载时在 main 启动日志提示换写法（见 README）
         # 子代理归属插桩；todos 工具；任务上下文按 run 注入；task 子代理异常收敛
         # （deepagents 内置工具不守「失败返回错误字符串」纪律，无此层时子代理
@@ -1016,6 +1117,7 @@ def build_agent(profile: cfg.ModelProfile | None = None):
         # 见 dispatch_enrich 模块头）；本地重工具超时封顶（治卡死工具拖死 run，
         # 子代理同样直接调 docx 族工具故 SUBAGENTS 条目里还挂了一份）
         middleware=[
+            summ,
             _SubagentTagMiddleware(),
             TodoListMiddleware(),
             _TaskContextMiddleware(),
