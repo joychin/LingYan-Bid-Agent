@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { getLatestRun, getRunSnapshot, resumeRun, cancelRun, continueRun as continueRunApi, sendMessage, type HitlDecision, type ThinkingLevel } from '@/api/client'
-import { subscribeSSE, type ToolStep } from '@/api/sse'
+import { subscribeSSE, type DeliverableSignal, type ToolStep } from '@/api/sse'
 import { useSidecarHealth } from '@/context/SidecarHealth'
 import { useToast } from '@/context/Toast'
 import { INITIAL_STATE, runReducer, type Action, type RunState } from './runReducer'
@@ -34,6 +34,13 @@ interface StreamBatch {
   seqFrom: number | null
 }
 
+export interface UseRunOptions {
+  /** 交付物呈现信号回调（reducer 的 present-deliverable Effect）：打开动作与
+   *  「面板空闲/自动内容才开」守卫在 App。经 ref 转发，回调换引用不会触发
+   *  SSE 重订阅（订阅 effect 不依赖本回调）。 */
+  onDeliverable?: (d: DeliverableSignal) => void
+}
+
 /** 订阅会话事件流并驱动一个正在进行的 run（agent.started -> token… -> completed）。
  *
  * 事件 → 状态的全部决策在 ./runReducer（纯函数，vitest 事件回放覆盖）；本 hook 是薄执行层：
@@ -41,7 +48,7 @@ interface StreamBatch {
  * stateRef 与 useState 手动同轨：dispatch 同步算出下一状态（含副作用决策依赖的记账字段），
  * 不依赖 React 异步的 setState updater（StrictMode 下 updater 双调用会重复触发副作用收集）。
  */
-export function useRun(convId: string | null) {
+export function useRun(convId: string | null, options?: UseRunOptions) {
   const queryClient = useQueryClient()
   const { reconnectSeq } = useSidecarHealth()
   const { toast } = useToast()
@@ -62,6 +69,9 @@ export function useRun(convId: string | null) {
   const dispatchRef = useRef<(a: Action) => void>(() => {})
   // 过程对账拉取的转发：effect 执行（applyAction）先于 restoreSnapshot 定义，照 dispatchRef 先例
   const restoreSnapshotRef = useRef<(runId: string) => void>(() => {})
+  // 交付物呈现回调的转发（同上先例）：App 注入的 onDeliverable 换引用不触发 SSE 重订阅
+  const onDeliverableRef = useRef(options?.onDeliverable)
+  onDeliverableRef.current = options?.onDeliverable
 
   /** reducer 应用层（原 dispatch 主体）：同步算下一状态 + 执行 Effect。 */
   const applyAction = useCallback(
@@ -78,6 +88,9 @@ export function useRun(convId: string | null) {
         } else if (e.kind === 'reconcile-trace') {
           // seq 缺口 = SSE 丢过事件：拉运行快照补死步（限频在 restoreSnapshot 内）
           restoreSnapshotRef.current(e.runId)
+        } else if (e.kind === 'present-deliverable') {
+          // 交付物呈现（产出即开）：守卫与打开动作在 App 侧
+          onDeliverableRef.current?.(e.deliverable)
         } else {
           void queryClient
             .invalidateQueries({ queryKey: ['messages', convId] })

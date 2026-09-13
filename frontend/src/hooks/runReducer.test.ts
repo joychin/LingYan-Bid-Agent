@@ -1317,3 +1317,82 @@ describe('等待死卡出口（run 已在服务端终态，2026-09-10 review）'
     expect(out2.state.reasoningText).toBe('快照兜底思考')
   })
 })
+
+describe('交付物呈现信号（deliverable.created，产出即开 2026-09-13）', () => {
+  const running = { ...INITIAL_STATE, running: true, runId: 'r1', lastSeq: { runId: 'r1', seq: 5 } }
+
+  it('file/artifact 两类信号转成 present-deliverable Effect（字段转 camelCase），不改渲染状态', () => {
+    const file = runReducer(running, {
+      type: 'sse',
+      event: 'deliverable.created',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        kind: 'file',
+        path: 'body/整本-技术部分.docx',
+        display_name: '整本-技术部分.docx',
+        seq: 6,
+      },
+    })
+    expect(file.effects).toEqual([
+      {
+        kind: 'present-deliverable',
+        deliverable: {
+          kind: 'file',
+          artifactId: null,
+          path: 'body/整本-技术部分.docx',
+          displayName: '整本-技术部分.docx',
+        },
+      },
+    ])
+    // seq 水位照常推进；tools/streamText 不受影响（呈现信号不驱动渲染状态）
+    expect(file.state.lastSeq).toEqual({ runId: 'r1', seq: 6 })
+    expect(file.state.tools).toBe(running.tools)
+
+    const art = runReducer(file.state, {
+      type: 'sse',
+      event: 'deliverable.created',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        kind: 'artifact',
+        artifact_id: 'a1',
+        display_name: '投标目录',
+        seq: 7,
+      },
+    })
+    expect(art.effects[0]).toMatchObject({
+      kind: 'present-deliverable',
+      deliverable: { kind: 'artifact', artifactId: 'a1' },
+    })
+  })
+
+  it('未知 kind 与重复投递分别被忽略/去重', () => {
+    // 未知 kind（旧/异常 sidecar 防御）：整体断言转换回放，与 fixture 同款
+    const unknown = runReducer(running, {
+      type: 'sse',
+      event: 'deliverable.created',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', kind: 'strange', seq: 6 } as unknown as AgentEventData,
+    })
+    expect(unknown.effects).toEqual([])
+    expect(unknown.state).toBe(running) // 原引用 no-op
+
+    // 双连接重复投递（同 seq）被 seq 去重吞掉
+    const first = runReducer(running, {
+      type: 'sse',
+      event: 'deliverable.created',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', kind: 'file', path: 'body/整本-x.docx', seq: 6 },
+    })
+    const dup = runReducer(first.state, {
+      type: 'sse',
+      event: 'deliverable.created',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', kind: 'file', path: 'body/整本-x.docx', seq: 6 },
+    })
+    expect(dup.effects).toEqual([])
+  })
+})

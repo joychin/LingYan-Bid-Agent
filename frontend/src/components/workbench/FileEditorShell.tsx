@@ -16,6 +16,7 @@ export function FileEditorShell({
   file,
   badges,
   notice,
+  contentClassName,
   children,
 }: {
   title: string
@@ -24,6 +25,9 @@ export function FileEditorShell({
   badges?: ReactNode
   /** 冲突横幅之下的自定义提示条（如源码模式兜底说明） */
   notice?: ReactNode
+  /** 内容区容器类名（缺省=单栏滚动）。两栏视图传 overflow-hidden 去 padding，
+   *  由内部分栏各自滚动。 */
+  contentClassName?: string
   children: ReactNode
 }) {
   const { auto, editing, editable, hasRestore, tableMode } = file
@@ -114,7 +118,9 @@ export function FileEditorShell({
       )}
       {notice}
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-auto p-4">{children}</div>
+      {/* 两栏视图传 contentClassName 覆盖默认单栏滚动容器（overflow-auto + p-4 与
+          overflow-hidden 属同类工具类，靠类名顺序赢不了——必须整串替换） */}
+      <div className={cn('flex min-h-0 flex-1 flex-col', contentClassName ?? 'overflow-auto p-4')}>{children}</div>
     </div>
   )
 }

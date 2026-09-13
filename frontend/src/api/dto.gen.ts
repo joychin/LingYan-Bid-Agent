@@ -325,6 +325,8 @@ export interface Task {
   title: string;
   progress_note: string;
   created_at: string;
+  stage: string;
+  last_activity_at: string;
 }
 /**
  * 版式文件（格式资产，与素材=内容资产分离）：内置基准或用户上传 .docx，

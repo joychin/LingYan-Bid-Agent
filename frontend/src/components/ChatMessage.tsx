@@ -153,14 +153,15 @@ export function AssistantMessage({
 }) {
   const [open, setOpen] = useState(false)
   // 过程快照按需取（2026-09-08 messages 瘦身）：列表只带步数/暂停摘要，点开过程区
-  // 才拉完整 tools/todos/reasoning。run 终态后快照不再变——staleTime 永久、缓存
-  // 保留 30 分钟，长会话翻旧消息不反复拉。
+  // 才拉完整 tools/todos/reasoning。run 终态后快照不再变——staleTime 永久；缓存保留
+  // 10 分钟（3GB 内存修复批从 30min 收窄：长会话翻旧过程不再多份全量 trace 长驻，
+  // 过期重开也只是再拉一次本地请求）。
   const traceQuery = useQuery({
     queryKey: ['message-trace', message.id],
     queryFn: () => fetchMessageTrace(message.conversation_id, message.id),
     enabled: open,
     staleTime: Infinity,
-    gcTime: 30 * 60_000,
+    gcTime: 10 * 60_000,
     retry: 1,
   })
   const trace = traceQuery.data

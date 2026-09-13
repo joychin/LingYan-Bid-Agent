@@ -11,6 +11,7 @@ import type { Artifact } from '@/api/client'
 import { artifactKey, listContracts } from '@/api/client'
 import { DirectoryProcessor } from '@/components/processors/DirectoryProcessor'
 import { NoteProcessor } from '@/components/processors/NoteProcessor'
+import { VolumeProcessor } from '@/components/processors/VolumeProcessor'
 
 export interface ProcessorProps {
   artifact: Artifact
@@ -40,6 +41,12 @@ const PROCESSORS: Record<string, ArtifactProcessor> = {
     title: '笔记',
     Component: NoteProcessor,
   },
+  // 整本标书（文件型产物）：合册交付稿 docx 只读预览 + 下载
+  'tender.volume/tender-volume-docx@1': {
+    key: 'tender.volume/tender-volume-docx@1',
+    title: '整本标书',
+    Component: VolumeProcessor,
+  },
 }
 
 export function resolveProcessor(a: Artifact): ArtifactProcessor | undefined {
@@ -51,6 +58,7 @@ export function contractLabel(kind: string): string {
   const map: Record<string, string> = {
     'tender.directory': '目录',
     'doc.note': '笔记',
+    'tender.volume': '整本标书',
   }
   return map[kind] ?? kind
 }
@@ -72,6 +80,7 @@ export interface KindIcon {
 const KIND_ICON: Record<string, KindIcon> = {
   'tender.directory': { cls: 'ft-ico--dir', mark: '≡' },
   'doc.note': { cls: 'ft-ico--md', mark: 'M' },
+  'tender.volume': { cls: 'ft-ico--vol', mark: '整' },
 }
 
 export function kindIcon(kind: string): KindIcon | null {

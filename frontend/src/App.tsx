@@ -3,6 +3,7 @@ import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from '
 import { Sidebar } from '@/components/Sidebar'
 import { ChatView } from '@/components/ChatView'
 import { ChatHeader } from '@/components/ChatHeader'
+import { HomeView } from '@/components/HomeView'
 import { KnowledgeView } from '@/components/KnowledgeView'
 import { MaterialsLibraryView } from '@/components/MaterialsLibraryView'
 import { TemplatesView } from '@/components/TemplatesView'
@@ -14,7 +15,9 @@ import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { reconcileContracts } from '@/artifacts/registry'
 import { cn } from '@/lib/utils'
 import { useConversations, useCreateConversation } from '@/hooks/useConversations'
-import { useTasks, taskOfConversation } from '@/hooks/useTasks'
+import { useCreateTask, useTasks, taskOfConversation } from '@/hooks/useTasks'
+import { useToast } from '@/context/Toast'
+import type { DeliverableSignal } from '@/api/sse'
 
 const LS_SIDEBAR = 'tender-agent.sidebar-collapsed'
 const LS_ARTIFACTS = 'tender-agent.artifacts-collapsed'
@@ -24,9 +27,14 @@ export default function App() {
   const { data: conversations = [], isLoading: conversationsLoading } = useConversations()
   const { data: tasks = [], isLoading: tasksLoading } = useTasks()
   const createConv = useCreateConversation()
+  const createTaskM = useCreateTask()
+  const { toast } = useToast()
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  // 「新建会话」草稿页：主区展示欢迎页+输入框（convId=null），所属任务在输入框胶囊里选/建
-  const [drafting, setDrafting] = useState(false)
+  // 「任务即房间」（2026-09-13）：会话只从任务内诞生——无会话选中时主区是任务首页
+  // （HomeView），建任务在首页本页完成（卡内命名/整页拖放文件），不弹窗。
+  // 建任务/首页拖放攒下的文件：任务/会话创建成功后交给挂载的 ChatView 走 FileUpload
+  // 上传（转交模式同旧 initialSend：onSelect 导航时清空，ChatView 挂载后消费一次）
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
   // 主区形态：chat=对话工作台 / kb=知识库（全局资料层，与任务无关）/
   // library=写作素材库（内容资产）/ templates=版式库（格式资产；2026-09-09 由「模板库」改名，标识符不动）
   const [activeView, setActiveView] = useState<'chat' | 'kb' | 'library' | 'templates'>('chat')
@@ -37,7 +45,6 @@ export default function App() {
   const [workbenchAnchor, setWorkbenchAnchor] = useState<number | null>(null)
   // 来源原件（sources/）预览当前打开的文件名（pdf/docx/图片，只读）
   const [sourceFile, setSourceFile] = useState<string | null>(null)
-  const [pendingSend, setPendingSend] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(LS_SIDEBAR) === '1')
   const [artifactsCollapsed, setArtifactsCollapsed] = useState(() => localStorage.getItem(LS_ARTIFACTS) === '1')
   // 主题：首帧由 main.tsx 写 documentElement（localStorage 优先，否则跟随系统），这里只同步 React 态驱动图标
@@ -71,11 +78,20 @@ export default function App() {
       return !v
     })
 
+  // 工作区单槽的来源标记（交付物呈现守卫，2026-09-13）：user=用户手开（永不被
+  // 自动呈现抢走——Canvas「自动打开被打扰」的社区抱怨教训）、auto=交付物自动
+  // 打开（可被更新的交付物接力替换，同轮先目录后整本自然切换）、null=空闲。
+  // 纯逻辑标记不驱动渲染：用 ref 而非 state，presentDeliverable 回调保持稳定
+  // 引用（经 useRun 转发，失稳会连累 SSE 订阅 effect 重挂）。
+  const slotOriginRef = useRef<'user' | 'auto' | null>(null)
+
   // 「本轮文件」chip 的打开动作：打开工作台文件查看器（清掉产物预览态，二者共用
   // 面板工作区）；面板收起时顺带展开（transient，不写 localStorage 偏好）。
   // useCallback 保引用稳定：MessageList/ChatMessage 是 memo 组件，回调换引用会破白名单。
   // anchorLine：来源追溯「查看原文上下文」定位（编辑器切源码栏滚到行）。
-  const openWorkbenchFile = useCallback((path: string, anchorLine?: number) => {
+  // origin：单槽来源标记（自动呈现传 'auto'，用户点击缺省 'user'）。
+  const openWorkbenchFile = useCallback((path: string, anchorLine?: number, origin: 'user' | 'auto' = 'user') => {
+    slotOriginRef.current = origin
     setPreviewId(null)
     setSourceFile(null)
     setWorkbenchPath(path)
@@ -84,14 +100,16 @@ export default function App() {
   }, [])
   // 与上面对称的单槽语义：打开产物时清掉工作台文件态，否则 workbenchPath 优先渲染、
   // 产物点击看似无响应（面板渲染是 workbenchPath ? WorkbenchViewer : ArtifactOpenHost）
-  const openArtifact = useCallback((id: string) => {
+  const openArtifact = useCallback((id: string, origin: 'user' | 'auto' = 'user') => {
+    slotOriginRef.current = origin
     setWorkbenchPath(null)
     setSourceFile(null)
     setPreviewId(id)
     setArtifactsCollapsed(false)
   }, [])
   // 来源原件预览（sources/ 的 pdf/docx/图片，只读）：同一工作区单槽，互斥清理
-  const openSourceFile = useCallback((name: string) => {
+  const openSourceFile = useCallback((name: string, origin: 'user' | 'auto' = 'user') => {
+    slotOriginRef.current = origin
     setPreviewId(null)
     setWorkbenchPath(null)
     setWorkbenchAnchor(null)
@@ -99,29 +117,65 @@ export default function App() {
     setArtifactsCollapsed(false)
   }, [])
 
+  // 交付物呈现（deliverable.created，产出即开）：面板空闲或正显示自动打开的内容
+  // 才开——用户手开的文件/产物/原件永不被抢，chips/产物卡仍是手动出口；auto 内容
+  // 可被更新的交付物接力替换。展开面板复用既有 transient 语义（不写收起偏好）。
+  const presentDeliverable = useCallback(
+    (d: DeliverableSignal) => {
+      if (slotOriginRef.current === 'user') return
+      if (d.kind === 'artifact' && d.artifactId) openArtifact(d.artifactId, 'auto')
+      else if (d.kind === 'file' && d.path) openWorkbenchFile(d.path, undefined, 'auto')
+    },
+    [openArtifact, openWorkbenchFile],
+  )
+
   // 契约对账：sidecar 契约目录 vs 客户端 Processor 覆盖（缺失告警，防半接入状态）
   useEffect(() => {
     void reconcileContracts()
   }, [])
 
-  // 进入时若已有会话而尚未选中，落到第一个（列表已按创建时间倒序）；草稿页期间不被抢占
-  useEffect(() => {
-    if (!drafting && !selectedId && conversations.length > 0) {
-      setSelectedId(conversations[0].id)
-    }
-  }, [drafting, selectedId, conversations])
+  // 冷启动落任务首页（2026-09-13 拍板）：不再自动进入最新会话，「继续上次」一行即回
 
-  // 首发消息：在所选任务下建会话 → 退出草稿选中它 → 把消息转给挂载后的 ChatView
-  const handleRequestCreate = async (text: string, taskId: string) => {
-    const conv = await createConv.mutateAsync(taskId)
-    setDrafting(false)
-    setSelectedId(conv.id)
-    setPendingSend(text)
+  // 建任务（首页卡内命名/整页拖放）：建任务（自带首个会话）→ 进入会话 → 文件转交
+  // ChatView 上传。失败在此 toast（HomeView 无提示职责）
+  const handleCreateTask = async (title: string, files: File[]) => {
+    try {
+      const body = await createTaskM.mutateAsync({ title, withConversation: true })
+      // withConversation=true 应答必带会话；万一没有（后端行为变化）兜底补建一个
+      const conv = body.conversation ?? (await createConv.mutateAsync(body.task.id))
+      setSelectedId(conv.id)
+      setPendingFiles(files)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error')
+    }
   }
 
-  // 草稿页展示的会话 id（null=欢迎页）；进入草稿页时清空选中（高亮与任务胶囊保持一致），
-  // 退出草稿 = 点任一会话（onSelect 会置回 drafting=false）
-  const viewConvId = drafting ? null : selectedId
+  // 进入任务（首页卡片/继续上次）：优先打开其最近会话，无会话（历史遗留的空任务）就地建一个
+  const handleOpenTask = async (taskId: string) => {
+    const latest = conversations.find((c) => c.task_id === taskId)
+    if (latest) {
+      setSelectedId(latest.id)
+      return
+    }
+    try {
+      const conv = await createConv.mutateAsync(taskId)
+      setSelectedId(conv.id)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error')
+    }
+  }
+
+  // 会话头部「＋ 新会话」：在当前任务内建会话并进入（与侧栏任务 hover「＋」同款语义）
+  const handleNewConversationInTask = async (taskId: string) => {
+    try {
+      const conv = await createConv.mutateAsync(taskId)
+      setSelectedId(conv.id)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error')
+    }
+  }
+
+  const viewConvId = selectedId
   const viewConv = viewConvId ? (conversations.find((c) => c.id === viewConvId) ?? null) : null
   const currentTask = viewConv ? taskOfConversation(tasks, conversations, viewConvId) : null
 
@@ -131,18 +185,18 @@ export default function App() {
       <Sidebar
         selectedId={selectedId}
         onSelect={(id) => {
-          setDrafting(false)
           setActiveView('chat')
           setSelectedId(id)
-          setPendingSend(null)
+          // 建任务转交的文件由 ChatView 消费后回调清空（消费即清源，见 onInitialFilesConsumed）；
+          // 这里导航时也清一次，兜住「消费前就导航走」的窗口（重复上传的二道防线）
+          setPendingFiles([])
         }}
-        onNewSession={() => {
-          setDrafting(true)
+        onNewTask={() => {
+          // 「新建任务」= 导航到任务首页（用户拍板，2026-09-13 验收）：建任务入口
+          // （开始新投标卡/整页拖放）都在首页本页上，不弹窗
           setActiveView('chat')
-          // 清掉旧会话高亮：草稿页里侧栏选中态与输入框任务胶囊指向一致，
-          // 不再出现「侧栏亮着 A 任务的会话、胶囊却是 B 任务」的错位
           setSelectedId(null)
-          setPendingSend(null)
+          setPendingFiles([])
         }}
         onOpenKnowledge={() => setActiveView('kb')}
         onOpenLibrary={() => setActiveView('library')}
@@ -163,19 +217,34 @@ export default function App() {
           <MaterialsLibraryView />
         ) : activeView === 'templates' ? (
           <TemplatesView />
-        ) : (
+        ) : viewConvId ? (
           <>
-            <ChatHeader task={currentTask} conversation={viewConv} />
+            {/* viewConv 可能晚一拍（建会话后 conversations 失效重拉未回）：按选中 id
+                分派而非 viewConv，避免先闪一下任务首页；头部短暂显示占位标题无碍 */}
+            <ChatHeader
+              task={currentTask}
+              conversation={viewConv}
+              onNewConversation={
+                currentTask ? () => void handleNewConversationInTask(currentTask.id) : undefined
+              }
+            />
             <ChatView
-              key={viewConvId ?? 'root'}
+              key={viewConvId}
               convId={viewConvId}
               onOpenArtifact={openArtifact}
               onOpenWorkbench={openWorkbenchFile}
-              initialSend={pendingSend}
-              onRequestCreate={handleRequestCreate}
+              onPresentDeliverable={presentDeliverable}
+              initialFiles={pendingFiles}
+              onInitialFilesConsumed={() => setPendingFiles([])}
               onOpenSettings={() => setSettingsOpen(true)}
             />
           </>
+        ) : (
+          <HomeView
+            onOpenTask={(taskId) => void handleOpenTask(taskId)}
+            onCreateTask={handleCreateTask}
+            onNewConversation={(taskId) => void handleNewConversationInTask(taskId)}
+          />
         )}
       </main>
       {/* 产物面板是对话工作台的一部分：知识库视图/无会话上下文（草稿态）不渲染
@@ -203,6 +272,7 @@ export default function App() {
           onOpenSource={openSourceFile}
           onOpenLibrary={() => setActiveView('library')}
           onClearPreview={() => {
+            slotOriginRef.current = null
             setPreviewId(null)
             setWorkbenchPath(null)
             setWorkbenchAnchor(null)

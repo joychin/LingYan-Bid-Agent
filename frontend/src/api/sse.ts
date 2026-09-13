@@ -14,6 +14,7 @@ import type {
   AgentToken,
   ArtifactCreated,
   ConversationRenamed,
+  DeliverableCreated,
   InterruptRequestPayload,
   RunInterrupt,
   RunState as RunStatePayload,
@@ -29,6 +30,16 @@ import type {
 export type TodoStatus = TodoItemPayload['status']
 export type TodoItem = TodoItemPayload
 export type InterruptRequest = InterruptRequestPayload
+
+/** 交付物呈现信号（deliverable.created，additive 2026-09-13）：产出侧声明「值得
+ *  展示给用户」，前端自动打开产物面板（产出即开）。字段已转 camelCase 供 UI 层
+ *  消费；kind=artifact 开产物视图、kind=file 开工作台文件。 */
+export interface DeliverableSignal {
+  kind: 'artifact' | 'file'
+  artifactId?: string | null
+  path?: string | null
+  displayName?: string | null
+}
 
 /** 工具步骤（运行中由 useRun 维护；run 结束后由 run_traces 快照还原，同构）。 */
 export interface ToolStep {
@@ -67,6 +78,7 @@ export interface AgentEventData
       ToolResult &
       TodoUpdated &
       ArtifactCreated &
+      DeliverableCreated &
       AgentCompleted &
       AgentError &
       RunInterrupt &

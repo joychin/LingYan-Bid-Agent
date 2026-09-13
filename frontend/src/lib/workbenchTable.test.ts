@@ -10,6 +10,7 @@ import {
   GUIDE_TABLE,
   GUIDE_MODES,
   PROMISE_TABLE,
+  blockPreviewText,
   guideRowFlags,
   guideRowMatches,
   iterLeaves,
@@ -19,6 +20,7 @@ import {
   normRefId,
   orderBodyRows,
   parseBlockRefs,
+  parseGuideNote,
   parseModeTokens,
   parseRefIds,
   parseTableFile,
@@ -184,6 +186,103 @@ describe('单元格工具', () => {
   })
 })
 
+describe('parseGuideNote（缺口/备注列读者分离，2026-09-13）', () => {
+  it('真实身份证明行：工具名+行号落 rest，【缺】单独成条', () => {
+    const p = parseGuideNote(
+      '格式件：docx_source_inject 拷第五章格式（L988-L1005）+revise 填应征人名称、单位性质、地址、成立时间、'
+        + '经营期限、法定代表人姓名/性别/年龄/职务，并粘贴身份证正反面复印件【缺：上述公司信息与法定代表人身份证复印件】',
+    )
+    expect(p.gaps).toEqual(['上述公司信息与法定代表人身份证复印件'])
+    expect(p.knowledge).toEqual([])
+    expect(p.clarifies).toEqual([])
+    expect(p.rest).toBe(
+      '格式件：docx_source_inject 拷第五章格式（L988-L1005）+revise 填应征人名称、单位性质、地址、成立时间、'
+        + '经营期限、法定代表人姓名/性别/年龄/职务，并粘贴身份证正反面复印件',
+    )
+  })
+
+  it('真实公司介绍行：知识库命中 / 工具句 / 缺口 三者分离且不吞字', () => {
+    const p = parseGuideNote(
+      '【知识库】ISO9001 质量管理体系认证证书：注册号 0350324Q30696R1M，有效期最长可至 2027 年'
+        + '（含图 1 张，贴图路径 knowledge/parse/1、ISO9001中文证书(存档)/images/img_001.png）；'
+        + '拷素材后必用 check_name_residue 扫旧名残留；【缺：营业执照信息、注册地址/成立时间、近三年财务概况】',
+    )
+    expect(p.knowledge).toEqual([
+      'ISO9001 质量管理体系认证证书：注册号 0350324Q30696R1M，有效期最长可至 2027 年'
+        + '（含图 1 张，贴图路径 knowledge/parse/1、ISO9001中文证书(存档)/images/img_001.png）',
+    ])
+    expect(p.gaps).toEqual(['营业执照信息、注册地址/成立时间、近三年财务概况'])
+    // 工具句留在 rest（不丢内容），边界分隔符清理干净
+    expect(p.rest).toBe('拷素材后必用 check_name_residue 扫旧名残留')
+  })
+
+  it('待澄清段独立成条（剥 ⚠ 与 CLAR 编号保留）；rest 里的中间分号保留', () => {
+    const p = parseGuideNote(
+      '格式件：docx_source_inject 拷第五章进度计划格式（L1221-L1244）+revise 填工程进度与时间安排；'
+        + '总工期以项目签署后 6 个月内完成全功能开发上线为准；'
+        + '⚠待澄清 CLAR-04：合同格式附件一「项目清单」为空、交付里程碑不可获得【缺：进度节点与时间安排（取承诺清单）】',
+    )
+    expect(p.clarifies).toEqual(['待澄清 CLAR-04：合同格式附件一「项目清单」为空、交付里程碑不可获得'])
+    expect(p.gaps).toEqual(['进度节点与时间安排（取承诺清单）'])
+    expect(p.rest).toBe(
+      '格式件：docx_source_inject 拷第五章进度计划格式（L1221-L1244）+revise 填工程进度与时间安排；'
+        + '总工期以项目签署后 6 个月内完成全功能开发上线为准',
+    )
+  })
+
+  it('【缺：X】——解释 归入同一条（缺项与其原因的常见写法）', () => {
+    const p = parseGuideNote(
+      '以《航天科工案例》素材块为业绩叙述底稿；【缺：券商相关行业项目合同扫描件】'
+        + '——评审实施案例 3 分仅券商行业案例得分，需用户提供案例清单',
+    )
+    expect(p.gaps).toEqual([
+      '券商相关行业项目合同扫描件——评审实施案例 3 分仅券商行业案例得分，需用户提供案例清单',
+    ])
+    expect(p.rest).toBe('以《航天科工案例》素材块为业绩叙述底稿')
+  })
+
+  it('旧格式裸「缺：xxx」不强行摘、落 rest（存量指引兼容）', () => {
+    const p = parseGuideNote('缺：总体方案素材')
+    expect(p.gaps).toEqual([])
+    expect(p.rest).toBe('缺：总体方案素材')
+  })
+
+  it('防御：裸【缺】给泛化缺项，不静默消失', () => {
+    expect(parseGuideNote('【缺】')).toEqual({
+      gaps: ['（指引未列出具体缺项）'],
+      knowledge: [],
+      clarifies: [],
+      rest: '',
+      anaphora: false,
+    })
+  })
+
+  it('代词回指标记：anaphora=true（渲染层据此默认展开执行说明）', () => {
+    const hit = parseGuideNote(
+      '格式件：docx_source_inject 拷第五章格式（L988-L1005）【缺：上述公司信息与法定代表人身份证复印件】',
+    )
+    expect(hit.anaphora).toBe(true)
+    const miss = parseGuideNote('【缺：公司全称、注册地址、成立时间】')
+    expect(miss.anaphora).toBe(false)
+    // 正常措辞「本项目/本文」不误判
+    expect(parseGuideNote('【缺：本项目业绩合同扫描件】').anaphora).toBe(false)
+  })
+
+  it('空 / — / 纯文本备注：不产生条目', () => {
+    expect(parseGuideNote('')).toEqual({ gaps: [], knowledge: [], clarifies: [], rest: '', anaphora: false })
+    expect(parseGuideNote('—')).toEqual({ gaps: [], knowledge: [], clarifies: [], rest: '', anaphora: false })
+    const plain = parseGuideNote('索引表（自行编制，招标无样例）：按第三章详细评审 5 个评审因素逐项列示')
+    expect(plain.gaps).toEqual([])
+    expect(plain.rest).toBe('索引表（自行编制，招标无样例）：按第三章详细评审 5 个评审因素逐项列示')
+  })
+
+  it('多条缺口各成一项；纯缺口行的 rest 为空白串', () => {
+    const p = parseGuideNote('【缺：应征人全称】【缺：法定代表人姓名】')
+    expect(p.gaps).toEqual(['应征人全称', '法定代表人姓名'])
+    expect(p.rest).toBe('')
+  })
+})
+
 describe('叶子匹配（body_contract 移植）', () => {
   const docs: EditDoc[] = [
     {
@@ -211,11 +310,73 @@ describe('叶子匹配（body_contract 移植）', () => {
     const ls = iterLeaves(single)
     // 「第三章」容器不下沉为叶子，叶子 = 3.1/3.2
     expect(ls).toHaveLength(2)
-    expect(ls[0]).toEqual({ vol: '主册', title: '3.1 项目理解与需求分析', delivery: '正文编写' })
+    expect(ls[0]).toEqual({
+      vol: '主册',
+      title: '3.1 项目理解与需求分析',
+      delivery: '正文编写',
+      overview: '',
+      reason: '',
+    })
     expect(leafKey(ls[0].vol, ls[0].title, false)).toBe('3.1 项目理解与需求分析')
 
     expect(multiVolume(docs)).toBe(true)
     expect(leafKey('商务部分', '投标函', true)).toBe('商务部分/投标函')
+  })
+
+  it('iterLeaves：带出节点概述/归位理由（行内内容行数据源）；空白 trim、缺省空串', () => {
+    const withMeta: EditDoc[] = [
+      {
+        name: '',
+        directory: [
+          {
+            目录名称: '第三章 落实方案',
+            level: 1,
+            children: [
+              {
+                目录名称: '3.1 项目理解',
+                level: 2,
+                children: [],
+                节点概述: ' 阐述总体技术路线与架构 ',
+                归位理由: '招标方要求说明对需求的理解',
+              },
+              { 目录名称: '3.2 总体设计', level: 2, children: [] },
+            ],
+          },
+        ],
+      },
+    ]
+    const ls = iterLeaves(withMeta)
+    expect(ls[0]).toEqual({
+      vol: '主册',
+      title: '3.1 项目理解',
+      delivery: '',
+      overview: '阐述总体技术路线与架构',
+      reason: '招标方要求说明对需求的理解',
+    })
+    expect(ls[1]).toEqual({ vol: '主册', title: '3.2 总体设计', delivery: '', overview: '', reason: '' })
+  })
+
+  it('blockPreviewText：空输入 → 空串；只取首个 section', () => {
+    expect(blockPreviewText(undefined, 120)).toBe('')
+    expect(blockPreviewText([], 120)).toBe('')
+    expect(blockPreviewText([{ text: '   \n  ' }], 120)).toBe('')
+    expect(blockPreviewText([{ text: '第一段' }, { text: '第二段' }], 120)).toBe('第一段')
+  })
+
+  it('blockPreviewText：表格线替空格、折叠空白、图片占位转人话', () => {
+    expect(blockPreviewText([{ text: '我公司提供\n\n7×24 小时\t维保服务' }], 120)).toBe('我公司提供 7×24 小时 维保服务')
+    expect(blockPreviewText([{ text: '| 项 | 值 |\n|---|---|\n| 工期 | 一年 |' }], 120)).toBe('项 值 --- --- 工期 一年')
+    expect(blockPreviewText([{ text: '![](图片)\n证书扫描件' }], 120)).toBe('（含图） 证书扫描件')
+    expect(blockPreviewText([{ text: '## 1 服务内容及SLA\n**产品支持**：知识中心' }], 120)).toBe(
+      '1 服务内容及SLA 产品支持：知识中心',
+    )
+  })
+
+  it('blockPreviewText：超长截断加省略号', () => {
+    const out = blockPreviewText([{ text: '字'.repeat(200) }], 120)
+    expect(out).toHaveLength(121)
+    expect(out.endsWith('…')).toBe(true)
+    expect(blockPreviewText([{ text: '字'.repeat(120) }], 120)).toHaveLength(120)
   })
 
   it('容器节点不下沉为叶子；空标题跳过', () => {

@@ -659,6 +659,39 @@
   font-size: 14px;
   font-weight: 600;
 }
+/* 「＋ 新会话」（「任务即房间」）：当前任务内建会话，与侧栏 hover「＋」同语义；
+   挤在标题行尾部、margin-left:auto 推到右端，ghost 形态不与标题争焦 */
+.chat-head-new {
+  flex: none;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--Radius-radius-8);
+  background: transparent;
+  color: var(--Color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: 0.12s;
+}
+.chat-head-new:hover {
+  background: var(--Color-bg-subtle);
+  color: var(--Color-text-primary);
+}
+.chat-head-new:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--Color-text-primary) 25%, transparent);
+}
+.chat-head-new svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+}
 .chat-scroll {
   flex: 1;
   overflow-y: auto;
@@ -1263,6 +1296,15 @@
      输入件「只提亮不加粗」的焦点态同款克制 */
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--Color-text-primary) 25%, transparent);
 }
+/* 文件拖到输入框上（拖拽上传局部反馈，InputComposer drag-over 态）：1px 品牌色
+   细描边 + 内卡淡品牌 tint——与焦点态同款克制，比聊天区整层 UploadDropzone 覆盖层
+   更贴「放进这个框」的心智 */
+.composer .box.drag-over {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--Color-brand-primary) 55%, transparent);
+}
+.composer .box.drag-over .box-inner {
+  background: color-mix(in srgb, var(--Color-brand-primary) 6%, var(--Color-bg-canvas));
+}
 .composer .box-inner {
   position: relative;
   border-radius: var(--Radius-radius-12);
@@ -1292,13 +1334,6 @@
   justify-content: space-between;
   gap: 8px;
   margin-top: 12px;
-}
-/* 顶带：ghost 任务选择器的容身位（外卡 padding 4px + 本行 padding 凑出左缘缩进） */
-.composer .box-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
 }
 .composer-plus {
   width: 32px;
@@ -1357,50 +1392,6 @@
 .model-select .chev {
   width: 16px;
   height: 16px;
-  stroke: var(--Color-text-tertiary);
-  fill: none;
-  stroke-width: 1.7;
-}
-/* ghost 选择器（ZCode 顶带同款）：无边框透明底，icon+文字+chevron，hover 浮出淡墨底 */
-.task-select {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 10px;
-  border-radius: var(--Radius-radius-8);
-  border: none;
-  background: transparent;
-  color: var(--Color-text-primary);
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.12s;
-}
-.task-select:hover {
-  background: color-mix(in srgb, var(--Color-text-primary) 6%, transparent);
-}
-.task-select:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--Color-text-primary) 12%, transparent);
-}
-.task-select .task-icon {
-  width: 16px;
-  height: 16px;
-  flex: none;
-  stroke: var(--Color-text-secondary);
-  fill: none;
-  stroke-width: 2;
-}
-.task-select .label {
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.task-select .chev {
-  width: 16px;
-  height: 16px;
-  flex: none;
   stroke: var(--Color-text-tertiary);
   fill: none;
   stroke-width: 1.7;
@@ -1706,6 +1697,9 @@
 .ft-ico--dir {
   background: var(--Color-text-tertiary); /* 中性灰 · tender.directory 目录（原 emerald 除名） */
 }
+.ft-ico--vol {
+  background: var(--Color-file-docx); /* Word 交付稿 · tender.volume（与 .ft-ico--docx 同色相） */
+}
 /* 卡片变体：聊天内 ArtifactCard 用，比文件树 18px 略大，与卡片 padding 比例合适 */
 .ft-ico--card {
   width: 22px;
@@ -1917,15 +1911,16 @@
 
 /* ===== 知识库（2026-08-27）：文件类型色板 + 侧栏红点 + 知识库视图 ===== */
 
-/* 文件格式色板（知识库列表/参考 kindIcon 语义色约定，同段维护） */
+/* 文件格式色板（知识库列表/参考 kindIcon 语义色约定，同段维护）——底色走
+   tokens.css 的 --Color-file-* 族，暗色档自动深一档 */
 .ft-ico--pdf {
-  background: #ef4444; /* red · PDF */
+  background: var(--Color-file-pdf); /* PDF */
 }
 .ft-ico--docx {
-  background: #2563eb; /* blue · Word */
+  background: var(--Color-file-docx); /* Word */
 }
 .ft-ico--img {
-  background: #8b5cf6; /* violet · 图片 */
+  background: var(--Color-file-img); /* 图片 */
 }
 
 /* 侧栏导航红点：有待处理事项（知识库待确认条目） */
@@ -4642,4 +4637,308 @@
   max-width: 100%;
   background: #fff;
   box-shadow: 0 1px 4px rgb(0 0 0 / 0.16);
+}
+
+/* ============ 任务首页（无会话选中时的主区，「任务即房间」2026-09-13；H2 列表） ============
+   一屏看清「每个标走到哪」：阶段/最近活动来自 sidecar task_stage.py（机械推导），
+   本页按 last_activity_at 倒序（后端 /tasks 仍按创建序，侧栏保持稳定不跳动）。
+   行度量对齐既有 .ft-row / .chat-item（30~36px 行高、Radius-8、hover bg-subtle）。 */
+.home {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+}
+.home-inner {
+  width: min(100%, 860px);
+  padding: 44px 32px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.home-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.home-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--Color-text-primary);
+  margin: 0;
+}
+.home-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* 搜索框：细边框、无阴影，focus 只提亮边框（全局 focus 克制的约定） */
+.home-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--Color-border-default);
+  border-radius: var(--Radius-radius-8);
+  background: var(--Color-bg-canvas);
+  color: var(--Color-text-tertiary);
+  transition: border-color 0.12s;
+}
+.home-search:focus-within {
+  border-color: var(--Color-text-tertiary);
+}
+.home-search svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.7;
+  flex: none;
+}
+.home-search input {
+  width: 140px;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--Color-text-primary);
+}
+.home-search input::placeholder {
+  color: var(--Color-text-tertiary);
+}
+/* 表头：与行同列宽（grid 列定义是唯一真源，表头/行共用） */
+.home-thead,
+.home-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 118px 84px 108px 62px;
+  align-items: center;
+  gap: 10px;
+}
+.home-thead {
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--Color-text-tertiary);
+}
+.home-rows {
+  display: flex;
+  flex-direction: column;
+}
+.home-row {
+  padding: 9px 10px;
+  border-radius: var(--Radius-radius-8);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.home-row + .home-row {
+  border-top: 1px solid var(--Color-border-default);
+}
+.home-row:hover,
+.home-row:focus-visible {
+  background: var(--Color-bg-subtle);
+}
+.home-row:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--Color-text-primary) 25%, transparent);
+}
+.home-row .c-task {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.home-row .c-task svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  stroke: var(--Color-text-secondary);
+  fill: none;
+  stroke-width: 1.7;
+}
+.home-row .c-task .name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--Color-text-primary);
+}
+.home-row .c-convs,
+.home-row .c-time {
+  font-size: 12px;
+  color: var(--Color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.home-row .c-tail {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+/* 行尾「＋」：hover 才浮出（与侧栏任务文件夹 hover「＋」同款），箭头常显 */
+.home-row-add {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--Color-text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: 0.12s;
+}
+.home-row:hover .home-row-add,
+.home-row-add:focus-visible {
+  opacity: 1;
+}
+.home-row-add:hover {
+  background: color-mix(in srgb, var(--Color-text-primary) 8%, transparent);
+  color: var(--Color-text-primary);
+}
+.home-row-add:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--Color-text-primary) 25%, transparent);
+}
+.home-row-add svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+}
+.home-row-arrow {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  stroke: var(--Color-text-tertiary);
+  fill: none;
+  stroke-width: 1.7;
+}
+/* 阶段胶囊（阶段语义色：进行中=品牌 tint、已完结=中性弱化，走 color-mix 派生） */
+.stage-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--Color-brand-primary);
+  background: color-mix(in srgb, var(--Color-brand-primary) 10%, var(--Color-bg-canvas));
+}
+.stage-pill.done {
+  color: var(--Color-text-tertiary);
+  background: color-mix(in srgb, var(--Color-text-primary) 6%, var(--Color-bg-canvas));
+}
+/* 执行中胶囊（实时 run 状态）：品牌绿点 + 浅底，与「等待确认」的 .wait-pill 成对 */
+.run-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  flex: none;
+  color: var(--Color-success);
+  background: color-mix(in srgb, var(--Color-success) 12%, var(--Color-bg-canvas));
+}
+/* 行内命名创建（顶部「＋ 开始新投标」触发） */
+.home-newrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--Color-brand-primary) 35%, var(--Color-border-default));
+  border-radius: var(--Radius-radius-8);
+  background: color-mix(in srgb, var(--Color-brand-primary) 5%, var(--Color-bg-canvas));
+}
+.home-newrow-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--Color-border-default);
+  border-radius: 6px;
+  background: var(--Color-bg-canvas);
+  font-size: 13px;
+  color: var(--Color-text-primary);
+  outline: none;
+}
+.home-newrow-input:focus {
+  border-color: var(--Color-text-tertiary);
+}
+/* 零任务空态：整页一个大号虚线创建区 */
+.home-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 52px 20px;
+  border: 1px dashed color-mix(in srgb, var(--Color-brand-primary) 35%, var(--Color-border-default));
+  border-radius: var(--Radius-radius-12);
+  background: transparent;
+  cursor: pointer;
+  color: var(--Color-brand-primary);
+  transition: 0.12s;
+}
+.home-empty:hover {
+  background: color-mix(in srgb, var(--Color-brand-primary) 6%, var(--Color-bg-canvas));
+}
+.home-empty svg {
+  width: 22px;
+  height: 22px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+}
+.home-empty .main {
+  font-size: 15px;
+  font-weight: 600;
+}
+.home-empty .sub {
+  font-size: 12px;
+  color: var(--Color-text-tertiary);
+}
+.home-noresult {
+  padding: 24px 10px;
+  font-size: 13px;
+  color: var(--Color-text-tertiary);
+}
+.home-hint {
+  margin-top: 2px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--Color-text-tertiary);
+}
+/* 整页拖放建任务：拖招标文件到首页任意位置=以文件名建任务并上传（覆盖层自绘，
+   容器只为 absolute 覆盖层提供定位上下文） */
+.home-drop-overlay {
+  position: absolute;
+  inset: 10px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 2px dashed var(--Color-brand-primary);
+  border-radius: var(--Radius-radius-12);
+  background: color-mix(in srgb, var(--Color-bg-canvas) 88%, transparent);
+  color: var(--Color-brand-primary);
+  font-size: 14px;
+  font-weight: 500;
+  pointer-events: none;
+}
+.home-drop-overlay svg {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.7;
 }

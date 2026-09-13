@@ -61,6 +61,8 @@ const navMaxW = () => Math.max(MIN_W, Math.min(MAX_W, window.innerWidth - 264 - 
 
 // 整本-<册名>.docx=合册产出的最终交付物（行徽标/组内置顶/DocxView 交付提醒共用判定）
 const isFinalDoc = (path: string) => (path.split('/').pop() ?? '').startsWith('整本-')
+// 交付稿行徽标（整本标书产物行与工作台整本文件行共用文案；品牌 tint 见 wbRow/artifactRow）
+const FINAL_TAIL = '整本 · 最终稿'
 
 /** 业务流分类夹（平台封闭）。产物按其 kind 归入 group；过程文件按 path 前缀归入 group。 */
 const GROUPS: { key: string; label: string }[] = [
@@ -265,6 +267,9 @@ export function ArtifactPanel({
   // 目录夹：目录产物 + 工作表 + fragments
   const directoryArtifacts = taskArtifacts.filter((a) => a.kind === 'tender.directory')
   const noteArtifacts = taskArtifacts.filter((a) => a.kind === 'doc.note')
+  // 正文夹的整本标书产物（tender.volume，合册发布）：有产物行时工作台的同名整本
+  // 文件不再重复出第二行（同一内容；产物行带预览/下载）。旧任务无产物时维持文件行。
+  const volumeArtifacts = taskArtifacts.filter((a) => a.kind === 'tender.volume')
 
   const openMenu = (e: React.MouseEvent, target: RowMenuTarget) => {
     e.preventDefault()
@@ -292,9 +297,10 @@ export function ArtifactPanel({
     )
   }
 
-  const artifactRow = (a: Artifact) => {
+  const artifactRow = (a: Artifact, tail?: string) => {
     const fromConv = convArtifactIds.has(a.artifact_id)
     const icon = kindIcon(a.kind)
+    const final = tail === FINAL_TAIL
     return (
       <div
         key={a.artifact_id}
@@ -310,6 +316,24 @@ export function ArtifactPanel({
           </span>
         )}
         <span className="ap-row-name truncate">{a.display_name}</span>
+        {tail && (
+          <span className="ap-row-tail">
+            <span
+              className={cn('ap-status', !final && 'regen')}
+              style={
+                final
+                  ? {
+                      color: 'var(--Color-brand-primary)',
+                      background:
+                        'color-mix(in srgb, var(--Color-brand-primary) 12%, var(--Color-bg-canvas))',
+                    }
+                  : undefined
+              }
+            >
+              {tail}
+            </span>
+          </span>
+        )}
       </div>
     )
   }
@@ -322,7 +346,7 @@ export function ArtifactPanel({
     // 多册节文件嵌套在 body/<册>/ 下——尾部显册名；平铺 docx 全组同质，不占徽章
     const volDir = parts.length > 2 ? parts[parts.length - 2] : ''
     const tail = isFinal
-      ? '整本 · 最终稿'
+      ? FINAL_TAIL
       : (tailOverride ??
         (f.editable
           ? '可编辑'
@@ -478,14 +502,30 @@ export function ArtifactPanel({
                     count += outlineFiles.length + fragmentFiles.length
                   }
                 } else if (g.key === 'body') {
+                  // 整本标书产物（tender.volume，合册发布）置组首——交付物有产物身份
+                  // （聊天卡/预览/下载），册序按目录树；有产物行时工作台的同名整本
+                  // 文件行不再重复出（旧任务无产物时维持文件行，重跑合册即有产物）
+                  const volNames = (dirData?.response_documents ?? []).map((d) => d.name)
+                  const volRank = (a: Artifact) => {
+                    const i = volNames.indexOf(a.display_name)
+                    return i >= 0 ? i : volNames.length
+                  }
+                  ;volumeArtifacts
+                    .toSorted((x, y) => volRank(x) - volRank(y))
+                    .forEach((a) => {
+                      pushRow(artifactRow(a, FINAL_TAIL))
+                    })
+                  const hideFinalRows = volumeArtifacts.length > 0
                   // 整本=最终交付物排组首（册序）；节文件按目录树序；无目录回退列表原序
                   const ordered = orderBodyRows(bodyFiles.map((f) => f.path), dirData)
                   const byPath = new Map(bodyFiles.map((f) => [f.path, f]))
                   const rowOf = (p: string | null) => (p ? byPath.get(p) : undefined)
-                  ordered.finals.forEach((p) => {
-                    const f = rowOf(p)
-                    if (f) pushRow(wbRow(f))
-                  })
+                  if (!hideFinalRows) {
+                    ordered.finals.forEach((p) => {
+                      const f = rowOf(p)
+                      if (f) pushRow(wbRow(f))
+                    })
+                  }
                   const guideF = rowOf(ordered.guide)
                   if (guideF) pushRow(wbRow(guideF))
                   const promiseF = rowOf(ordered.promise)

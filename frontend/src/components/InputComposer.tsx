@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ClipboardEvent, DragEvent } from 'react'
 import { ArrowUp, Paperclip, Square } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { useFileUpload } from '@/context/FileUpload'
@@ -8,6 +8,7 @@ import { ModelSelect } from '@/components/workspace/ModelSelect'
 import { ThinkingSelect } from '@/components/ThinkingSelect'
 import { PromptSuggestionPopover } from '@/components/PromptSuggestionPopover'
 import { PROMPT_SUGGESTIONS, type PromptSuggestionItem } from '@/data/promptCatalog'
+import { renameClipboardFiles } from '@/lib/clipboardFiles'
 import { getSettings, type ThinkingLevel } from '@/api/client'
 
 /** 输入时提示词联想弹层：2026-09-07 用户要求暂时禁用；恢复改回 true（showSuggestions 单点闸门，其余接线原样保留） */
@@ -21,13 +22,13 @@ export function InputComposer({
   onSend,
   value,
   onChange,
-  leftSlot,
   thinking,
   onThinkingChange,
   model,
   onModelChange,
   onOpenSettings,
   onStop,
+  idlePlaceholder,
 }: {
   running: boolean
   /** 已请求停止、等待收尾（协作式取消的事件边界窗口）：停止钮转「正在停止…」 */
@@ -35,8 +36,6 @@ export function InputComposer({
   onSend: (text: string) => void | Promise<void>
   value: string | null
   onChange: (v: string | null) => void
-  /** 输入框左上角附加行（新会话草稿页的任务选择胶囊，ZCode 输入框顶部条同款）；空=不渲染顶行 */
-  leftSlot?: ReactNode
   /** 思考档位（胶囊展示与切换；随消息发送由持有方 ChatView 接线） */
   thinking: ThinkingLevel
   onThinkingChange: (level: ThinkingLevel) => void
@@ -47,6 +46,8 @@ export function InputComposer({
   onOpenSettings?: () => void
   /** 停止当前 run（running 且非 HITL 等待时，发送钮变停止钮） */
   onStop?: () => void
+  /** 空闲态占位文案（ChatView 传任务感知版「在「XX」中输入消息…」；缺省通用文案） */
+  idlePlaceholder?: string
 }) {
   const text = value ?? ''
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -54,8 +55,12 @@ export function InputComposer({
   const [suggestionsOpen, setSuggestionsOpen] = useState(false)
   const [activeSuggestion, setActiveSuggestion] = useState(0)
   const [sending, setSending] = useState(false)
+  /** 文件拖到输入框上（drag-over 高亮 + placeholder 提示）：文件拖放本就有聊天区
+   *  整层 UploadDropzone 兜底，这里只给输入框局部反馈；`data-drag-target` 供外层
+   *  覆盖层识别「现在是输入框在自己的边界内接」从而让位（双反馈打架） */
+  const [dragOver, setDragOver] = useState(false)
   const suggestionListId = 'prompt-suggestion-list'
-  const { uploads, taskScope, openFilePicker, acknowledgeUploads } = useFileUpload()
+  const { uploads, taskScope, openFilePicker, dropFiles, acknowledgeUploads } = useFileUpload()
   const { data: settings } = useQuery({
     queryKey: ['settings'],
     queryFn: getSettings,
@@ -130,10 +135,40 @@ export function InputComposer({
   const runningBlock = running
   const sendDisabled = sending || (!text.trim() && freshFiles.length === 0)
 
+  // 文件拖放/文字拖放分流：只拦 Files（types 含 'Files'），框内选中文字的拖放
+  // 走原生行为；preventDefault 是 drop 能落到本元素的前提。dragover 不 stopPropagation
+  // ——外层 UploadDropzone 要靠它按拖拽目标让位（两层同时亮=双反馈）；drop 必须
+  // stopPropagation 防外层再收一次（双上传），外层另用 onDropCapture 收尾覆盖层
+  const boxDragHandlers = {
+    onDragOver: (e: DragEvent<HTMLDivElement>) => {
+      if (!e.dataTransfer.types.includes('Files')) return
+      e.preventDefault()
+      setDragOver(true)
+    },
+    onDragLeave: (e: DragEvent<HTMLDivElement>) => {
+      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false)
+    },
+    onDrop: (e: DragEvent<HTMLDivElement>) => {
+      if (!e.dataTransfer.types.includes('Files') || e.dataTransfer.files.length === 0) return
+      e.preventDefault()
+      e.stopPropagation()
+      setDragOver(false)
+      dropFiles(Array.from(e.dataTransfer.files))
+    },
+  }
+
+  // 粘贴文件（截图/复制的文件）：有文件才拦截，纯文本粘贴走默认行为。剪贴板
+  // 截图默认名都是 image.png（任务内同名覆盖语义），renameClipboardFiles 改名保共存
+  const handlePaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData.files ?? [])
+    if (files.length === 0) return
+    e.preventDefault()
+    dropFiles(renameClipboardFiles(files))
+  }
+
   return (
     <div className="composer">
-      <div className="box">
-        {leftSlot && <div className="box-top">{leftSlot}</div>}
+      <div className={dragOver ? 'box drag-over' : 'box'} data-drag-target="" {...boxDragHandlers}>
         <div className="box-inner">
           <UploadChips className="mb-2" />
           <textarea
@@ -148,6 +183,7 @@ export function InputComposer({
               if (query) setSuggestionsOpen(true)
             }}
             onBlur={() => setFocused(false)}
+            onPaste={handlePaste}
             onKeyDown={(e) => {
               if (showSuggestions && e.key === 'ArrowDown') {
                 e.preventDefault()
@@ -180,11 +216,13 @@ export function InputComposer({
             aria-activedescendant={showSuggestions ? `prompt-suggestion-${filteredSuggestions[activeSuggestion]?.id}` : undefined}
             rows={1}
             placeholder={
-              stopping
-                ? '正在停止任务，收尾后即可继续发送…'
-                : freshFiles.length > 0
-                  ? '直接发送：通知助手处理刚上传的文件…'
-                  : '输入消息，可上传招标文件…'
+              dragOver
+                ? '松开以上传到当前任务…'
+                : stopping
+                  ? '正在停止任务，收尾后即可继续发送…'
+                  : freshFiles.length > 0
+                    ? '直接发送：通知助手处理刚上传的文件…'
+                    : idlePlaceholder ?? '输入消息，可上传招标文件…'
             }
           />
           {showSuggestions && (

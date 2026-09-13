@@ -39,7 +39,9 @@ export function DocxView({ taskId, path }: { taskId: string | null; path: string
     queryFn: async () => await fetchWorkbenchRaw(taskId!, path!),
     enabled: !!taskId && !!path && mode === 'layout',
     staleTime: 30_000,
-    gcTime: 10 * 60_000,
+    // 2min：整本几十 MB，关预览后尽快释放（3GB 内存修复批；连续巡览多节的叠加窗口
+    // 从 10min 收窄，重开预览 30s 内仍免重拉）
+    gcTime: 2 * 60_000,
   })
 
   const handlePreviewError = useCallback(() => {

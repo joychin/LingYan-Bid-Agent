@@ -1,6 +1,10 @@
 /**
  * 表格视图共用小件：文本单元格（「—」弱化）、编辑输入框、两步删除按钮、
  * 源码模式兜底提示条。两个视图（写作指引/承诺清单）同款交互，抽此处单源。
+ *
+ * 空值约定：表格文件里空单元格统一写「—」（sanitizeCell，保持列完整与解析稳定），
+ * 但「—」对用户不传达任何信息、且与模式列的「不写正文」同形易混——编辑态一律
+ * 显示为空框 + placeholder 说明，提交空串再回写「—」，存储格式不变。
  */
 
 import { useState } from 'react'
@@ -15,7 +19,10 @@ export function CellText({ value, className }: { value: string; className?: stri
   )
 }
 
-/** 编辑态输入框（表格单元格内嵌；值原样含「—」，可全选替换）。 */
+/** 表格文件里的空值占位符（存储层：保持列完整；界面层不显示）。 */
+export const EMPTY_CELL = '—'
+
+/** 编辑态输入框（「—」显示为空框、清空回写「—」；其余值原样，可全选替换）。 */
 export function CellInput({
   value,
   onChange,
@@ -30,8 +37,8 @@ export function CellInput({
   return (
     <input
       type="text"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
+      value={value === EMPTY_CELL ? '' : value}
+      onChange={(e) => onChange(e.target.value || EMPTY_CELL)}
       placeholder={placeholder}
       className={cn(
         'w-full rounded-md border border-line bg-background px-2 py-1 text-sm outline-none',

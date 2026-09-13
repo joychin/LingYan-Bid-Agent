@@ -172,6 +172,118 @@ export function parseBlockRefs(cell: string): { blockIds: string[]; missing: boo
   return { blockIds, missing, rest }
 }
 
+// ---------- 缺口/备注列（读者分离：用户看缺口，AI 看执行说明） ----------
+
+export interface GuideNoteParts {
+  /** 【缺：xxx】的内容，一条一项——渲染成「需要你提供」清单 */
+  gaps: string[]
+  /** 【知识库】命中事实（材料名+关键数字原文），一条一项 */
+  knowledge: string[]
+  /** ⚠待澄清 事项（含 CLAR 编号），一条一项 */
+  clarifies: string[]
+  /** 其余原文（工具名、行号、人话备注）——本列里给写手的执行细节；无内容时 '' */
+  rest: string
+  /** 缺口项用了代词回指（「【缺：上述公司信息】」）——摘出后指代丢失，渲染层据此
+   *  提示「指代见下方执行说明」并默认展开执行说明（存量指引的兜底可读性）。 */
+  anaphora: boolean
+}
+
+const NOTE_ANAPHORA_RE = /【缺[：:]\s*(?:上述|以上|前述|前面)/
+
+/** 片段终止位置：下一个句末或下一个标记（不含终止符本身）。 */
+function noteStop(s: string): number {
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (ch === '；' || ch === ';' || ch === '。' || ch === '【') return i
+  }
+  return s.length
+}
+
+/** 剔除片段后剩下的执行说明：折叠空白、清边界与重复分隔符（避免留一串「；」）。 */
+function cleanupNoteRest(s: string): string {
+  return s
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s；;，,。．、]+/, '')
+    .replace(/[\s；;，。．、：:]+$/, '')
+    .replace(/([；;])[\s；;]+/g, '$1')
+    .replace(/([，,])[\s，,]+/g, '$1')
+    .trim()
+}
+
+/**
+ * 缺口/备注列 → 四类片段（2026-09-13 A 批）。
+ *
+ * 动因：该列被设计成「随派发整段透传给写手」的指令载体，又同时是用户唯一可见的
+ * 缺料点名——工具名/行号与【缺：…】混写，整段直接渲染＝用户看不懂（实测原话）。
+ * 这里按标记切分，渲染层把「需要你提供」摆在最前、执行细节折叠起来。
+ *
+ * 宽容解析：标记之外的原文一律落 rest，**不丢任何内容**；旧格式（裸「缺：xxx」
+ * 不带括号）不强行摘，仍能在 rest 里看到。
+ */
+export function parseGuideNote(note: string): GuideNoteParts {
+  const src = (note ?? '').trim()
+  const out: GuideNoteParts = { gaps: [], knowledge: [], clarifies: [], rest: '', anaphora: false }
+  if (!src || src === '—') return out
+
+  const spans: [number, number][] = []
+
+  // 【缺：xxx】组；紧跟其后的破折号解释一并归入该条（「【缺：X】——为什么缺」的常见写法）
+  for (const m of src.matchAll(/【缺[：:]\s*([^】]*)】/g)) {
+    const start = m.index ?? 0
+    let end = start + m[0].length
+    let text = (m[1] ?? '').trim()
+    const tail = src.slice(end)
+    if (/^\s*(?:——|—|－|[:：])/.test(tail)) {
+      const ext = tail.slice(0, noteStop(tail))
+      const body = ext.replace(/^\s*(?:——|—|－|[:：])\s*/, '').trim()
+      if (body) {
+        text = `${text}——${body}`
+        end += ext.length
+      }
+    }
+    if (text) out.gaps.push(text)
+    spans.push([start, end])
+  }
+
+  // 【知识库】命中事实：到下一个句末/下一个标记为止（标记剥掉——命中段标题已说明来源）
+  for (const m of src.matchAll(/【知识库】/g)) {
+    const start = m.index ?? 0
+    const after = start + m[0].length
+    const len = noteStop(src.slice(after))
+    const text = src.slice(after, after + len).trim()
+    if (text) out.knowledge.push(text)
+    spans.push([start, after + len])
+  }
+
+  // ⚠待澄清（含 CLAR 编号）：到下一个句末/下一个标记为止
+  for (const m of src.matchAll(/⚠?\s*待澄清/g)) {
+    const start = m.index ?? 0
+    const len = noteStop(src.slice(start))
+    const text = src.slice(start, start + len).replace(/^\s*⚠?\s*/, '').trim()
+    if (text) out.clarifies.push(text)
+    spans.push([start, start + len])
+  }
+
+  // 防御：裸【缺】（素材列的写法，本列罕见）——不静默消失，给一条泛化缺项
+  for (const m of src.matchAll(/【缺】/g)) {
+    const start = m.index ?? 0
+    out.gaps.push('（指引未列出具体缺项）')
+    spans.push([start, start + m[0].length])
+  }
+
+  spans.sort((a, b) => a[0] - b[0])
+  let cursor = 0
+  let rest = ''
+  for (const [s, e] of spans) {
+    if (s > cursor) rest += src.slice(cursor, s)
+    cursor = Math.max(cursor, e)
+  }
+  rest += src.slice(cursor)
+  out.rest = cleanupNoteRest(rest)
+  out.anaphora = NOTE_ANAPHORA_RE.test(src)
+  return out
+}
+
 // ---------- 叶子匹配（body_contract / check_pipeline 的 TS 移植，显示用途） ----------
 
 /** 标题 → 文件名/目录名（body_contract.sanitize_name 同款：非法字符替空格、折叠空白、截 60）。 */
@@ -187,6 +299,10 @@ export interface DirLeaf {
   vol: string
   title: string
   delivery: string
+  /** 节点概述：tender-outline 生成的一句话「这节写什么」（旧目录产物可能缺）。 */
+  overview: string
+  /** 归位理由：这章为什么存在（招标方要求/惯例）。 */
+  reason: string
 }
 
 /** 目录树叶子（无子节点、标题非空）；册名缺省「主册」（body_contract.iter_leaves 同款）。 */
@@ -199,11 +315,33 @@ export function iterLeaves(docs: EditDoc[] | undefined): DirLeaf[] {
         continue
       }
       const title = (n.目录名称 ?? '').trim()
-      if (title) out.push({ vol, title, delivery: (n.交付形态 ?? '').trim() })
+      if (title)
+        out.push({
+          vol,
+          title,
+          delivery: (n.交付形态 ?? '').trim(),
+          overview: (n.节点概述 ?? '').trim(),
+          reason: (n.归位理由 ?? '').trim(),
+        })
     }
   }
   for (const d of docs ?? []) walk((d.name ?? '').trim() || '主册', d.directory)
   return out
+}
+
+/** 素材块首段预览（写作指引「素材底稿」行）：图片占位转人话、表格线替空格、
+ *  剥标题#/加粗记号、折叠全部空白、超长截断。只取首个 section——预览要的是
+ *  「开头写什么」，不是全量。 */
+export function blockPreviewText(sections: { text: string }[] | undefined, maxChars: number): string {
+  const s = (sections?.[0]?.text ?? '')
+    .replace(/!\[\]\(图片\)/g, '（含图）')
+    .replace(/\|/g, ' ')
+    .replace(/(^|\s)#{1,6}\s*/g, '$1')
+    .replace(/\*\*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!s) return ''
+  return s.length > maxChars ? `${s.slice(0, maxChars)}…` : s
 }
 
 /** 多册判定：有目录树的响应文件多于一份（body_contract.multi_volume 同款）。 */

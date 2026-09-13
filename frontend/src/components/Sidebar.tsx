@@ -40,8 +40,8 @@ import { UserBar } from '@/components/workspace/UserBar'
 export interface SidebarProps {
   selectedId: string | null
   onSelect: (id: string | null) => void
-  /** 「新建任务」：进入新建会话草稿页（所属任务在输入框胶囊里选/建） */
-  onNewSession: () => void
+  /** 「新建任务」：打开建任务弹窗（建完自带首个会话并进入——「任务即房间」，2026-09-13） */
+  onNewTask: () => void
   /** 打开写作素材库视图（素材跨文件浏览） */
   onOpenLibrary?: () => void
   /** 打开版式库视图（版式文件=格式资产，与素材分离；2026-09-09 由「模板库」改名） */
@@ -97,7 +97,7 @@ function forgetModelPrefs(convIds: string[]) {
 export function Sidebar({
   selectedId,
   onSelect,
-  onNewSession,
+  onNewTask,
   onOpenKnowledge,
   activeView = 'chat',
   onOpenLibrary,
@@ -286,7 +286,7 @@ export function Sidebar({
       <div className="side-head" data-tauri-drag-region />
       <div className="side-scroll">
         <div className="quick-list">
-          <NavRow icon={<Plus />} label="新建任务" onClick={onNewSession} />
+          <NavRow icon={<Plus />} label="新建任务" onClick={onNewTask} />
           <NavRow
             icon={<BookOpen />}
             label="知识库"
@@ -743,6 +743,9 @@ function groupByTask(
         title: '未归类',
         progress_note: '',
         created_at: orphans[0].created_at,
+        // 合成组不参与阶段/排序（侧栏不消费，只为满足 Task 类型）
+        stage: 'new',
+        last_activity_at: orphans[0].created_at,
       },
       conversations: orphans,
     })

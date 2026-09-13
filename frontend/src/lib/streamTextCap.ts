@@ -4,8 +4,9 @@
  * 活卡把 8 路子代理的全部累计思考流挂成活 DOM（tender-body 整本 run 11 分钟
  * ≈30MB 文本，页面 WebContent footprint 涨到 11GB）。流式期间只渲染尾部一段：
  * DOM 体量与 MemoMarkdown 每次节流的全量重解析成本都从「随 run 无界增长」变为
- * 恒定。终态（completed/error/暂停冻结/历史快照）不受影响——isStreaming=false
- * 时调用方渲染全文，终态后的完整思考来自服务端 run_traces 快照，与流式累计无关。
+ * 恒定。终态分语境（2026-09-13 修订）：活卡内（RunMessage，经 TraceLiveContext
+ * 标记）终态同样封顶——run 期陆续完成的子代理卡随波次累积，整段思考常驻 DOM 是
+ * 内存持续爬升主因；历史快照（点开才拉取、按需挂载）不受影响，渲染全文。
  *
  * 已知取舍：尾部切片可能截断 markdown 结构（代码块/表格从中间开始）——它是
  * 瞬态预览，终态视图是完整原文，接受。

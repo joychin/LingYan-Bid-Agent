@@ -45,7 +45,8 @@ export function SourceView({
     // 原件不可变（同名重传经上传/删除点显式失效）：Infinity 防重开整份重拉
     // （标书 PDF 数十 MB，默认 1s staleTime 每次重开都重下 + 预览瞬时双份内存）
     staleTime: Infinity,
-    gcTime: 10 * 60_000,
+    // 3min：原件字节数十 MB，关预览后尽快释放（3GB 内存修复批；staleTime 语义不变）
+    gcTime: 3 * 60_000,
   })
 
   // 图片：blob → objectURL（挂载期拥有，卸载/换图 revoke——KbImage 先例）

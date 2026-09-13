@@ -4,7 +4,7 @@ import type { Artifact } from '@/api/client'
 export type ArtifactPlacement = {
   /** run_id → 该 run 发布的产物（保持产物列表原顺序） */
   byRun: Map<string, Artifact[]>
-  /** 转录中没有对应回合的产物（旧数据、活卡进行中的 run）→ 转录尾部 */
+  /** 转录中没有对应回合的产物（旧数据）→ 转录尾部 */
   tail: Artifact[]
 }
 

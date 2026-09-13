@@ -20,11 +20,18 @@ export function UploadDropzone({ children }: { children: ReactNode }) {
       className="relative flex h-full min-h-0 w-full flex-col"
       onDragOver={(e) => {
         e.preventDefault()
-        setOver(true)
+        // 拖到输入框（[data-drag-target]）上时本层让位：InputComposer 已给局部反馈，
+        // 两层同时亮是双反馈打架（从聊天区一路拖到输入框，本层不会收到 dragleave，
+        // 只能在这里按拖拽目标逐帧裁决）
+        const el = e.target instanceof Element ? e.target : null
+        setOver(!el?.closest('[data-drag-target]'))
       }}
       onDragLeave={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget as Node)) setOver(false)
       }}
+      // 捕获段收尾：输入框的 drop 会 stopPropagation（防双上传），冒泡段的 onDrop 收不到
+      // → 覆盖层永久卡在「松开上传到工作区」（实测拖文件进输入框必现）
+      onDropCapture={() => setOver(false)}
       onDrop={handleDrop}
     >
       {children}

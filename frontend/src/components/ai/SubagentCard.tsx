@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useContext } from 'react'
 import { Bot, CheckCircle, ChevronDown, CirclePause, Loader2, XCircle } from 'lucide-react'
 import { Loader } from '@/components/ai/Loader'
 import { MemoMarkdown } from '@/components/ai/MemoMarkdown'
@@ -6,6 +6,7 @@ import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai/R
 import { TextShimmer } from '@/components/ai/TextShimmer'
 import { subagentStepTitle, toolDisplayName } from '@/components/ai/toolDisplay'
 import { SkillBatch } from '@/components/ai/ToolStepRow'
+import { TraceLiveContext, TRACE_LIVE_TEXT_CAP } from '@/components/ai/traceLive'
 import { segmentToolSteps } from '@/components/ai/traceGroups'
 import {
   Collapsible,
@@ -76,11 +77,14 @@ function ChildStep({ step }: { step: ToolStep }) {
 
 /** 子代理思考块：reasoning 是流式 token 热路径（多册并发派发时的主 token 通道），
  *  节流（渲染层合并）+ 分块 memo（只重解析最后一块）双重降本。
- *  流式期间只渲染尾部（capStreamingText）：活卡思考 DOM 与重解析成本不随 run
- *  无界增长（2026-09-08 内存暴涨修复）；终态渲染全文（数据源已是服务端快照）。 */
+ *  活卡内**恒封顶**（流式与终态都走尾部尾窗）：run 期陆续完成的子代理卡会随波次
+ *  累积，终态渲染整段思考 markdown 是内存持续爬升主因（2026-09-13 修复批，语境
+ *  经 TraceLiveContext 区分）；历史过程区（按需挂载）渲染全文。 */
 function StepReasoning({ text, isStreaming }: { text: string; isStreaming: boolean }) {
+  const live = useContext(TraceLiveContext)
   const shown = useThrottledValue(text)
-  const display = isStreaming ? capStreamingText(shown).text : shown
+  const display =
+    live || isStreaming ? capStreamingText(shown, TRACE_LIVE_TEXT_CAP).text : shown
   return (
     <Reasoning isStreaming={isStreaming}>
       <ReasoningTrigger className="text-xs text-muted-foreground">

@@ -10,7 +10,7 @@
  *   表达：等价于原 invalidateQueries().then(setState)。
  */
 
-import type { AgentEventData, InterruptRequest, TodoItem, ToolStep } from '@/api/sse'
+import type { AgentEventData, DeliverableSignal, InterruptRequest, TodoItem, ToolStep } from '@/api/sse'
 
 export interface RunState {
   running: boolean
@@ -95,6 +95,10 @@ export type Effect =
   /** 过程对账（2026-09-08）：seq 缺口 = SSE 丢过事件（bus 积压丢弃/断连窗口），
    *  拉运行快照把死步/丢步骤补齐；hook 层限频，缺口风暴不会连环拉。 */
   | { kind: 'reconcile-trace'; runId: string }
+  /** 交付物呈现（2026-09-13 additive deliverable.created）：产出侧声明「值得展示
+   *  给用户」，产出即开——打开动作与守卫在 App（面板空闲/显示自动内容才开），
+   *  这里只把信号转成 Effect 由 useRun 回调给上层（决策单点化同 invalidate）。 */
+  | { kind: 'present-deliverable'; deliverable: DeliverableSignal }
 
 export type Action =
   | { type: 'sse'; event: string; data: AgentEventData; now: number }
@@ -647,6 +651,21 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
     case 'artifact.created':
       // 产物已落库，刷新列表让 ArtifactCard 即时出现
       return result(s, [{ kind: 'invalidate', queryKey: ['artifacts'] }])
+    case 'deliverable.created':
+      // 交付物呈现信号（产出即开）：不驱动渲染状态，纯转发给上层回调（App 侧
+      // 守卫：面板空闲/显示自动内容才开）。kind 判别收紧到两值，未知值忽略。
+      if (data.kind !== 'artifact' && data.kind !== 'file') return result(orig)
+      return result(s, [
+        {
+          kind: 'present-deliverable',
+          deliverable: {
+            kind: data.kind,
+            artifactId: data.artifact_id ?? null,
+            path: data.path ?? null,
+            displayName: data.display_name ?? null,
+          },
+        },
+      ])
     case 'conversation.renamed':
       // 自动命名已写库（无 seq 连接级事件），刷新会话列表让侧栏标题即时更新
       return result(s, [{ kind: 'invalidate', queryKey: ['conversations'] }])
@@ -720,6 +739,9 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
         { kind: 'settle-after-messages', action: { type: 'settle-completed' } },
         // run 期间模型可能新写了工作台文件（body/ 指引与正文），结束时刷新面板列表
         { kind: 'invalidate', queryKey: ['workbench'] },
+        // 首页列表的 stage/last_activity_at 由磁盘与索引现算：终态后同步刷新
+        // （首页已挂载时不必等重挂载才看到「目录已生成/正文写作中」的变化）
+        { kind: 'invalidate', queryKey: ['tasks'] },
       ])
     case 'agent.error':
       return result(markTerminal(s, data.run_id), [
@@ -728,6 +750,7 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
           action: { type: 'settle-error', error: data.error ?? '未知错误', code: data.code ?? null },
         },
         { kind: 'invalidate', queryKey: ['workbench'] },
+        { kind: 'invalidate', queryKey: ['tasks'] },
       ])
     default:
       return result(orig)

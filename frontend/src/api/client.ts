@@ -433,6 +433,13 @@ export async function getArtifactContent(id: string): Promise<{ content: string;
   return { content: await res.text(), contentType: res.headers.get('content-type') ?? '' }
 }
 
+/** 文件型产物（tender.volume=整本标书 docx）的原始字节：预览/下载共用。
+ *  整本可能几十 MB，与 fetchWorkbenchRaw 同口径走无超时的 rawFetch。 */
+export async function fetchArtifactFile(id: string): Promise<Blob> {
+  const res = await rawFetch(`/artifacts/${id}/file`)
+  return res.blob()
+}
+
 /** 编辑保存：非 force 时 409 = 内容已被外部更新（探测信号）；force = 用户裁决「保留我的版本」无条件覆盖。 */
 export function updateArtifactContent(
   id: string,
@@ -654,8 +661,11 @@ export interface MtBlockContent {
   sections: MtBlockSection[]
 }
 
-export function getMtBlockContent(id: string): Promise<MtBlockContent> {
-  return request(`/materials/blocks/${id}/content`)
+export function getMtBlockContent(id: string, preview?: number): Promise<MtBlockContent> {
+  // preview：行内预览预算（字符）——服务端截断 sections 正文，chars 仍是真实总字数；
+  // 不传 = 全量（块详情弹窗）
+  const q = preview && preview > 0 ? `?preview=${preview}` : ''
+  return request(`/materials/blocks/${id}/content${q}`)
 }
 
 /** 文件片段内容（挑章节实时预览）：按行号闭区间切片，服务端 clamp 越界。 */
@@ -719,6 +729,8 @@ export interface WorkbenchContent {
   revised: boolean
   editable: boolean
   has_restore: boolean
+  /** 行切片形态（getWorkbenchContentLines）附带：文件总行数，前端算实际展示区间用 */
+  total_lines?: number
 }
 
 /** 轻量探测：编辑器轮询外部更新只比哈希（不拉全文）。 */
@@ -737,6 +749,18 @@ export function listWorkbench(taskId: string): Promise<{ files: WorkbenchFile[] 
 
 export function getWorkbenchContent(taskId: string, path: string): Promise<WorkbenchContent> {
   const qs = new URLSearchParams({ task_id: taskId, path })
+  return request(`/workbench/content?${qs}`)
+}
+
+/** 行切片取文（1 基闭区间，服务端 clamp 越界）：溯源卡等「只看几十行」的消费方用，
+ *  不再整份拉 MB 级解析稿回来 split（2026-09-13 内存修复批）。 */
+export function getWorkbenchContentLines(
+  taskId: string,
+  path: string,
+  start: number,
+  end: number,
+): Promise<WorkbenchContent> {
+  const qs = new URLSearchParams({ task_id: taskId, path, start: String(start), end: String(end) })
   return request(`/workbench/content?${qs}`)
 }
 

@@ -37,7 +37,7 @@ export function OriginalView({ source }: { source: OriginalSource }) {
     queryFn: () => source.fetchBlob(source.id),
     enabled: ext === '.pdf' || ext === '.docx',
     staleTime: Infinity, // 原件只在整文件替换时变化（知识库 retrigger 按键失效；素材库原件不可变）
-    gcTime: 10 * 60_000,
+    gcTime: 3 * 60_000, // 3min：关预览后尽快释放几十 MB 原件字节（3GB 内存修复批）
   })
 
   if (ext === '.doc') {

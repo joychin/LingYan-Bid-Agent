@@ -12,7 +12,7 @@ import { useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { FileText } from 'lucide-react'
 import { Dialog } from '@/components/ui/dialog'
-import { getWorkbenchContent } from '@/api/client'
+import { getWorkbenchContentLines } from '@/api/client'
 import { useWorkbench } from '@/hooks/useWorkbench'
 import { cn } from '@/lib/utils'
 
@@ -30,7 +30,9 @@ export function sourceLine(source?: string): number | null {
 
 /** 出处原文上下文（就地展示，2026-09-09）：按出处行号取解析主文件 md 的
  *  line-8 ~ line+12 切片，目标行高亮。解析主文件=workbench 列表 parse/ 下
- *  首个条目（单主文件场景，与旧跳转口径一致）；content 查询与面板共享缓存。
+ *  首个条目（单主文件场景，与旧跳转口径一致）。走服务端行切片端点
+ *  （2026-09-13 内存修复批）：不再整份拉 MB 级解析稿回来 split——指引行展开
+ *  面板一次展开十几张 SourceEntryCard，旧口径把整份解析稿抬进缓存。
  *  无任务/无解析文件/出处无行号 → 各自降级不渲染（提示行号缺失）。 */
 export function ParseContextBlock({
   taskId,
@@ -45,9 +47,11 @@ export function ParseContextBlock({
     () => (wbFiles ?? []).find((f) => f.path.startsWith('parse/') && f.path.endsWith('.md'))?.path ?? null,
     [wbFiles],
   )
+  const from = line !== null ? Math.max(1, line - 8) : 1
+  const to = line !== null ? line + 12 : 1
   const { data: raw, isLoading } = useQuery({
-    queryKey: ['workbench', taskId ?? null, 'content', parsePath],
-    queryFn: async () => await getWorkbenchContent(taskId!, parsePath!),
+    queryKey: ['workbench', taskId ?? null, 'content-slice', parsePath, from, to],
+    queryFn: async () => await getWorkbenchContentLines(taskId!, parsePath!, from, to),
     enabled: !!taskId && !!parsePath && line !== null,
     staleTime: 30_000,
   })
@@ -59,19 +63,18 @@ export function ParseContextBlock({
   if (isLoading || !raw) return <p className="text-xs text-muted-foreground">正在加载原文上下文…</p>
 
   const lines = raw.content.split('\n')
-  const from = Math.max(1, line - 8)
-  const to = Math.min(lines.length, line + 12)
+  const shown = Math.min(to, raw.total_lines ?? to)
   const fileName = parsePath.split('/').pop() ?? ''
   return (
     <div className="overflow-hidden rounded-lg border border-line">
       <div className="flex items-center gap-1.5 border-b border-line bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground">
         <FileText className="h-3 w-3 shrink-0" />
         <span className="min-w-0 truncate">
-          原文上下文 L{from}-L{to} · {fileName}
+          原文上下文 L{from}-L{shown} · {fileName}
         </span>
       </div>
       <div className="max-h-64 overflow-auto px-1 py-1">
-        {Array.from({ length: to - from + 1 }, (_v, k) => {
+        {lines.map((text, k) => {
           const n = from + k
           const hit = n === line
           return (
@@ -85,7 +88,7 @@ export function ParseContextBlock({
               <span className={cn('w-9 shrink-0 select-none text-right tabular-nums', hit ? 'text-primary' : 'text-ink-3')}>
                 {n}
               </span>
-              <span className="min-w-0 whitespace-pre-wrap break-words">{lines[n - 1] || ' '}</span>
+              <span className="min-w-0 whitespace-pre-wrap break-words">{text || ' '}</span>
             </div>
           )
         })}

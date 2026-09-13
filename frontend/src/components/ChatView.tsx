@@ -18,6 +18,7 @@ import {
 } from '@/components/ai/InterruptCard'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai/Reasoning'
 import { RunTrace, NarrationLine } from '@/components/ai/RunTrace'
+import { TraceLiveContext, TRACE_LIVE_TEXT_CAP } from '@/components/ai/traceLive'
 import { TodoPanel } from '@/components/ai/TodoPanel'
 import { TextShimmer } from '@/components/ai/TextShimmer'
 import { toolDisplayName } from '@/components/ai/toolDisplay'
@@ -28,14 +29,14 @@ import { capStreamingText } from '@/lib/streamTextCap'
 import { WelcomeScreen } from '@/components/WelcomeScreen'
 import { InputComposer } from '@/components/InputComposer'
 import { UploadChips } from '@/components/UploadChips'
-import { TaskPicker } from '@/components/TaskPicker'
 import { useMessages } from '@/hooks/useMessages'
 import { useRun } from '@/hooks/useRun'
 import { useThrottledValue } from '@/hooks/useThrottledValue'
 import type { RunState } from '@/hooks/useRun'
+import type { DeliverableSignal } from '@/api/sse'
 import { useArtifacts } from '@/hooks/useArtifacts'
 import { useConversations } from '@/hooks/useConversations'
-import { useCreateTask, useTasks } from '@/hooks/useTasks'
+import { taskOfConversation, useTasks } from '@/hooks/useTasks'
 import { useFileUpload } from '@/context/FileUpload'
 import { useToast } from '@/context/Toast'
 import { formatDay, cn } from '@/lib/utils'
@@ -71,17 +72,26 @@ export function ChatView({
   convId,
   onOpenArtifact,
   onOpenWorkbench,
-  initialSend,
-  onRequestCreate,
+  onPresentDeliverable,
+  initialFiles,
+  onInitialFilesConsumed,
   onOpenSettings,
 }: {
+  /** 所属会话（「任务即房间」2026-09-13：本组件只在有会话时挂载；类型保留 null 容忍是
+   *  为了少动全文件的空值守卫，null 分支实际不可达） */
   convId: string | null
   onOpenArtifact: (id: string) => void
   /** 「本轮文件」chip -> 打开工作台面板编辑该文件（path 相对 <task>/work/） */
   onOpenWorkbench: (path: string) => void
-  initialSend: string | null
-  /** 首发消息：无会话时由 App 在所选任务下建会话并转发文本（P4：会话必须归属任务） */
-  onRequestCreate: (text: string, taskId: string) => void
+  /** 交付物呈现信号（deliverable.created，产出即开）：App 侧守卫（面板空闲/
+   *  自动内容才开）后打开产物面板——声明权在产出侧，前端零文件名/业务类型规则 */
+  onPresentDeliverable: (d: DeliverableSignal) => void
+  /** 建任务弹窗转交的文件（创建成功后在此上传到新任务）：等 taskScope 就位后
+   *  dropFiles 一次；消费后回调 App 清空来源（消费即清源，见下 effect） */
+  initialFiles?: File[]
+  /** initialFiles 已消费（上传已发起）——App 据此清空 pendingFiles，任何重挂载
+   *  路径都不会再喂一次（＋新会话/进入任务/切视图往返） */
+  onInitialFilesConsumed?: () => void
   /** 打开设置（输入区模型胶囊入口） */
   onOpenSettings?: () => void
 }) {
@@ -118,7 +128,7 @@ export function ChatView({
     cancel,
     continueRun,
     resyncTrace,
-  } = useRun(convId)
+  } = useRun(convId, { onDeliverable: onPresentDeliverable })
   // 活卡存续的 run（执行中累积 / 等待输入冻结 / 续跑接续）：该 run 的暂停/中断半截
   // 消息不渲染独立卡（一张活卡贯穿 run 生命周期）；终态后为空，消息回到转录被
   // 最终/中断消息吸收
@@ -131,16 +141,14 @@ export function ChatView({
   const { data: artifacts = [] } = useArtifacts()
   const { data: tasks = [] } = useTasks()
   const { data: conversations = [] } = useConversations()
-  const createTask = useCreateTask()
   const { toast } = useToast()
-  const { setTaskScope, uploads, taskScope, acknowledgeUploads, openFilePicker } = useFileUpload()
+  const { setTaskScope, uploads, taskScope, acknowledgeUploads, openFilePicker, dropFiles } = useFileUpload()
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottom = useRef(true)
   const [showJump, setShowJump] = useState(false)
-  const [prompt, setPrompt] = useState<string | null>(initialSend)
-  const [pickedTaskId, setPickedTaskId] = useState<string | null>(null)
+  const [prompt, setPrompt] = useState<string | null>(null)
   // 思考档位（reasoning_effort）：随每条消息发送、localStorage 记忆上次选择（默认低）。
-  // ChatView 持有而非 InputComposer：无会话首发（initialSend effect）也要带上档位
+  // ChatView 持有而非 InputComposer：重试/续发等编程式发送也要带上档位
   const [thinking, setThinking] = useState<ThinkingLevel>(loadThinking)
   const changeThinking = useCallback((level: ThinkingLevel) => {
     setThinking(level)
@@ -209,11 +217,31 @@ export function ChatView({
     lastInterruptRunRef.current = interruptRunId
   }, [interrupt])
 
-  // 上传归属任务（§16 任务级文件区）：选中会话→其所属任务；草稿页→选择器挑的任务
+  // 上传归属任务（§16 任务级文件区）：选中会话→其所属任务
   useEffect(() => {
     const conv = convId ? conversations.find((c) => c.id === convId) : null
-    setTaskScope(conv?.task_id ?? (convId ? null : pickedTaskId))
-  }, [convId, conversations, pickedTaskId, setTaskScope])
+    setTaskScope(conv?.task_id ?? null)
+  }, [convId, conversations, setTaskScope])
+
+  // 当前任务（空会话欢迎语/输入框占位符的任务感知文案用）
+  const currentTask = useMemo(
+    () => taskOfConversation(tasks, conversations, convId),
+    [tasks, conversations, convId],
+  )
+
+  // 建任务弹窗转交的文件：等 taskScope 就位（建会话后 conversations 失效重拉可能晚到，
+  // taskScope 先 null 后有值）再上传一次。消费后回调 App 清空 pendingFiles（消费即
+  // 清源）——实例级 ref 只能防本实例重跑，换 key 重挂（＋新会话/切视图往返）会复位，
+  // 只有清来源才能保证任何重挂载都不会二次上传。ref 仍留（防 StrictMode 双跑双传）。
+  // dropFiles 走 FileUpload 既有管线（并行上传+进度 chips+失败可重试）。
+  const droppedInitialRef = useRef(false)
+  useEffect(() => {
+    if (droppedInitialRef.current || !initialFiles || initialFiles.length === 0) return
+    if (!taskScope) return
+    droppedInitialRef.current = true
+    dropFiles(initialFiles)
+    onInitialFilesConsumed?.()
+  }, [initialFiles, taskScope, dropFiles, onInitialFilesConsumed])
 
   // ---- HITL 逐项卡（含问快照，单问=向导 N=1 特例）：卡内作答，最后一项一次 resume 全量 ----
   const wizardMode = !!interrupt && hasQuestion(interrupt.requests)
@@ -353,6 +381,15 @@ export function ChatView({
     }
     return convArtifacts.filter((a) => !a.source?.run_id || rids.has(a.source.run_id))
   }, [convArtifacts, messages, windowStart])
+  // 活卡 run 的产物卡活卡期间不进转录（2026-09-13 两次实测反馈收束）：活卡存续时
+  // 该回合在转录里只有一张执行卡，产物卡落转录尾=插在用户气泡与执行卡之间，落
+  // 执行卡之后=挂在还在输出的 LLM 卡片底下，放哪都读成错位。发布瞬间已有
+  // deliverable.created 产出即开 + 右栏产物面板常驻兜底，转录卡等 run 终态后随
+  // 回合落位（最终回复之后）自然现身——与暂停消息「活卡期间隐藏、终态回归」同一条规则
+  const transcriptArtifacts = useMemo(
+    () => (liveRunId ? windowArtifacts.filter((a) => a.source?.run_id !== liveRunId) : windowArtifacts),
+    [windowArtifacts, liveRunId],
+  )
   // 「加载更早」的滚动锚定：扩窗在顶部插入内容，按 scrollHeight 差值补偿 scrollTop
   // 让视口停在原消息上（不跳顶、不误触贴底）
   const expandAnchor = useRef<{ start: number; height: number } | null>(null)
@@ -374,28 +411,11 @@ export function ChatView({
 
   const doSend = useCallback(
     async (text: string) => {
-      if (!convId) {
-        if (!pickedTaskId) {
-          toast('请先选择所属任务', 'error')
-          // reject：InputComposer 的契约是 onSend 失败即保留输入（不清空、不 acknowledge），
-          // 正常 resolve 会把用户已打的文字清掉
-          throw new Error('请先选择所属任务')
-        }
-        // 建会话失败：toast 已提示；向上抛让 InputComposer 保留输入（不清空、不 acknowledge）
-        // 首发消息由建会话后的 initialSend effect 发出，届时带上当前思考档位
-        try {
-          await onRequestCreate(text, pickedTaskId)
-        } catch (e) {
-          toast(e instanceof Error ? e.message : String(e), 'error')
-          throw e
-        }
-        return
-      }
-      if (running) return
+      if (!convId || running) return
       // 失败向上抛：useRun 已置错误卡，InputComposer 据此保留输入与新上传 chips
       await send(text, thinking, model)
     },
-    [convId, running, send, onRequestCreate, pickedTaskId, thinking, model, toast],
+    [convId, running, send, thinking, model],
   )
 
   // 历史中断回合的一键续接入口（2026-09-12）：错误卡是内存态、刷新即消失，转录里
@@ -445,31 +465,6 @@ export function ChatView({
     continueRun,
   ])
 
-  // 无会话时 App 转发首发消息。StrictMode 开发模式会把本 effect 跑两遍
-  // （挂载→cleanup→重挂载），无守卫会双发 POST，第二发撞 409「已有进行中的任务」
-  const sentInitialRef = useRef<string | null>(null)
-  useEffect(() => {
-    if (initialSend) {
-      setPrompt(initialSend)
-      if (convId && sentInitialRef.current !== initialSend) {
-        sentInitialRef.current = initialSend
-        // 发送成功后清空输入框：草稿页首发的合成消息（如「我上传了文件：…」）
-        // 不再整场会话残留在 composer 里；失败则保留文本（InputComposer 亦不清空，
-        // 错误卡带重试），用户可改可重发
-        void doSend(initialSend)
-          .then(() => setPrompt(null))
-          .catch(() => {})
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialSend, convId])
-
-  /** 选择器就地新建任务：只建任务不建会话（首发消息时再建），保住已输入的文本。 */
-  const handlePickerCreateTask = async (title: string): Promise<string> => {
-    const body = await createTask.mutateAsync({ title, withConversation: false })
-    return body.task.id
-  }
-
   // 流式自动贴底；用户上滚则停止贴底。rAF 合并同帧多次触发：scrollHeight 读取
   // 强制同步布局，一帧最多一次（token 突发时不再逐 token 打断合成器）
   useEffect(() => {
@@ -515,9 +510,7 @@ export function ChatView({
                   onRetry={() => void refetchMessages()}
                 />
               )}
-              {empty && (
-                <WelcomeScreen hasTask={!!convId || !!pickedTaskId} />
-              )}
+              {empty && <WelcomeScreen taskTitle={currentTask?.title} />}
               {/* 子树边界：一条坏历史数据只降级消息区占位卡，不再打到根级整窗错误页 */}
               <ErrorBoundary compact resetKey={convId ?? 'root'}>
                 {windowStart > 0 && (
@@ -533,7 +526,7 @@ export function ChatView({
                 )}
                 <MessageList
                   messages={visibleMessages}
-                  convArtifacts={windowArtifacts}
+                  convArtifacts={transcriptArtifacts}
                   onOpenArtifact={onOpenArtifact}
                   onOpenWorkbench={onOpenWorkbench}
                   hiddenPauseRunId={liveRunId}
@@ -655,15 +648,8 @@ export function ChatView({
             onModelChange={changeModel}
             onOpenSettings={onOpenSettings}
             onStop={() => void cancel()}
-            leftSlot={
-              !convId ? (
-                <TaskPicker
-                  tasks={tasks}
-                  value={pickedTaskId}
-                  onChange={setPickedTaskId}
-                  onCreateTask={handlePickerCreateTask}
-                />
-              ) : null
+            idlePlaceholder={
+              currentTask ? `在「${currentTask.title}」中输入消息，可上传招标文件…` : undefined
             }
           />
         )}
@@ -795,21 +781,33 @@ function RunMessage({
             )}
           </ReasoningTrigger>
           <ReasoningContent contentClassName="mt-2 space-y-2">
-            {pauseNarration.trim() && (
-              <NarrationLine text={capStreamingText(pauseNarration, undefined, '正文').text} />
-            )}
-            {traceSyncIssue && (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <span>执行过程可能与实际有出入（同步失败）</span>
-                <button type="button" className="hover:underline" onClick={onTraceResync}>
-                  重新同步
-                </button>
-              </div>
-            )}
-            <RunTrace tools={tools} />
-            {/* 思考块 = 当前未封口段（历史思考已按 tool.called 封段沉入步骤行），
-                放步骤区之后保持时序：先看到已发生的工具流水，再看到正在增长的思考 */}
-            {shownReasoning && <DeepThinking text={shownReasoning} isStreaming={running} autoFollow />}
+            {/* 活卡语境标记：内部步骤树的子代理思考恒走尾部封顶（run 期内存爬升
+                主因之一是陆续完成的子代理卡整段思考常驻 DOM），历史过程区不受影响 */}
+            <TraceLiveContext.Provider value={true}>
+              {pauseNarration.trim() && (
+                <NarrationLine text={capStreamingText(pauseNarration, undefined, '正文').text} />
+              )}
+              {traceSyncIssue && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span>执行过程可能与实际有出入（同步失败）</span>
+                  <button type="button" className="hover:underline" onClick={onTraceResync}>
+                    重新同步
+                  </button>
+                </div>
+              )}
+              <RunTrace tools={tools} />
+              {/* 思考块 = 当前未封口段（历史思考已按 tool.called 封段沉入步骤行），
+                  放步骤区之后保持时序：先看到已发生的工具流水，再看到正在增长的思考。
+                  活卡恒封顶（含暂停冻结态 isStreaming=false）：全文在 run 结束后的
+                  历史过程区可见 */}
+              {shownReasoning && (
+                <DeepThinking
+                  text={capStreamingText(shownReasoning, TRACE_LIVE_TEXT_CAP).text}
+                  isStreaming={running}
+                  autoFollow
+                />
+              )}
+            </TraceLiveContext.Provider>
           </ReasoningContent>
         </Reasoning>
       )}

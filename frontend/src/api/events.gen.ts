@@ -78,6 +78,23 @@ export interface ConversationRenamed {
   title: string;
 }
 /**
+ * 交付物呈现信号（契约 additive 2026-09-13；二批改定呈现时机）：产出侧声明
+ * 「这是值得展示给用户的交付物」，前端收到即自动打开产物面板。声明在工具成功
+ * 点入队，事件在 **run 正常完成时**取最后一个声明、在终态事件前发出（error/
+ * 取消/等待输入段不呈现）。瞬时信号：不落库、不重放、错过不补。
+ * kind=artifact 开产物视图（artifact_id），kind=file 开工作台文件
+ * （path 相对 <task>/work/，与「本轮文件」chips 同格式）。
+ */
+export interface DeliverableCreated {
+  run_id: string;
+  conversation_id: string;
+  kind: "artifact" | "file";
+  artifact_id?: string | null;
+  path?: string | null;
+  display_name?: string | null;
+  seq: number;
+}
+/**
  * HITL 待裁决动作（run.interrupt / run.state(waiting_input) 附带）。
  */
 export interface InterruptRequestPayload {

@@ -2,9 +2,12 @@
  * pdf 版式预览渲染体（懒加载分包，经 React.lazy 引入）：pdfjs-dist 在浏览器
  * 本地渲染，文件不出本机。纯渲染组件——宿主负责取字节与失败兜底（onError 上抛）。
  *
- * 性能口径：逐页 canvas 懒渲染（IntersectionObserver 进视口前约一屏才画，
- * 标书几百页不一次性渲染）；fit 宽度缩放（面板拖宽经 ResizeObserver 防抖后整列
- * 重算重渲）；devicePixelRatio 高清出图。每实例独立 worker 线程，卸载即销毁。
+ * 性能口径：逐页 canvas 双向懒渲染（进视口前约一屏才画；**滚出视口约 2000px 回收
+ * 画布回占位、重进再画**——只加不减时几百页标书滚一遍就是 GB 级常驻，2026-09-13
+ * 内存修复批）；渲染/回收阈值错开形成迟滞带，慢速滚动在回收边界不抖动。
+ * fit 宽度缩放（面板拖宽经 ResizeObserver 防抖后整列重算重渲）；devicePixelRatio
+ * 高清出图、封顶 1.5（单页背衬内存减半，正文文字锐度无感差异）。每实例独立
+ * worker 线程，卸载即销毁。
  */
 import { useEffect, useRef, useState } from 'react'
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
@@ -23,7 +26,8 @@ function ensureWorker() {
   }
 }
 
-/** 单页：懒可见 → 画布渲染。占位用 A4 比例 aspect-ratio，渲染后画布自然替换。 */
+/** 单页：双向懒可见 → 画布渲染/回收。占位用 A4 比例 aspect-ratio，渲染后画布
+ *  自然替换，回收后回到占位（页高不变，页码指示与滚动位置不跳）。 */
 function PdfPage({
   pdf,
   pageNumber,
@@ -36,23 +40,39 @@ function PdfPage({
   registerSlot: (n: number, el: HTMLDivElement | null) => void
 }) {
   const slotRef = useRef<HTMLDivElement>(null)
-  // 首两页直接渲染（进面板即有内容），其余进视口前 400px 再渲
+  // 首两页直接渲染（进面板即有内容），其余进视口前 400px 再渲；离视口约 2000px 回收
   const [visible, setVisible] = useState(pageNumber <= 2)
 
   useEffect(() => {
     const el = slotRef.current
-    if (!el || visible) return
-    const io = new IntersectionObserver(
+    if (!el) return
+    // 渲染观察器：进视口（含 400px 前瞻）即渲染；已渲染时 setVisible(true) 是同值 no-op
+    const renderIo = new IntersectionObserver(
       (entries) => {
-        if (entries.some((e) => e.isIntersecting)) {
-          setVisible(true)
-          io.disconnect()
-        }
+        if (entries.some((e) => e.isIntersecting)) setVisible(true)
       },
       { rootMargin: '400px 0px' },
     )
-    io.observe(el)
-    return () => io.disconnect()
+    // 回收观察器：离视口约 2000px 才回收（与渲染阈值错开成迟滞带，快速滚动不抖动）
+    const recycleIo = new IntersectionObserver(
+      (entries) => {
+        if (entries.every((e) => !e.isIntersecting)) setVisible(false)
+      },
+      { rootMargin: '2000px 0px' },
+    )
+    renderIo.observe(el)
+    recycleIo.observe(el)
+    return () => {
+      renderIo.disconnect()
+      recycleIo.disconnect()
+    }
+  }, [])
+
+  // 回收释放：visible 转 false 时清掉已挂画布回占位。单独成 effect 而不是塞进渲染
+  // effect 的 cleanup——那条路宽度重渲也会走，清了会拖面板闪白；这里只跟 visible。
+  useEffect(() => {
+    if (visible) return
+    slotRef.current?.replaceChildren()
   }, [visible])
 
   useEffect(() => {
@@ -67,7 +87,8 @@ function PdfPage({
       const base = page.getViewport({ scale: 1 })
       const viewport = page.getViewport({ scale: width / base.width })
       const canvas = document.createElement('canvas')
-      const dpr = window.devicePixelRatio || 1
+      // dpr 封顶 1.5：单页背衬 ~14MB→~8MB，正文文字锐度无感差异（3GB 内存修复批）
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.5)
       canvas.width = Math.floor(viewport.width * dpr)
       canvas.height = Math.floor(viewport.height * dpr)
       canvas.style.width = '100%'
