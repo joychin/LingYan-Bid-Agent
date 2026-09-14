@@ -1804,13 +1804,39 @@ def test_image_insert_pdf_page_render(env):
     assert r.startswith("[插图失败]") and "共 1 页" in r
 
 
+def test_image_insert_webp_transcoded(env):
+    """webp 图源自动转 png 插入。
+
+    知识库上传白名单收 webp（IMAGE_EXTS）、python-docx 原生只认
+    png/jpg/bmp/gif/tiff——此前「收得进、插不进」，报错让用户换格式
+    （2026-09-14 复核批收口：Pillow 解码转 PNG 后插入，透明通道保留）。
+    """
+    from PIL import Image
+
+    from app.knowledge import store as kb_store
+
+    img_dir = kb_store.kb_images_dir("产品手册.pdf")
+    img_dir.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(img_dir / "img_001.webp", format="WEBP")
+
+    rel = _make_section("技术部分/系统界面.docx")
+    r = docx_image_insert.invoke({"dest": rel, "image": "knowledge/parse/产品手册/images/img_001.webp"})
+    assert r.startswith("[已插图]") and "webp 已转 png" in r, r
+
+    doc = Document(str(_abs(env, rel)))
+    p_el = next(p._p for p in doc.paragraphs if p._p.findall(".//" + qn("a:blip")))
+    blip = p_el.find(".//" + qn("a:blip"))
+    part = doc.part.related_parts[blip.get(qn("r:embed"))]
+    assert part.content_type == "image/png"  # 落进包里的部件是 PNG 而非 webp
+
+
 def test_image_insert_rejects(env):
     """容错：越界/不存在/坏格式图源/段落号超范围/目标节缺失，全部人话报错。"""
     rel = _make_section("技术部分/附图.docx")
     assert docx_image_insert.invoke({"dest": rel, "image": "/etc/passwd"}).startswith("[插图失败]")
     assert "不存在" in docx_image_insert.invoke(
         {"dest": rel, "image": "knowledge/parse/无此文件/images/img_001.png"})
-    # webp：python-docx 不识别，人话提示换格式
+    # 坏 webp：解码失败人话报错（完好 webp 走转码分支，见 test_image_insert_webp_transcoded）
     from app.knowledge import store as kb_store
 
     webp_dir = kb_store.kb_images_dir("证书.webp")

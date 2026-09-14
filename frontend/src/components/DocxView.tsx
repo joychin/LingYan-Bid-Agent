@@ -13,7 +13,7 @@ import { lazy, Suspense, useCallback, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { FolderOpen } from 'lucide-react'
 import { fetchWorkbenchRaw, getWorkbenchDocxView, isTauri, revealInFolder } from '@/api/client'
-import { wbDisplayName } from '@/lib/wbNames'
+import { FINAL_TAIL, wbDisplayName } from '@/lib/wbNames'
 import { cn } from '@/lib/utils'
 
 const DocxPreviewBody = lazy(() => import('./preview/DocxPreviewBody'))
@@ -60,7 +60,7 @@ export function DocxView({ taskId, path }: { taskId: string | null; path: string
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b pl-4 pr-[88px] py-3">
         <span className="truncate text-sm font-semibold">{display}</span>
         <span className="rounded-full bg-accent px-2 py-0.5 text-xs text-muted-foreground">
-          {isFinal ? '整本 · 最终稿' : 'Word 正文 · 只读'}
+          {isFinal ? FINAL_TAIL : 'Word 正文 · 只读'}
         </span>
         <div className="flex items-center rounded-md border border-line p-0.5 text-xs">
           {(['layout', 'text'] as const).map((m) => (

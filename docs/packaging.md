@@ -90,6 +90,9 @@ npm run build:release
 - 侧车无控制台窗已接好（spec `console=False`，stderr 由 Rust 侧重定向进 boot 留档）。
 - 已知坑备案（AGENTS）：**NSIS 覆盖安装不更新 externalBin**（tauri#15134）——靠版本号
   变化规避，即每次发新版前把 `tauri.conf.json` 的 `version` 抬一位（CI 已从 tag 自动同步）。
+- 版本号共五处必须同步：`tauri.conf.json`、`src-tauri/Cargo.toml`、`frontend/package.json`
+  （注入设置页 `__APP_VERSION__`）、`sidecar/pyproject.toml`、`sidecar/app/main.py` 的
+  `VERSION`。`./check.sh`（all 模式）有一致性守卫，漏抬即红。
 - 未签名 exe 杀软误报偏高，正式代码签名证书 = 后续门。
 - 用户数据目录：`%APPDATA%\com.tenderagent.app`。
 - **实测坑①（已修）**：Windows 的 stdout/stderr 默认 locale 编码（cp1252），

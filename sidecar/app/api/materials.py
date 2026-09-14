@@ -13,6 +13,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from .. import db
+from ..config import MAX_UPLOAD_BYTES
 from ..knowledge import materials_lib as mlib
 
 router = APIRouter()
@@ -23,7 +24,6 @@ router = APIRouter()
 # 「另存为 .docx」一步即可（2026-09-08 用户拍板）。
 MT_ALLOWED_EXTENSIONS = {".docx"}
 _MT_EXTENSION_HINT = "素材库只收 .docx（历史标书原文，支持图表整体拷贝）——PDF/老 .doc 范文请先用 Word 打开，另存为 .docx 再传"
-MAX_SIZE_BYTES = 100 * 1024 * 1024
 _CHUNK = 1024 * 1024
 
 
@@ -62,7 +62,7 @@ async def upload_file(file: UploadFile = File(...)):
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > MAX_SIZE_BYTES:
+                if size > MAX_UPLOAD_BYTES:
                     raise HTTPException(status_code=413, detail="文件超过 100MB 上限")
                 h.update(chunk)
                 f.write(chunk)

@@ -466,7 +466,7 @@ def test_permanent_error_no_retry():
 
 def _bare_instream_apierror() -> Exception:
     """网关流内错误事件的产物：openai _streaming.py 构造裸基类 APIError（无状态码，
-    不落任何子类——2026-09-07 实测 lfans "Our servers are currently overloaded"）。"""
+    不落任何子类——2026-09-07 实测自建网关 "Our servers are currently overloaded"）。"""
     from openai import APIError
 
     return APIError(

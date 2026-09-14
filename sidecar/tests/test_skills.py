@@ -127,3 +127,31 @@ def test_tender_body_material_objection_channel():
     # 方法论细则：仍注入 + 批注带回（跳过=丢图丢样式，改换块=路径分叉）
     for kw in ("素材异议", "仍照常注入并改写", "docx_comment_add"):
         assert kw in detail, f"section-writing.md 缺少素材异议细则关键词：{kw}"
+
+
+def test_tender_body_contract_names_anchored():
+    """body_contract 契约名 ↔ 技能教学文本锚点（2026-09-14 硬编码复核批）。
+
+    写作指引/承诺清单/整本前缀的常量真值在 tools/body_contract.py（check_pipeline
+    /validate_body/dispatch_enrich/docx_ops 逻辑点均 import 它），但 tender-body
+    的 SKILL.md 与 references 以字面量教学同一名——常量改名而文档没跟，模型按
+    旧名找文件、工具按新名对账，静默失配。本锚点断言常量值仍出现在教学文本：
+    改名不更新文档即红（改常量时三份文档同批改）。
+    """
+    from app.tools import body_contract
+
+    body = skills_source_dir() / "tender-body"
+    texts = [
+        (body / "SKILL.md").read_text(encoding="utf-8"),
+        (body / "references" / "guide-format.md").read_text(encoding="utf-8"),
+        (body / "references" / "section-writing.md").read_text(encoding="utf-8"),
+    ]
+    combined = "\n".join(texts)
+    for token in (
+        body_contract.GUIDE_NAME,
+        body_contract.PROMISE_NAME,
+        body_contract.VOLUME_PREFIX,
+    ):
+        assert token in combined, (
+            f"tender-body 技能文档缺契约名「{token}」——body_contract 常量改名须同步教学文本"
+        )

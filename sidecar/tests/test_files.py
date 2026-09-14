@@ -115,7 +115,7 @@ def test_upload_rejects_too_large(client, monkeypatch):
     """上限 100MB（常量）；monkeypatch 小阈值即可验证同一增量检查路径。"""
     import app.api.files as files_mod
 
-    monkeypatch.setattr(files_mod, "MAX_SIZE_BYTES", 6)
+    monkeypatch.setattr(files_mod, "MAX_UPLOAD_BYTES", 6)
     task = create_task(client)
     r = client.post(
         "/api/files",
@@ -129,7 +129,7 @@ def test_oversize_overwrite_keeps_original(client, monkeypatch):
     """同名上传超限文件时，磁盘上已存在的旧文件不能被破坏（回归：曾直接 unlink 目标）。"""
     import app.api.files as files_mod
 
-    monkeypatch.setattr(files_mod, "MAX_SIZE_BYTES", 6)
+    monkeypatch.setattr(files_mod, "MAX_UPLOAD_BYTES", 6)
     task = create_task(client)
     tid = task["task"]["id"]
     files_dir = artifact_store.sources_dir(tid)

@@ -25,7 +25,7 @@ import { ContextMenu } from '@/components/ui/ContextMenu'
 import type { ContextMenuItem } from '@/components/ui/ContextMenu'
 import { useToast } from '@/context/Toast'
 import { fileExtIcon, kindIcon } from '@/artifacts/registry'
-import { wbDisplayName } from '@/lib/wbNames'
+import { FINAL_TAIL, wbDisplayName } from '@/lib/wbNames'
 import { orderBodyRows } from '@/lib/workbenchTable'
 import { cn, downloadBlob, downloadText, formatSize } from '@/lib/utils'
 
@@ -61,8 +61,6 @@ const navMaxW = () => Math.max(MIN_W, Math.min(MAX_W, window.innerWidth - 264 - 
 
 // 整本-<册名>.docx=合册产出的最终交付物（行徽标/组内置顶/DocxView 交付提醒共用判定）
 const isFinalDoc = (path: string) => (path.split('/').pop() ?? '').startsWith('整本-')
-// 交付稿行徽标（整本标书产物行与工作台整本文件行共用文案；品牌 tint 见 wbRow/artifactRow）
-const FINAL_TAIL = '整本 · 最终稿'
 
 /** 业务流分类夹（平台封闭）。产物按其 kind 归入 group；过程文件按 path 前缀归入 group。 */
 const GROUPS: { key: string; label: string }[] = [

@@ -206,7 +206,11 @@ def archive_task(task_id: str) -> bool:
     return True
 
 
-# ---------- 恢复点（后台安全网，非版本管理：覆盖"他人内容"前留底，保留最近 3 个） ----------
+# ---------- 恢复点（后台安全网，非版本管理：覆盖"他人内容"前留底，保留最近 RESTORE_KEEP 个） ----------
+
+# 恢复点栈深度——单一真值：工作台编辑（api/workbench）与 docx 节编辑
+# （tools/docx_ops）的恢复点轮换都从这里取值，改一处三处同步
+RESTORE_KEEP = 3
 
 
 def restore_dir(aid: str, scope: Mapping) -> Path:
@@ -224,7 +228,7 @@ def save_restore_point(aid: str, scope: Mapping, seq: int, content_text: str) ->
     name = f"rp_{int(time.time() * 1000):013d}_{seq:06d}_{uuid.uuid4().hex[:8]}.json"
     _atomic_write(d / name, content_text)
     points = sorted(d.glob("rp_*.json"))
-    for old in points[:-3]:
+    for old in points[:-RESTORE_KEEP]:
         old.unlink(missing_ok=True)
 
 

@@ -447,3 +447,16 @@ def test_body_wave_reference_skipped_when_few_pending(env):
     _write_body(env, "body/写作指引.md", "指引表\n")
     r = check_pipeline_state.invoke({})
     assert "均衡分波参考" not in r
+
+
+def test_wave_capacity_matches_concurrency_ceiling():
+    """跨文件同值守卫：波容量（_WAVE_CAPACITY）= 图并发上限（_MAX_CONCURRENT_STEPS）。
+
+    两处独立常量只靠注释互相声明（agent.py 侧注明「与波容量对齐」）：波容量 >
+    并发上限 → 波内任务排队、清单同步守卫误拦滞后派发；< 上限 → 并发余量浪费。
+    只改一处即此测试红——调容量时两处一起动。
+    """
+    from app import agent
+    from app.tools import check_pipeline
+
+    assert check_pipeline._WAVE_CAPACITY == agent._MAX_CONCURRENT_STEPS

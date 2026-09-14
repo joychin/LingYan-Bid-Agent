@@ -16,10 +16,10 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from .. import artifact_store, db
+from ..config import MAX_UPLOAD_BYTES
 
 router = APIRouter()
 
-MAX_SIZE_BYTES = 100 * 1024 * 1024
 _CHUNK = 1024 * 1024
 
 
@@ -58,7 +58,7 @@ async def upload_file(task_id: str, file: UploadFile = File(...)):
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > MAX_SIZE_BYTES:
+                if size > MAX_UPLOAD_BYTES:
                     raise HTTPException(status_code=413, detail="文件超过 100MB 上限")
                 f.write(chunk)
         os.replace(tmp, target)

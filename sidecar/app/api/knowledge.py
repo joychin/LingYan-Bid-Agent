@@ -17,6 +17,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from .. import db
+from ..config import MAX_UPLOAD_BYTES
 from ..knowledge import images, store
 from ..knowledge.freshness import freshness_warnings
 from ..knowledge.ingest import reindex_item, schedule_ingest
@@ -32,7 +33,6 @@ from ..parse.image import IMAGE_EXTS
 router = APIRouter()
 
 KB_ALLOWED_EXTENSIONS = {".docx", ".pdf", ".txt", ".md", ".doc"} | IMAGE_EXTS
-MAX_SIZE_BYTES = 100 * 1024 * 1024
 _CHUNK = 1024 * 1024
 
 CONVERSION_LABELS: dict[str, str] = {
@@ -95,7 +95,7 @@ async def upload_file(file: UploadFile = File(...)):
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > MAX_SIZE_BYTES:
+                if size > MAX_UPLOAD_BYTES:
                     raise HTTPException(status_code=413, detail="文件超过 100MB 上限")
                 h.update(chunk)
                 f.write(chunk)

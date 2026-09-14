@@ -14,6 +14,13 @@ import re
 # 写作指引 / 承诺清单固定落点（相对 work/）
 GUIDE_RELPATH = "body/写作指引.md"
 PROMISE_RELPATH = "body/关键事实与承诺.md"
+# basename 形态（body/ 目录内直接拼路径用；与 RELPATH 同源派生）
+GUIDE_NAME = GUIDE_RELPATH.rsplit("/", 1)[-1]
+PROMISE_NAME = PROMISE_RELPATH.rsplit("/", 1)[-1]
+
+# 整本合册产物的文件名前缀（docx_assemble_volume 落名；对账/排除逻辑与前端
+# 工作台按此前缀识别最终交付物——合册侧、workbench 侧、SKILL.md 教学文本同源）
+VOLUME_PREFIX = "整本-"
 
 # 写作模式枚举（指引表「模式」列的合法取值，「+」组合）
 MODES = ("素材修订", "格式跟随", "推理撰写")

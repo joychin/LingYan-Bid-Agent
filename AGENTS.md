@@ -511,7 +511,7 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    但该过滤器只挂 v2 协议事件路径，我方 `agent.stream(stream_mode=["messages",
    "updates"])` 走 v1 通道，且该通道下 invoke 也被流式回调拉着逐 token 上抛 →
    总结全文当 agent.token 流出（英文思考同漏进 reasoning 通道）。触发背景=本地
-   首次真实压缩：模型 profile `deepseek-flash`（lfans 别名）不在 langchain_deepseek
+   首次真实压缩：模型 profile `deepseek-flash`（自建网关别名）不在 langchain_deepseek
    注册表（认 deepseek-v4-flash 等、自带 1M 窗口）且用户未配 context_window →
    deepagents 兜底档「17 万 token 固定触发+保留 6 条」（注册表模型为窗口 85%
    比例档=85 万）；该会话贯穿 parse→analysis→outline 全程起步 9.8 万，正文准备轮

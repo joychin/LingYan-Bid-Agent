@@ -23,11 +23,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .. import artifact_store, db
+from ..artifact_store import RESTORE_KEEP
 
 router = APIRouter()
 
-# 恢复点栈深度（与产物 artifact_store 恢复点口径一致）
-_RESTORE_KEEP = 3
+# 恢复点栈深度（单一真值=artifact_store.RESTORE_KEEP，与 docx 节编辑/产物恢复点同源）
+_RESTORE_KEEP = RESTORE_KEEP
 
 # 产物头部元信息注释里的修订字段（「<!-- … | 修订=用户 2026-08-28T09:30:00+00:00 -->」）
 _REVISED_RE = re.compile(r"修订=用户")

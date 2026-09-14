@@ -321,7 +321,7 @@ def test_settings_test_model_upstream_error_is_200_with_human_message(client, mo
         (401, "boom", "API Key 无效"),
         (402, "boom", "欠费"),
         (404, "boom", "404"),
-        # 实测形态：DeepSeek 对未知模型名回 400、lfans 网关回 422，原文带模型线索
+        # 实测形态：DeepSeek 对未知模型名回 400、自建网关回 422，原文带模型线索
         (400, "The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed bad-model.", "模型名不被该服务商支持"),
         (422, "model not found: gpt-5.6-luna", "模型名不被该服务商支持"),
         (400, "some other bad request", "连接失败（HTTP 400）"),

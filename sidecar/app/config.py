@@ -48,6 +48,11 @@ def _builtin_default_profile() -> ModelProfile:
     return ModelProfile(id="default", name="默认模型", base_url=_DEFAULT_BASE_URL, model=_DEFAULT_MODEL)
 
 
+# 上传大小上限（单一真值）：任务来源文件 / 知识库 / 素材库三个上传端点共用——
+# 此前三处各写一份 100MB，改一处漏两处会让「同任务不同入口上限不一」静默发生
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+
 def data_dir() -> Path:
     return Path(os.environ.get("DATA_DIR") or (SIDECAR_ROOT / "data")).resolve()
 

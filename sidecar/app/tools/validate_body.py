@@ -380,7 +380,10 @@ def _validate_body_global(body_dir: Path) -> str:
     seen: set[tuple[Path, str]] = set()
     sections: list[Path] = []
     for q in sorted(list(body_dir.rglob("*.docx")) + list(body_dir.rglob("*.md"))):
-        if q.name in ("写作指引.md", "关键事实与承诺.md") or q.name.startswith("整本-"):
+        if (
+            q.name in (body_contract.GUIDE_NAME, body_contract.PROMISE_NAME)
+            or q.name.startswith(body_contract.VOLUME_PREFIX)
+        ):
             continue
         key = (q.parent, q.stem)
         if key in seen:
@@ -415,7 +418,7 @@ def _validate_body_global(body_dir: Path) -> str:
     skip_note: str | None = None
     promise_summary = ""
     warn_lines: list[str] = []
-    promise_path = body_dir / "关键事实与承诺.md"
+    promise_path = body_dir / body_contract.PROMISE_NAME
     if not promise_path.is_file():
         skip_note = "无关键事实与承诺清单——跳过承诺比对（开工时应生成 body/关键事实与承诺.md）"
     else:
@@ -539,7 +542,7 @@ def validate_body(section: str, block_ids: list[str] | None = None) -> str:
                 )
         elif p.suffix == ".md":
             lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-            if pure.name == "写作指引.md" and "body" in pure.parts:
+            if pure.name == body_contract.GUIDE_NAME and "body" in pure.parts:
                 issues, warnings, notes = _validate_guide(lines, task_id)
             else:
                 issues, warnings, notes = _validate_section(lines, block_ids)

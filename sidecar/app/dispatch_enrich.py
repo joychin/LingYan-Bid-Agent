@@ -195,7 +195,11 @@ def _sibling_lines(task_id: str, content: dict, vol: str, own_title: str) -> lis
         return []
     own = body_contract.sanitize_name(own_title) + ".docx"
     try:
-        files = [f for f in vdir.glob("*.docx") if f.name != own and not f.name.startswith("整本-")]
+        files = [
+            f
+            for f in vdir.glob("*.docx")
+            if f.name != own and not f.name.startswith(body_contract.VOLUME_PREFIX)
+        ]
         files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
     except OSError:
         return []

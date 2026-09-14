@@ -56,7 +56,7 @@ _DENY_SEGMENTS = frozenset({"sources", "_meta", "archive", "skills", "formal", "
 # 出口：图片贴正文唯一通道=docx_image_insert（自读文件不经此层）；文本一律先解析。
 _IMAGE_READ_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif"})
 _PDF_READ_SUFFIXES = frozenset({".pdf"})
-_OFFICE_READ_SUFFIXES = frozenset({".doc", ".docx", ".ppt", ".pptx"})
+_OFFICE_READ_SUFFIXES = frozenset({".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".xlsm"})
 
 # ---------- 文件变更串行 + 原子落盘（2026-09-13 并发编辑事故批） ----------
 #
@@ -106,6 +106,12 @@ def _binary_read_error(file_path: str) -> str | None:
             "（支持 PDF 按页渲染）。"
         )
     if suffix in _OFFICE_READ_SUFFIXES:
+        if suffix in (".xls", ".xlsx", ".xlsm"):
+            return (
+                f"[读取被拒绝] {file_path}：Excel 是二进制文件，不能 read_file 直读。"
+                "当前没有自动解析 Excel 的通道——需要核对表格内容请让用户在应用外"
+                "打开确认，不要反复尝试读取。"
+            )
         return (
             f"[读取被拒绝] {file_path}：Office 文档是二进制文件，不能 read_file 直读。"
             "读标书正文节请用 docx_section_read；需要其文本内容请用 parse_document 解析。"

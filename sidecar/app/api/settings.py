@@ -276,7 +276,7 @@ def _status_message(code: int, raw: str) -> str:
         return "请求过于频繁（限流）——稍后重试"
     if code >= 500:
         return f"服务方错误（HTTP {code}）——稍后重试"
-    # 实测：DeepSeek 对未知模型名回 400、lfans 网关回 422（"model not found: x"），
+    # 实测：DeepSeek 对未知模型名回 400、自建网关回 422（"model not found: x"），
     # 原文里多带有效模型清单或名字回显
     if code in (400, 422) and _looks_like_model_error(raw):
         return f"模型名不被该服务商支持——检查拼写，或点「获取列表」从真实清单选择。\n服务方返回：{raw[:200]}"

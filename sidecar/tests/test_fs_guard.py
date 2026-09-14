@@ -122,6 +122,12 @@ def test_read_refuses_pdf_and_office_with_hints(backend):
     r2 = be.read(f"{task['id']}/work/body/某节.docx")
     assert r2.error and "读取被拒绝" in r2.error and "docx_section_read" in r2.error
     assert be.read(f"{task['id']}/work/body/演示.pptx").error
+    # Excel（2026-09-14 补面）：整文件 base64 撞上下文的路同开；当前无解析通道，
+    # 文案不得引导模型走不存在的 parse_document/预览出口
+    r3 = be.read(f"{task['id']}/sources/分项报价表.xlsx")
+    assert r3.error and "读取被拒绝" in r3.error
+    assert "parse_document" not in r3.error and "docx_section_read" not in r3.error
+    assert be.read(f"{task['id']}/work/analysis/历史报价.xls").error
 
 
 def test_read_allows_text_unchanged(backend):

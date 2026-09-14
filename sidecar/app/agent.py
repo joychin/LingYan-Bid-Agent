@@ -55,7 +55,7 @@ INTERRUPT_ON: dict = {
 # stream config 设置），封顶同一 superstep 的并行任务——含同一消息并发派发的多个
 # task 子代理，并经 ensure_config 的 ContextVar 拷贝自动传入子代理图（各图自建
 # executor/semaphore，无共享无死锁）。行业标配（Claude Code 20 / OpenAI SDK
-# max_function_tool_concurrency / LangGraph 原生）；8 = lfans 网关实测稳定并发，
+# max_function_tool_concurrency / LangGraph 原生）；8 = 自建网关实测稳定并发，
 # 且与 tender-body 均衡分波的波容量对齐（波 ≤ 上限 → 波内任务不排队，
 # 见 tools/check_pipeline._WAVE_CAPACITY）。
 _MAX_CONCURRENT_STEPS = 8
@@ -73,7 +73,7 @@ _LLM_TRANSIENT_MARKERS = (
     "peer closed connection",
     "incomplete chunked read",
     "connection reset by peer",
-    # 网关过载（2026-09-07 实测 lfans 流内 "Our servers are currently overloaded"）；
+    # 网关过载（2026-09-07 实测自建网关流内 "Our servers are currently overloaded"）；
     # 不收 "try again later"——配额类永久错误常带此措辞
     "overloaded",
 )
@@ -1043,7 +1043,7 @@ def _parse_context_limit(msg_lower: str) -> int | None:
 class _NoThinkingRetryCompletions:
     """网关「思考回传」400 兜底 + 超限 400 归一化 + 撞线学习真实窗口。
 
-    网关（ingress.lfans.cn）2026-08-29 起对思考模式 + 历史含 tool_calls 的冷回放
+    自建网关 2026-08-29 起对思考模式 + 历史含 tool_calls 的冷回放
     （HITL resume 重放 checkpoint 是唯一命中场景；热会话有服务端状态不校验）
     强制要求把历史轮思考内容按 reasoning_text 回传，而其代理层只认
     reasoning/reasoning_content 且实测回传任何字段都无法满足该校验（2026-08-30

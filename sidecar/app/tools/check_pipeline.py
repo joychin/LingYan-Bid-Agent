@@ -218,13 +218,16 @@ def check_pipeline_state() -> str:
         all_body = sorted(
             list(bdir.rglob("*.docx")) + list(bdir.rglob("*.md"))
         ) if bdir.is_dir() else []
-        guide_ok = (bdir / "写作指引.md").is_file()
-        promise_ok = (bdir / "关键事实与承诺.md").is_file()
+        guide_ok = (bdir / body_contract.GUIDE_NAME).is_file()
+        promise_ok = (bdir / body_contract.PROMISE_NAME).is_file()
         section_files: list = []
         coexist: list[str] = []
         seen_stems: dict[tuple, Path] = {}
         for p in all_body:
-            if p.name in ("写作指引.md", "关键事实与承诺.md") or p.name.startswith("整本-"):
+            if (
+                p.name in (body_contract.GUIDE_NAME, body_contract.PROMISE_NAME)
+                or p.name.startswith(body_contract.VOLUME_PREFIX)
+            ):
                 continue
             key = (p.parent, p.stem)
             if key in seen_stems:
@@ -320,7 +323,7 @@ def check_pipeline_state() -> str:
                     pending: dict[tuple[str, str], tuple[str, int]] = {}
                     fallback: list[str] = []
                     try:
-                        guide_text = (bdir / "写作指引.md").read_text(
+                        guide_text = (bdir / body_contract.GUIDE_NAME).read_text(
                             encoding="utf-8", errors="replace"
                         )
                     except OSError:

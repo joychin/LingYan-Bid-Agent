@@ -16,6 +16,40 @@ run() { echo "\n==> $*"; "$@"; }
 fail=0
 step() { run "$@" || fail=1; }
 
+check_versions() {
+  # 版本号一致性守卫：五处必须同步（tauri.conf.json 由 CI 从 tag 覆写，其余手动）。
+  # package.json 的版本经 vite 注入设置页 __APP_VERSION__——脱节即用户可见的错版号。
+  echo "\n==> 版本号一致性（tauri.conf / Cargo.toml / package.json / pyproject / main.py）"
+  if ! python3 - <<'EOF'
+import json, re, sys
+
+def toml_ver(path: str) -> str:
+    m = re.search(r'^version\s*=\s*"([^"]+)"', open(path, encoding="utf-8").read(), re.M)
+    if not m:
+        sys.exit(f"无法解析 {path} 的 version 字段")
+    return m.group(1)
+
+spots = {
+    "src-tauri/tauri.conf.json": json.load(open("src-tauri/tauri.conf.json", encoding="utf-8"))["version"],
+    "src-tauri/Cargo.toml": toml_ver("src-tauri/Cargo.toml"),
+    "frontend/package.json": json.load(open("frontend/package.json", encoding="utf-8"))["version"],
+    "sidecar/pyproject.toml": toml_ver("sidecar/pyproject.toml"),
+    "sidecar/app/main.py": re.search(
+        r'^VERSION = "([^"]+)"', open("sidecar/app/main.py", encoding="utf-8").read(), re.M
+    ).group(1),
+}
+if len(set(spots.values())) != 1:
+    print("✗ 版本号不一致（发版五处必须同步，见 docs/packaging.md）：")
+    for k, v in spots.items():
+        print(f"  {k}: {v}")
+    sys.exit(1)
+print(f"  五处版本一致：{next(iter(spots.values()))}")
+EOF
+  then
+    fail=1
+  fi
+}
+
 check_sidecar() {
   cd sidecar
   step uv run ruff check app tests
@@ -60,7 +94,7 @@ case "$target" in
   sidecar)  check_sidecar ;;
   frontend) check_frontend ;;
   rust)     check_rust ;;
-  all)      check_sidecar; check_frontend; check_rust ;;
+  all)      check_versions; check_sidecar; check_frontend; check_rust ;;
   *) echo "未知目标: $target（sidecar|frontend|rust|all）"; exit 2 ;;
 esac
 

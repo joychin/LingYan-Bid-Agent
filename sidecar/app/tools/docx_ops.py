@@ -71,7 +71,7 @@ from langchain_core.tools import tool
 from lxml import etree
 
 from .. import db, publish, runctx
-from ..artifact_store import sources_dir, work_dir
+from ..artifact_store import RESTORE_KEEP, sources_dir, work_dir
 from ..config import workspace_dir
 from ..knowledge import materials_lib
 from ..parse import convert as parse_convert
@@ -117,14 +117,15 @@ def _dest_path(task_id: str, rel: str, *, must_exist: bool) -> tuple[Path, str]:
 
 
 def _rotate_restore_point(dst: Path) -> None:
-    """旧文件入恢复点栈（<文件名>.restorepoints/NNNN.bak、留 3 个轮换——工作台编辑
-    恢复点同款目录形态；.bak 不匹配 rglob("*.docx")，不进面板列表与「本轮文件」）。"""
+    """旧文件入恢复点栈（<文件名>.restorepoints/NNNN.bak、留 RESTORE_KEEP 个轮换
+    ——工作台编辑恢复点同款目录形态；.bak 不匹配 rglob("*.docx")，不进面板列表与
+    「本轮文件」）。栈深单一真值=artifact_store.RESTORE_KEEP。"""
     d = dst.with_name(dst.name + ".restorepoints")
     d.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d%H%M%S%f")
     dst.rename(d / f"{ts}.bak")
     points = sorted(p for p in d.iterdir() if p.is_file() and p.suffix == ".bak")
-    for old in points[:-3]:
+    for old in points[:-RESTORE_KEEP]:
         old.unlink()
 
 
@@ -1554,8 +1555,8 @@ def docx_image_insert(dest: str, image: str, after: str = "", page: int = 1) -> 
                空白页跳过），docx 是文档内嵌图；
                ②当前任务上传图 sources/<文件名>（可带任务前缀）；
                ③PDF 原件（knowledge/files/xxx.pdf 或 sources/xxx.pdf）——传页号
-               现场渲染那一页为图。支持 png/jpg/bmp/gif；
-               webp 与 docx 原件不支持（换 PDF 或图片版）。
+               现场渲染那一页为图。支持 png/jpg/bmp/gif/webp（webp 自动转 png
+               插入）；docx 原件不支持（换 PDF 或图片版）。
         after: 插在该段落号之后（P 序号以 docx_section_read 视图为准，可带 P 前缀）；
                留空=追加到节末尾
         page: image 指向 PDF 时的页号（1 起；图片文件忽略此参数）
@@ -1612,10 +1613,28 @@ def docx_image_insert(dest: str, image: str, after: str = "", page: int = 1) -> 
     elif suffix in (".png", ".jpg", ".jpeg", ".bmp", ".gif"):
         data = src.read_bytes()
         src_label = image
+    elif suffix == ".webp":
+        # python-docx 不认 webp（docx.image 只有 png/jpg/bmp/gif/tiff 解析器），
+        # Pillow 解码后转 PNG 再插——知识库上传白名单收 webp（IMAGE_EXTS），此处
+        # 不接会把「收得进、插不进」的矛盾留给用户（2026-09-14 复核批）。
+        # 坏文件（半截/伪造后缀）按人话报错，不裸抛类型名（_tool_guard 兜底是英文）
+        from PIL import Image
+
+        try:
+            with Image.open(src) as im:
+                buf = BytesIO()
+                im.convert("RGBA").save(buf, format="PNG")
+        except Exception:
+            return (
+                f"[插图失败] {image} 不是有效的 webp 图片（无法解码）——"
+                "请确认文件完好，或换 png/jpg 上传"
+            )
+        data = buf.getvalue()
+        src_label = f"{image}（webp 已转 png）"
     else:
         return (
             f"[插图失败] 「{image}」不是可插入的图片或 PDF（{suffix or '无后缀'}）"
-            "——webp 请换 png/jpg 上传；docx 原件不作图源，请传 PDF 或图片版"
+            "——docx 原件不作图源，请传 PDF 或图片版"
         )
 
     with _docx_path_lock(dst):
@@ -2268,7 +2287,9 @@ def docx_assemble_volume() -> str:
             reports.append(f"{vol}：无已写节文件{detail}，未产出整本")
             continue
         try:
-            dst, rel = _dest_path(task_id, f"body/整本-{body_contract.sanitize_name(vol)}.docx", must_exist=False)
+            dst, rel = _dest_path(
+                task_id, f"body/{body_contract.VOLUME_PREFIX}{body_contract.sanitize_name(vol)}.docx", must_exist=False
+            )
         except ValueError as e:
             return f"[合册失败] {e}"
         with _docx_path_lock(dst):
@@ -2335,7 +2356,7 @@ def docx_assemble_volume() -> str:
     if body_root.is_dir():
         for p in sorted(body_root.rglob("*.docx")):
             rel_path = p.relative_to(wroot).as_posix()
-            if not p.name.startswith("整本-") and rel_path not in consumed:
+            if not p.name.startswith(body_contract.VOLUME_PREFIX) and rel_path not in consumed:
                 orphans.append(rel_path)
     lines = ["[已合册]", *reports]
     if orphans:

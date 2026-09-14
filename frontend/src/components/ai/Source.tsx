@@ -6,6 +6,35 @@ import { cn } from '@/lib/utils'
 /** prompt-kit Source 移植：引用源 pill + hover 详情卡。HoverCard 用我们手写原语（零 radix）。 */
 const SourceContext = createContext<{ href: string; domain: string } | null>(null)
 
+// 域名头像色板（本地渲染，零网络请求——不外发用户检索命中的域名给 favicon 服务）
+const AVATAR_COLORS = [
+  '#6366f1',
+  '#0ea5e9',
+  '#10b981',
+  '#f59e0b',
+  '#ef4444',
+  '#8b5cf6',
+  '#14b8a6',
+  '#f43f5e',
+]
+
+function FaviconMark({ domain, size }: { domain: string; size: number }) {
+  const label = domain.replace(/^www\./, '')
+  const letter = (label[0] ?? '?').toUpperCase()
+  let h = 0
+  for (const ch of label) h = (Math.imul(h, 31) + (ch.codePointAt(0) ?? 0)) >>> 0
+  const color = AVATAR_COLORS[h % AVATAR_COLORS.length]
+  return (
+    <span
+      aria-hidden
+      className="inline-flex shrink-0 items-center justify-center rounded-full font-semibold text-white"
+      style={{ width: size, height: size, backgroundColor: color, fontSize: Math.round(size * 0.62) }}
+    >
+      {letter}
+    </span>
+  )
+}
+
 function useSourceContext() {
   const ctx = useContext(SourceContext)
   if (!ctx) throw new Error('Source.* must be used inside <Source>')
@@ -52,15 +81,7 @@ export function SourceTrigger({
           className,
         )}
       >
-        {showFavicon && (
-          <img
-            src={`https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(href)}`}
-            alt="favicon"
-            width={14}
-            height={14}
-            className="size-3.5 rounded-full"
-          />
-        )}
+        {showFavicon && <FaviconMark domain={domain} size={14} />}
         <span className="truncate text-center font-normal tabular-nums">{labelToShow}</span>
       </a>
     </HoverCardTrigger>
@@ -81,13 +102,7 @@ export function SourceContent({
     <HoverCardContent className={cn('w-80 p-0 shadow-xs', className)}>
       <a href={href} target="_blank" rel="noopener noreferrer" className="flex flex-col gap-2 p-3">
         <div className="flex items-center gap-1.5">
-          <img
-            src={`https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(href)}`}
-            alt="favicon"
-            className="size-4 rounded-full"
-            width={16}
-            height={16}
-          />
+          <FaviconMark domain={domain} size={16} />
           <div className="truncate text-sm text-primary">{domain.replace('www.', '')}</div>
         </div>
         <div className="line-clamp-2 text-sm font-medium">{title}</div>

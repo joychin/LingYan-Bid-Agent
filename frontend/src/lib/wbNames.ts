@@ -19,6 +19,10 @@ export const WB_NAMES: Record<string, string> = {
   'body/关键事实与承诺.md': '关键事实与承诺',
 }
 
+// 整本-<册名>.docx（合册最终交付物）的行/头部徽章文案——产物面板与 DocxView
+// 编辑器头部共用单点（文件名前缀「整本-」的真值在 sidecar body_contract.VOLUME_PREFIX）
+export const FINAL_TAIL = '整本 · 最终稿'
+
 /**
  * 工作台文件显示名（path = 相对 <task>/work/ 的 posix 路径）：
  * 固定过程文件走业务名；parse/<源文件名>/… 加「 解析稿」后缀标明产物身份；
