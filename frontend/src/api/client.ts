@@ -881,3 +881,30 @@ export async function revealSidecarLogs(): Promise<void> {
   if (!isTauri() || !window.__TAURI_INTERNALS__) return
   await window.__TAURI_INTERNALS__.invoke('reveal_sidecar_logs')
 }
+
+// ---------------------------------------------------------------------------
+// 版本检查 + 更新提示（清单由 Rust 壳拉取；更新源三层取值见 src-tauri/src/lib.rs）
+// ---------------------------------------------------------------------------
+
+export interface LatestReleaseInfo {
+  version: string
+  /** 「前往下载」目标（清单下发，Rust 侧 https-only 校验过） */
+  url: string
+  /** 「完整发布说明」目标（缺省回落 url） */
+  notesUrl: string | null
+  publishedAt: string | null
+  highlights: string | null
+  changes: string[]
+}
+
+/** 查官网 version.json 最新版本（仅 Tauri；5s 超时由 Rust 侧控制）。 */
+export async function fetchLatestRelease(): Promise<LatestReleaseInfo> {
+  if (!isTauri() || !window.__TAURI_INTERNALS__) throw new Error('仅桌面端支持检查更新')
+  return (await window.__TAURI_INTERNALS__.invoke('check_latest_version')) as LatestReleaseInfo
+}
+
+/** 用系统浏览器打开下载页/发布说明外链（Rust 侧再校验一次 https-only）。 */
+export async function openDownloadPage(url: string): Promise<void> {
+  if (!isTauri() || !window.__TAURI_INTERNALS__) throw new Error('仅桌面端支持打开外链')
+  await window.__TAURI_INTERNALS__.invoke('open_download_page', { url })
+}

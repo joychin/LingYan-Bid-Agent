@@ -21,14 +21,18 @@ import {
   type ModelBody,
 } from '@/api/client'
 import { findKeySource, mergeModelOptions, sameBaseUrl } from '@/lib/modelSettings'
+import { formatCheckedAt, useUpdateCheck } from '@/lib/updateCheck'
+import { openDownloadPage } from '@/api/client'
 import { useToast } from '@/context/Toast'
+
+export type SectionId = 'models' | 'parse' | 'general'
 
 export interface SettingsModalProps {
   open: boolean
   onClose: () => void
+  /** 打开时落哪个 section（缺省「模型」页；有新版时 App 传 general 直达更新内容） */
+  initialSection?: SectionId
 }
-
-type SectionId = 'models' | 'parse' | 'general'
 
 const SECTIONS: { id: SectionId; title: string; icon: typeof Sparkles }[] = [
   { id: 'models', title: '模型', icon: Sparkles },
@@ -36,11 +40,17 @@ const SECTIONS: { id: SectionId; title: string; icon: typeof Sparkles }[] = [
   { id: 'general', title: '通用', icon: FolderOpen },
 ]
 
-export function SettingsModal({ open, onClose }: SettingsModalProps) {
+export function SettingsModal({ open, onClose, initialSection }: SettingsModalProps) {
   // open gate 必须有：ModalShell 无 open 概念，丢了它设置窗会常驻渲染（关闭回调
   // 全部生效但 UI 永不卸载）——旧 ui/dialog.tsx 的同款门控在双栏重构时弄丢过一次
   if (!open) return null
-  const [section, setSection] = useState<SectionId>('models')
+  const [section, setSection] = useState<SectionId>(initialSection ?? 'models')
+  // 每次打开都按 initialSection 落位：组件常驻挂载（open gate 只是不渲染），
+  // useState 初值只在首次生效，重开时要靠这个 effect 重新对齐
+  useEffect(() => {
+    if (open) setSection(initialSection ?? 'models')
+    // initialSection 在 App 打开设置前就已定格，入列仅为闭合 lint 依赖
+  }, [open, initialSection])
   const { data: settings } = useQuery({
     queryKey: ['settings'],
     queryFn: getSettings,
@@ -1480,7 +1490,10 @@ function ParseSection() {
 
 function GeneralSection({ settings }: { settings: Awaited<ReturnType<typeof getSettings>> | undefined }) {
   const { toast } = useToast()
-  const version = __APP_VERSION__
+  const tauri = isTauri()
+  const { latest, ignored, hasUpdate, isChecking, forceCheck, ignore, unignore } = useUpdateCheck()
+  const [manualError, setManualError] = useState<string | null>(null)
+  const [changesExpanded, setChangesExpanded] = useState(false)
 
   const reveal = async (path: string) => {
     try {
@@ -1489,6 +1502,26 @@ function GeneralSection({ settings }: { settings: Awaited<ReturnType<typeof getS
       toast(e instanceof Error ? e.message : String(e), 'error')
     }
   }
+
+  const openUrl = async (url: string) => {
+    try {
+      await openDownloadPage(url)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error')
+    }
+  }
+
+  // 手动检查：绕过节流强制联网；失败保留旧结果，错误内联展示（启动静默失败不走到这）
+  const onManualCheck = async () => {
+    setManualError(null)
+    setChangesExpanded(false)
+    const r = await forceCheck()
+    if (r.error) setManualError(r.error || '检查失败')
+  }
+
+  const changes = latest?.changes ?? []
+  // 忽略后收成一行（用户主动让路，不占版面；「仍要查看」= 取消忽略恢复完整面板）
+  const ignoredCollapsed = !hasUpdate && !!latest && ignored !== '' && ignored === latest.version
 
   return (
     <div className="space-y-4">
@@ -1511,9 +1544,89 @@ function GeneralSection({ settings }: { settings: Awaited<ReturnType<typeof getS
           </>
         )}
       </Card>
-      <Card className="text-sm">
-        <span className="text-muted-foreground">版本</span>
-        <span className="ml-2 font-mono text-xs">{version}</span>
+      <Card className="space-y-3 text-sm">
+        <div className="flex items-center justify-between">
+          <div className="text-[15px] font-semibold">版本</div>
+          {tauri && (
+            <Button size="sm" variant="outline" disabled={isChecking} onClick={() => void onManualCheck()}>
+              {isChecking ? '检查中…' : '检查更新'}
+            </Button>
+          )}
+        </div>
+
+        {!tauri ? (
+          <div>
+            <span className="text-muted-foreground">当前版本</span>
+            <span className="ml-2 font-mono text-xs">{__APP_VERSION__}</span>
+          </div>
+        ) : ignoredCollapsed ? (
+          <button
+            type="button"
+            onClick={unignore}
+            className="text-[13px] text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+          >
+            已忽略新版本 v{latest!.version} · 仍要查看
+          </button>
+        ) : hasUpdate && latest ? (
+          <div className="space-y-3 rounded-lg border border-warning/40 bg-warning/5 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-warning px-2 py-0.5 text-xs font-medium">新版本</span>
+              <span className="font-mono text-xs">v{latest.version}</span>
+              <span className="text-xs text-muted-foreground">当前 v{__APP_VERSION__}</span>
+              {latest.publishedAt && (
+                <span className="text-xs text-muted-foreground">· {latest.publishedAt} 发布</span>
+              )}
+            </div>
+            {latest.highlights && <p className="text-[13px] leading-relaxed">{latest.highlights}</p>}
+            {changes.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[13px] font-medium text-muted-foreground">更新内容</div>
+                <ul className="space-y-1">
+                  {(changesExpanded ? changes : changes.slice(0, 8)).map((c, i) => (
+                    <li key={i} className="flex gap-1.5 text-[13px] leading-relaxed">
+                      <span className="shrink-0 text-muted-foreground">•</span>
+                      <span className="min-w-0">{c}</span>
+                    </li>
+                  ))}
+                </ul>
+                {changes.length > 8 && (
+                  <button
+                    type="button"
+                    className="text-xs text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+                    onClick={() => setChangesExpanded((v) => !v)}
+                  >
+                    {changesExpanded ? '收起' : `展开全部（共 ${changes.length} 条）`}
+                  </button>
+                )}
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <Button size="sm" onClick={() => void openUrl(latest.url)}>
+                前往下载
+              </Button>
+              <Button size="sm" variant="outline" onClick={ignore}>
+                忽略此版本
+              </Button>
+            </div>
+            <button
+              type="button"
+              className="text-xs text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+              onClick={() => void openUrl(latest.notesUrl ?? latest.url)}
+            >
+              完整发布说明 ↗
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
+            <span>
+              当前版本 <span className="font-mono text-xs text-foreground">{__APP_VERSION__}</span>
+            </span>
+            {latest && (
+              <span>· 已是最新 ✓ · {formatCheckedAt(latest.checkedAt)}检查过</span>
+            )}
+          </div>
+        )}
+        {manualError && <p className="text-xs text-error">{manualError}</p>}
       </Card>
     </div>
   )

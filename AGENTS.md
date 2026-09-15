@@ -744,6 +744,39 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    标识符）。测试：dispatch_enrich +2（锚点/首行不中放行）、agent +5（守卫
    四态+valve+wired）、path_resolve 新 5、run_continue +3（409/fail-open/直测）、
    skills +1；824 绿+check.sh 全绿。
+   **客户端版本检查+更新提示一期（2026-09-15，Rust 壳+前端，零新依赖零
+   capabilities；分支 release-management）**：动因=用户要求「client 版本检查，
+   更新功能」，两步走拍板——一期=检查+提示+跳转下载，应用内自动更新
+   （tauri-plugin-updater）二期与签名公证绑定（macOS 未签名更新后重启会被
+   Gatekeeper 拦，已核实：updater 的 minisign 清单签名与 Apple 代码签名是两回事，
+   但 quarantine 门槛仍在）。**版本号同源修复**（前置 bug）：`__APP_VERSION__`
+   原读 frontend/package.json（恒 0.0.0）→ 改读 `../src-tauri/tauri.conf.json`
+   （CI 从 tag 同步的唯一真源），设置页此前显示 0.0.0 即此 bug。**更新源三层
+   取值**（`resolve_manifest_url`）：环境变量 `UPDATE_MANIFEST_URL`（本地测试）>
+   `<数据目录>/updater.json` 的 manifestUrl（生产改址免重编译）> 内置常量
+   `DEFAULT_UPDATE_MANIFEST_URL`（当前空串=未配置，域名定稿后填入随版发布）；
+   刻意不放设置界面（更新源=下载跳转信任根，谁都能改=恶意下载页入口）。清单
+   契约=官网 `version.json`（version/url 必填 + notesUrl/publishedAt/highlights/
+   changes 可选；字段可加不可删；漏更=不提示不误报 fail-safe）；**检查源与下载
+   目标解耦**（url 现指 GitHub Releases，换官网下载页不动客户端）。Rust 两命令：
+   `check_latest_version`（blocking reqwest 5s 超时+UA；清洗=剥 v/数字段校验、
+   https-only、changes ≤20 条×200 字符截断，远端内容不合法整次判失败）与
+   `open_download_page`（https-only 白名单后 opener 打开；Rust 侧调 opener 不经
+   ACL 同 reveal 口径）。前端 `lib/updateCheck.ts`：启动 query 静默查一次（成功
+   后 24h 节流、失败不写 lastAt 下次启动重试=每启动最多一次请求）、忽略态折进
+   同一 query 缓存（红点/版本卡全局一致；按版本号精确匹配，忽略 0.1.2 后出
+   0.2.0 红点回归）、`isNewerVersion` 逐段数值比较（防 0.10.0<0.9.0 字符串坑，
+   不合法输入一律 false 宁漏报不误报）。UI=侧栏设置图标红点（bg-warning 8px，
+   IconButtonAction 加 relative）+点设置直达「通用」页（SettingsModal 加
+   initialSection prop+open 对齐 effect——组件常驻挂载、useState 初值只首次生效）
+   +版本卡内嵌状态机（无新版一行含检查时间/检查中/有新版=徽章+highlights+
+   changes 逐条 bullet >8 折叠+前往下载+忽略此版本+完整发布说明 ↗/已忽略收成
+   一行可恢复/手动失败红字可重试——启动静默失败不上 UI）。App 的 openSettings
+   （section?）统一两处设置入口传参。测试：updateCheck.test.ts 10 例（比较/节流/
+   时间人话化）+ lib.rs 3 例（normalize/clamp/https 校验）；前端 tsc/oxlint/build
+   绿 + cargo check 绿。发版新增手动步骤=更新官网 version.json（文档化在
+   packaging.md §8）。已知边界：清单无签名（一期只读版本号+跳转可接受，二期
+   自动更新必须上 minisign）；api.github.com 不再依赖（自建源，国内直连可控）。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。

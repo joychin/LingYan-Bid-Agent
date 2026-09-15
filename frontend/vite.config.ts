@@ -5,14 +5,17 @@ import tailwindcss from '@tailwindcss/vite'
 
 // 根 tsconfig 是 NodeNext：JSON import 需要属性语法，vite 对此有兼容坑，改走 require
 const require = createRequire(import.meta.url)
-const pkg = require('./package.json') as { version: string }
+// 版本号唯一真源 = src-tauri/tauri.conf.json（CI 出包时从 tag 同步写入）。
+// 前端 package.json 的 version（恒 0.0.0）与本应用无关——此前从它读导致设置页
+// 显示 0.0.0、版本检查无从比较（2026-09-15 修复）。
+const tauriConf = require('../src-tauri/tauri.conf.json') as { version: string }
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  // __APP_VERSION__：package.json 版本号（src/env.d.ts 有声明；设置窗「通用」页展示）
+  // __APP_VERSION__：应用版本号（src/env.d.ts 有声明；设置窗「通用」页展示 + 版本检查比较）
   define: {
-    __APP_VERSION__: JSON.stringify(pkg.version),
+    __APP_VERSION__: JSON.stringify(tauriConf.version),
   },
   resolve: {
     alias: {

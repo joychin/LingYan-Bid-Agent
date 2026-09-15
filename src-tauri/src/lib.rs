@@ -186,6 +186,190 @@ fn confirm_exit(app: AppHandle, state: State<'_, Arc<SidecarManager>>) {
     app.exit(0);
 }
 
+// ---------------------------------------------------------------------------
+// 版本检查 + 更新提示（2026-09-15）：清单 = 官网 version.json（自建更新源，
+// schema 见 docs/packaging.md）。更新源三层取值：环境变量 UPDATE_MANIFEST_URL >
+// <数据目录>/updater.json 的 manifestUrl > DEFAULT_UPDATE_MANIFEST_URL 常量。
+// 刻意不放设置界面：更新源是「前往下载」跳转的信任根，谁都能改就是引导恶意
+// 下载页的入口——留在开发者可及的环境变量/文件层（改址免重编译），用户无感。
+// ---------------------------------------------------------------------------
+
+/// 内置默认更新清单地址；域名定稿后填入随版发布（空串=未配置，检查报「更新源尚未配置」）。
+const DEFAULT_UPDATE_MANIFEST_URL: &str = "";
+
+/// 清单里 changes 要点条数上限（超出丢弃，防异常清单撑爆设置卡）。
+const MAX_UPDATE_CHANGES: usize = 20;
+/// 外链长度上限（https 前缀之外再卡一道，防异常长串）。
+const MAX_URL_LEN: usize = 2048;
+
+/// updater.json 配置文件（数据目录下）：{"manifestUrl": "https://…/version.json"}。
+/// 文件不存在/坏 JSON/字段缺失 → None 静默落下一层（改址免重编译的运维通道）。
+fn manifest_url_from_config() -> Option<String> {
+    let text = std::fs::read_to_string(sidecar::data_dir().join("updater.json")).ok()?;
+    let url = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()?
+        .get("manifestUrl")?
+        .as_str()?
+        .trim()
+        .to_string();
+    (!url.is_empty()).then_some(url)
+}
+
+/// 更新源三层取值（None = 三层都未配置）。命中即整条采用，不做拼接。
+fn resolve_manifest_url() -> Option<String> {
+    if let Ok(url) = std::env::var("UPDATE_MANIFEST_URL") {
+        let url = url.trim().to_string();
+        if !url.is_empty() {
+            log::info!("更新源：环境变量 UPDATE_MANIFEST_URL 覆盖");
+            return Some(url);
+        }
+    }
+    if let Some(url) = manifest_url_from_config() {
+        log::info!("更新源：updater.json manifestUrl 覆盖");
+        return Some(url);
+    }
+    (!DEFAULT_UPDATE_MANIFEST_URL.is_empty()).then(|| DEFAULT_UPDATE_MANIFEST_URL.to_string())
+}
+
+/// 剥 v/V 前缀并校验「数字段用点连接」形态（0.10.0 合法；0.1.x/空串/中文不合法）。
+fn normalize_version(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    let t = t.strip_prefix('v').or_else(|| t.strip_prefix('V')).unwrap_or(t);
+    let ok = !t.is_empty()
+        && t.split('.').all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()));
+    ok.then(|| t.to_string())
+}
+
+/// 按字符截断（中文安全，非字节切片），截断补省略号；首尾空白先剥。
+fn clamp_chars(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    format!("{}…", s.chars().take(max).collect::<String>())
+}
+
+/// 外链白名单式校验：仅 https 且长度合理。清单是远端内容，这里是它变成
+/// 系统浏览器跳转前的唯一关口（本地测试清单地址可用 http，只管清单本身）。
+fn valid_https_url(url: &str) -> bool {
+    url.starts_with("https://") && url.len() <= MAX_URL_LEN
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateManifest {
+    version: String,
+    url: String,
+    #[serde(rename = "notesUrl")]
+    notes_url: Option<String>,
+    #[serde(rename = "publishedAt")]
+    published_at: Option<String>,
+    highlights: Option<String>,
+    changes: Option<Vec<String>>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LatestReleaseInfo {
+    version: String,
+    url: String,
+    notes_url: Option<String>,
+    published_at: Option<String>,
+    highlights: Option<String>,
+    changes: Vec<String>,
+}
+
+/// 查官网 version.json（5s 超时；sync 命令跑在 Tauri 线程池，不卡 UI 线程）。
+/// 清单是远端内容，字段全部清洗（版本/链接校验、文本截断），不合法即整次判失败，
+/// 返回人话错误——前端把它当「检查失败」展示，细节进日志。
+#[tauri::command]
+fn check_latest_version() -> Result<LatestReleaseInfo, String> {
+    let Some(manifest_url) = resolve_manifest_url() else {
+        return Err("更新源尚未配置".into());
+    };
+    log::info!("检查更新：GET {manifest_url}");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .user_agent("tender-agent-updater")
+        .build()
+        .map_err(|e| format!("网络初始化失败: {e}"))?;
+    let resp = client
+        .get(&manifest_url)
+        .send()
+        .map_err(|_| "检查更新失败，可能是网络原因".to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("更新服务器返回 {}", resp.status()));
+    }
+    let manifest: UpdateManifest = resp.json().map_err(|_| "更新信息格式不正确".to_string())?;
+    let version = normalize_version(&manifest.version).ok_or("更新信息版本号不合法")?;
+    let url = manifest.url.trim().to_string();
+    if !valid_https_url(&url) {
+        return Err("更新信息下载链接不合法".into());
+    }
+    Ok(LatestReleaseInfo {
+        version,
+        url,
+        notes_url: manifest
+            .notes_url
+            .map(|u| u.trim().to_string())
+            .filter(|u| valid_https_url(u)),
+        published_at: manifest.published_at.map(|s| clamp_chars(&s, 64)),
+        highlights: manifest.highlights.map(|s| clamp_chars(&s, 200)),
+        changes: manifest
+            .changes
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .take(MAX_UPDATE_CHANGES)
+            .map(|s| clamp_chars(&s, 200))
+            .collect(),
+    })
+}
+
+/// 系统浏览器打开「前往下载/完整发布说明」外链（清单下发，经 https-only 校验）。
+/// Rust 侧调 opener 不经 ACL（同 reveal 系命令口径），capabilities 零改动。
+#[tauri::command]
+fn open_download_page(app: AppHandle, url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !valid_https_url(url) {
+        return Err("仅支持 https 链接".into());
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| format!("打开浏览器失败: {e}"))
+}
+
+#[cfg(test)]
+mod update_check_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_version_strips_prefix_and_validates() {
+        assert_eq!(normalize_version("v0.1.2").as_deref(), Some("0.1.2"));
+        assert_eq!(normalize_version("V1.20.3").as_deref(), Some("1.20.3"));
+        assert_eq!(normalize_version("0.10.0").as_deref(), Some("0.10.0"));
+        assert_eq!(normalize_version(" 0.1.0 ").as_deref(), Some("0.1.0"));
+        assert_eq!(normalize_version("0.1.x"), None);
+        assert_eq!(normalize_version("版本1"), None);
+        assert_eq!(normalize_version(""), None);
+        assert_eq!(normalize_version("v"), None);
+    }
+
+    #[test]
+    fn clamp_chars_is_char_safe() {
+        assert_eq!(clamp_chars("你好世界", 2), "你好…");
+        assert_eq!(clamp_chars("  短文本  ", 10), "短文本");
+        assert_eq!(clamp_chars("abc", 3), "abc");
+    }
+
+    #[test]
+    fn https_url_validation() {
+        assert!(valid_https_url("https://example.com/a?b=1"));
+        assert!(!valid_https_url("http://example.com/"));
+        assert!(!valid_https_url("javascript:alert(1)"));
+        assert!(!valid_https_url(&format!("https://a/{}", "x".repeat(MAX_URL_LEN))));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mgr = Arc::new(SidecarManager::default());
@@ -245,7 +429,9 @@ pub fn run() {
             export_diagnostics,
             reveal_sidecar_logs,
             reveal_in_folder,
-            confirm_exit
+            confirm_exit,
+            check_latest_version,
+            open_download_page
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
