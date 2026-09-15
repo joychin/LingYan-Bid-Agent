@@ -14,15 +14,8 @@ import type { DirLeaf } from '@/lib/workbenchTable'
 import { countUnassigned, pruneTree, type GuideTreeNode, type GuideTreeFilter } from '@/lib/guideTree'
 import { FilterPills, LeafPicker } from './guideBits'
 
-/** 叶子状态（圆点配色 + 容器的聚合计数共用一份判定）。 */
+/** 叶子状态（圆点配色）。 */
 export type GuideNodeStatus = 'written' | 'todo' | 'issue' | 'unassigned'
-
-/** 容器聚合：已写/应写节数 + 后代是否有问题（容器行右侧显示 `已写 x/y`）。 */
-interface NodeAgg {
-  total: number
-  written: number
-  issue: boolean
-}
 
 const DOT: Record<GuideNodeStatus, string> = {
   written: 'bg-success',
@@ -61,7 +54,7 @@ export function GuideTree({
   filter: GuideTreeFilter
   onFilter: (f: GuideTreeFilter) => void
   counts: Record<GuideTreeFilter, number>
-  /** 叶子状态；容器节点传 null（聚合计数另行算） */
+  /** 叶子状态（圆点配色）；容器节点不调用 */
   statusOf: (n: GuideTreeNode) => GuideNodeStatus
   /** 节点是否命中当前筛选 + 搜索（容器恒 true，靠 pruneTree 的祖先规则保留） */
   matches: (n: GuideTreeNode) => boolean
@@ -82,30 +75,6 @@ export function GuideTree({
     [nodes, matches, ql],
   )
 
-  // 容器聚合计数（一次性算全树，避免每行递归）
-  const aggs = useMemo(() => {
-    const m = new Map<string, NodeAgg>()
-    const walk = (n: GuideTreeNode): NodeAgg => {
-      if (!n.children.length) {
-        const st = statusOf(n)
-        const agg = { total: n.rowIndex >= 0 ? 1 : 0, written: st === 'written' ? 1 : 0, issue: st === 'issue' }
-        m.set(n.key, agg)
-        return agg
-      }
-      const agg: NodeAgg = { total: 0, written: 0, issue: false }
-      for (const c of n.children) {
-        const a = walk(c)
-        agg.total += a.total
-        agg.written += a.written
-        agg.issue ||= a.issue
-      }
-      m.set(n.key, agg)
-      return agg
-    }
-    for (const n of nodes) walk(n)
-    return m
-  }, [nodes, statusOf])
-
   const unassigned = useMemo(() => countUnassigned(nodes), [nodes])
   const hasFilters = counts.missing + unassigned + counts.stale + counts.offtree > 0
   const showOffTree = offTreeRows.length > 0 && (filter === 'all' || filter === 'offtree')
@@ -121,7 +90,6 @@ export function GuideTree({
   const renderNode = (n: GuideTreeNode, depth: number): React.ReactNode => {
     const isContainer = n.children.length > 0
     const active = selectedKey === n.key
-    const agg = aggs.get(n.key)
     const pad = { paddingLeft: 6 + depth * 12 }
     if (isContainer) {
       const f = folded.has(n.key)
@@ -132,11 +100,6 @@ export function GuideTree({
             <span className="min-w-0 flex-1 truncate" title={n.label}>
               {n.label}
             </span>
-            {agg && agg.total > 0 && (
-              <span className={cn('shrink-0 text-[11px] font-normal', agg.issue ? 'text-warning' : 'text-ink-3')}>
-                已写 {agg.written}/{agg.total}
-              </span>
-            )}
           </button>
           {!f && n.children.map((c) => renderNode(c, depth + 1))}
         </div>

@@ -304,8 +304,9 @@ export function GuideDetail({
               )}
             </Sec>
 
-            {/* 素材 */}
-            <Sec title="素材">
+            {/* 素材（查看态显示业务语义名——「素材块」是写作素材库的引用，不是公司证明材料；
+                编辑态维持契约词，与 md 表头/placeholder 一致） */}
+            <Sec title={editing ? '素材' : '写法参考 · 素材块'}>
               {editing && row ? (
                 <MaterialCellEditor
                   value={row[3] ?? ''}
@@ -401,7 +402,7 @@ export function GuideDetail({
             ) : (
               note &&
               note !== '—' && (
-                <Sec title="备注">
+                <Sec title="公司资料 / 缺口">
                   <div className="flex flex-col gap-2">
                     <NoteList
                       title="需要你提供"

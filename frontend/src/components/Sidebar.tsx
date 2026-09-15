@@ -303,18 +303,21 @@ export function Sidebar({
             label="知识库"
             active={activeView === 'kb'}
             badge={(kbBadge.data?.pending ?? 0) > 0}
+            title="公司资料：营业执照、资质/人员证书、合同业绩、财务、公司介绍。AI 回答「我们有什么、做过什么」从这里查，引用数字回原文核对。"
             onClick={onOpenKnowledge}
           />
           <NavRow
             icon={<Library />}
             label="写作素材库"
             active={activeView === 'library'}
+            title="历史标书/范文里挑出的章节。AI 只参考写法和结构；历史项目名、数字、承诺不直接沿用。"
             onClick={onOpenLibrary}
           />
           <NavRow
             icon={<LayoutTemplate />}
             label="版式库"
             active={activeView === 'templates'}
+            title="文档外观：字体样式/页面/页眉页脚等 Word 版式文件（仅 .docx）。设为默认后，之后新建的正文节与合册即用此版式；版式里的示例内容不会进入正文。"
             onClick={onOpenTemplates}
           />
         </div>

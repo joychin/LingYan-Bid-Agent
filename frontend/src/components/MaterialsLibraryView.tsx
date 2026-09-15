@@ -285,7 +285,7 @@ function extOf(name: string): string {
 type DetailMode = 'block' | 'picker'
 type SortKey = 'range' | 'chars' | 'used'
 
-export function MaterialsLibraryView() {
+export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => void }) {
   const [scope, setScope] = useState<'all' | string>('all')
   const [blockId, setBlockId] = useState<string | null>(null)
   const [mode, setMode] = useState<DetailMode>('block')
@@ -720,6 +720,18 @@ export function MaterialsLibraryView() {
           {fileQ.trim()
             ? '没有匹配的文件——换个关键词'
             : '还没有文件——点下方「上传文件」传历史标书/范文（仅 .docx），再勾选章节建素材块'}
+          {!fileQ.trim() && files.length === 0 && (
+            <p className="mtw-lib-alt">
+              证明公司真做过什么（合同/验收/证书）？
+              {onGoKnowledge ? (
+                <button type="button" className="mtw-lib-link" onClick={onGoKnowledge}>
+                  去知识库上传
+                </button>
+              ) : (
+                <span>请传「知识库」</span>
+              )}
+            </p>
+          )}
         </div>
       )}
     </>

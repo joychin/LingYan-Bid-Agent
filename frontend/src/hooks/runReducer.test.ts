@@ -131,6 +131,12 @@ describe('HITL 中断与续跑', () => {
     expect(resumed.state.interrupt).toBeNull()
   })
 
+  it('run.interrupt 暂停点刷新任务文件面板（等待期看到的即暂停前落盘的全部文件，2026-09-15）', () => {
+    const first = replay(hitl.events.slice(0, 3))
+    expect(first.effects).toContainEqual({ kind: 'invalidate', queryKey: ['workbench'] })
+    expect(first.effects).toContainEqual({ kind: 'invalidate', queryKey: ['tasks'] })
+  })
+
   it('纯审批续跑保留暂停的 task 卡，并将其恢复为运行态', () => {
     const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
     const withTask = runReducer(started, {
@@ -335,6 +341,9 @@ describe('HITL 中断与续跑', () => {
     expect(r.state.pauseNarration).toBe('有个问题要问你')
     expect(r.state.tools[0].status).toBe('paused')
     expect(r.effects).toContainEqual({ kind: 'invalidate-messages' })
+    // 对账路径补暂停点面板刷新（2026-09-15）：错过 run.interrupt 的客户端靠这里
+    expect(r.effects).toContainEqual({ kind: 'invalidate', queryKey: ['workbench'] })
+    expect(r.effects).toContainEqual({ kind: 'invalidate', queryKey: ['tasks'] })
 
     // 等待期 SSE 重连的重复对账：不抹掉已冻结的旁白、不重复冻结出问题
     const again = runReducer(r.state, {

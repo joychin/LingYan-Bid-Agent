@@ -5,6 +5,7 @@ import { ChatView } from '@/components/ChatView'
 import { ChatHeader } from '@/components/ChatHeader'
 import { HomeView } from '@/components/HomeView'
 import { KnowledgeView } from '@/components/KnowledgeView'
+import { HoverTip } from '@/components/HoverTip'
 import { MaterialsLibraryView } from '@/components/MaterialsLibraryView'
 import { TemplatesView } from '@/components/TemplatesView'
 import { SettingsModal } from '@/components/SettingsModal'
@@ -186,6 +187,8 @@ export default function App() {
   return (
     <ErrorBoundary>
     <div className="app">
+      {/* 全局悬停提示（WKWebView 不渲染原生 title；App 根挂一份，读 [title]/[data-tip]） */}
+      <HoverTip />
       <Sidebar
         selectedId={selectedId}
         onSelect={(id) => {
@@ -218,7 +221,7 @@ export default function App() {
         {activeView === 'kb' ? (
           <KnowledgeView onGoLibrary={() => setActiveView('library')} />
         ) : activeView === 'library' ? (
-          <MaterialsLibraryView />
+          <MaterialsLibraryView onGoKnowledge={() => setActiveView('kb')} />
         ) : activeView === 'templates' ? (
           <TemplatesView />
         ) : viewConvId ? (

@@ -167,6 +167,13 @@ export function KnowledgeView({ onGoLibrary }: { onGoLibrary?: () => void }) {
       >
         <div className="kb-side-head" data-tauri-drag-region>
           <span className="kb-title" data-tauri-drag-region>知识库</span>
+          <span
+            className="kb-head-sub"
+            data-tauri-drag-region
+            title="公司资料——AI 引用的「我们有什么、做过什么」都从这里查；历史标书只作业绩候选，写法参考请去写作素材库"
+          >
+            公司资料——「我们有什么、做过什么」都从这里查
+          </span>
         </div>
         <div className="kb-search">
           <Search className="h-3.5 w-3.5" />
@@ -257,7 +264,7 @@ export function KnowledgeView({ onGoLibrary }: { onGoLibrary?: () => void }) {
         <div className="kb-side-foot">
           <Button size="sm" className="kb-upload-btn" onClick={() => fileInputRef.current?.click()}>
             <Upload className="h-3.5 w-3.5" />
-            上传文件
+            上传公司资料
           </Button>
           <div className="kb-foot-hint">支持 .docx / .pdf / .txt / .md / .doc / 图片，单个不超过 100MB</div>
         </div>

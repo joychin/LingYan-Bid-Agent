@@ -710,7 +710,13 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
             error: null,
             errorCode: null,
           },
-          [{ kind: 'invalidate-messages' }],
+          [
+            { kind: 'invalidate-messages' },
+            // 对账路径同样要刷面板（2026-09-15）：客户端错过 run.interrupt 时，
+            // 这里是唯一能补上暂停点刷新的地方（与 run.interrupt case 同款）
+            { kind: 'invalidate', queryKey: ['workbench'] },
+            { kind: 'invalidate', queryKey: ['tasks'] },
+          ],
         )
       }
       const err = data.status === 'error' ? (data.error ?? '任务已中断') : null
@@ -732,6 +738,10 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
             requests: data.requests ?? [],
           },
         },
+        // 暂停点刷新面板（2026-09-15）：技能在等待点提醒用户去界面过目文件，
+        // 暂停前工具已全部落盘；暂停期间无写入，这次刷新对整个等待期有效
+        { kind: 'invalidate', queryKey: ['workbench'] },
+        { kind: 'invalidate', queryKey: ['tasks'] },
       ])
     case 'agent.completed':
       // 流式累积文本与落库内容一致，替换是无缝的（settle 在消息拉回后执行）

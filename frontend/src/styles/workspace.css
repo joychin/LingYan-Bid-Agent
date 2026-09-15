@@ -2465,10 +2465,32 @@
   border-right: 1px solid var(--Color-border-default);
   background: var(--Color-bg-surface);
 }
+/* ── 全局悬停提示（HoverTip）：WKWebView 不渲染原生 title，桌面端气泡由此组件呈现 ──
+ * 定位由组件按实测尺寸写入 left/top（初始藏屏外防角上闪烁）；z-index 高于全部业务层。 */
+.hover-tip {
+  position: fixed;
+  left: -9999px;
+  top: -9999px;
+  visibility: hidden;
+  z-index: 1200;
+  max-width: 280px;
+  padding: 6px 10px;
+  border-radius: var(--Radius-radius-8);
+  background: var(--Color-bg-inverse);
+  color: var(--Color-text-on-color);
+  font-size: var(--Typography-font-size-xs);
+  line-height: 1.55;
+  box-shadow: var(--Shadow-shadow-lg);
+  pointer-events: none;
+  user-select: none;
+  white-space: pre-line;
+}
+
 .kb-side-head {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
   height: 50px;
   padding: 0 16px;
   flex: none;
@@ -2481,6 +2503,14 @@
   font-size: 14px;
   font-weight: 600;
   color: var(--Color-text-primary);
+}
+/* 头部副标题（与素材库 mtw-head-sub 同款定位说明；hover 原生 title 看全文） */
+.kb-head-sub {
+  font-size: 11.5px;
+  color: var(--Color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .kb-search {
   display: flex;
@@ -3639,6 +3669,24 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* 空态反向指引（知识库↔素材库双指引：证明公司做过什么去知识库，样式对齐 kb-hero-link） */
+.mtw-lib-alt {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--Color-text-tertiary);
+}
+.mtw-lib-link {
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin-left: 4px;
+  font-size: 11.5px;
+  color: var(--Color-brand-primary);
+  cursor: pointer;
+}
+.mtw-lib-link:hover {
+  text-decoration: underline;
 }
 .mtw-search {
   display: flex;

@@ -3,6 +3,8 @@
 本仓库是 Tender Agent（智能标书 Agent 桌面客户端，local-first）的 monorepo。
 给在本仓库工作的 coding agent 的约定。需求唯一事实来源：`tender-agent-mvp-prd.md`；
 Artifact/任务系统的设计与决策唯一事实来源：`artifact-system-design.md`（改动相关代码前必读）。
+**这两份文档不在当前工作树**（2026-09-09 开源整理时移出，删除提交 08b93c1；需要时从
+git 历史取 `git show 08b93c1^:tender-agent-mvp-prd.md`，新 clone 里没有是正常的）。
 另：`docs/skill design/`（重构手册上/下 + `schemas/` 四个 JSON Schema）是证据包/skill
 体系的设计参考材料（自包含，面向新场景重建，非本仓现状的实现说明）；`docs/prototypes/`
 放 HTML 原型页。改 skill/契约相关工作前值得先翻。
@@ -689,6 +691,18 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    并发经 kit 锁天然安全。依赖净变化：-pymupdf（25MB 轮子）、+pypdfium2>=4.30,<5
    +Pillow（运行时）、+reportlab（dev，BSD-3）；运行时依赖树无 AGPL。批 2b 起须
    **重启 sidecar** 生效；差分机为 /tmp 临时件未进仓。
+   **检索工具挑选纪律批（2026-09-15，纯提示词零逻辑）**：search_company_assets
+   docstring 纪律段补两条——①招标带时间限定（近三年/近三个会计年度/自某日
+   以来/N 个月内，适用任何材料）先换算成具体时间范围、再对齐材料自身时间
+   锚点（财报年度/合同验收签订日期/证书发证与有效期），不满足不采用；动机=
+   freshness 的「资料较旧」标签是写死满 3 年的通用提醒，与招标语境错位
+   （2026-09 时 2023 年财报恰是「最近三年」要的却被标较旧），纪律里明确
+   「以换算范围为准不被标签带偏」。②材料与招标要求不契合（案例行业/业务
+   类型、证书种类等级）不凑数宁缺点名。两个拍板：判断纪律放工具 docstring
+   （知识库查找职能、全调用方生效），非 tender-body SKILL；**不写硬代码**
+   ——年份过滤/契合评分是把语义伪装成机械（「最近三年」口径本身模糊归
+   模型）。search_references 刻意不加（用户手挑块+备注已是挑选依据+数字已
+   禁用）。枚举招标措辞形态而非材料类型（举例即边界，写窄了模型照着窄化）。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。
@@ -877,7 +891,10 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   ——ask_human 加可选 `guide_path` 参数（透传前端、工具体不消费，提问卡渲染
   「打开指引」按钮直开 workbench 文件，InterruptCard/ChatView 两文件）+ run 终态
   （agent.completed/error）invalidate `['workbench']`（run 期间新写的 body 文件结束
-  时自动进面板列表）+ WB_NAMES 显示名；②并发铺开——agent.py SUBAGENTS 加
+  时自动进面板列表）+ WB_NAMES 显示名（**暂停点刷新补齐 2026-09-15**：run.interrupt
+  与 run.state waiting_input 对账分支同款补 invalidate `['workbench']`/`['tasks']`——
+  技能在等待点提醒用户去界面过目文件，面板却停在 run 开始前的快照是缝隙；暂停
+  期间无写入，interrupt 时点刷一次对整个等待期有效，取消/续跑不另补）；②并发铺开——agent.py SUBAGENTS 加
   `tender-body-writer` 子代理（interrupt_on:{}；先读 section-writing.md 按素材先行；
   硬纪律=承诺只用派发说明给的清单值/缺料【待补】/裁决【待澄清】带回/**禁改指引与
   承诺清单**——共享写点只归主线程，并发下唯一写边界），SKILL 第 2 步按范围分执行
@@ -2220,7 +2237,12 @@ search_references 只查素材块一种形态。
 - sidecar 有 pytest（`uv run pytest`，覆盖 db 恢复 / 设置校验（含双角色）/ 工具路径 containment /
   契约校验 / 发布管线 / 编辑保存与恢复点 / 知识库（入库/检索/元数据/解析注册表，
   `test_knowledge_*.py`）/ **§5.5 事件契约 schema**（`test_contract.py`，
-  字段清单须与前端 `api/sse.ts` 的 AgentEventData 人工同步））；frontend/Rust 暂无测试 runner。
+  字段清单须与前端 `api/sse.ts` 的 AgentEventData 人工同步））；单文件聚焦跑
+  `uv run pytest tests/test_docx_ops.py -q`。frontend 测试 = vitest（`cd frontend && npm run test`，
+  单文件 `npx vitest run src/lib/workbenchTable.test.ts`；覆盖 runReducer/workbenchTable/
+  guideBasis/guideTree/wbNames/toolDisplay 等纯函数与 reducer）。Rust 单测少而存在
+  （sidecar.rs 尾部 `#[cfg(test)]`，`cd src-tauri && cargo test`；check.sh 只跑
+  check+clippy 不含 test）。
 - e2e 冒烟：`cd sidecar && uv run pytest -m e2e`——spawn 真实 sidecar 子进程（独立端口 +
   隔离 DATA_DIR）跑一轮真实 LLM 对话，断言 run 完成、SSE seq 单调无重复、tool_call_id
   唯一、messages/trace 落库。需要 `.env` 有效 key（无则 skip）。日常 `uv run pytest` 默认
