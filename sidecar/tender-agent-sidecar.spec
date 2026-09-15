@@ -8,6 +8,8 @@
 - datas app/skills/**：main._sync_skills 启动时按 __file__ 相对路径读技能文件，
   非 .py 不进 PYZ，漏了启动即 warning 且 agent 无技能。
 - collect_data trafilatura：settings.cfg / data/tei_corpus.dtd 走 __file__ 读，无 hook。
+- collect_dynamic_libs pypdfium2：pdfium 原生库随包分发、import 时加载，PyInstaller
+  静态分析常漏收（社区实测坑）；冻结冒烟的 pypdfium2(native) 项兜底验证。
 - collect_submodules 保底（冷门无 hook + 懒加载）：deepagents / langchain 全家 /
   openai（3.x _resources_proxy 纯字符串 import_module("openai.resources")；
   langgraph jsonplus 反序列化动态 import = agent.db 会话恢复路径；
@@ -18,7 +20,7 @@
 
 import os
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 # 构建脚本经 env 传 triple 后缀（tauri externalBin 命名规则）与 Windows 无控制台开关
 exe_name = os.environ.get("SIDECAR_NAME", "tender-agent-sidecar")
@@ -33,6 +35,8 @@ datas = [
 datas += collect_data_files("trafilatura")
 # trafilatura 2.x 走 justext 剔除样板文本，stoplists 是包内数据文件（冻结冒烟实测抓漏）
 datas += collect_data_files("justext")
+# pdfium 原生库（.dylib/.so/.dll）进 binaries——漏收时冻结产物 import pypdfium2 即失败
+binaries = collect_dynamic_libs("pypdfium2")
 
 hiddenimports = []
 for _pkg in (
@@ -50,7 +54,7 @@ for _pkg in (
 a = Analysis(
     ["run_frozen.py"],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

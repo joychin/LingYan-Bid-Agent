@@ -36,12 +36,12 @@ import {
 const GUIDE_GOLDEN = [
   '# 写作指引',
   '',
-  '| 节 | 模式 | 依据 | 素材 | 缺口/备注 |',
-  '|---|---|---|---|---|',
-  '| 3.1 项目理解与需求分析 | 素材修订 | REQ-01、REQ-07 | blk_0123456789ab | — |',
-  '| 3.2 总体设计方案 | 素材修订+推理撰写 | SCORE-02 | 【缺】 | 缺：总体方案素材 |',
-  '| 3.3 项目团队配置 | 推理撰写 | — | 【缺】 | 缺：人员证书扫描件 |',
-  '| 投标函 | — | MAND-03 | — | 格式件：拷原件+revise 填空 |',
+  '| 节 | 模式 | 依据 | 素材 | 图示 | 缺口/备注 |',
+  '|---|---|---|---|---|---|',
+  '| 3.1 项目理解与需求分析 | 素材修订 | REQ-01、REQ-07 | blk_0123456789ab | — | — |',
+  '| 3.2 总体设计方案 | 素材修订+推理撰写 | SCORE-02 | 【缺】 | 分层:系统总体架构 | 缺：总体方案素材 |',
+  '| 3.3 项目团队配置 | 推理撰写 | — | 【缺】 | 表:岗位配置 | 缺：人员证书扫描件 |',
+  '| 投标函 | — | MAND-03 | — | — | 格式件：拷原件+revise 填空 |',
   '',
 ].join('\n')
 
@@ -79,7 +79,7 @@ describe('parseTableFile', () => {
     ].join('\n')
     const p = parseTableFile(variant, GUIDE_TABLE)
     expect(p).not.toBeNull()
-    expect(p!.rows[0]).toEqual(['3.3 团队', '推理撰写', 'REQ-01', '【缺】', '—'])
+    expect(p!.rows[0]).toEqual(['3.3 团队', '推理撰写', 'REQ-01', '【缺】', '', '—'])
   })
 
   it('宽容解析：表头缺「缺口/备注」列名时按下标兜底（sidecar idx.get 同款）', () => {
@@ -89,7 +89,8 @@ describe('parseTableFile', () => {
       '| 3.1 需求 | 素材修订 | REQ-01 | blk_0123456789ab | 备注X |',
     ].join('\n')
     const p = parseTableFile(variant, GUIDE_TABLE)
-    expect(p!.rows[0][4]).toBe('备注X')
+    expect(p!.rows[0][4]).toBe('') // 缺「图示」列名=空串（旧 5 列指引零破坏）
+    expect(p!.rows[0][5]).toBe('备注X')
   })
 
   it('首列为空的行跳过；块内第二行不计数据', () => {
@@ -137,7 +138,7 @@ describe('serializeTableFile（金样例往返字节稳定）', () => {
     )
     expect(md).toContain('| 3.1 需求 | — | REQ-01 | — | a｜b c |')
     // 序列化产物必须能被自己重新解析（编辑循环闭环）
-    expect(parseTableFile(md, GUIDE_TABLE)!.rows[0]).toEqual(['3.1 需求', '—', 'REQ-01', '—', 'a｜b c'])
+    expect(parseTableFile(md, GUIDE_TABLE)!.rows[0]).toEqual(['3.1 需求', '—', 'REQ-01', '—', 'a｜b c', '—'])
   })
 })
 

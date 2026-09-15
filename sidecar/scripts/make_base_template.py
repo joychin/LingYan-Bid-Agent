@@ -253,6 +253,21 @@ def main() -> None:
     csf.alignment = WD_ALIGN_PARAGRAPH.CENTER
     csf.space_after = Pt(6)
 
+    # Tender Caption：图注/表题（docx_diagram_insert 的 caption 与建节 body 表块
+    # 的表题挂它，2026-09-14 表格通道批）——宋体小五居中无缩进；合册按样式名识别
+    # 做「图X-Y/表X-Y」全局重编号（中文文档惯例：表题在表上方、图注在图下方）。
+    caption = doc.styles.add_style("Tender Caption", WD_STYLE_TYPE.PARAGRAPH)
+    caption.element.set(qn("w:styleId"), "TenderCaption")
+    caption.base_style = normal
+    caption.quick_style = True
+    caption.font.size = Pt(XIAO_WU)
+    _set_fonts(caption, EAST_BODY, LATIN)
+    capf = caption.paragraph_format
+    capf.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    capf.line_spacing = 1.5
+    capf.space_before = Pt(3)
+    capf.space_after = Pt(6)
+
     # 标题：黑体分级加粗黑色、中西文同族（去默认模板的英文蓝与 Times 混排），
     # 顶格无缩进，keepNext+keepLines 防标题落单在页尾；italic 显式关掉
     # （默认模板四级标题自带斜体，中文标题不该斜）
@@ -364,6 +379,8 @@ def main() -> None:
         "本页全部内容在程序建节时自动清空，仅作版式预览。",
         style=body_name,
     )
+    doc.add_paragraph("表 1-1 岗位配置（表题示例）", style="Tender Caption")
+    doc.add_paragraph("图 1-1 系统组织架构（图注示例）", style="Tender Caption")
 
     # 清掉默认模板自带的空段（模板首行直接是 Title 示例）
     for p in doc.element.body.findall(qn("w:p")):
@@ -384,6 +401,13 @@ def main() -> None:
     assert bi.get(qn("w:firstLineChars")) == "200"
     assert b.paragraph_format.line_spacing == 1.5
     assert b.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    # Tender Caption：宋体小五居中（合册按样式名识别重编号）
+    cap = chk.styles["Tender Caption"]
+    assert cap.font.size == Pt(XIAO_WU)
+    assert cap.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    cap_fonts = cap.element.get_or_add_rPr().get_or_add_rFonts()
+    assert cap_fonts.get(qn("w:eastAsia")) == EAST_BODY
 
     # 标题：三号黑体加粗黑色、中西文同族、keepLines、无斜体（默认模板四级斜体）
     h1 = chk.styles["Heading 1"]

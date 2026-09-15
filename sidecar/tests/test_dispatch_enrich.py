@@ -116,6 +116,9 @@ def test_thin_dispatch_enriched_with_all_blocks(env):
     assert f"输出路径：{tid}/work/body/3.1 项目理解与需求分析.docx" in out
     assert re.search(r"今天日期：\d{4}-\d{2}-\d{2}$", out, re.MULTILINE)  # 天级（写手拿不到任务上下文块）
     assert "写作模式：推理撰写" in out
+    # 开工硬纪律（2026-09-14 回读收敛批）：开局禁探测/禁内部编号
+    assert "开局禁止 ls/glob 探测目录" in out
+    assert "禁止检索或使用 REQ/MAND/SCORE/TPL 内部编号" in out
     # 要求清单=registry 解析的原文+出处，编号解析后即弃
     assert "- 投标人须具备低代码开发能力（出处：第三章 3.1，L100-L110）" in out
     assert "承诺清单全部值" in out
@@ -519,3 +522,37 @@ def test_echo_substring_name_enriches(env):
     out = build_enriched_description("写财务状况一览表", tid)
     assert out is not None
     assert "投标单位财务状况一览表（附件7）.docx" in out
+
+
+def test_figure_column_transmitted_to_writer(env):
+    """图示列透传（2026-09-14 表格通道批）：6 列指引的图示列随派发送达写手
+    （计划先行——写手按清单逐项产出）；旧 5 列指引缺列零影响（无图示段）。"""
+    tid = _seed(env)
+    out = build_enriched_description("写 3.1 项目理解", tid)
+    assert "本节图示清单" not in out  # 旧 5 列指引：无图示段
+
+    wroot = artifact_store.work_dir(tid)
+    content = _dir_content()
+    content["response_documents"][0]["directory"].append(
+        {"目录名称": "3.3 混合记法节", "level": 1, "children": [], "交付形态": "正文编写"}
+    )
+    tid = _seed(env, content=content)  # 重发布目录产物（同任务同契约=覆盖）
+    wroot = artifact_store.work_dir(tid)
+    (wroot / "body/写作指引.md").write_text(
+        "# 写作指引\n\n"
+        "| 节 | 模式 | 依据 | 素材 | 图示 | 缺口/备注 |\n|---|---|---|---|---|---|\n"
+        "| 3.1 项目理解与需求分析 | 推理撰写 | REQ-01 | — | 分层:系统架构、表:对比 | 无 |\n"
+        "| 3.2 总体设计方案 | 素材修订 | SCORE-02 | blk_abc123def456 | — | 无 |\n"
+        "| 3.3 混合记法节 | 推理撰写 | REQ-03 | — | 表:对比、— | 无 |\n",
+        encoding="utf-8",
+    )
+    out2 = build_enriched_description("写 3.1 项目理解", tid)
+    assert "本节图示清单（指引计划，逐项产出" in out2
+    assert "分层:系统架构、表:对比" in out2
+    out3 = build_enriched_description("写 3.2 总体设计", tid)
+    assert "本节图示清单" not in out3  # 「—」不透传
+    # 混合项过滤与 validate_body 对账侧同款口径（2026-09-14 review 修复）：
+    # 「表:对比、—」不把「—」当计划项透传
+    out4 = build_enriched_description("写 3.3 混合记法", tid)
+    assert "本节图示清单" in out4 and "表:对比" in out4
+    assert "表:对比、—" not in out4

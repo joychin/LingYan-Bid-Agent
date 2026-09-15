@@ -2,12 +2,21 @@
 
 import json
 
-import pymupdf  # 测试用：运行时生成 PDF，仿 _make_docx 做法
 import pytest
 from docx import Document
 
 from app.config import workspace_dir
 from app.tools.parse_document import parse_document
+from tests.pdfgen import (
+    Pdf,
+    _make_pdf,
+    _make_pdf_link_toc,
+    _make_pdf_printed_toc,
+    _make_pdf_split_headings,
+    _make_pdf_with_enumeration,
+    _make_pdf_with_header_footer,
+    _make_pdf_with_toc,
+)
 from tests.util import init_env
 
 
@@ -136,10 +145,8 @@ def test_scanned_pdf_routes_to_cloud_when_configured(ws, monkeypatch):
     幂等优先于路由——同 hash 二次调用不再触发云端。"""
     from app import baidu_ocr
 
-    doc = pymupdf.open()
-    doc.new_page()  # 空内容页：文本层近 0 字符 → 扫描件判定
-    doc.save(str(ws / "扫描件.pdf"))
-    doc.close()
+    # 空内容页：文本层近 0 字符 → 扫描件判定
+    Pdf(ws / "扫描件.pdf").show_page().save()
 
     r = parse_document.invoke({"path": "扫描件.pdf"})
     assert r.startswith("[解析失败]")
@@ -234,26 +241,6 @@ def test_bare_name_resolves_from_task_files(ws):
     _make_docx(fdir / "招标文件.docx")
     r = parse_document.invoke({"path": "招标文件.docx"})  # 根下无此文件
     assert r.startswith("[解析成功]"), r
-
-
-def _make_pdf(path):
-    """运行时生成无书签 PDF（标题与正文同字号——结构只能靠文本信号识别）。
-
-    注意 insert_text 不自动换行，正文每行需控制在单行宽度内；总字符 > 100 过 _MIN_TEXT_CHARS。
-    默认 Helvetica 无 CJK 字形，中文须用内置中文字体 china-s，否则渲染为占位符。
-    """
-    doc = pymupdf.open()
-    page = doc.new_page()
-    page.insert_text((72, 72), "第一章 招标公告", fontsize=18, fontname="china-s")
-    page.insert_text((72, 110), "本项目为测试采购项目，现邀请合格投标人参加投标。", fontsize=12, fontname="china-s")
-    page.insert_text((72, 140), "招标范围包括软件开发、系统集成与三年运维服务。", fontsize=12, fontname="china-s")
-    page.insert_text((72, 170), "投标人应具备相应资质，并在截止时间前提交投标文件。", fontsize=12, fontname="china-s")
-    page.insert_text((72, 220), "第二章 投标人须知", fontsize=18, fontname="china-s")
-    page.insert_text((72, 260), "投标人应在截止时间前递交密封投标文件，逾期不予受理。", fontsize=12, fontname="china-s")
-    page.insert_text((72, 320), "第三章 评标办法", fontsize=18, fontname="china-s")
-    page.insert_text((72, 360), "本项目采用综合评分法，评分因素包括技术与商务两部分。", fontsize=12, fontname="china-s")
-    doc.save(str(path))
-    doc.close()
 
 
 def test_pdf_convert_and_outline(ws):
@@ -356,24 +343,6 @@ def test_changed_file_reconverts(ws):
     assert "| 包号 |" not in md
 
 
-def _make_pdf_with_toc(path):
-    """带书签的多页 PDF：标题与正文同字号，结构只能靠书签。"""
-    doc = pymupdf.open()
-    for i, cn in enumerate("一二三", 1):
-        page = doc.new_page()
-        page.insert_text((72, 72), f"第{cn}章 测试章节{i}", fontsize=12, fontname="china-s")
-        for j in range(6):
-            page.insert_text(
-                (72, 110 + j * 20),
-                f"第{cn}章的正文内容第{j}段，写入足够内容以通过扫描件阈值校验。",
-                fontsize=12,
-                fontname="china-s",
-            )
-    doc.set_toc([[1, "第一章 测试章节1", 1], [1, "第二章 测试章节2", 2], [1, "第三章 测试章节3", 3]])
-    doc.save(str(path))
-    doc.close()
-
-
 def test_pdf_bookmark_toc_preferred(ws):
     """有书签时结构来自书签（作者声明档），同字号文本下编号兜底不参与。"""
     _make_pdf_with_toc(ws / "书签文件.pdf")
@@ -389,38 +358,6 @@ def test_pdf_bookmark_toc_preferred(ws):
     assert [n["标题"] for n in outline] == ["第一章 测试章节1", "第二章 测试章节2", "第三章 测试章节3"]
     assert "# 第一章 测试章节1" in md
     assert not any("警示用词" in w for w in meta["warnings"])  # pdf-toc 无档位警示
-
-
-def _make_pdf_printed_toc(path):
-    """无书签 PDF：结构来自第 2 页印刷目录（真实语料形态——孤立章节号行 +
-    引导点线条目；正文标题也拆行）。封面巨字用于验证不再产生伪标题。"""
-    doc = pymupdf.open()
-    p1 = doc.new_page()
-    p1.insert_text((72, 100), "测试项目采购文件", fontsize=24, fontname="china-s")
-    p1.insert_text((72, 130), "（封面巨字在字号判级时代会全部变成伪标题）", fontsize=12, fontname="china-s")
-    p2 = doc.new_page()
-    p2.insert_text((72, 72), "目 录", fontsize=16, fontname="china-s")
-    p2.insert_text((72, 110), "第一章", fontsize=12, fontname="china-s")
-    p2.insert_text((72, 128), "招标公告....................................1", fontsize=12, fontname="china-s")
-    p2.insert_text((72, 160), "第二章", fontsize=12, fontname="china-s")
-    p2.insert_text((72, 178), "投标人须知..................................3", fontsize=12, fontname="china-s")
-    p2.insert_text((72, 210), "第三章 评标办法.............................5", fontsize=12, fontname="china-s")
-    p3 = doc.new_page()
-    p3.insert_text((72, 72), "第一章", fontsize=12, fontname="china-s")
-    p3.insert_text((72, 90), "招标公告", fontsize=12, fontname="china-s")
-    for j in range(6):
-        p3.insert_text((72, 130 + j * 20), f"公告正文第{j}段，本项目为测试采购项目内容填充。", fontsize=12, fontname="china-s")
-    p4 = doc.new_page()
-    p4.insert_text((72, 72), "第二章", fontsize=12, fontname="china-s")
-    p4.insert_text((72, 90), "投标人须知", fontsize=12, fontname="china-s")
-    for j in range(6):
-        p4.insert_text((72, 130 + j * 20), f"须知正文第{j}段，投标人应遵守各项规定要求。", fontsize=12, fontname="china-s")
-    p5 = doc.new_page()
-    p5.insert_text((72, 72), "第三章 评标办法", fontsize=12, fontname="china-s")
-    for j in range(6):
-        p5.insert_text((72, 110 + j * 20), f"评标正文第{j}段，综合评分法满分一百分整。", fontsize=12, fontname="china-s")
-    doc.save(str(path))
-    doc.close()
 
 
 def test_pdf_printed_toc(ws):
@@ -452,28 +389,6 @@ def test_pdf_printed_toc(ws):
     assert "招标公告" in md
 
 
-def _make_pdf_with_enumeration(path):
-    """无书签无目录：正文含「本文件包括下述内容」式自枚举清单（连续 L1 编号行）。"""
-    doc = pymupdf.open()
-    page = doc.new_page()
-    page.insert_text((72, 72), "招标文件包括下述内容", fontsize=12, fontname="china-s")
-    for i, name in enumerate(["商务文件", "技术文件", "附件"], 1):
-        page.insert_text((72, 96 + i * 22), f"第{'一二三'[i - 1]}部分 {name}", fontsize=12, fontname="china-s")
-    page.insert_text((72, 170), "以下为各部分正文内容。", fontsize=12, fontname="china-s")
-    for cn, title in (("一", "投标邀请"), ("二", "投标人须知"), ("三", "评标办法")):
-        y = 190 + "一二三".index(cn) * 90
-        page.insert_text((72, y), f"第{cn}章 {title}", fontsize=12, fontname="china-s")
-        for j in range(3):
-            page.insert_text(
-                (72, y + 24 + j * 20),
-                f"第{cn}章正文第{j}段，填充足够内容避免扫描页误判。{'x' * 5}",
-                fontsize=12,
-                fontname="china-s",
-            )
-    doc.save(str(path))
-    doc.close()
-
-
 def test_pdf_numbered_skips_enumeration_list(ws):
     """自枚举清单（连续「第X部分」行）不识别为标题；真章节照常识别。"""
     _make_pdf_with_enumeration(ws / "清单文件.pdf")
@@ -488,20 +403,6 @@ def test_pdf_numbered_skips_enumeration_list(ws):
     assert meta["conversion"] == "pdf-numbered"
     assert "# 第一部分" not in md
     assert [n["标题"] for n in outline] == ["第一章 投标邀请", "第二章 投标人须知", "第三章 评标办法"]
-
-
-def _make_pdf_split_headings(path, chapters=3):
-    """无书签无目录：正文标题拆行（孤立章节号一行 + 标题文字一行）。"""
-    doc = pymupdf.open()
-    titles = [("第一章", "招标公告"), ("第二章", "投标人须知"), ("第三章", "评标办法")]
-    for prefix, title in titles[:chapters]:
-        p = doc.new_page()
-        p.insert_text((72, 72), prefix, fontsize=12, fontname="china-s")
-        p.insert_text((72, 90), title, fontsize=12, fontname="china-s")
-        for j in range(4):
-            p.insert_text((72, 130 + j * 20), f"{title}正文第{j}段，本项目为测试采购项目。", fontsize=12, fontname="china-s")
-    doc.save(str(path))
-    doc.close()
 
 
 def test_pdf_numbered_merges_split_heading(ws):
@@ -540,46 +441,6 @@ def test_pdf_plain_drops_subthreshold_marks(ws):
     assert any("未识别出章节结构" in w for w in meta["warnings"])
 
 
-def _make_pdf_link_toc(path):
-    """无书签 PDF：目录页条目带内部跳转链接（Word 导出的常见形态）——
-    链接矩形即条目、目标即物理页。正文标题拆行（章节号与标题分两行）。"""
-    doc = pymupdf.open()
-    p1 = doc.new_page()
-    p1.insert_text((72, 100), "测试项目采购文件", fontsize=24, fontname="china-s")
-    p2 = doc.new_page()
-    p2.insert_text((72, 60), "目 录", fontsize=16, fontname="china-s")
-    entries = [("第一章 招标公告", 3), ("第二章 投标人须知", 4), ("第三章 评标办法", 5)]
-    for title, target in entries:
-        p2.insert_text((72, 100 + (target - 3) * 26), f"{title}..........{target - 2}", fontsize=12, fontname="china-s")
-    # 先建齐全部正文页，再回填目录链接（insert_link 会解析目标页 xref）
-    for title, _ in entries:
-        page = doc.new_page()
-        page.insert_text((72, 72), title.split()[0], fontsize=12, fontname="china-s")
-        page.insert_text((72, 90), title.split()[1], fontsize=12, fontname="china-s")
-        for j in range(5):
-            page.insert_text(
-                (72, 130 + j * 20),
-                f"{title}正文第{j}段，填充足够内容避免扫描页误判。",
-                fontsize=12,
-                fontname="china-s",
-            )
-    # Page 对象在 new_page 后会失效，重新取回再插链接；矩形贴紧行高（真实
-    # Word 导出的链接矩形即条目文本范围）
-    p2 = doc[1]
-    for i, (title, target) in enumerate(entries):
-        y = 100 + i * 26
-        p2.insert_link(
-            {
-                "kind": pymupdf.LINK_GOTO,
-                "from": pymupdf.Rect(60, y - 2, 520, y + 10),
-                "page": target - 1,
-                "to": pymupdf.Point(0, 0),
-            }
-        )
-    doc.save(str(path))
-    doc.close()
-
-
 def test_pdf_link_toc(ws):
     """目录条目自带 GOTO 链接 → pdf-link-toc；定位收窄到目标页，标题拆行合并。"""
     _make_pdf_link_toc(ws / "链接目录.pdf")
@@ -607,13 +468,11 @@ def test_pdf_link_toc(ws):
 
 def test_pdf_plain_when_no_structure(ws):
     """无书签/无目录/无编号 → pdf-plain，警示 grep 兜底。"""
-    doc = pymupdf.open()
-    page = doc.new_page()
-    page.insert_text((72, 72), "采购需求说明", fontsize=12, fontname="china-s")
+    p = Pdf(ws / "无结构.pdf")
+    p.text(72, 72, "采购需求说明")
     for j in range(8):
-        page.insert_text((72, 100 + j * 20), f"需求{j}：系统应当支持相关功能特性与性能指标。", fontsize=12, fontname="china-s")
-    doc.save(str(ws / "无结构.pdf"))
-    doc.close()
+        p.text(72, 100 + j * 20, f"需求{j}：系统应当支持相关功能特性与性能指标。")
+    p.save()
 
     r = parse_document.invoke({"path": "无结构.pdf"})
     assert r.startswith("[解析成功]"), r
@@ -622,25 +481,6 @@ def test_pdf_plain_when_no_structure(ws):
     assert meta["conversion"] == "pdf-plain"
     assert outline == []
     assert any("未识别出章节结构" in w for w in meta["warnings"])
-
-
-def _make_pdf_with_header_footer(path, npages=4):
-    """每页带重复页眉（大字号，不剔除会成为伪标题）与页码的 PDF。"""
-    doc = pymupdf.open()
-    for i in range(1, npages + 1):
-        page = doc.new_page()
-        h = page.rect.height
-        page.insert_text((72, 30), "第三章 投标人须知", fontsize=15, fontname="china-s")
-        page.insert_text((72, h - 30), f"{i}/{npages}", fontsize=12, fontname="china-s")
-        for j in range(5):
-            page.insert_text(
-                (72, 100 + j * 20),
-                f"正文段落第{j}行，写入足够内容以通过扫描件阈值校验，内容编号{i}-{j}。",
-                fontsize=12,
-                fontname="china-s",
-            )
-    doc.save(str(path))
-    doc.close()
 
 
 def test_pdf_header_footer_stripped(ws):

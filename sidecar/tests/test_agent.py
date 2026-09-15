@@ -256,6 +256,15 @@ def test_subagent_specs():
     assert "直接采用" in body["system_prompt"]
     assert "不再调用 search_references" in body["system_prompt"]
     assert "禁止调用 ask_human" in body["system_prompt"]
+    # 读取瘦身纪律（2026-09-14 回读收敛批）：禁探测/禁编号/不回读
+    assert "开局禁止 ls/glob 探测目录" in body["system_prompt"]
+    assert "禁止 grep/检索 REQ/MAND/SCORE/TPL" in body["system_prompt"]
+    assert "不回读视图确认" in body["system_prompt"]
+    # 表格通道纪律（2026-09-14）：body 块混排 + 图示清单按计划产出
+    assert "body 块序列（段落+表格混排）" in body["system_prompt"]
+    assert "本节图示清单" in body["system_prompt"] and "docx_diagram_insert" in body["system_prompt"]
+    # 界面原型纪律（2026-09-14 批二）：HTML 内联/禁外链/失败降级
+    assert "docx_html_figure" in body["system_prompt"] and "禁外链禁脚本" in body["system_prompt"]
     # 承诺纪律与共享写边界（并发下唯一写边界，漏写=子代理改清单/编承诺值）
     assert "承诺清单" in body["system_prompt"]
     assert "禁止改写写作指引与关键事实与承诺清单" in body["system_prompt"]
@@ -818,8 +827,9 @@ def test_dispatch_enrich_middleware_wired():
 
 
 def test_body_writer_minimal_toolset():
-    """写手最小工具集（2026-09-10）：spec 带 tools 字段收窄到 13 个；集合内名字
-    必须都在 TOOLS 注册表（防拼错=静默丢工具）；9 个禁用名不得「顺手加回」。"""
+    """写手最小工具集（2026-09-10；2026-09-14 加 docx_diagram_insert/docx_html_figure 共 15 个）：
+    spec 带 tools 字段收窄；集合内名字必须在 TOOLS 注册表（防拼错=静默丢工具）；
+    禁用名不得「顺手加回」。"""
     from app.tools import TOOLS
 
     writer = next(s for s in agent_mod.SUBAGENTS if s["name"] == agent_mod._BODY_WRITER_NAME)

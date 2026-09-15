@@ -151,7 +151,11 @@ export function GuideDetail({
   const leaf: DirLeaf | null = node.leaf
   const refs = parseRefIds(row?.[2] ?? '')
   const mat = parseBlockRefs(row?.[3] ?? '')
-  const note = (row?.[4] ?? '').trim()
+  const fig = (row?.[4] ?? '').trim()
+  const figItems = fig && fig !== '—'
+    ? fig.split(/[、;；,，]/).map((x) => x.trim()).filter(Boolean)
+    : []
+  const note = (row?.[5] ?? '').trim()
   const noteParts = parseGuideNote(note)
   const matBlocks = mat.blockIds.flatMap((id) => {
     const pv = blockPreviews.get(id)
@@ -353,14 +357,44 @@ export function GuideDetail({
               )}
             </Sec>
 
+            {/* 图示（2026-09-14 表格通道批）：本节计划产出的表格/图示清单——
+                类型:主题；「计划先行」的用户可见面（validate 节级对账看这列）。 */}
+            {editing && row ? (
+              <Sec title="图示">
+                <CellInput
+                  value={row[4] ?? ''}
+                  onChange={(v) => onChangeCell(4, v)}
+                  placeholder="图示（类型:主题，如 甘特:实施进度计划、表:岗位配置；无则 —）"
+                />
+              </Sec>
+            ) : (
+              figItems.length > 0 && (
+                <Sec title="图示">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {figItems.map((item, i) => {
+                      const m = /^(表|分层|辐射|甘特)\s*[:：]\s*(.+)$/.exec(item)
+                      return m ? (
+                        <span key={i} className="inline-flex items-center gap-1 rounded-full border border-line bg-accent-soft px-2 py-0.5 text-xs">
+                          <span className="font-medium text-primary">{m[1]}</span>
+                          <span className="text-ink-2">{m[2]}</span>
+                        </span>
+                      ) : (
+                        <span key={i} className="text-xs text-ink-3">{item}</span>
+                      )
+                    })}
+                  </div>
+                </Sec>
+              )
+            )}
+
             {/* 缺口/备注（编辑态可改；查看态有内容才显示）。
                 读者分离（2026-09-13 A 批）：该列同时是给写手的执行指令与给用户的
                 缺料点名，「需要你提供」摘出来摆最前，工具名/行号等执行细节折叠。 */}
             {editing && row ? (
               <Sec title="缺口/备注">
                 <CellInput
-                  value={row[4] ?? ''}
-                  onChange={(v) => onChangeCell(4, v)}
+                  value={row[5] ?? ''}
+                  onChange={(v) => onChangeCell(5, v)}
                   placeholder="缺口/备注（【缺：具体字段名】；不写工具名与行号）"
                 />
               </Sec>

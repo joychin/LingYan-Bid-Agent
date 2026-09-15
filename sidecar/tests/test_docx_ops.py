@@ -22,8 +22,10 @@ from app.tools.docx_ops import (
     _accept_revisions_inplace,
     _accepted_text,
     _flatten_rejected,
+    _flow_to_mermaid,
     docx_assemble_volume,
     docx_comment_add,
+    docx_diagram_insert,
     docx_image_insert,
     docx_material_inject,
     docx_section_create,
@@ -1432,6 +1434,148 @@ def test_assemble_toc_reconciliation(env):
     assert "模板填充类未产出 1 节" in r  # 既有行不受影响
 
 
+# ---------- 机械目录页 / 前置区编号 / 空容器抑制 / 附件壳节（2026-09-14 结构缺口批） ----------
+
+_DIR_TOC = {
+    "response_documents": [
+        {
+            "name": "技术部分",
+            "scope": "",
+            "directory": [
+                {"目录名称": "封面", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+                {"目录名称": "编制索引", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+                {"目录名称": "目录", "level": 1, "children": [],
+                 "交付形态": "模板或附件填充", "来源位置": []},
+                {"目录名称": "技术方案", "level": 1, "children": [
+                    {"目录名称": "项目理解与需求分析", "level": 2, "children": [],
+                     "交付形态": "正文编写", "来源位置": ["REQ-01"]},
+                ]},
+                {"目录名称": "附件：资质证书复印件", "level": 1, "children": [],
+                 "交付形态": "模板或附件填充", "来源位置": ["MAND-02"]},
+            ],
+        }
+    ]
+}
+
+
+def test_assemble_mechanical_toc_and_front_matter(env):
+    """目录节点无节文件→机械目录页（Word 目录域+缓存清单，插在目录节点位置）；
+    前置区（目录前的非封面节点=编制索引）不占章号，正文从目录后第一章起编；
+    未产出附件节在缓存清单标「另附」；返回行报告条目数。"""
+    _seed_dir_artifact(env, _DIR_TOC)
+    docx_section_create.invoke({"path": "body/封面", "title": "封面"})
+    docx_section_create.invoke({"path": "body/编制索引", "title": "编制索引",
+                                "paragraphs": "索引表正文。"})
+    docx_section_create.invoke({"path": "body/项目理解与需求分析",
+                                "title": "项目理解与需求分析",
+                                "paragraphs": "项目理解正文第一段。"})
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]"), r
+    assert "目录页已生成（4 条" in r  # 编制索引 + 第一章 技术方案 + 1.1 + 附件另附
+    assert "未产出附件节标「另附」1 项" in r
+    assert "模板填充类未产出 1 节" in r
+
+    chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    texts = [_accepted_text(p._p) for p in chk.paragraphs]
+    # 前置区不占章号：编制索引无「第一章」前缀；正文章从目录后起编
+    assert not any(t.startswith("第一章\u3000编制索引") for t in texts)
+    assert "第一章\u3000技术方案" in texts
+    # 机械目录页：标题非 Heading 样式（防目录域/导航自引用），位于编制索引之后、第一章之前
+    toc_i = next(i for i, p in enumerate(chk.paragraphs) if p.text == "目录")
+    assert chk.paragraphs[toc_i].style.name not in ("Heading 1", "Heading 2", "Title")
+    idx_i = next(i for i, t in enumerate(texts) if t == "编制索引")
+    ch1_i = next(i for i, t in enumerate(texts) if t.startswith("第一章\u3000技术方案"))
+    assert idx_i < toc_i < ch1_i
+    # Word 目录域三件套 + 指令文本（域包裹缓存清单——更新域整体替换得带页码目录）
+    xml = chk.element.body.xml
+    assert xml.count('w:fldCharType="begin"') >= 1
+    assert ' TOC \\o "1-3"' in xml
+    assert 'w:fldCharType="separate"' in xml and 'w:fldCharType="end"' in xml
+    # 缓存清单条目：前置页无编号、正文带编号、缺文件正文节点照列、附件标另附
+    assert any(t.strip() == "编制索引" for t in texts)
+    assert any(t.strip() == "第一章\u3000技术方案" for t in texts)
+    assert any(t.strip() == "1.1 项目理解与需求分析" for t in texts)
+    assert any("附件：资质证书复印件" in t and "（另附）" in t for t in texts)
+
+
+def test_assemble_toc_node_with_file_unnumbered(env):
+    """手写目录节文件优先：并入+对账照旧，但「目录」标题不占章号（此前会是
+    「第一章 目录」），后续正文从第一章起编。"""
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "目录", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+                {"目录名称": "项目理解", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+            ]}
+        ]
+    })
+    assert docx_section_create.invoke({"path": "body/目录", "title": "目录",
+                                       "paragraphs": "项目理解"}).startswith("[已创建]")
+    assert docx_section_create.invoke({"path": "body/项目理解", "title": "项目理解",
+                                       "paragraphs": "正文。"}).startswith("[已创建]")
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    assert "目录页与正文对账不符" not in r
+    assert "目录页已生成" not in r  # 手写路径不走机械生成
+    texts = [_accepted_text(p._p) for p in Document(
+        str(_abs(env, "body/整本-技术部分.docx"))).paragraphs]
+    assert not any(t.startswith("第一章\u3000目录") for t in texts)
+    assert "第一章\u3000项目理解" in texts
+
+
+def test_assemble_attachment_shell_section(env):
+    """附件壳节（2026-09-14 拍板：知识库全无命中也建节）=模板填充叶子带节文件
+    →按树序正常并入整本（贴入位行随正文走），不再进「按附件对待」未产出点名。"""
+    _seed_dir_artifact(env, _DIR_SINGLE)
+    docx_section_create.invoke({"path": "body/项目理解与需求分析",
+                                "title": "项目理解与需求分析", "paragraphs": "正文。"})
+    docx_section_create.invoke({"path": "body/附件：资质证书复印件",
+                                "title": "附件：资质证书复印件",
+                                "paragraphs": "（此处贴入：资质证书复印件，加盖公章）"})
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    assert "模板填充类未产出" not in r
+    texts = [_accepted_text(p._p) for p in Document(
+        str(_abs(env, "body/整本-技术部分.docx"))).paragraphs]
+    assert any("此处贴入：资质证书复印件" in t for t in texts)
+    assert any(t.startswith("第二章\u3000附件：资质证书复印件") for t in texts)
+
+
+def test_assemble_empty_container_suppressed(env):
+    """空容器抑制（兜底）：容器子树无任何将产出叶子→不发章标题（防「第X章
+    其他资料」光杆空壳）；有产出叶子的容器照常发标题。子节点照旧走未产出
+    点名，信息不丢。"""
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "技术方案", "level": 1, "children": [
+                    {"目录名称": "项目理解与需求分析", "level": 2, "children": [],
+                     "交付形态": "正文编写", "来源位置": ["REQ-01"]},
+                ]},
+                {"目录名称": "其他资料", "level": 1, "children": [
+                    {"目录名称": "社保缴纳票据", "level": 2, "children": [],
+                     "交付形态": "模板或附件填充", "来源位置": []},
+                    {"目录名称": "信用查询资料", "level": 2, "children": [],
+                     "交付形态": "模板或附件填充", "来源位置": []},
+                ]},
+            ]}
+        ]
+    })
+    docx_section_create.invoke({"path": "body/项目理解与需求分析",
+                                "title": "项目理解与需求分析", "paragraphs": "正文。"})
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    assert "模板填充类未产出 2 节" in r
+    texts = [_accepted_text(p._p) for p in Document(
+        str(_abs(env, "body/整本-技术部分.docx"))).paragraphs]
+    assert not any("其他资料" in t for t in texts)  # 空容器标题被抑制
+    assert any(t.startswith("第一章\u3000技术方案") for t in texts)  # 部分产出容器照常
+
+
 def test_assemble_migrates_comments_and_warns_inline(env):
     """节内待办批注迁入整本（id 重映射、标记不悬空）；内联占位兜底扫描点名。"""
     _seed_dir_artifact(env, _DIR_SINGLE)
@@ -1775,16 +1919,12 @@ def test_image_insert_append_at_end(env):
 
 def test_image_insert_pdf_page_render(env):
     """PDF 原件按页现场渲染（抽取缺图的兜底）；任务前缀形态归一；页号越界人话报错。"""
-    import pymupdf
-
     from app.artifact_store import sources_dir
+    from tests import pdfgen
 
     pdf = sources_dir(env["task"]["id"]) / "证书扫描件.pdf"
     pdf.parent.mkdir(parents=True, exist_ok=True)
-    pd = pymupdf.open()
-    pd.new_page().insert_text((72, 72), "ISO27001 CERTIFICATE")
-    pd.save(str(pdf))
-    pd.close()
+    pdfgen.Pdf(pdf).text(72, 72, "ISO27001 CERTIFICATE").save()
 
     rel = _make_section("技术部分/3.2 公司资质.docx")
     r = docx_image_insert.invoke({"dest": rel, "image": "sources/证书扫描件.pdf", "page": 1})
@@ -2242,3 +2382,346 @@ def test_parallel_comment_add_same_file(env):
     doc = Document(str(dst))  # 文件完好可开（未写坏）
     assert len(_comment_texts(doc)) == n  # 8 条批注全在——并行不丢更新
     assert not list(dst.parent.glob("*.tmp"))  # 原子存盘无残件
+
+
+# ---------- 表格通道批（2026-09-14）：建节混排 / 图示生成 / 合册图注编号 ----------
+
+
+def test_create_body_blocks_mixed(env):
+    """body 块序列建节：段落/表题/表格按序落、表题挂 Tender Caption 在表格上方、
+    表头加粗+浅灰底纹；paragraphs 参数向后兼容。"""
+    body = json.dumps(
+        [
+            {"type": "p", "text": "我方组建专职实施团队，按招标岗位口径配置，如下表："},
+            {
+                "type": "table",
+                "caption": "项目团队岗位配置",
+                "header": ["岗位", "人数", "职责"],
+                "rows": [["项目经理", "1", "对本项目交付负总责"], ["架构师", "1", "主持架构设计"]],
+            },
+            {"type": "p", "text": "同一成员可兼任多个角色，兼任不降低履行质量。"},
+        ],
+        ensure_ascii=False,
+    )
+    r = docx_section_create.invoke({"path": "body/团队配置", "title": "团队配置", "body": body})
+    assert r.startswith("[已创建]"), r
+    assert "正文 2 段+表格 1 张" in r
+    doc = Document(str(_abs(env, "body/团队配置.docx")))
+    kinds = [e.tag.split("}")[-1] for e in doc.element.body]
+    assert kinds == ["p", "p", "p", "tbl", "p", "sectPr"]  # 标题/引言/表题/表格/收尾
+    assert doc.paragraphs[2].style.name == "Tender Caption"  # 表题在表格上方
+    tbl = doc.tables[0]
+    assert [c.text for c in tbl.rows[0].cells] == ["岗位", "人数", "职责"]
+    shd = tbl.cell(0, 0)._tc.find(qn("w:tcPr")).find(qn("w:shd"))
+    assert shd is not None and shd.get(qn("w:fill")) == "F2F2F2"
+    assert tbl.cell(0, 0).paragraphs[0].runs[0].bold is True
+    view = docx_section_read.invoke({"path": "body/团队配置"})
+    assert "[T1] R1：C1=岗位 C2=人数 C3=职责" in view
+
+
+def test_create_body_blocks_validation(env):
+    """body 参数校验：非 JSON / 列超限 / 单格超长 / rows 缺失，报错给修复写法。"""
+    r = docx_section_create.invoke({"path": "body/bad1", "title": "x", "body": "不是json"})
+    assert r.startswith("[创建失败]") and "body 不是合法 JSON" in r
+    wide = json.dumps([{"type": "table", "header": [f"列{i}" for i in range(9)], "rows": [["x"] * 9]}])
+    r = docx_section_create.invoke({"path": "body/bad2", "title": "x", "body": wide})
+    assert "列数 9 超上限" in r
+    long_cell = json.dumps([{"type": "table", "header": ["a"], "rows": [["x" * 201]]}])
+    r = docx_section_create.invoke({"path": "body/bad3", "title": "x", "body": long_cell})
+    assert "201 字超上限" in r
+    r = docx_section_create.invoke({"path": "body/bad4", "title": "x",
+                                    "body": json.dumps([{"type": "table", "header": ["a"]}])})
+    assert "缺 rows" in r
+    # 行宽超 header 报错不截断（2026-09-14 review 修复）：静默截断会丢格
+    fat_row = json.dumps([{"type": "table", "header": ["a", "b", "c"],
+                           "rows": [["1", "2", "3", "4", "5"]]}])
+    r = docx_section_create.invoke({"path": "body/bad5", "title": "x", "body": fat_row})
+    assert r.startswith("[创建失败]") and "第 1 行 5 列超过 header 的 3 列" in r
+    # 少列的宽容保留：补空串建表成功
+    thin = json.dumps([{"type": "table", "header": ["a", "b", "c"], "rows": [["only"]]}])
+    r = docx_section_create.invoke({"path": "body/thin", "title": "x", "body": thin})
+    assert r.startswith("[已创建]") and "表格 1 张" in r
+    assert len(Document(str(_abs(env, "body/thin.docx"))).tables[0].columns) == 3
+
+
+def test_diagram_layered_gantt_radial(env):
+    """三种网格图示：layered 层间箭头行/域头深灰、gantt 周数推定+填色格+里程碑行、
+    radial 中列纵向合并；表格不占 P 序号、锚定插入与图注跟随。"""
+    docx_section_create.invoke({"path": "body/进度", "title": "进度", "paragraphs": "第一段。\n第二段。"})
+    r = docx_diagram_insert.invoke(
+        {
+            "dest": "body/进度",
+            "kind": "layered",
+            "spec": json.dumps(
+                {"layers": [{"title": "决策层", "items": ["领导小组"]},
+                            {"title": "执行层", "items": ["开发组", "测试组"]}]},
+                ensure_ascii=False,
+            ),
+            "after": "2",
+            "caption": "项目组织架构",
+        }
+    )
+    assert r.startswith("[已插图示]"), r
+    assert "T1" in r and "2 层" in r and "P2 之后" in r
+    doc = Document(str(_abs(env, "body/进度.docx")))
+    t1 = doc.tables[0]
+    assert len(t1.rows) == 3 and len(t1.columns) == 5  # 2 层 + 1 箭头行
+    assert t1.cell(1, 2).text == "↓"
+    shd = t1.cell(0, 0)._tc.find(qn("w:tcPr")).find(qn("w:shd"))
+    assert shd.get(qn("w:fill")) == "D9D9D9"  # 域头深灰
+    # 表格不占 P 序号：插在 P2（第一段）后，图注段紧随表格、第二段顺延为 P4
+    view = docx_section_read.invoke({"path": "body/进度"})
+    assert "[P2]（Tender Body）第一段。" in view
+    assert "[P3]（Tender Caption）项目组织架构" in view
+    assert "[P4]（Tender Body）第二段。" in view
+
+    r2 = docx_diagram_insert.invoke(
+        {
+            "dest": "body/进度",
+            "kind": "gantt",
+            "spec": json.dumps(
+                {"tasks": [{"name": "需求调研", "start": 1, "end": 3}],
+                 "milestones": [{"week": 3, "label": "需求评审"}]}
+            ),
+        }
+    )
+    assert "1 项任务×3 周" in r2  # weeks 省略按最晚结束周推定
+    doc = Document(str(_abs(env, "body/进度.docx")))
+    t2 = doc.tables[1]
+    assert len(t2.rows) == 3 and len(t2.columns) == 4  # 表头+任务+里程碑
+    assert t2.cell(0, 3).text == "W3"
+    assert t2.cell(1, 3)._tc.find(qn("w:tcPr")).find(qn("w:shd")) is not None  # 区间格填色
+    assert t2.cell(2, 3).text == "◆" and t2.cell(2, 0).text == "需求评审"
+
+    r3 = docx_diagram_insert.invoke(
+        {
+            "dest": "body/进度",
+            "kind": "radial",
+            "spec": json.dumps(
+                {"center": "人员主记录", "left": ["公司与组织", "职位与任职"],
+                 "right": ["任免业务"]},
+                ensure_ascii=False,
+            ),
+        }
+    )
+    assert r3.startswith("[已插图示]")
+    doc = Document(str(_abs(env, "body/进度.docx")))
+    t3 = doc.tables[2]
+    assert t3.cell(0, 2)._tc is t3.cell(1, 2)._tc  # 中列纵向合并
+
+
+def test_diagram_validation(env):
+    """图示参数校验：kind 词表 / 甘特周超限给聚合出路 / layered 缺字段。"""
+    docx_section_create.invoke({"path": "body/dv", "title": "dv", "paragraphs": "x。"})
+    r = docx_diagram_insert.invoke({"dest": "body/dv", "kind": "wireframe", "spec": "{}"})
+    assert r.startswith("[图示失败]") and "kind 须为" in r and "flow" in r
+    r = docx_diagram_insert.invoke(
+        {"dest": "body/dv", "kind": "gantt",
+         "spec": json.dumps({"tasks": [{"name": "t", "start": 1, "end": 99}]})}
+    )
+    assert "超上限（≤36）" in r and "按月" in r
+    r = docx_diagram_insert.invoke(
+        {"dest": "body/dv", "kind": "layered", "spec": json.dumps({"layers": [{"title": "A层"}]})}
+    )
+    assert "缺 title 或 items" in r
+
+
+def test_assemble_caption_numbering(env):
+    """合册图注/表题全局重编号：表题（表格上方）编「表 X-Y」、图注（图示下方）编
+    「图 X-Y」，跨节累计、章号随树序；与章节编号同一原则（节文件不带编号）。"""
+    _seed_dir_artifact(env, _DIR_SINGLE)
+    body = json.dumps(
+        [
+            {"type": "p", "text": "团队配置如下："},
+            {"type": "table", "caption": "岗位配置", "header": ["岗位"], "rows": [["项目经理"]]},
+        ],
+        ensure_ascii=False,
+    )
+    docx_section_create.invoke(
+        {"path": "body/项目理解与需求分析", "title": "项目理解与需求分析", "body": body}
+    )
+    docx_section_create.invoke({"path": "body/总体设计方案", "title": "总体设计方案", "paragraphs": "方案段。"})
+    docx_diagram_insert.invoke(
+        {"dest": "body/总体设计方案", "kind": "layered",
+         "spec": json.dumps({"layers": [{"title": "应用层", "items": ["门户"]}]}, ensure_ascii=False),
+         "caption": "系统架构"}
+    )
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]"), r
+    assert "图注/表题编号 2 处" in r
+    chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    texts = [p.text for p in chk.paragraphs]
+    assert "表 1-1 岗位配置" in texts  # 表题在表格上方 → 表系列
+    assert "图 1-1 系统架构" in texts  # 图示图注在表格下方 → 图系列
+
+
+# ---------- 流程图（kind=flow，mermaid 消费方 2026-09-14 批三） ----------
+
+
+def test_flow_spec_validation(env):
+    """flow spec 校验：缺 nodes/edges、超节点上限、悬空边、非法 shape、id 重复。"""
+    docx_section_create.invoke({"path": "body/fv", "title": "fv", "paragraphs": "x。"})
+    r = docx_diagram_insert.invoke({"dest": "body/fv", "kind": "flow", "spec": "{}"})
+    assert r.startswith("[图示失败]") and "flow 须带 nodes" in r
+    many = {"nodes": [{"id": f"n{i}", "label": f"节点{i}"} for i in range(21)], "edges": [["n0", "n1"]]}
+    r = docx_diagram_insert.invoke({"dest": "body/fv", "kind": "flow", "spec": json.dumps(many)})
+    assert "节点数 21 超上限" in r and "拆成两张图" in r
+    r = docx_diagram_insert.invoke({"dest": "body/fv", "kind": "flow",
+        "spec": json.dumps({"nodes": [{"id": "a", "label": "甲"}], "edges": [["a", "zz"]]})})
+    assert "不存在的节点" in r
+    r = docx_diagram_insert.invoke({"dest": "body/fv", "kind": "flow",
+        "spec": json.dumps({"nodes": [{"id": "a", "label": "甲", "shape": "circle"}],
+                            "edges": [["a", "a"]]})})
+    assert "shape 须为" in r
+    r = docx_diagram_insert.invoke({"dest": "body/fv", "kind": "flow",
+        "spec": json.dumps({"nodes": [{"id": "a", "label": "甲"}, {"id": "a", "label": "乙"}],
+                            "edges": [["a", "a"]]})})
+    assert "重复" in r
+
+
+def test_flow_to_mermaid_translation():
+    """JSON 拓扑 → mermaid 文本：形状语法/边标签/转义（引号→#quot;、竖线→全角）。"""
+    parsed = {
+        "nodes": [
+            {"id": "a", "label": "提交故障", "shape": "round"},
+            {"id": "b", "label": "判定级别", "shape": "diamond"},
+            {"id": "c", "label": '含"引号"的节点', "shape": "rect"},
+        ],
+        "edges": [["a", "b"], ["b", "c", "重|大"]],
+    }
+    m = _flow_to_mermaid(parsed)
+    assert m.startswith("flowchart TD")
+    assert 'a("提交故障")' in m          # round → 圆括号
+    assert 'b{"判定级别"}' in m          # diamond → 花括号
+    assert 'c["含#quot;引号#quot;的节点"]' in m  # 引号转义
+    assert "a --> b" in m
+    assert "b -->|重｜大| c" in m        # 边标签 + 竖线转全角
+
+
+def test_flow_via_render_queue(env):
+    """flow 经渲染队列：登记 mermaid 载荷 → 回执 PNG → 节文件含图；无回执降级。"""
+    import contextvars
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    docx_section_create.invoke({"path": "body/fv", "title": "fv", "paragraphs": "x。"})
+    spec = json.dumps({
+        "nodes": [{"id": "a", "label": "提交故障"},
+                  {"id": "b", "label": "判定级别", "shape": "diamond"},
+                  {"id": "c", "label": "应急处置"}],
+        "edges": [["a", "b"], ["b", "c", "重大"], ["c", "b", "重判"]],
+    }, ensure_ascii=False)
+    client = TestClient(app)
+    out: dict = {}
+    ctx = contextvars.copy_context()
+
+    def run():
+        out["r"] = docx_diagram_insert.invoke(
+            {"dest": "body/fv", "kind": "flow", "spec": spec, "caption": "故障处置流程"})
+
+    t = threading.Thread(target=lambda: ctx.run(run))
+    t.start()
+    # 等 pending 出现,断言载荷是 flow+mermaid 文本(非模型手写——程序翻译产物)
+    import time as _t
+
+    pend = []
+    for _ in range(100):
+        pend = client.get("/api/render/pending").json()["requests"]
+        if pend:
+            break
+        _t.sleep(0.05)
+    assert len(pend) == 1
+    assert pend[0]["kind"] == "flow"
+    assert pend[0]["mermaid"].startswith("flowchart TD")
+    assert 'b{"判定级别"}' in pend[0]["mermaid"]
+    rr = client.post("/api/render/figure", data={"request_id": pend[0]["request_id"]},
+                     files={"file": ("f.png", _tiny_png_bytes(), "image/png")})
+    assert rr.status_code == 200
+    t.join(timeout=5)
+    assert out["r"].startswith("[已插图示]") and "流程图 1 张" in out["r"]
+    assert "节点 3/连线 3" in out["r"]
+    doc = Document(str(_abs(env, "body/fv.docx")))
+    assert len(doc.element.body.findall(
+        ".//{http://schemas.openxmlformats.org/drawingml/2006/main}blip")) == 1
+
+
+def _tiny_png_bytes() -> bytes:
+    import struct as _s
+    import zlib as _z
+
+    def chunk(t: bytes, d: bytes) -> bytes:
+        c = t + d
+        return _s.pack(">I", len(d)) + c + _s.pack(">I", _z.crc32(c) & 0xFFFFFFFF)
+
+    ihdr = _s.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", _z.compress(b"\x00\xff\x00\x00")) + chunk(b"IEND", b""))
+
+
+def test_image_height_cap(env):
+    """插图高度封顶（2026-09-14 实测修复）：mermaid 长链流程图显示高 34.7~62.5cm
+    占满整页还溢出——按版心宽等比缩放后超 18cm 的按高度反缩（等比、变窄居中）。"""
+    import io
+
+    from PIL import Image as PILImage
+
+    from app.tools.docx_ops import _tracked_image_paragraph
+
+    buf = io.BytesIO()
+    PILImage.new("RGB", (100, 1000), "white").save(buf, format="PNG")  # 细高图 1:10
+    docx_section_create.invoke({"path": "body/hc", "title": "hc", "paragraphs": "x。"})
+    from docx import Document as _D
+
+    doc = _D(str(_abs(env, "body/hc.docx")))
+    p_el = _tracked_image_paragraph(doc, buf.getvalue())
+    ext = p_el.find(".//{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}extent")
+    if ext is None:  # python-docx 命名空间形态兜底
+        ext = next(e for e in p_el.iter() if e.tag.endswith("}extent"))
+    cx, cy = int(ext.get("cx")), int(ext.get("cy"))
+    assert cy <= 18 * 360000 + 1, f"显示高 {cy/360000:.1f}cm 超封顶"
+    assert abs(cx / cy - 100 / 1000) < 0.02, "反缩须等比（宽高比不变）"
+
+
+def test_revise_returns_now_text_without_reread(env):
+    """纯改动批（无插段）返回「改动后现文」——replace/格编辑后模型直接看到结果，
+    回读动机消除（2026-09-14 回读再收敛）；删除段标已删除；插段批维持全视图。"""
+    import json as _json
+
+    docx_section_create.invoke(
+        {"path": "body/现文节", "title": "现文节",
+         "paragraphs": "第一段原文甲。\n第二段原文乙。\n第三段原文丙。"}
+    )
+    edits = _json.dumps([
+        {"para": 2, "action": "replace", "find": "原文甲", "text": "改后之甲"},
+        {"para": 3, "action": "delete"},
+    ], ensure_ascii=False)
+    r = docx_section_revise.invoke({"path": "body/现文节", "edits": edits})
+    assert "[已修订]" in r and "改动后现文（接受修订视角，无需回读确认）" in r
+    assert "P2 现文：第一段改后之甲。" in r
+    assert "P3 现文：（已标记删除，接受修订后此段消失）" in r
+    assert "最新读视图如下" not in r  # 无插段=不附全视图（现文块已覆盖确认需求）
+
+    # 格编辑:建节带表,fill 后返回格现文
+    body = _json.dumps([
+        {"type": "table", "header": ["项", "值"], "rows": [["工期", ""], ["人员", "5"]]},
+    ], ensure_ascii=False)
+    docx_section_create.invoke({"path": "body/现文表", "title": "现文表", "body": body})
+    edits2 = _json.dumps([{"table": 1, "row": 2, "col": 2, "action": "fill", "text": "3 个月"}])
+    r2 = docx_section_revise.invoke({"path": "body/现文表", "edits": edits2})
+    assert "T1R2C2 现文：3 个月" in r2
+
+    # 长段改动点在尾部也须现文可见（截断对齐 _VIEW_TEXT_LIMIT，2026-09-14 review 修复：
+    # 原 200 字截断会把长段后半的替换结果裁掉，「把结果送到眼前」对长段失效）
+    tail = "铺垫" * 130 + "结尾改这里"
+    docx_section_create.invoke(
+        {"path": "body/现文长段", "title": "现文长段", "paragraphs": tail + "原文。"}
+    )
+    r3 = docx_section_revise.invoke(
+        {"path": "body/现文长段",
+         "edits": _json.dumps([{"para": 2, "action": "replace", "find": "原文", "text": "改后"}],
+                              ensure_ascii=False)}
+    )
+    assert "结尾改这里改后。" in r3  # 尾部改动点未被截断裁掉

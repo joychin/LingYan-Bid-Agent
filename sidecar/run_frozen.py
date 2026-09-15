@@ -22,7 +22,13 @@ def _smoke() -> int:
         except Exception as e:  # noqa: BLE001 - 冒烟要把每项失败原因都带出来
             checks[name] = f"FAIL: {type(e).__name__}: {e}"
 
-    check("pymupdf", lambda: __import__("pymupdf").__version__)
+    def _pdfium() -> str:
+        import pypdfium2
+
+        return f"{pypdfium2.V_PYPDFIUM2} (pdfium {pypdfium2.V_LIBPDFIUM})"
+
+    # import 即触发 pdfium 原生库加载——冻结产物漏收 dylib/so 时此项当场红
+    check("pypdfium2(native)", _pdfium)
 
     def _jieba() -> str:
         import jieba

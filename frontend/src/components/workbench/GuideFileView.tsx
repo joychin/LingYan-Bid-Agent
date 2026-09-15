@@ -46,7 +46,7 @@ import { useTableFile } from './useTableFile'
 const NON_PROSE_DELIVERY = ['模板或附件填充', '目录容器']
 
 /** 源文件模式兜底说明（说明当前是 Markdown 源码，不是两栏视图）。 */
-const SOURCE_NOTICE = '「节｜模式｜依据｜素材｜缺口/备注」'
+const SOURCE_NOTICE = '「节｜模式｜依据｜素材｜图示｜缺口/备注」'
 
 /** 按 key 找树节点（选中态复原与详情取数共用）。 */
 function findNode(nodes: GuideTreeNode[], key: string | null): GuideTreeNode | null {
@@ -308,7 +308,7 @@ export function GuideFileView({
 
   const addLeafRow = (l: DirLeaf) => {
     const mode = NON_PROSE_DELIVERY.includes(l.delivery) ? '—' : '推理撰写'
-    file.applyRows([...file.rows, [leafKey(l.vol, l.title, dir?.multi ?? false), mode, '—', '—', '—']])
+    file.applyRows([...file.rows, [leafKey(l.vol, l.title, dir?.multi ?? false), mode, '—', '—', '—', '—']])
   }
 
   const usedKeys = useMemo(() => new Set(file.rows.map((r) => r[0] ?? '')), [file.rows])

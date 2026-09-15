@@ -402,6 +402,31 @@ export async function uploadFile(file: File, taskId: string): Promise<UploadResu
   )
 }
 
+/** webview 光栅化（2026-09-14 批二；批三加 flow）：前端渲染服务拉取待渲染请求
+ *  （3s 轮询）。载荷分流：html=界面原型（沙箱 iframe+html2canvas）、
+ *  flow=流程图（程序从 JSON 拓扑翻译的 mermaid 文本，应用上下文渲染）。 */
+export interface PendingRender {
+  request_id: string
+  kind: 'html' | 'flow'
+  html?: string
+  mermaid?: string
+}
+
+export function fetchPendingRenders(): Promise<{ requests: PendingRender[] }> {
+  return request('/render/pending')
+}
+
+/** 渲染回执：png=null 为失败回执（sidecar 立即降级，不等超时）。404（过期/已回执）静默。 */
+export async function postRenderFigure(requestId: string, png: Blob | null): Promise<void> {
+  const form = new FormData()
+  form.append('request_id', requestId)
+  if (png) form.append('file', png, 'figure.png')
+  const res = await rawFetch('/render/figure', { method: 'POST', body: form }).catch((e: Error) => e)
+  if (res instanceof Error) throw res
+  // 404=请求已过期/已回执（迟到回执的正常分支），不当错误抛
+  if (!res.ok && res.status !== 404) throw new Error(`渲染回执失败：${res.status}`)
+}
+
 /** 任务级文件区（§16）：列出指定任务 files/ 下的上传文件。 */
 export function listFiles(taskId: string): Promise<{ files: FileItem[] }> {
   return request(`/files?task_id=${encodeURIComponent(taskId)}`)

@@ -204,8 +204,9 @@ def _make_docx_with_images(tmp_path, n_images=3) -> bytes:
     """构造带嵌入图片的 docx（python-docx add_picture 真实图片）。"""
     import io
 
-    import fitz
     from docx import Document
+
+    from tests import pdfgen
 
     doc = Document()
     doc.add_heading("产品介绍", 0)
@@ -215,10 +216,9 @@ def _make_docx_with_images(tmp_path, n_images=3) -> bytes:
                           "覆盖架构分层、部署形态与运维保障等多个维度的内容补充。")
     for i in range(n_images):
         # 每张图不同（docx 对相同图片去重成一个 media part）
-        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 600 + i, 400))
-        pix.set_rect(pix.irect, (200 + i * 10, 120, 40))
+        png = pdfgen.solid_png(600 + i, 400, (200 + i * 10, 120, 40))
         doc.add_paragraph(f"图{i + 1}说明：系统架构与部署拓扑的示意说明文本。")
-        doc.add_picture(io.BytesIO(pix.tobytes("png")))
+        doc.add_picture(io.BytesIO(png))
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
@@ -258,13 +258,12 @@ def test_small_images_filtered(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     import io
 
-    import fitz
     from docx import Document
 
+    from tests import pdfgen
+
     doc = Document()
-    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 80, 40))  # 80×40 小图
-    pix.set_rect(pix.irect, (10, 10, 10))
-    doc.add_picture(io.BytesIO(pix.tobytes("png")))
+    doc.add_picture(io.BytesIO(pdfgen.solid_png(80, 40, (10, 10, 10))))  # 80×40 小图
     out = io.BytesIO()
     doc.save(out)
     src = store.kb_files_dir() / "装饰.docx"
@@ -347,41 +346,34 @@ def test_pdf_renders_whole_page_not_embedded_image(tmp_path, monkeypatch):
     构造一张覆盖整页的底图（原生仅 100×100）+ 叠在上面的文字层——旧逐图抽取会
     因短边 <200 被滤掉（0 张）；新路径渲染整页，尺寸=页面 150 DPI，文字在画里。
     """
-    import fitz
+    from PIL import Image
 
     from app.knowledge import images as images_mod
+    from tests import pdfgen
 
     _setup(tmp_path, monkeypatch)
-    doc = fitz.open()
-    page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
-    base = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 100, 100))  # 小底图铺满整页
-    page.insert_image(page.rect, stream=base.tobytes("png"))
-    page.insert_text((60, 300), "ISO9001 CERTIFICATE 0350324Q30696R1M", fontsize=14)
-    src = store.kb_files_dir() / "iso证书.pdf"
-    doc.save(str(src))
-    doc.close()
+    p = pdfgen.Pdf(store.kb_files_dir() / "iso证书.pdf", width=_PAGE_W, height=_PAGE_H)
+    p.image(0, 0, _PAGE_W, _PAGE_H, pdfgen.solid_png(100, 100, (255, 255, 255)))  # 小底图铺满整页
+    p.text(60, 300, "ISO9001 CERTIFICATE 0350324Q30696R1M", size=14)
+    src = p.save()
 
     written, skipped = images_mod.extract_images(src, "iso证书.pdf")
     assert written == 1 and skipped == 0
     img = store.kb_images_dir("iso证书.pdf") / "img_001.png"
-    out = fitz.Pixmap(str(img))
-    assert abs(out.width - _expected_px(_PAGE_W)) <= 2
-    assert abs(out.height - _expected_px(_PAGE_H)) <= 2
+    with Image.open(img) as out:
+        assert abs(out.width - _expected_px(_PAGE_W)) <= 2
+        assert abs(out.height - _expected_px(_PAGE_H)) <= 2
 
 
 def test_pdf_vector_only_page_still_renders(tmp_path, monkeypatch):
     """纯矢量/文字页（无任何嵌入图）——旧路径 0 张，渲染路径照出 1 张。"""
-    import fitz
-
     from app.knowledge import images as images_mod
+    from tests import pdfgen
 
     _setup(tmp_path, monkeypatch)
-    doc = fitz.open()
-    page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
-    page.insert_text((40, 80), "VECTOR ONLY CERTIFICATE", fontsize=18)
-    src = store.kb_files_dir() / "vector.pdf"
-    doc.save(str(src))
-    doc.close()
+    p = pdfgen.Pdf(store.kb_files_dir() / "vector.pdf", width=_PAGE_W, height=_PAGE_H)
+    p.text(40, 80, "VECTOR ONLY CERTIFICATE", size=18)
+    src = p.save()
 
     written, skipped = images_mod.extract_images(src, "vector.pdf")
     assert written == 1 and skipped == 0
@@ -390,20 +382,16 @@ def test_pdf_vector_only_page_still_renders(tmp_path, monkeypatch):
 
 def test_pdf_blank_page_skipped_and_page_numbering(tmp_path, monkeypatch):
     """空白页跳过、文件名即页码（编号留空洞）——模型据页锚点可推回页图。"""
-    import fitz
-
     from app.knowledge import images as images_mod
+    from tests import pdfgen
 
     _setup(tmp_path, monkeypatch)
-    doc = fitz.open()
-    p1 = doc.new_page(width=_PAGE_W, height=_PAGE_H)
-    p1.insert_text((40, 80), "PAGE 1", fontsize=18)
-    doc.new_page(width=_PAGE_W, height=_PAGE_H)  # 第 2 页空白
-    p3 = doc.new_page(width=_PAGE_W, height=_PAGE_H)
-    p3.insert_text((40, 80), "PAGE 3", fontsize=18)
-    src = store.kb_files_dir() / "空白页.pdf"
-    doc.save(str(src))
-    doc.close()
+    p = pdfgen.Pdf(store.kb_files_dir() / "空白页.pdf", width=_PAGE_W, height=_PAGE_H)
+    p.text(40, 80, "PAGE 1", size=18)
+    p.show_page()
+    p.show_page()  # 第 2 页空白（末尾未关闭页 save 时丢弃，须显式翻页）
+    p.text(40, 80, "PAGE 3", size=18)
+    src = p.save()
 
     written, skipped = images_mod.extract_images(src, "空白页.pdf")
     assert written == 2 and skipped == 1
@@ -413,18 +401,15 @@ def test_pdf_blank_page_skipped_and_page_numbering(tmp_path, monkeypatch):
 
 def test_pdf_render_respects_max_images(tmp_path, monkeypatch):
     """张数上限：写满即停，长文档不白渲染后续页。"""
-    import fitz
-
     from app.knowledge import images as images_mod
+    from tests import pdfgen
 
     _setup(tmp_path, monkeypatch)
-    doc = fitz.open()
+    p = pdfgen.Pdf(store.kb_files_dir() / "四页.pdf", width=_PAGE_W, height=_PAGE_H)
     for i in range(4):
-        page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
-        page.insert_text((40, 80), f"PAGE {i + 1}", fontsize=18)
-    src = store.kb_files_dir() / "四页.pdf"
-    doc.save(str(src))
-    doc.close()
+        p.text(40, 80, f"PAGE {i + 1}", size=18)
+        p.show_page()
+    src = p.save()
 
     monkeypatch.setattr(images_mod, "_MAX_IMAGES", 2)
     written, _ = images_mod.extract_images(src, "四页.pdf")

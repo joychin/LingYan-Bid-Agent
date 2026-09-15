@@ -7,6 +7,8 @@ from .check_residue import check_name_residue
 from .docx_ops import (
     docx_assemble_volume,
     docx_comment_add,
+    docx_diagram_insert,
+    docx_html_figure,
     docx_image_insert,
     docx_material_inject,
     docx_section_create,
@@ -45,6 +47,8 @@ TOOLS = [
     docx_source_inject,
     docx_image_insert,
     docx_comment_add,
+    docx_diagram_insert,
+    docx_html_figure,
     docx_section_revise,
     docx_assemble_volume,
 ]

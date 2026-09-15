@@ -57,6 +57,17 @@ _TOOL_NAME_RE = re.compile(r"\b(?:docx_\w+|check_name_residue|parse_document|sea
 # 正常措辞不在此列，「上述」限定紧跟【缺： 之后的首字符语境
 _NOTE_ANAPHORA_RE = re.compile(r"【缺[：:]\s*(?:上述|以上|前述|前面|前面所|以上所)")
 
+# md 残字（2026-09-14 表格通道批）：docx 终稿文本里的 markdown 语法残字——docx
+# 通道不解析任何标记，模型习惯性写 ##/** 即字面落格随交付稿印出。判不过级（与
+# 内联占位同级：都是会印出去的垃圾）；反引号降提示（技术正文偶见合法用途）；
+# 有序编号「1. 」是中文正文合法形态不扫（误报不可接受）；md 旧形态节不扫
+#（旧管线 md 表是合法用法）。
+_MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
+_MD_TABLE_ROW_RE = re.compile(r"^\|.*\|\s*$")
+# 指引「图示」列类型词表（2026-09-14 批；原型=批二、流程=批三 mermaid 消费方）：剩 线框
+_FIGURE_KINDS = ("表", "分层", "辐射", "甘特", "原型", "流程")
+_FIGURE_ITEM_RE = re.compile(r"^(表|分层|辐射|甘特|原型|流程)\s*[:：]\s*(\S.*)$")
+
 
 def _normalize(text: str) -> str:
     """块切片与节文本的统一归一化：在剥注释/空白行之外，再剥两侧形态差符号——
@@ -217,6 +228,17 @@ def _validate_guide(lines: list[str], task_id: str) -> tuple[list[str], list[str
         if not dep and content and key in prose_keys:
             warnings.append(f"写作指引.md:{lineno} 「{key}」依据列为空——纯过渡章允许；应写节须挂 REQ/SCORE/MAND ID")
 
+        # 图示列（2026-09-14 表格通道批）：记法「类型:主题」顿号分隔，类型词表
+        # 与 docx_diagram_insert 的 kind 对齐——计划先行，validate 节级对账看这里
+        fig = cells[idx["图示"]].strip() if idx.get("图示", 5) < len(cells) else ""
+        if fig and fig != "—":
+            for item in (x.strip() for x in re.split(r"[、;；,，]", fig)):
+                if item and not _FIGURE_ITEM_RE.match(item):
+                    warnings.append(
+                        f"写作指引.md:{lineno} 「{key}」图示项「{item[:30]}」记法须为"
+                        f"「类型:主题」（类型∈{'/'.join(_FIGURE_KINDS)}；无图示写「—」）"
+                    )
+
         # 缺口/备注列读者分离（2026-09-13，两条均提示级——前端已能把【缺】摘出来
         # 独立展示，混写只是观感与可读性问题，不是门禁；存量指引照常可用）
         note = cells[idx["缺口/备注"]].strip() if idx.get("缺口/备注", 4) < len(cells) else ""
@@ -313,6 +335,32 @@ def _validate_section(
             else:
                 notes.append(f"{loc}：{ln.strip()[:50]}{'…' if len(ln.strip()) > 50 else ''}")
 
+    # md 残字（2026-09-14 批，仅 docx 节）：建节/修订通道不解析任何标记，模型
+    # 习惯性写的 markdown 语法会字面落格——##/**/整行竖线表判不过（印进交付稿
+    # 的垃圾），反引号降提示；每行取首命中，不叠报
+    if docx:
+        for i, ln in enumerate(lines, 1):
+            loc = labels[i - 1] if labels and i <= len(labels) else f"{pos}{i}"
+            if _MD_HEADING_RE.match(ln):
+                issues.append(
+                    f"{loc}：行首 markdown 标题残字「{ln.strip()[:24]}」——docx 通道不解析 #，"
+                    "层级用 Heading 样式（建节后 docx_section_revise 的 insert_after 带 style）"
+                )
+            elif "**" in ln:
+                issues.append(
+                    f"{loc}：正文含「**」加粗残字——docx 通道不解析 markdown，星号会原样"
+                    "印进交付稿；删除星号用普通文本"
+                )
+            elif _MD_TABLE_ROW_RE.match(ln.strip()):
+                issues.append(
+                    f"{loc}：整行为竖线拼的 markdown 表格残字——表格用建节 body 的 table 块"
+                    "或 docx_diagram_insert 生成，不在正文写竖线表"
+                )
+            elif "`" in ln:
+                warnings.append(
+                    f"{loc}：正文含反引号——确认不是 markdown 代码残字（代码类内容用普通文字描述）"
+                )
+
     if block_ids is None:
         warnings.append("未传 block_ids——旧名残留与素材使用率检查跳过（使用计划里选了哪些块就传哪些）")
         return issues, warnings, notes
@@ -340,6 +388,44 @@ def _validate_section(
                 f"（素材修订=先把块贴进底稿再改写适配，不是看着参考另写一篇）"
             )
     return issues, warnings, notes
+
+
+def _figure_plan_reconcile(doc, p: Path, body_root: Path) -> list[str]:
+    """图示对账（提示级，2026-09-14 批）：指引「图示」列计划 vs 节内实收表格数。
+    「不进计划的能力=不存在」的对账面——计划了没产出=能力闲置、计划外产出=
+    注水嫌疑；计划外只对推理撰写节提示（素材修订/格式跟随的表格来自注入与拷
+    原件，不背计划的账）；节名与指引行对不上（文件名清洗差异）静默跳过。"""
+    guide = body_root / body_contract.GUIDE_NAME
+    if not guide.is_file():
+        return []
+    try:
+        rel = p.relative_to(body_root)
+    except ValueError:
+        return []
+    key = "/".join((*rel.parts[:-1], p.stem))  # 多册「册名/标题」同 guide 记法
+    rows = _parse_guide_rows(guide.read_text(encoding="utf-8", errors="replace").splitlines())
+    row = next((r for r in rows if r[1][r[2]["节"]].strip() == key), None)
+    if row is None:
+        return []
+    _, cells, idx = row
+    fig = cells[idx["图示"]].strip() if idx.get("图示", 5) < len(cells) else ""
+    mode = cells[idx["模式"]].strip() if idx.get("模式", 1) < len(cells) else ""
+    plan = [x.strip() for x in re.split(r"[、;；,，]", fig) if x.strip() and x.strip() != "—"]
+    # 实收=表格数+图片数（原型经 docx_html_figure 落图、证书等贴图也计图——
+    # 计划外只对推理撰写节提示，素材/格式节的表与图来自注入拷贝不背计划的账）
+    actual = len(doc.tables) + len(doc.element.body.findall(".//" + qn("a:blip")))
+    out: list[str] = []
+    if plan and actual < len(plan):
+        out.append(
+            f"〔图示〕指引计划 {len(plan)} 项、节内表格/图片 {actual} 项——未产出项收尾前补齐或改指引："
+            + "；".join(plan)
+        )
+    if not plan and actual and "推理撰写" in mode:
+        out.append(
+            f"〔图示〕指引未计划图示、节内有 {actual} 项表格/图片——推理撰写节的补进指引"
+            "图示列（计划先行），或在收尾汇报说明理由"
+        )
+    return out
 
 
 def _section_dup_warnings(body_dir: Path, sections: list[Path], finals: list[str]) -> list[str]:
@@ -519,6 +605,8 @@ def validate_body(section: str, block_ids: list[str] | None = None) -> str:
             issues, warnings, notes = _validate_section(
                 [t for _, t in labeled], block_ids, labels=[lbl for lbl, _ in labeled], docx=True
             )
+            # 图示对账（2026-09-14 批，提示级）：指引图示列计划 vs 节内表格数
+            warnings.extend(_figure_plan_reconcile(doc, p, wroot / "body"))
             # 待办批注清点（docx_comment_add 落的待办——收尾汇报逐条点名，不是门禁）
             notes.extend(
                 f"{loc}〔批注〕：{t[:50]}{'…' if len(t) > 50 else ''}"

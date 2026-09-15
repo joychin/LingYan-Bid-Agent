@@ -26,7 +26,9 @@ export interface TableSpec {
 
 export const GUIDE_TABLE: TableSpec = {
   required: ['节', '模式'],
-  columns: ['节', '模式', '依据', '素材', '缺口/备注'],
+  // 「图示」列（2026-09-14 表格通道批）：计划产出的表格/图示清单——旧指引无此
+  // 列名时按 fallbackIdx 投影不出（取空串），不破坏存量
+  columns: ['节', '模式', '依据', '素材', '图示', '缺口/备注'],
   fallbackIdx: { 依据: 2, 素材: 3, '缺口/备注': 4 },
 }
 

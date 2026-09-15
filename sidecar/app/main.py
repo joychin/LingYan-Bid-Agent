@@ -29,6 +29,7 @@ from .api import (
     files,
     knowledge,
     materials,
+    render,
     runs,
     sse,
     tasks,
@@ -238,6 +239,7 @@ app.include_router(knowledge.router, prefix="/api")
 app.include_router(materials.router, prefix="/api")
 app.include_router(templates.router, prefix="/api")
 app.include_router(workbench.router, prefix="/api")
+app.include_router(render.router, prefix="/api")
 
 
 def main() -> None:

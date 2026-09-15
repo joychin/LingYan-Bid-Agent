@@ -317,8 +317,8 @@ def check_pipeline_state() -> str:
                     )
                 # 均衡分波参考（零结论的机械调度参考）：只覆盖**待写**节——重写范围
                 # 由用户裁决后按 SKILL 同口径自建；指引缺行的待写需正文叶子按权重 1
-                # 兜底补入并注明（validate_body 另有缺行警告）；物理附件类线下准备
-                # 不派子代理故不参与
+                # 兜底补入并注明（validate_body 另有缺行警告）；物理附件类（建壳/
+                # 贴图，2026-09-14 起）与目录页节点由主线程处理、不派子代理故不参与
                 if guide_ok:
                     pending: dict[tuple[str, str], tuple[str, int]] = {}
                     fallback: list[str] = []

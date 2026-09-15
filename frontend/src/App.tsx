@@ -18,12 +18,16 @@ import { useConversations, useCreateConversation } from '@/hooks/useConversation
 import { useCreateTask, useTasks, taskOfConversation } from '@/hooks/useTasks'
 import { useToast } from '@/context/Toast'
 import type { DeliverableSignal } from '@/api/sse'
+import { useHtmlRenderService } from '@/lib/htmlRenderer'
 
 const LS_SIDEBAR = 'tender-agent.sidebar-collapsed'
 const LS_ARTIFACTS = 'tender-agent.artifacts-collapsed'
 const LS_THEME = 'tender-agent.theme'
 
 export default function App() {
+  // webview 光栅化服务（2026-09-14 批二）：docx_html_figure 的渲染引擎常驻——
+  // 3s 轮询待渲染请求，隐藏 iframe 出 PNG 回执；空列表是常态，成本可忽略
+  useHtmlRenderService()
   const { data: conversations = [], isLoading: conversationsLoading } = useConversations()
   const { data: tasks = [], isLoading: tasksLoading } = useTasks()
   const createConv = useCreateConversation()

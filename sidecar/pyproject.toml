@@ -10,7 +10,6 @@ dependencies = [
     "langgraph",
     "langgraph-checkpoint-sqlite",
     "python-docx",
-    "pymupdf>=1.24",
     "fastapi",
     "uvicorn",
     "pydantic",
@@ -24,6 +23,8 @@ dependencies = [
     # 原先靠 langchain-openai 的传递依赖裸用，显式声明转正（版本=uv.lock 既有解析）
     "openai==3.3.1",
     "tenacity>=9",
+    "pypdfium2>=4.30,<5",
+    "pillow>=12.3.0",
 ]
 
 # 国内网络必须（pypi.org 直连会 TLS 超时）
@@ -37,6 +38,7 @@ dev = [
     "ruff",
     # pydantic 模型 → TS interface 生成（CLI 命令名 pydantic2ts；契约单一事实源用）
     "pydantic-to-typescript",
+    "reportlab>=5.0.1",
 ]
 
 # cryptography 是传递依赖（deepagents → langchain-google-genai → google-auth）。

@@ -25,7 +25,7 @@
 
 **出包前必做**：`./check.sh`（sidecar 测试 + 前端 lint/tsc/build + Rust check/clippy 全绿）。
 侧车产物没有「过期守卫」——`binaries/` 里的旧产物不会自动失效，**每次出包前重跑 ①**，
-冒烟门（10 项：pymupdf/jieba/FTS5/trafilatura/**python-docx/版式模板**/openai/agent 栈/
+冒烟门（10 项：pypdfium2(native)/jieba/FTS5/trafilatura/**python-docx/版式模板**/openai/agent 栈/
 server 栈/app.main）会拦住「收集漏了但只静默退化」的问题（如版式模板缺失回落英文默认版式）。
 
 ## 1. 各平台一次性环境

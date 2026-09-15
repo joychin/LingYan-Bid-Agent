@@ -1,9 +1,13 @@
-"""pdf → markdown（PyMuPDF；结构识别链：书签 → 印刷目录页 → 中文编号，页眉页脚剔除，页码锚点）。
+"""pdf → markdown（pdfium 引擎；结构识别链：书签 → 印刷目录页 → 中文编号，页眉页脚剔除，页码锚点）。
 
-自 tools/parse_document.py 迁入，文本管线逻辑不变；知识库场景新增三个原子能力：
-- meta.scanned_pages：每页产出文本量分类（混合/扫描 PDF 的视觉路由依据）
-- render_page_png：单页渲染为 png（喂视觉模型）
-- insert_page_text：把视觉转写插回对应页码锚点后（混合 PDF 拼接）
+**PyMuPDF 替换批（2026-09-14 完成）**：运行时依赖已从 PyMuPDF（AGPL）整体迁至
+pypdfium2（Apache-2.0 / PDFium BSD-3）——商用许可自由。本文件持有**引擎无关**的
+四级结构识别链与扫描页/表格/锚点语义；引擎原语见 pdf_pdfium.py，pdfium 底层收口
+在 pdfium_kit.py（全局锁纪律：PDFium 官方禁多线程）。旧 mupdf 引擎已拆除（迁移
+期差分门禁：档位/结构/渲染/性能五级对比通过后切换；已知差异=无框表格不识别
+〔mupdf stream 策略，内容以文本保留〕与中西文空格合成等风格差异）。
+对外 surface 不变：convert / render_page_png / insert_page_text，ParseResult.info
+键 conversion/pages/tables/scanned_pages。
 
 结构识别不使用字号（2026-08-28 实测证伪：政采 PDF 由 Word 导出，章标题字号常与
 正文相同甚至更小，而封面全是巨字——「按字号判级」抓到的是封面碎片、漏掉的是真实
@@ -23,11 +27,23 @@ import math
 import re
 from collections import Counter
 from pathlib import Path
-
-import pymupdf
+from typing import NamedTuple
 
 from . import ParseResult, register
 from .numbering import LONE_PREFIX_RE, numbered_heading_level
+
+
+# 引擎无关的文本块/表格形状：bbox 一律左上原点 (x0, y0, x1, y1)；lines 为逐行文本
+# （行内 span 已拼接，含空行——过滤在消费点做，与旧 dict 形状语义一致）
+class Block(NamedTuple):
+    bbox: tuple[float, float, float, float]
+    lines: list[str]
+
+
+class Table(NamedTuple):
+    bbox: tuple[float, float, float, float]
+    rows: list[list[str]]
+
 
 _HF_BAND = 0.08  # 页眉/页脚条带：页高上下各 8%
 _HF_REPEAT_RATIO = 0.25  # 条带文本跨页重复占比阈值（≥ max(3, 页数×比例) 判定页眉页脚）
@@ -75,31 +91,23 @@ def _norm_text(s: str) -> str:
     return re.sub(r"\s+", "", s)
 
 
-def _block_text(block: dict) -> str:
-    parts = []
-    for line in block.get("lines", []):
-        for span in line.get("spans", []):
-            t = span.get("text", "") or ""
-            if t:
-                parts.append(t)
-    return "".join(parts)
+def _block_text(block: Block) -> str:
+    return "".join(block.lines)
 
 
-def _collect_repeated_bands(doc: pymupdf.Document) -> set[str]:
+def _collect_repeated_bands(eng, doc) -> set[str]:
     """跨页重复的页眉/页脚文本（顶部/底部条带内，归一化后出现页数占比达标）。"""
     hits: Counter[str] = Counter()
     npages = 0
-    for page in doc:
+    for _pno, page in eng.iter_pages(doc):
         npages += 1
-        h = page.rect.height
+        h = eng.page_height(page)
         try:
-            blocks = page.get_text("dict").get("blocks", [])
+            blocks = eng.text_blocks(page)
         except Exception:
             continue
         for b in blocks:
-            if b.get("type") != 0:
-                continue
-            if b["bbox"][3] <= h * _HF_BAND or b["bbox"][1] >= h * (1 - _HF_BAND):
+            if b.bbox[3] <= h * _HF_BAND or b.bbox[1] >= h * (1 - _HF_BAND):
                 text = _norm_text(_block_text(b))
                 if text:
                     hits[text] += 1
@@ -109,10 +117,9 @@ def _collect_repeated_bands(doc: pymupdf.Document) -> set[str]:
     return {t for t, c in hits.items() if c >= threshold}
 
 
-def _is_hf_block(block: dict, page: pymupdf.Page, drop: set[str]) -> bool:
+def _is_hf_block(block: Block, page_height: float, drop: set[str]) -> bool:
     """页眉/页脚块判定：条带内 + 跨页重复 或 纯页码形态。"""
-    h = page.rect.height
-    if not (block["bbox"][3] <= h * _HF_BAND or block["bbox"][1] >= h * (1 - _HF_BAND)):
+    if not (block.bbox[3] <= page_height * _HF_BAND or block.bbox[1] >= page_height * (1 - _HF_BAND)):
         return False
     text = _norm_text(_block_text(block))
     if not text:
@@ -120,12 +127,12 @@ def _is_hf_block(block: dict, page: pymupdf.Page, drop: set[str]) -> bool:
     return text in drop or _PAGE_NUM_RE.fullmatch(text) is not None
 
 
-def _toc_by_page(doc: pymupdf.Document) -> dict[int, list[tuple[int, str]]]:
+def _toc_by_page(eng, doc) -> dict[int, list[tuple[int, str]]]:
     """有意义书签按目标页分组：{page: [(level, title), ...]}；不足 3 条返回空。
 
     匹配只在书签自己的目标页内进行——目录页列出的标题不会误命中。"""
     try:
-        toc = doc.get_toc(simple=True)
+        toc = eng.toc(doc)
     except Exception:
         return {}
     entries = [
@@ -153,50 +160,34 @@ def _match_toc(block_norm: str, titles: list[tuple[int, str]], consumed: set[str
     return None
 
 
-def _block_to_md(block: dict) -> str:
+def _block_to_md(block: Block) -> str:
     """把一个文本块转为 markdown（不判标题——结构识别全部后置于文本层）。"""
-    lines = block.get("lines", [])
-    if not lines:
+    if not any(ln.strip() for ln in block.lines):
         return ""
-    line_texts: list[str] = []
-    for line in lines:
-        parts = []
-        for span in line.get("spans", []):
-            t = span.get("text", "") or ""
-            if t:
-                parts.append(t)
-        line_texts.append("".join(parts))
-    if not any(lt.strip() for lt in line_texts):
-        return ""
-    return "\n".join(lt for lt in line_texts if lt.strip())
+    return "\n".join(ln for ln in block.lines if ln.strip())
 
 
 def _page_to_markdown(
-    page: pymupdf.Page,
+    eng,
+    page,
     drop: set[str],
     toc_titles: list[tuple[int, str]],
 ) -> tuple[list[str], int, int]:
     """单页文本块 + 表格按阅读顺序输出。返回 (行列表, 表格数, 书签命中数)。
 
     页眉/页脚块剔除；书签模式下标题由书签命中产生，未命中的书签目标页标题也保持
-    正文——书签可信度靠整卷命中率把关（见 convert）。"""
-    blocks = page.get_text("dict").get("blocks", [])
+    正文——书签可信度靠整卷命中率把关（见 _convert_with）。"""
     blocks = [
         b
-        for b in blocks
-        if b.get("type") == 0
-        and any(s.get("text", "").strip() for line in b.get("lines", []) for s in line.get("spans", []))
-        and not _is_hf_block(b, page, drop)
+        for b in eng.text_blocks(page)
+        if any(ln.strip() for ln in b.lines) and not _is_hf_block(b, eng.page_height(page), drop)
     ]
-    blocks.sort(key=lambda b: (round(b["bbox"][1], 1), b["bbox"][0]))
-    try:
-        tables = page.find_tables().tables
-    except Exception:
-        tables = []
+    blocks.sort(key=lambda b: (round(b.bbox[1], 1), b.bbox[0]))
+    tables = eng.find_tables(page)
     table_idx_of_block: dict[int, int] = {}
     for i, b in enumerate(blocks):
         for ti, t in enumerate(tables):
-            if _bboxes_overlap(b["bbox"], t.bbox):
+            if _bboxes_overlap(b.bbox, t.bbox):
                 table_idx_of_block[i] = ti
                 break
     out: list[str] = []
@@ -208,7 +199,7 @@ def _page_to_markdown(
         if ti is not None:
             if ti not in emitted_tables:
                 emitted_tables.add(ti)
-                md = _pipe_table(tables[ti].extract())
+                md = _pipe_table(tables[ti].rows)
                 if md:
                     out.append(md)
                     out.append("")
@@ -242,7 +233,7 @@ def _clean_toc_title(raw: str) -> str:
     return text.strip()
 
 
-def _link_toc_entries(doc: pymupdf.Document) -> tuple[list[tuple[str, int]], set[int]]:
+def _link_toc_entries(eng, doc) -> tuple[list[tuple[str, int]], set[int]]:
     """从内链密集页提取目录条目：([(标题, 物理目标页 1 起)], 目录页集合)。
 
     目录页判定：单页 GOTO 链接 ≥ _LINK_TOC_MIN。条目标题取链接矩形覆盖的文本
@@ -251,27 +242,24 @@ def _link_toc_entries(doc: pymupdf.Document) -> tuple[list[tuple[str, int]], set
     （无链接、页面不符）天然不会误配。"""
     entries: list[tuple[str, int]] = []
     toc_pages: set[int] = set()
-    for pno, page in enumerate(doc, 1):
+    for pno, page in eng.iter_pages(doc):
         try:
-            links = [lk for lk in page.get_links() if lk.get("kind") == pymupdf.LINK_GOTO]
+            links = eng.goto_links(doc, page)
         except Exception:
             continue
         if len(links) < _LINK_TOC_MIN:
             continue
         toc_pages.add(pno)
         items: list[tuple[float, str, int]] = []
-        for lk in links:
-            target = (lk.get("page") if isinstance(lk.get("page"), int) else -1) + 1
-            if target < 1:
-                continue
+        for rect, target in links:
             try:
-                raw = page.get_textbox(lk["from"])
+                raw = eng.text_in_rect(page, rect)
             except Exception:
                 continue
             title = _clean_toc_title(raw)
             # 纯数字/符号「标题」= 链接矩形盖住页码列的渗漏，不是条目
             if len(_norm_text(title)) >= 3 and re.search(r"[\u4e00-\u9fffA-Za-z]", title):
-                items.append((lk["from"].y0, title, target))
+                items.append((rect[1], title, target))
         items.sort(key=lambda t: t[0])
         entries.extend((t, pg) for _, t, pg in items)
     return entries, toc_pages
@@ -315,16 +303,16 @@ def _locate_link_toc(
 # ---- 印刷目录页解析与标题标记（后置于最终文本行）----
 
 
-def _printed_toc_entries(doc: pymupdf.Document) -> dict[int, list[str]]:
+def _printed_toc_entries(eng, doc) -> dict[int, list[str]]:
     """扫描各页，识别「印刷目录页」并抽取条目标题：{页码: [标题...]}。
 
     目录页判定：有「目录/目次/CONTENTS」抬头且 ≥3 条目，或无抬头但 ≥5 条目
     （抬头本身常被拆行/拆字，条目数是更稳的信号）。条目 = 标题 + 引导点线 +
     可选页码；孤立章节号前缀行（「第一章」单独成行）与下一条目拼接。"""
     result: dict[int, list[str]] = {}
-    for pno, page in enumerate(doc, 1):
+    for pno, page in eng.iter_pages(doc):
         try:
-            raw_lines = [ln.strip() for ln in page.get_text().splitlines() if ln.strip()]
+            raw_lines = [ln.strip() for ln in eng.page_text(page).splitlines() if ln.strip()]
         except Exception:
             continue
         entries: list[str] = []
@@ -434,7 +422,7 @@ def _enumeration_context(lines: list[str], i: int, entry_norms: set[str]) -> boo
         if not nxt:
             continue
         nn = _norm_text(nxt)
-        return nn in entry_norms or bool(LONE_PREFIX_RE.fullmatch(nxt))
+        return nn in entry_norms or bool(LONE_PREFIX_RE.fullmatch(nn))
     return False
 
 
@@ -504,17 +492,15 @@ def _apply_numbered(lines: list[str], skip_lines: set[int]) -> dict[int, tuple[i
     return marks
 
 
-@register([".pdf"])
-def convert(path: Path) -> ParseResult:
+def _convert_with(eng, path: Path) -> ParseResult:
     """PDF → (markdown, 信息)。每页前插页码锚点 <!-- p:N -->；结构识别链
     书签 → 印刷目录页 → 中文编号 → 无结构（详见模块 docstring）。
 
     info.scanned_pages 记录产出文本过少的页码（知识库视觉路由依据；纯文本 PDF 为空）。"""
-    doc = pymupdf.open(str(path))
-    try:
-        pages = doc.page_count
-        drop = _collect_repeated_bands(doc)
-        toc = _toc_by_page(doc)
+    with eng.open(path) as doc:
+        pages = eng.n_pages(doc)
+        drop = _collect_repeated_bands(eng, doc)
+        toc = _toc_by_page(eng, doc)
         total_toc = sum(len(v) for v in toc.values())
 
         def render(use_toc: bool) -> tuple[list[str], int, int, list[int]]:
@@ -522,10 +508,10 @@ def convert(path: Path) -> ParseResult:
             tables = 0
             matched = 0
             scanned_pages: list[int] = []
-            for pno, page in enumerate(doc, 1):
+            for pno, page in eng.iter_pages(doc):
                 out.append(f"<!-- p:{pno} -->")
                 md, n_tables, n_matched = _page_to_markdown(
-                    page, drop, toc.get(pno, []) if use_toc else []
+                    eng, page, drop, toc.get(pno, []) if use_toc else []
                 )
                 # 该页实际产出字符（剔除锚点与空白）——扫描页判定
                 page_chars = len("".join(x.strip() for x in md))
@@ -546,12 +532,12 @@ def convert(path: Path) -> ParseResult:
             # 后置于最终文本行的结构识别：超链接目录 → 印刷目录页 → 中文编号
             lines = [ln for el in out for ln in el.splitlines()]
             ranges = _page_line_ranges(lines)
-            link_entries, link_toc_pages = _link_toc_entries(doc)
+            link_entries, link_toc_pages = _link_toc_entries(eng, doc)
             marks = _locate_link_toc(lines, link_entries, ranges, link_toc_pages)
             if len(marks) >= max(3, math.ceil(len(link_entries) * 0.5)):
                 conversion = "pdf-link-toc"
             else:
-                printed = _printed_toc_entries(doc)
+                printed = _printed_toc_entries(eng, doc)
                 toc_lines: set[int] = set()
                 for pno in link_toc_pages | set(printed):
                     if pno in ranges:
@@ -581,21 +567,20 @@ def convert(path: Path) -> ParseResult:
                 "scanned_pages": scanned_pages,
             },
         )
-    finally:
-        doc.close()
+
+
+@register([".pdf"])
+def convert(path: Path) -> ParseResult:
+    from . import pdf_pdfium
+
+    return _convert_with(pdf_pdfium.ENGINE, path)
 
 
 def render_page_png(path: Path, page_no: int, out_path: Path, dpi: int = 150) -> Path:
     """渲染单页为 png（视觉模型读图输入）。page_no 1 起。"""
-    doc = pymupdf.open(str(path))
-    try:
-        page = doc[page_no - 1]
-        pix = page.get_pixmap(dpi=dpi)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        pix.save(str(out_path))
-        return out_path
-    finally:
-        doc.close()
+    from . import pdfium_kit
+
+    return pdfium_kit.render_page_png(path, page_no, out_path, dpi)
 
 
 def insert_page_text(md: str, page_no: int, text: str) -> str:

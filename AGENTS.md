@@ -651,6 +651,44 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    发布）+ /file 端点优先取 content.json `filename` 同名 docx（历史污染包盲取
    字典序第一会发错册）。实测=playwright 实机开关循环 4/4 + 双册切换渲染稳定；
    test_artifacts/test_publish_tool +2；check.sh 全绿。sidecar 两侧改动须重启生效。
+   **PyMuPDF 整体替换为 pypdfium2（2026-09-14，许可治理批，sidecar 内部件+测试+打包）**：
+   动因=商用许可自由（PyMuPDF 为 AGPL；本仓自身 AGPL 开源下今天无违规，替换=给未来
+   闭源商用分发留路）；铁则=**全程不读 MuPDF/PyMuPDF 源码**（含 sdist），算法参考仅
+   MIT 实现（pdfminer.six 分组思路/pdfplumber 边线表格），未动用「效果不佳可参考
+   mupdf 源码」的授权。三批落地：①渲染/图片侧先行（`app/parse/pdfium_kit.py` 全部
+   pdfium 交互收口+**全局 RLock**——PDFium 官方明确禁多线程、跨文档也不许并发
+   〔pypdfium2 文档与 Issue #303 实证；4.30 为 SWIG 绑定非 ctypes〕；知识库 images.py
+   切 Pillow 解码/尺寸；docx 插图页数；PyInstaller spec 加 `collect_dynamic_libs
+   ("pypdfium2")`——原生库漏收是社区实测坑，冻结冒烟项 `pypdfium2(native)` 兜底，
+   实打包验证过）②结构层自研（`pdf_text.py` 文本块=get_text("dict") 平替：行层走
+   pdfium C 级分段 count_rects/get_rect+get_text_bounded，**纵向聚行传递闭包+行内
+   x 序拼接/大间隙切段**（中文两端对齐逐字定位会打乱 (y,x) 序，合并算法必须顺序
+   无关）；`pdf_tables.py` 有框表格=find_tables 平替：路径 bbox→退化维判横竖边
+   （**容差 3.5pt**——Word 双线边框两线相距 3.4 会出幽灵列）→共线合并→闭合格
+   →连通簇+重叠/垂直相邻簇合并（同一张表隔空行带/交错列分裂形态）→「穿行带竖边
+   定列界」extract（跨列合并格自然闭合、缺格补 ""、簇内双向筛线防捞同 x 范围
+   邻表）；`pdf.py` 四级识别链改引擎无关模板（纯逻辑单份），引擎原语在
+   `pdf_pdfium.py`；旧 mupdf 实现曾逐字节一致性校验后随批 3 拆除）③差分门禁后
+   切换+拆除（临时 TENDER_PDF_ENGINE 开关经真实语料五级差分〔L0 档位/L1 结构/
+   L2 归一 diff/L3 渲染墨水覆盖/L4 耗时〕全过后翻默认，随后删 pdf_mupdf.py/
+   依赖/开关，冒烟项 pymupdf→pypdfium2(native)，`test_pdfium_kit` 加许可守卫
+   〔app/ 零 import pymupdf|fitz，防 AGPL 回流〕）。差分实测的关键坑与裁决：
+   pdfium 字符盒=**字形墨迹盒**（「一」仅 1.7pt 高，bounded 取文会漏字→垂直外扩
+   3pt 兜）；跨行粘连跑伪影（文本含 \r\n 取末段+退化高度矩形丢弃+x 重叠段去重
+   ——「颁颁」「Firefofox」双实证）；渲染对比改**区域墨水覆盖**口径（抗锯齿/
+   hinting 逐像素差 15% 但结构等价、字体本就嵌入）；mupdf 在中西文边界合成空格
+   而pdfium 不加（L1/L2 比对去空白归一）；真实语料 2 份（ISO 证书全过且 pdfium
+   快 20 倍；143 页公司介绍 L1/L3/L4 全过、L0 表格 39→27=**无框表格策略差异裁决
+   例外**——mupdf stream 策略从文本对齐推断的「表」多为证书排版框/单行文本条，
+   内容以文本完整保留〔字符比 0.991、outline 全同〕，无框表格明确范围外）。
+   测试夹具同步去 pymupdf：`tests/pdfgen.py`（reportlab 左上原点薄封装+七个档位
+   夹具复刻+hand_pdf 手工 PDF〔/Rotate 等页面字典形态〕+solid_png；**reportlab 只在
+   showPage 落页、save 丢弃未关闭尾页**——空白页夹具须双 show_page；夹具先对旧
+   引擎自证再用于新引擎）。并行 parse 语义变化：C 层真并行→全局锁串行（典型
+   3-5 源文件墙钟有界回退，L4 实测大文件反而更快）；render_page_png/插图页数
+   并发经 kit 锁天然安全。依赖净变化：-pymupdf（25MB 轮子）、+pypdfium2>=4.30,<5
+   +Pillow（运行时）、+reportlab（dev，BSD-3）；运行时依赖树无 AGPL。批 2b 起须
+   **重启 sidecar** 生效；差分机为 /tmp 临时件未进仓。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。
@@ -749,8 +787,9 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   跨会话交接+重入沿用依据；**变化检测锚点=parse_document 幂等返回**：跳过=未变、
   重入时重新解析=确认后重传过，交确认门裁决——**不用时间戳**，模型写的时间戳
   不可信（confirmed_at 零点占位先例，字段已删））→ **并行 parse_document**
-  （同一 assistant 消息一次性发出全部调用，ToolNode 线程池真并行——PyMuPDF 释放
-  GIL；主文件失败在概况门前拦停，不串行即停）→
+  （同一 assistant 消息一次性发出全部调用，ToolNode 线程池真并行——2026-09-14
+  PyMuPDF 替换批起 C 层经 pdfium 全局锁串行、Python/IO 层重叠（PDFium 官方禁
+  多线程，见铁律 3 的替换批记录）；主文件失败在概况门前拦停，不串行即停）→
   **解析概况确认门**
   （流式摘要：角色/字符量/页数/标题数/解析档位/顶层章节/警示/降级声明 + ask 确认/停下，
   全部[解析跳过]时不弹门；**数字全部取自 parse_document 返回文案**（跳过同样带全量
@@ -782,7 +821,7 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   **云端文档解析（2026-08-28）**：`app/baidu_ocr.py`（百度云 PaddleOCR-VL，平移老系统
   document_helpler 的 token manager + 异步任务协议：AK/SK 换 access_token（30 天缓存）
   → base64 提交 → 5s 轮询 → 下载结果拼 md；凭证 BAIDU_OCR_API_KEY/SECRET_KEY 只认 env）。
-  路由纪律：**数字版 PDF 永远本地 PyMuPDF**（书签/目录链接结构识别只在本地有）；
+  路由纪律：**数字版 PDF 永远本地解析**（2026-09-14 起 pdfium 引擎；书签/目录链接结构识别只在本地有）；
   扫描 PDF（文本层过薄）/.doc/图片在**已配置时**路由云端**整本**解析（文档级 API 无逐页
   接口，conversion=`paddleocr-vl`，幂等检查在路由前防重复云端花费），未配置维持明确拒绝
   并提示设置入口；出处署名同 pdf-plain（OCR 标题不可回原文验证）。知识库侧转写优先级
@@ -898,6 +937,65 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   RT import 随之删除。历史已产出节文件不自动纠正（重注入/重写节才走新逻辑）。
   明确不做：素材库旧名元数据（零 LLM 是拍板设计，残留扫描弱级+显式名单兜底）、
   素材交叉引用跨块死链（跨文档引用无完美解，纸面无感，记录在案）。
+- **临时参考件纪律（2026-09-14，全提示词层零代码）**：动因=用户问「标书写完后
+  把类似案例扔进输入框（不进知识库）让模型读取后填充」——机制链路本来就通
+  （上传落 sources/ → parse_document → 按行号读区段 → revise/source_inject），
+  但流程没为该场景定制：素材先行五步与写手硬纪律都只认素材块，临时案例走
+  计划外路径纯靠模型自觉，且 document-parse 的 [untracked] 对账可能把它误引到
+  来源确认流（反问主文件还是补充文件）。修订四件：tender-body SKILL.md 概述
+  加「临时参考件」定义（=sources/ 里用户明说参考的非招标文件；定位=写法参考，
+  不是写作依据也不是素材库资产）+ 第 0 步 [untracked] 裁决分支（用户让当参考
+  用 → 不走来源确认流）+ 第 2 步派发意图句给参考路径+行号区间（写手自行按
+  区段 read_file，单节就地写主线程自己读）；section-writing.md 新增「临时参考件」
+  节（三铁律：只借写法不抄事实——案例项目名/客户名/数字不进正文，残留扫描对
+  该类文件没有防线、纪律是唯一防线；冲突以招标为准；叙述内容唯一形态=改写，
+  不整段拷贝；案例不进 block_ids、用法在完成摘要说明）；写手子代理 prompt 加
+  同款一句（未给参考件不主动翻 sources/）；主 prompt 词汇表补临时参考件定义。
+  **刻意不动两处**：docx_source_inject docstring 不扩口径（窄口径让「案例只改写」
+  有工具层配合，扩=邀请整段抄案例）；validate_body 不加案例残留/使用校验（案例
+  文件名不在素材库元数据，接线成本>收益，纪律层先上、出事故再加机械防线）。
+  生效须重启 sidecar。
+- **整本交付结构缺口批（2026-09-14，目录页/附件壳节/空容器抑制/前置区编号）**：
+  动因=真实任务（东方证券比选）整本质检发现三处结构缺口，run trace 实证模型
+  全程按 SKILL 执行、合册返回两次点名——是设计缝隙非模型违规：①两册整本均无
+  目录页（招标 3.7.3 要求编制目录；tender-outline 只硬性规定「封面」首节点、
+  通篇无目录节点规则，合册端 toc_lines 提取/对账机制从未触发——机制上下游
+  齐全、断链在中间）；②4 个物理附件节（营业执照/社保票据/信用截屏/安全测试
+  报告）按 09-06「全无命中不建节」拍板在整本里零落点（营业执照是废标级资格件，
+  只活在聊天收尾汇报里），且容器「其他资料」子节点全被跳过后章标题光杆空壳
+  （合册发容器标题在先、无空容器抑制）；③写作指引写「建节后批注点名」而
+  SKILL 写「不建节」——guide-format 示例行措辞过宽被模型泛化到全无命中的行。
+  **用户五拍板**（业务原则=交付物必须在文档内自解释，评委/装订的人不看聊天
+  记录）：附件全无命中→**建壳节**（标题+一行贴入位「（此处贴入：XXX 复印件，
+  加盖公章）」——对齐招标件自印「在此粘贴身份证复印件」惯例、材料贴上即覆盖
+  不存在忘删问题 + Word 批注详述，推翻 09-06 第三分支）；目录页→**合册机械
+  生成**（树节点只定位置=语义，条目=实收章节=机械，符合 LLM 语义/程序机械
+  铁律）；形态=**Word 目录域+缓存静态清单**（应用内预览见清单；Word/WPS 更新
+  域即得带页码正式目录；不更新也能交）；空容器→**抑制章标题**（壳节后基本
+  不触发的纯兜底）；**前置区不占章号**（目录节点之前的非封面节点如编制索引
+  不占章序，正文从目录后第一章起编；树无目录节点维持全编号=旧产物兼容）。
+  **存量任务产物不修复**（用户拍板，新机制只对之后的生成生效）。代码
+  （docx_ops）：`_TOC_NODE_NAME` 按名识别（对齐封面先例）；无手写节文件→循环
+  记锚点、循环后 `_insert_mechanical_toc` 在该位置插入目录页——标题刻意不用
+  Heading 样式（防目录域/导航自引用），域三件套 begin/instrText `TOC \o "1-3"
+  \h \z \u`/separate/缓存条目/end，**缓存包裹在域内**（更新域整体替换、静态
+  页码不做——页码排版后只有 Word 知道）；有节文件→手写优先（并入+toc_lines
+  对账照旧，标题不再占章号）；`_tree_nodes` 增产原节点，`_empty_containers`
+  预计算子树无将产出叶子的容器（判定与主循环同款：prose 叶恒产出〔缺文件
+  照发标题、缺失另有点名〕、NON_PROSE 以文件为准、目录节点恒产出）→主循环
+  按对象身份跳过章标题；目录页条目=树序（编号+标题按层级缩进），未产出附件
+  节标「（另附）」；unfilled 兜底报告行保留（正常应恒空=壳节漏建探测器）。
+  技能：tender-outline generate.md **规则 11**（封面后必有「目录」节点、位置
+  =前置区末尾〔缺省紧随封面；「XX 装订/编排于目录前」类要求时排其后，如编制
+  索引〕、交付形态固定模板或附件填充、不写节文件）+SKILL.md 提点+示例树/目录
+  说明行；tender-body SKILL 三分法第三分支改建壳节+「目录节点不建节不派发」、
+  合册段与注意事项目录页段改机械生成描述；section-writing 物理附件节壳节细则
+  （废标级资格件绝不许只登记不建节）；guide-format 模式列三分+附件两行示例
+  （命中贴图/全无命中壳节）+目录行示例；agent.py 写手 prompt 壳节出路同步；
+  check_pipeline 仅注释口径更新（代码零改——NON_PROSE 分类天然不把目录节点
+  报缺）。测试：test_docx_ops +4（机械目录页+前置区编号/手写目录不占号/附件
+  壳节并入/空容器抑制）+ test_skills 锚点 1 例（旧「线下准备/不建节」口径不得
+  回流）；806 绿+check.sh 全绿。**须重启 sidecar 生效**。
 - **样式/编号迁移去重与拷贝卫生批（2026-09-13，整本目录乱号根因修复）**：动因=
   用户实拍整本导航「1.3 16.1 工作目标…」式乱号，全链路审计实证一个缺陷族——
   素材/招标件拷贝在注入与合册两层共用 `_merge_missing_styles`/
@@ -999,6 +1097,20 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
   FilesystemBackend：7/8 成功、1 假报错、仅 3/8 落盘。sidecar 756 绿+check.sh
   全绿。已知边界：工作台 HTTP 保存不经 backend，仍走既有 base_hash 409 探测
   +用户裁决（铁则 4 原生形态），不进本批。**须重启 sidecar 生效**。
+- **09-14 表格通道/回读收敛批 review 修复四件（2026-09-14，小批）**：review 挂在
+  当日未记录的「写手读取瘦身+富内容工具」批（body 块混排/docx_diagram_insert/
+  docx_html_figure/revise 现文块/派发开工纪律——其 AGENTS 记录待补）之上：
+  ①`_parse_body_blocks` 行宽超 header **报错不截断**（原 `_pad_row` 把超宽行静默
+  裁到 header 列数丢格，违「不猜不吞」；少列补空的宽容保留）②两处无图注出口
+  （`_render_and_insert`/`docx_diagram_insert`）的「先删旧图/旧表再重插」是写手
+  执行不了的死胡同（无删表删图工具且重插会翻倍）——改为「图注在插入时经
+  caption 给出；漏了可接受无图注或批注请用户补；勿重调本工具」③revise 现文块
+  段落截断 200→`_VIEW_TEXT_LIMIT`(800)（长段尾部替换结果原本被裁掉，「把结果
+  送到眼前」对长段失效）④dispatch_enrich 图示列透传过滤对齐 validate_body 对账
+  口径（`[、;；,，]` 切分丢空与「—」，混合记法「表:对比、—」不再把「—」当
+  计划项下发）。测试 test_docx_ops +2（超宽行报错/少列宽容/长段现文尾部可见）、
+  test_dispatch_enrich 图示透传 +混合项两断言；183 绿+ruff 零告警。**须重启
+  sidecar 生效**（工具文案与校验逻辑）。
 - **任务清单陈旧提醒中间件（2026-09-13，机制+纪律）**：动因=整本正文生成 run
   实测主 agent 在写作指引确认门（ask_human ×2 裁决）之后只字未再调 write_todos
   ——40+ 次子代理派发、4 波 24 节全程零回写，TodoPanel 常驻浮层数小时停在

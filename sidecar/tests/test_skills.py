@@ -129,6 +129,68 @@ def test_tender_body_material_objection_channel():
         assert kw in detail, f"section-writing.md 缺少素材异议细则关键词：{kw}"
 
 
+def test_tender_body_table_channel_teaching():
+    """表格通道批（2026-09-14）教学锚点：五层教学落地——SKILL 指引期图示规划/
+    第 2 步混排路由/收尾图示产出、section-writing 正向示例（模型模仿示例远胜
+    遵守规则）、guide-format 图示列契约；旧「paragraphs 换行分段一次成形」的
+    纯散文教学不得回流（它就是 0 自建表的抑制源）。"""
+    root = skills_source_dir() / "tender-body"
+    skill = (root / "SKILL.md").read_text(encoding="utf-8")
+    for kw in ("图示列随模式同轮填", "不为丰富而丰富", "不进计划的能力等于不存在",
+               "body 块序列（段落+表格混排", "docx_diagram_insert",
+               "表格类内容不用流水句铺", "图示产出情况"):
+        assert kw in skill, f"tender-body/SKILL.md 缺少表格通道教学关键词：{kw}"
+    detail = (root / "references" / "section-writing.md").read_text(encoding="utf-8")
+    for kw in ("body 块序列", "\"type\": \"table\"", "docx_diagram_insert",
+               "kind=\"layered\"", "kind=\"gantt\"", "计划先行"):
+        assert kw in detail, f"section-writing.md 缺少表格通道示例/路由关键词：{kw}"
+    assert "一次成形于 `docx_section_create` 的 paragraphs（换行分段）" not in detail, \
+        "旧的纯散文一次成形教学不得回流——它是模型 0 自建表的抑制源"
+    guide = (root / "references" / "guide-format.md").read_text(encoding="utf-8")
+    for kw in ("| 节 | 模式 | 依据 | 素材 | 图示 | 缺口/备注 |", "类型:主题",
+               "docx_diagram_insert", "kind=radial", "原型（系统界面原型，docx_html_figure"):
+        assert kw in guide, f"guide-format.md 缺少图示列契约关键词：{kw}"
+    # 界面原型教学（2026-09-14 批二）：SKILL 路由 + 方法论写法细则
+    for kw in ("docx_html_figure", "界面原型 · 示意图"):
+        assert kw in skill, f"tender-body/SKILL.md 缺少界面原型教学关键词：{kw}"
+    for kw in ("## 界面原型（docx_html_figure）", "全部样式内联", "禁脚本、禁外链",
+               "改用文字描述界面"):
+        assert kw in detail, f"section-writing.md 缺少界面原型细则关键词：{kw}"
+    # 流程图（2026-09-14 批三 mermaid 消费方）：模型给 JSON 拓扑、程序转 mermaid——
+    # 「模型永不手写 mermaid」的纪律锚点（错误形态：非法 spec 当场报错）
+    for kw in ('kind="flow"', "程序转 mermaid 渲染", "shape=\"diamond\""):
+        assert kw in detail, f"section-writing.md 缺少流程图教学关键词：{kw}"
+
+
+def test_tender_body_attachment_shell_and_outline_toc_node():
+    """结构缺口批（2026-09-14）锚点：①物理附件全无知识库命中→建壳节（标题+贴入
+    位行+批注）——「线下准备/不建节」旧口径不得回流（营业执照废标级资格件曾在
+    整本里零落点）；②tender-outline 每册树封面后必有「目录」节点（合册机械生成
+    目录页、前置区不占章号）——此前 outline 无此规则、合册端支持空转，目录页
+    从未产出。三处配套：SKILL 三分法、section-writing 物理附件节、guide-format
+    模式列与目录行示例。
+    """
+    body = skills_source_dir() / "tender-body"
+    skill = (body / "SKILL.md").read_text(encoding="utf-8")
+    assert "全无命中→建壳节" in skill and "贴入位" in skill, \
+        "tender-body/SKILL.md 三分法第三分支必须是建壳节"
+    assert "不建节不派发——目录页由合册机械生成" in skill, "SKILL 缺目录节点免派发教学"
+    assert "线下准备」登记到待填清单" not in skill, "旧「线下准备不建节」口径不得回流"
+    detail = (body / "references" / "section-writing.md").read_text(encoding="utf-8")
+    assert "全无命中 → 建壳节" in detail and "（此处贴入：XXX 复印件，加盖公章）" in detail, \
+        "section-writing.md 物理附件节缺建壳节细则"
+    assert "维持「线下准备」" not in detail, "旧口径不得回流"
+    guide = (body / "references" / "guide-format.md").read_text(encoding="utf-8")
+    assert "全无命中→建壳节+批注" in guide and "| 目录 | — |" in guide, \
+        "guide-format.md 模式列三分与目录行示例缺失"
+    outline = skills_source_dir() / "tender-outline"
+    gen = (outline / "references" / "generate.md").read_text(encoding="utf-8")
+    for kw in ("**目录页节点**", "机械\n   生成目录页", "前置区", "不占章号"):
+        assert kw in gen, f"tender-outline/generate.md 缺目录页节点规则关键词：{kw}"
+    oskill = (outline / "SKILL.md").read_text(encoding="utf-8")
+    assert "封面后固定 `- 目录`" in oskill, "tender-outline/SKILL.md 缺目录节点提点"
+
+
 def test_tender_body_contract_names_anchored():
     """body_contract 契约名 ↔ 技能教学文本锚点（2026-09-14 硬编码复核批）。
 

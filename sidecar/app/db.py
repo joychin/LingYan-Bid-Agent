@@ -354,8 +354,9 @@ def create_conversation(task_id: str | None = None, title: str | None = None) ->
 def list_conversations() -> list[dict]:
     conn = _conn()
     try:
+        # rowid DESC 兜底：同秒创建的会话顺序稳定（侧栏「最近 N 条」切割边界依赖此序）
         rows = conn.execute(
-            "SELECT id, task_id, title, created_at FROM conversations ORDER BY created_at DESC"
+            "SELECT id, task_id, title, created_at FROM conversations ORDER BY created_at DESC, rowid DESC"
         ).fetchall()
     finally:
         conn.close()

@@ -603,3 +603,107 @@ def test_section_docx_direct_outline_note(env):
     assert r.startswith("[校验通过]")  # 提示不是门禁
     assert "〔大纲级别〕1 段直挂大纲级别（P3）" in r
     assert "合册会自动摘出" in r
+
+
+# ---------- 表格通道批（2026-09-14）：md 残字扫描 + 图示对账 ----------
+
+
+def _write_section(env, name: str, paragraphs: str, tables_json: str | None = None) -> None:
+    from app.tools.docx_ops import docx_section_create
+
+    docx_section_create.invoke(
+        {"path": f"body/{name}", "title": name, "paragraphs": paragraphs, "body": tables_json or ""}
+    )
+
+
+def test_md_residue_scan(env):
+    """md 残字：行首 #/整行竖线表/「**」判不过（会印进交付稿），反引号降提示；
+    有序编号「1. 」是中文正文合法形态不扫。"""
+    _write_section(
+        env, "残字节",
+        "正常段落。\n## 小标题残字\n含**加粗**残字的段落。\n| 列一 | 列二 |\n1. 有序编号是合法形态\n含`反引号`的段。",
+    )
+    r = validate_body.invoke({"section": "body/残字节.docx"})
+    assert r.startswith("[校验未通过]")
+    assert "markdown 标题残字" in r
+    assert "「**」加粗残字" in r
+    assert "竖线拼的 markdown 表格残字" in r
+    assert "反引号" in r and "⚠️" in r  # 反引号=提示级（⚠️ 段）
+    assert "有序编号" not in r  # 1. 合法不扫
+
+    _write_section(env, "干净节", "全部正常段落，无任何标记残字。")
+    r2 = validate_body.invoke({"section": "body/干净节.docx"})
+    assert "残字" not in r2
+
+
+def test_figure_reconcile_and_guide_column(env):
+    """指引图示列：类型词合法校验（warning）+ 节级对账三态（计划未产出点名/
+    计划外插图提示/相符无提示）；旧 5 列指引缺图示列零影响。"""
+    _seed_directory(env)
+    wroot = _wroot(env[0])
+    (wroot / "body").mkdir(parents=True, exist_ok=True)
+    # 6 列指引：一行类型词不合法、一行计划 2 项、一行未计划
+    (wroot / "body/写作指引.md").write_text(
+        "| 节 | 模式 | 依据 | 素材 | 图示 | 缺口/备注 |\n"
+        "|---|---|---|---|---|---|\n"
+        "| 3.1 项目理解与需求分析 | 推理撰写 | REQ-01 | — | 饼图:占比 | — |\n"
+        "| 3.2 总体设计方案 | 推理撰写 | SCORE-02 | — | 表:对比、甘特:进度 | — |\n"
+        "| 3.3 项目团队配置 | 推理撰写 | — | — | — | — |\n",
+        encoding="utf-8",
+    )
+    r = validate_body.invoke({"section": "body/写作指引.md"})
+    assert "图示项「饼图:占比」记法须为「类型:主题」" in r
+
+    # 3.2 计划 2 项、实收 0 张表 → 计划未产出点名（节名与指引行逐字对齐才对账）
+    _write_section(env, "3.2 总体设计方案", "方案正文，无表格。")
+    r2 = validate_body.invoke({"section": "body/3.2 总体设计方案.docx"})
+    assert "指引计划 2 项、节内表格/图片 0 项" in r2
+    assert "表:对比" in r2 and "甘特:进度" in r2
+
+    # 3.3 未计划、推理撰写、有表 → 计划外提示
+    import json as _json
+
+    tbl = _json.dumps(
+        [{"type": "p", "text": "配置如下："},
+         {"type": "table", "header": ["岗位"], "rows": [["项目经理"]]}],
+        ensure_ascii=False,
+    )
+    _write_section(env, "3.3 项目团队配置", "", tables_json=tbl)
+    r3 = validate_body.invoke({"section": "body/3.3 项目团队配置.docx"})
+    assert "指引未计划图示、节内有 1 项表格/图片" in r3
+
+    # 3.1 计划与实收不符修正后……计划 1 项实收 1 张=相符无提示
+    (wroot / "body/写作指引.md").write_text(
+        "| 节 | 模式 | 依据 | 素材 | 图示 | 缺口/备注 |\n"
+        "|---|---|---|---|---|---|\n"
+        "| 3.1 项目理解与需求分析 | 推理撰写 | REQ-01 | — | 表:清单 | — |\n",
+        encoding="utf-8",
+    )
+    _write_section(env, "3.1 项目理解与需求分析", "", tables_json=tbl)
+    r4 = validate_body.invoke({"section": "body/3.1 项目理解与需求分析.docx"})
+    assert "〔图示〕" not in r4
+
+    # 原型类型词（2026-09-14 批二）：合法通过；图示对账实收计图片（a:blip）
+    (wroot / "body/写作指引.md").write_text(
+        "| 节 | 模式 | 依据 | 素材 | 图示 | 缺口/备注 |\n"
+        "|---|---|---|---|---|---|\n"
+        "| 3.1 项目理解与需求分析 | 推理撰写 | REQ-01 | — | 原型:审批界面 | — |\n",
+        encoding="utf-8",
+    )
+    r5 = validate_body.invoke({"section": "body/写作指引.md"})
+    assert "记法须为" not in r5
+
+
+def test_guide_old_five_columns_still_valid(env):
+    """旧 5 列指引（无图示列）照常通过——缺列取空串零影响。"""
+    _seed_directory(env)
+    wroot = _wroot(env[0])
+    (wroot / "body").mkdir(parents=True, exist_ok=True)
+    (wroot / "body/写作指引.md").write_text(
+        "| 节 | 模式 | 依据 | 素材 | 缺口/备注 |\n"
+        "|---|---|---|---|---|\n"
+        "| 3.1 项目理解与需求分析 | 推理撰写 | REQ-01 | — | — |\n",
+        encoding="utf-8",
+    )
+    r = validate_body.invoke({"section": "body/写作指引.md"})
+    assert r.startswith("[校验通过]") or "图示" not in r

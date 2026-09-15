@@ -3,8 +3,13 @@
 正文节文件 = 任务 work/body/ 下每节一个 .docx；模型不碰二进制——本工具族把
 docx 翻译成文本世界（读视图/编号寻址），写入全由程序机械完成：
 
-- docx_section_create：建节文件（标题 + 可选初始段落；已存在不覆盖，
-  重写传 replace=true——旧版自动入恢复点栈）
+- docx_section_create：建节文件（标题 + 可选初始内容；已存在不覆盖，
+  重写传 replace=true——旧版自动入恢复点栈）。初始内容两条通道：paragraphs
+  纯文字换行分段（旧），body 块序列 JSON 段落+表格混排一次成形（2026-09-14
+  表格通道批，推荐——人员配置/里程碑/对比类内容用表格不用流水句）
+- docx_diagram_insert：程序生成图示（表格拼装，2026-09-14 批）——layered
+  分层/组织架构、gantt 甘特、radial 中心辐射；模型只给语义拓扑，灰阶版式
+  全程序机械生成；图示承载承诺数据故走表格不走图片（可编辑、validate 可读）
 - docx_section_read：序列化视图（P1..Pn 段落+样式+图片标记，T1..Tm 表格逐行
   展开 R行 C列= 格文本——合并格标「同左/同上」，格坐标即修订寻址）
 - docx_material_inject：素材块元素级注入——从素材 docx 原件把块区间对应的
@@ -28,10 +33,12 @@ docx 翻译成文本世界（读视图/编号寻址），写入全由程序机�
 - docx_assemble_volume：整本合册——按投标目录树序把各节 docx 合并成每册
   一个整本文件（容器节点发章标题——按树序自动编号（第X章/1.1，格式取目录
   产物 numbering 字段）、一级章前分页、页脚页码；模板填充类叶子
-  产出节文件即按树序并入、未产出按附件对待不占整本位；**整本=交付态**：
+  产出节文件即按树序并入、未产出按附件对待不占整本位；「目录」节点机械
+  生成目录页（Word 目录域+缓存清单，2026-09-14 批）且目录前前置页不占章号、
+  空容器章标题抑制；**整本=交付态**：
   并入时按「接受全部修订」压平（节文件保留修订供审阅，改内容回节级改再
   重合册）、拷入的树外标题段摘出大纲层级（导航窗格只剩章节骨架）、
-  目录页与实收章节机械对账不符点名；整本是派生产物，内容真值在节文件，
+  手写目录页与实收章节机械对账不符点名；整本是派生产物，内容真值在节文件，
   重新合册覆盖）
 
 寻址纪律：段落序号以 docx_section_read 视图为准（body 直属段落，不含表格内
@@ -61,20 +68,21 @@ from io import BytesIO
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-import pymupdf
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
-from docx.oxml import parse_xml
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import nsdecls, qn
-from docx.shared import Cm
+from docx.shared import Cm, Pt
 from langchain_core.tools import tool
 from lxml import etree
 
-from .. import db, publish, runctx
+from .. import db, publish, render_queue, runctx
 from ..artifact_store import RESTORE_KEEP, sources_dir, work_dir
 from ..config import workspace_dir
 from ..knowledge import materials_lib
 from ..parse import convert as parse_convert
+from ..parse import pdfium_kit
 from ..parse.pdf import render_page_png
 from . import body_contract
 
@@ -82,6 +90,15 @@ _AUTHOR = "Tender Agent"
 _COMMENT_AUTHOR = "Swift Agent"  # 批注作者（Word 审阅侧栏可见；待办批注与修订标记分属两套体系）
 _VIEW_TEXT_LIMIT = 800  # 视图单段截断（修订需精确文本，超长段提示去 Word 处理）
 _CELL_TEXT_LIMIT = 60  # 视图单元格截断（填空场景格文本短；长格内容去 Word 看）
+
+# 表格通道批（2026-09-14）：程序生成表格/图示的灰阶与上限——视觉约定吸收自
+# 头部产品样例（域头/表头深灰、成员/数据格浅灰、留白格无底纹），打印黑白安全。
+_DIAG_HEAD_FILL = "D9D9D9"
+_DIAG_ITEM_FILL = "F2F2F2"
+_CAPTION_STYLE_NAME = "Tender Caption"  # 图注/表题样式（基准模板提供；缺失回落正文样式）
+_MAX_TABLE_COLS = 8
+_MAX_TABLE_ROWS = 60
+_MAX_CELL_CHARS = 200
 
 
 def _task_id() -> str | None:
@@ -745,6 +762,7 @@ def _strip_copy_residue(el) -> None:
 _BASE_TEMPLATE = Path(__file__).resolve().parent.parent / "resources" / "tender_base_template.docx"
 _BODY_STYLE_NAME = "Tender Body"  # 版式文件自定义正文样式（1.5 倍行距+首行缩进 2 字符）
 _COVER_NODE_NAME = "封面"  # 树首封面节点的约定名（合册按清洗后标题识别，tender-outline 定下）
+_TOC_NODE_NAME = "目录"  # 目录页节点的约定名（同为 tender-outline 结构约定；内容由合册机械生成）
 TEMPLATE_SETTING_KEY = "docx_template"  # app_settings 键：默认版式的用户文件名（空=内置基准）
 BUILTIN_TEMPLATE_KEY = "__builtin__"  # 内置版式寻址键（版式库 API 与 LLM 工具共用）
 BUILTIN_TEMPLATE_NAME = "内置标书基准版式"  # 用户可见名（2026-09-09「模板库」改名「版式库」随改）
@@ -1231,18 +1249,196 @@ def _tool_guard(label: str):
     return deco
 
 
+def _shade_cell(cell, fill: str) -> None:
+    """单元格底纹（w:shd 直接写 tcPr，不依赖样式表——换版式不失败）。"""
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_pr.append(parse_xml(f'<w:shd {nsdecls("w")} w:val="clear" w:color="auto" w:fill="{fill}"/>'))
+
+
+def _apply_table_borders(tbl) -> None:
+    """细灰边框直接写 tblPr——不依赖 Table Grid 样式名（用户版式可能没有该名，
+    无边框的表格观感即残；生成表格全部自带边框，样式名零依赖）。"""
+    edges = "".join(
+        f'<w:{e} w:val="single" w:sz="4" w:space="0" w:color="999999"/>'
+        for e in ("top", "left", "bottom", "right", "insideH", "insideV")
+    )
+    tbl._tbl.tblPr.append(parse_xml(f'<w:tblBorders {nsdecls("w")}>{edges}</w:tblBorders>'))
+
+
+def _caption_style(doc: Document):
+    """图注/表题样式：Tender Caption（合册按样式名识别做全局重编号）；版式缺该
+    样式时回落正文样式——建表不因换版式失败，编号侧缺样式=跳过重编号不误伤。"""
+    try:
+        return doc.styles[_CAPTION_STYLE_NAME]
+    except KeyError:
+        return _body_style(doc)
+
+
+def _add_caption(doc: Document, text: str) -> object:
+    """图注/表题居中段（中文文档惯例：表题在表格上方、图注在图示下方——调用方
+    控制与表格的先后顺序即落对位置）。"""
+    para = doc.add_paragraph(text.strip(), style=_caption_style(doc))
+    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    return para
+
+
+def _avail_width(doc: Document):
+    """版心宽度（EMU）；取不到回落 15cm——生成表格的列宽按它比例分配。"""
+    try:
+        sec = doc.sections[-1]
+        w = sec.page_width - sec.left_margin - sec.right_margin
+        if isinstance(w, int) and w > 0:
+            return w
+    except (IndexError, TypeError):
+        pass
+    return Cm(15)
+
+
+def _set_col_widths(tbl, ratios: list[float], avail) -> None:
+    """按比例分配列宽（禁 autofit + gridCol/逐格 tcW 双写——单写 gridCol 在部分
+    Word 版本会被内容自配覆盖）。须在 cell.merge 之前调用。"""
+    tbl.autofit = False
+    total = sum(ratios) or 1.0
+    widths = [int(avail * r / total) for r in ratios]
+    for i, w in enumerate(widths):
+        tbl.columns[i].width = w
+        for row in tbl.rows:
+            row.cells[i].width = w
+
+
+def _grid_table(doc: Document, grid: list[list[dict]], ratios: list[float]):
+    """格子规格网格 → docx 表格（纯机械渲染后端，W1 数据表/W2 图示共用）：
+    逐格落 text/fill/bold/center，自带细灰边框，列宽按 ratios 比例分版心。
+    格子 dict 键均可省：text（默认空）、fill（默认无底纹）、bold、center。"""
+    tbl = doc.add_table(rows=len(grid), cols=len(grid[0]))
+    _apply_table_borders(tbl)
+    _set_col_widths(tbl, ratios, _avail_width(doc))
+    for r, row in enumerate(grid):
+        for c, spec in enumerate(row):
+            cell = tbl.cell(r, c)
+            para = cell.paragraphs[0]
+            text = str(spec.get("text", ""))
+            if text:
+                run = para.add_run(text)
+                if spec.get("bold"):
+                    run.bold = True
+            if spec.get("center"):
+                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            fill = spec.get("fill")
+            if fill:
+                _shade_cell(cell, fill)
+    return tbl
+
+
+def _pad_row(cells: list, ncols: int) -> list:
+    """行补齐/截断到列数（模型少给多给一格都不至于建废表）。"""
+    return (list(cells) + [""] * ncols)[:ncols]
+
+
+def _cell_str(v) -> str:
+    return str(v) if v is not None else ""
+
+
+def _parse_body_blocks(body: str) -> tuple[list[dict] | None, str | None]:
+    """建节 body 块序列参数解析与校验：[{"type":"p","text":…},
+    {"type":"table","caption":…,"header":[…],"rows":[[…],…]}]。
+    返回 (规范化块列表, 错误文案)；错误文案带修复写法，不猜不吞。"""
+    try:
+        blocks = json.loads(body)
+    except ValueError:
+        return None, (
+            "body 不是合法 JSON——须为块数组："
+            '[{"type":"p","text":"段落文字"},{"type":"table","caption":"表题",'
+            '"header":["列名"],"rows":[["值", …], …]}, …]'
+        )
+    if not isinstance(blocks, list) or not blocks:
+        return None, "body 须为非空 JSON 数组（每块 {\"type\":\"p\"|\"table\", …}）"
+    norm: list[dict] = []
+    for i, blk in enumerate(blocks):
+        if not isinstance(blk, dict):
+            return None, f"body 第 {i + 1} 块不是对象"
+        btype = blk.get("type")
+        if btype == "p":
+            text = _cell_str(blk.get("text")).strip()
+            if not text:
+                return None, f"body 第 {i + 1} 块 p 缺 text"
+            norm.append({"type": "p", "text": text})
+        elif btype == "table":
+            header = blk.get("header") or []
+            rows = blk.get("rows")
+            if not isinstance(header, list) or any(not isinstance(h, str) for h in header):
+                return None, f"body 第 {i + 1} 块 table 的 header 须为字符串数组（可省略）"
+            if len(header) > _MAX_TABLE_COLS:
+                return None, f"body 第 {i + 1} 块 table 列数 {len(header)} 超上限（≤{_MAX_TABLE_COLS}，列多请拆表或换横向表述）"
+            if not isinstance(rows, list) or not rows:
+                return None, f"body 第 {i + 1} 块 table 缺 rows（二维字符串数组）"
+            if len(rows) > _MAX_TABLE_ROWS:
+                return None, f"body 第 {i + 1} 块 table 行数 {len(rows)} 超上限（≤{_MAX_TABLE_ROWS}，超长表请拆节或精简）"
+            for r, row in enumerate(rows, 1):
+                if not isinstance(row, list) or any(not isinstance(v, (str, int, float)) for v in row):
+                    return None, f"body 第 {i + 1} 块 table 第 {r} 行不是字符串数组"
+                # 行宽超 header 报错不截断：_pad_row 会把超宽行静默裁到 header
+                # 列数（多出的格丢失）；少列的宽容保留（补空串）
+                if header and len(row) > len(header):
+                    return None, (
+                        f"body 第 {i + 1} 块 table 第 {r} 行 {len(row)} 列超过 header 的 "
+                        f"{len(header)} 列——多出的列并入合适列，或补全 header；列不足可省略（自动留空）"
+                    )
+            ncols = len(header) or max(len(r) for r in rows)
+            if ncols > _MAX_TABLE_COLS:
+                return None, f"body 第 {i + 1} 块 table 列数 {ncols} 超上限（≤{_MAX_TABLE_COLS}）"
+            rows_n = [_pad_row([_cell_str(v) for v in row], ncols) for row in rows]
+            for r, row in enumerate(rows_n, 1):
+                for c, v in enumerate(row, 1):
+                    if len(v) > _MAX_CELL_CHARS:
+                        return None, f"body 第 {i + 1} 块 table 第 {r} 行第 {c} 格 {len(v)} 字超上限（≤{_MAX_CELL_CHARS}，长文放段落不放格）"
+            norm.append(
+                {
+                    "type": "table",
+                    "caption": _cell_str(blk.get("caption")).strip(),
+                    "header": [h.strip() for h in header],
+                    "rows": rows_n,
+                }
+            )
+        else:
+            return None, f"body 第 {i + 1} 块 type 非法（{btype}，须 p 或 table）"
+    return norm, None
+
+
+def _add_data_table(doc: Document, header: list[str], rows: list[list[str]]):
+    """普通数据表：表头行加粗+浅灰底纹居中，数据行不加修饰（可编辑、validate
+    可读格文本——承诺数据落格不落图）。"""
+    ncols = len(header) if header else max(len(r) for r in rows)
+    grid: list[list[dict]] = []
+    if header:
+        grid.append(
+            [{"text": h, "bold": True, "fill": _DIAG_ITEM_FILL, "center": True} for h in header]
+        )
+    for row in rows:
+        grid.append([{"text": v} for v in _pad_row(row, ncols)])
+    return _grid_table(doc, grid, [1.0] * ncols)
+
+
 @tool
 @_tool_guard("创建")
-def docx_section_create(path: str, title: str, paragraphs: str = "", replace: bool = False) -> str:
+def docx_section_create(path: str, title: str, paragraphs: str = "", replace: bool = False, body: str = "") -> str:
     """创建正文节 docx 文件（work/body/ 下，每节一文件）。
 
-    用途：tender-body 正文阶段为一节建档（标题 + 可选初始段落）。已存在默认不
+    用途：tender-body 正文阶段为一节建档（标题 + 可选初始内容）。已存在默认不
     覆盖（防误清已写内容）；**重写本节传 replace=true**（用户裁决的重写范围），
     旧版自动入恢复点栈（保留最近 3 版，文件名不变旁挂 .restorepoints/ 目录）。
     Args:
         path: 相对任务 work/ 的路径，如 body/技术部分/3.1 需求分析.docx（自动补 .docx）
         title: 节标题（写入文档一级标题样式，进目录域）
-        paragraphs: 可选初始段落，换行分隔（推理撰写/格式跟随模式可一次性带全文）
+        paragraphs: 可选初始段落，换行分隔（纯文字成节——人员配置/里程碑/对比类
+               内容**不要用这个**，用 body 块序列混排表格）
+        body: 可选块序列 JSON（推荐：段落+表格混排一次成形）——
+              [{"type":"p","text":"段落文字"},
+               {"type":"table","caption":"表题（可选，表上方居中）",
+                "header":["岗位","人数","职责"],"rows":[["项目经理","1","…"],…]},
+               …]；表头行自动加粗+浅灰，数据格可编辑可校验；约束 列≤8/行≤60/
+              单格≤200 字、行宽不得超过 header 列数，超限报错给修复写法。
+              body 存在时 paragraphs 被忽略
         replace: 已存在的节重写时传 true；默认 false 不覆盖
     """
     task_id = _task_id()
@@ -1252,6 +1448,11 @@ def docx_section_create(path: str, title: str, paragraphs: str = "", replace: bo
         dst, rel = _dest_path(task_id, path, must_exist=False)
     except ValueError as e:
         return f"[创建失败] {e}"
+    blocks: list[dict] | None = None
+    if (body or "").strip():
+        blocks, err = _parse_body_blocks(body)
+        if err:
+            return f"[创建失败] {err}"
     replaced = False
     with _docx_path_lock(dst):
         if dst.exists():
@@ -1265,15 +1466,31 @@ def docx_section_create(path: str, title: str, paragraphs: str = "", replace: bo
         doc = _new_document()
         doc.add_heading(title.strip() or "未命名", 1)
         body_style = _body_style(doc)
-        for text in paragraphs.split("\n"):
-            if text.strip():
-                doc.add_paragraph(text.strip(), style=body_style.name if body_style else None)
+        n_init = 0
+        n_tables = 0
+        if blocks is not None:
+            # 块序列混排：段/表按序落（表题先于表格 add 即落其上方），新建内容
+            # 不带修订标记（与初始段落同口径——修订标记只属于对既有文本的改写）
+            for blk in blocks:
+                if blk["type"] == "p":
+                    doc.add_paragraph(blk["text"], style=body_style.name if body_style else None)
+                    n_init += 1
+                else:
+                    if blk["caption"]:
+                        _add_caption(doc, blk["caption"])
+                    _add_data_table(doc, blk["header"], blk["rows"])
+                    n_tables += 1
+        else:
+            for text in paragraphs.split("\n"):
+                if text.strip():
+                    doc.add_paragraph(text.strip(), style=body_style.name if body_style else None)
+                    n_init += 1
         dst.parent.mkdir(parents=True, exist_ok=True)
         _atomic_save(doc, dst)
-    n_init = sum(1 for t in paragraphs.split("\n") if t.strip())
     head = "[已重建] " if replaced else "[已创建] "
+    stat = f"正文 {n_init} 段" + (f"+表格 {n_tables} 张" if n_tables else "")
     return (
-        f"{head}work/{rel}（标题「{title.strip()}」，正文 {n_init} 段）\n"
+        f"{head}work/{rel}（标题「{title.strip()}」，{stat}）\n"
         "下一步：贴素材底稿用 docx_material_inject；直接写内容/修订用 docx_section_revise。"
     )
 
@@ -1539,6 +1756,75 @@ def docx_source_inject(source: str, dest: str, lines: str = "") -> str:
     )
 
 
+# 图片显示高度上限（2026-09-14 实测修复）：mermaid TD 长链流程图非常高（实测
+# 显示高 34.7~62.5cm，A4 版心可用高仅 ~24.6cm），按版心宽等比缩放后一图占一页
+# 还溢出。封顶 18cm：超高的图按高度反缩（变窄居中），另配 mermaid 紧凑排版
+# （前端 nodeSpacing/rankSpacing 收紧）从源头降低自然高度。
+_IMG_MAX_HEIGHT = Cm(18)
+
+
+def _tracked_image_paragraph(doc: Document, data: bytes):
+    """全宽居中 + 段落标记/内容双插入修订的图片段（拒绝修订=整段含图消失）。
+    docx_image_insert 与 docx_html_figure/docx_diagram_insert(kind=flow) 共用；
+    图片无法解析抛 ValueError（调用方转人话）。图片段不挂 Tender Body（正文样式
+    带首行缩进会把图推偏）。全宽等比缩放后超高（>18cm）的按高度反缩居中。"""
+    sec = doc.sections[-1] if doc.sections else None
+    try:
+        avail = sec.page_width - sec.left_margin - sec.right_margin if sec else None
+    except TypeError:
+        avail = None
+    width = avail if isinstance(avail, int) and avail > 0 else Cm(15)
+    # drawing XML 让 python-docx 生成（先临时挂在节末），修订标记再手包+搬位
+    tmp_p = doc.add_paragraph()
+    run = tmp_p.add_run()
+    try:
+        shape = run.add_picture(BytesIO(data), width=width)
+        if shape.height > _IMG_MAX_HEIGHT:  # 超高图按高度反缩（等比，宽度随之变窄）
+            ratio = _IMG_MAX_HEIGHT / shape.height
+            shape.height = int(_IMG_MAX_HEIGHT)
+            shape.width = int(shape.width * ratio)
+    except Exception as e:
+        raise ValueError(f"图片无法解析（{type(e).__name__}）") from e
+    date = _now_iso()
+    rev_id = _next_rev_id(doc)
+    ins_el = parse_xml(
+        f'<w:ins {nsdecls("w")} w:id="{rev_id + 1}" w:author="{_AUTHOR}" w:date="{date}"/>'
+    )
+    r_el = run._r
+    r_el.addprevious(ins_el)
+    ins_el.append(r_el)
+    p_el = tmp_p._p
+    # 缺段落标记修订会让拒绝视角多出空行（自校验拦截）
+    p_el.insert(0, parse_xml(
+        f'<w:pPr {nsdecls("w")}>'
+        f'<w:jc w:val="center"/>'
+        f'<w:rPr><w:ins w:id="{rev_id}" w:author="{_AUTHOR}" w:date="{date}"/></w:rPr>'
+        f'</w:pPr>'
+    ))
+    return p_el
+
+
+def _place_after_anchor(doc: Document, p_el, after: str, label: str) -> tuple[str | None, str]:
+    """段元素放位：after=P 序号锚后（可带 P 前缀），空=文末（sectPr 前）。
+    返回 (错误文案|None, 位置描述)——错误文案带调用方 label 前缀。"""
+    if (after or "").strip():
+        try:
+            idx = int((after or "").strip().lstrip("Pp"))
+        except ValueError:
+            return f"{label} after 须为段落号（如 5 或 P5，以 docx_section_read 视图为准）", ""
+        paras = doc.paragraphs
+        if not 1 <= idx <= len(paras):
+            return f"{label} 段落号超范围：after={idx}，本节视图共 {len(paras)} 段", ""
+        paras[idx - 1]._p.addnext(p_el)
+        return None, f"P{idx} 之后"
+    sect = doc.element.body.find(qn("w:sectPr"))
+    if sect is not None:
+        sect.addprevious(p_el)
+    else:
+        doc.element.body.append(p_el)
+    return None, "节末"
+
+
 @tool
 @_tool_guard("插图")
 def docx_image_insert(dest: str, image: str, after: str = "", page: int = 1) -> str:
@@ -1595,11 +1881,7 @@ def docx_image_insert(dest: str, image: str, after: str = "", page: int = 1) -> 
 
     suffix = src.suffix.lower()
     if suffix == ".pdf":
-        pd = pymupdf.open(str(src))
-        try:
-            n_pages = pd.page_count
-        finally:
-            pd.close()
+        n_pages = pdfium_kit.page_count(src)
         if not 1 <= int(page) <= n_pages:
             return f"[插图失败] 页号超范围：该 PDF 共 {n_pages} 页（page 须 1-{n_pages}）"
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
@@ -1640,53 +1922,13 @@ def docx_image_insert(dest: str, image: str, after: str = "", page: int = 1) -> 
     with _docx_path_lock(dst):
         doc = Document(str(dst))
         before = _flatten_rejected(doc)
-        sec = doc.sections[-1] if doc.sections else None
         try:
-            avail = sec.page_width - sec.left_margin - sec.right_margin if sec else None
-        except TypeError:
-            avail = None
-        width = avail if isinstance(avail, int) and avail > 0 else Cm(15)
-        # drawing XML 让 python-docx 生成（先临时挂在节末），修订标记再手包+搬位
-        tmp_p = doc.add_paragraph()
-        run = tmp_p.add_run()
-        try:
-            run.add_picture(BytesIO(data), width=width)
-        except Exception as e:
-            return f"[插图失败] 图片无法解析（{type(e).__name__}）——请确认文件是完好的 png/jpg 图片"
-        date = _now_iso()
-        rev_id = _next_rev_id(doc)
-        ins_el = parse_xml(
-            f'<w:ins {nsdecls("w")} w:id="{rev_id + 1}" w:author="{_AUTHOR}" w:date="{date}"/>'
-        )
-        r_el = run._r
-        r_el.addprevious(ins_el)
-        ins_el.append(r_el)
-        p_el = tmp_p._p
-        # 段落标记修订（拒绝修订=整段含图消失）+ 居中；图片段不挂 Tender Body（正文
-        # 样式带首行缩进会把图推偏）；缺段落标记修订会让拒绝视角多出空行（自校验拦截）
-        p_el.insert(0, parse_xml(
-            f'<w:pPr {nsdecls("w")}>'
-            f'<w:jc w:val="center"/>'
-            f'<w:rPr><w:ins w:id="{rev_id}" w:author="{_AUTHOR}" w:date="{date}"/></w:rPr>'
-            f'</w:pPr>'
-        ))
-        if (after or "").strip():
-            try:
-                idx = int((after or "").strip().lstrip("Pp"))
-            except ValueError:
-                return "[插图失败] after 须为段落号（如 5 或 P5，以 docx_section_read 视图为准）"
-            paras = doc.paragraphs
-            if not 1 <= idx <= len(paras):
-                return f"[插图失败] 段落号超范围：after={idx}，本节视图共 {len(paras)} 段"
-            paras[idx - 1]._p.addnext(p_el)
-            where = f"P{idx} 之后"
-        else:
-            sect = doc.element.body.find(qn("w:sectPr"))
-            if sect is not None:
-                sect.addprevious(p_el)
-            else:
-                doc.element.body.append(p_el)
-            where = "节末"
+            p_el = _tracked_image_paragraph(doc, data)
+        except ValueError as e:
+            return f"[插图失败] {e}——请确认文件是完好的 png/jpg 图片"
+        err, where = _place_after_anchor(doc, p_el, after, "[插图失败]")
+        if err:
+            return err
         if _flatten_rejected(doc) != before:
             return "[插图失败] 修订标记自校验未通过（未保存，文件未变）——请重试或换图源"
         _atomic_save(doc, dst)
@@ -1695,6 +1937,128 @@ def docx_image_insert(dest: str, image: str, after: str = "", page: int = 1) -> 
         "\n下一步：docx_section_read 确认位置（图片段显示〔图×1〕）；需要图注可在该段前后"
         "用 docx_section_revise 插文字段。"
     )
+
+
+# ---- 界面原型（webview 光栅化，2026-09-14 批二）----
+# server 端 HTML 清洗：剥脚本块/iframe/on* 事件属性——静默剥不报错（CSP 在前端
+# wrapper 页再兜一层；两道锁都过不了的部分本来就不该出现在原型里）
+_HTML_MAX_BYTES = 100 * 1024
+_SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>.*?</script\s*>|<script\b[^>]*/\s*>", re.I | re.S)
+_IFRAME_TAG_RE = re.compile(r"</?iframe\b[^>]*/?\s*>", re.I)
+_ON_ATTR_RE = re.compile(r"\son[a-z]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I)
+
+
+def _sanitize_html(html: str) -> str:
+    return _ON_ATTR_RE.sub("", _IFRAME_TAG_RE.sub("", _SCRIPT_BLOCK_RE.sub("", html)))
+
+
+@tool
+@_tool_guard("原型")
+def docx_html_figure(dest: str, html: str, after: str = "", caption: str = "") -> str:
+    """把界面原型渲染成图片插入正文节 docx（webview 光栅化，2026-09-14 批二）。
+
+    用途：系统界面/功能页的原型图——模型只写 HTML，渲染由应用自带的前端 webview
+    完成（隐藏 iframe + html2canvas，本机离线、零外部依赖）。适用于「方案节要展示
+    系统长什么样」的场景；不适用于真实系统截图（那是 docx_image_insert 的事）。
+    按写作指引「图示」列的原型计划调用，计划外不配图。
+    Args:
+        dest: 目标节文件（相对任务 work/，须已用 docx_section_create 创建）
+        html: 原型页 HTML——**全部样式内联**（<style> 或 style 属性），禁外链
+               资源/字体/图片（外链会被内容安全策略拦掉，页面会缺件）、禁脚本
+               （会被剥除）；≤100KB、建议 ≤150 行；写法示例见 section-writing.md
+               「界面原型」
+        after: 插在该段落号之后（P 序号以 docx_section_read 视图为准，可带 P 前缀）；
+               留空=追加到节末尾
+        caption: 图片下方居中图注（如「审批模块界面原型」——不带编号，整本合册时
+               按树序全局编号）；空=不加图注
+
+    渲染产物自动带「界面原型 · 示意图」角标（wrapper 固定注入，防止原型被误当
+    真实截图）；图片全宽居中、带插入修订标记；渲染源 HTML 落盘
+    work/body/assets/ 留底。前端渲染服务不可用/超时（应用不在前台等）时返回
+    失败提示——改用文字描述界面或批注记待补，勿反复重试。
+    """
+    task_id = _task_id()
+    if not task_id:
+        return "[原型失败] 当前会话未归属任务"
+    try:
+        dst, rel = _dest_path(task_id, dest, must_exist=True)
+    except ValueError as e:
+        return f"[原型失败] {e}"
+    raw = (html or "").strip()
+    if not raw:
+        return "[原型失败] html 为空——界面原型须给出完整 HTML（全部样式内联）"
+    n_bytes = len(raw.encode("utf-8"))
+    if n_bytes > _HTML_MAX_BYTES:
+        return f"[原型失败] html {n_bytes // 1024}KB 超上限（≤100KB）——精简页面或拆成多张原型"
+    clean = _sanitize_html(raw)
+    # 源留底：工作台只列 .md/.docx（assets/ 不可见），纯磁盘资产——将来「改 HTML
+    # 重渲染」的入口，run_files 的 .md/.docx 收录口径也不受扰
+    assets_dir = dst.parent / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    (assets_dir / f"{uuid.uuid4().hex}.html").write_text(clean, encoding="utf-8")
+    return _render_and_insert(
+        task_id, dst, rel, after, caption,
+        {"kind": "html", "html": clean}, "[原型失败]",
+        f"[已插原型] work/{rel}：界面原型 1 张（webview 渲染，带角标）",
+    )
+
+
+def _insert_rendered_png(
+    dst: Path, rel: str, after: str, caption: str, png: bytes, label: str
+) -> tuple[str | None, str | None]:
+    """渲染产物 PNG 落进节文件（docx_html_figure 与 docx_diagram_insert kind=flow
+    共用）：全宽居中+插入修订的图片段、锚定放位、自校验后加图注（图注在图下方，
+    无修订新建段——自校验须在加图注之前做，否则拒绝视角比对误判）。
+    返回 (错误文案|None, 成功文案|None)。label 用于错误前缀（[原型失败]/[图示失败]）。"""
+    with _docx_path_lock(dst):
+        doc = Document(str(dst))
+        before = _flatten_rejected(doc)
+        try:
+            p_el = _tracked_image_paragraph(doc, png)
+        except ValueError as e:
+            return f"{label} 渲染产物异常（{e}）——请重试一次，再败则降级处理", None
+        err, where = _place_after_anchor(doc, p_el, after, label)
+        if err:
+            return err, None
+        if _flatten_rejected(doc) != before:
+            return f"{label} 修订标记自校验未通过（未保存，文件未变）——请重试", None
+        cap = (caption or "").strip()
+        if cap:
+            p_el.addnext(_add_caption(doc, cap)._p)
+        _atomic_save(doc, dst)
+    return None, where
+
+
+def _render_and_insert(
+    task_id: str, dst: Path, rel: str, after: str, caption: str, payload: dict, label: str, stat: str
+) -> str:
+    """经 webview 光栅化队列渲染并插入（html 原型/mermaid 流程共用）：
+    登记渲染请求 → 阻塞等待回执 → 插 PNG；超时/失败给降级文案（不死等不卡 run）。
+    label 为错误前缀（[原型失败]/[图示失败]），降级前缀由它派生（[原型渲染失败]）。"""
+    rid = render_queue.register(task_id, rel, after, caption, payload)
+    png = render_queue.wait(rid)
+    if png is None:
+        return (
+            f"{label.replace('失败]', '渲染失败]')} 前端渲染服务未响应（应用可能不在前台或"
+            "渲染超时）——改用文字描述该内容，或 docx_comment_add 批注记待补后继续；"
+            "不要原地反复重试"
+        )
+    err, where = _insert_rendered_png(dst, rel, after, caption, png, label)
+    if err:
+        return err
+    bits = f"{stat}（{where}）"
+    if (caption or "").strip():
+        bits += (
+            "，图注 1 段（图注段使其后段落序号 +1）\n（最新读视图如下——后续修订按此序号"
+            "定位即可，无需再调 docx_section_read）\n" + "\n".join(view_lines(Document(str(dst))))
+        )
+    else:
+        bits += (
+            "。图片段显示〔图×1〕；图注须在插入时经 caption 参数给出——漏了可接受"
+            "无图注，或 docx_comment_add 批注（锚定图片附近段落）请用户在 Word 补；"
+            "不要再调本工具补图注（会重复出图）"
+        )
+    return bits
 
 
 @tool
@@ -1748,6 +2112,391 @@ def docx_comment_add(path: str, text: str, after: str = "") -> str:
         f"[已加批注] work/{rel} {where}：「{snippet}」（本节待办批注共 {total} 条）"
         "\n待办批注收尾必须逐条向用户点名（validate_body 也会清点）；正文里不要写占位文字。"
     )
+
+
+def _grid_layered(layers: list[dict]) -> tuple[list[list[dict]], list[float]]:
+    """分层/组织架构网格：域头列+四成员列，层间 ↓ 箭头行，层内 >4 项折行。"""
+    grid: list[list[dict]] = []
+    for i, layer in enumerate(layers):
+        chunks = [layer["items"][j : j + 4] for j in range(0, len(layer["items"]), 4)] or [[]]
+        for k, chunk in enumerate(chunks):
+            row: list[dict] = [
+                {
+                    "text": layer["title"] if k == 0 else "",
+                    "bold": True,
+                    "fill": _DIAG_HEAD_FILL,
+                    "center": True,
+                }
+            ]
+            for c in range(4):
+                row.append(
+                    {"text": chunk[c], "fill": _DIAG_ITEM_FILL, "center": True}
+                    if c < len(chunk)
+                    else {}
+                )
+            grid.append(row)
+        if i < len(layers) - 1:
+            grid.append([{}, {}, {"text": "↓", "center": True}, {}, {}])
+    return grid, [0.18, 0.205, 0.205, 0.205, 0.205]
+
+
+def _grid_gantt(tasks: list[dict], weeks: int, milestones: list[dict]):
+    """甘特网格：任务行×周列，区间格填色即时间条（空文本+底纹），里程碑行 ◆。
+    周列窄格是形态本身——列数上限不适用，由 weeks ≤36 上限管横向溢出。"""
+    head_cell = {"bold": True, "fill": _DIAG_HEAD_FILL, "center": True}
+    grid: list[list[dict]] = [
+        [{"text": "任务", **head_cell}]
+        + [{"text": f"W{w}", **head_cell} for w in range(1, weeks + 1)]
+    ]
+    for t in tasks:
+        row = [{"text": t["name"]}]
+        for w in range(1, weeks + 1):
+            row.append({"fill": _DIAG_HEAD_FILL} if t["start"] <= w <= t["end"] else {})
+        grid.append(row)
+    for m in milestones:
+        row = [{"text": m["label"]}]
+        for w in range(1, weeks + 1):
+            row.append({"text": "◆", "center": True} if w == m["week"] else {})
+        grid.append(row)
+    return grid, [0.22] + [(1 - 0.22) / weeks] * weeks
+
+
+def _grid_radial(center: str, left: list[str], right: list[str], below: list[str]):
+    """中心辐射网格：中列（建表后纵向合并）+左右翼+↓下方行——返回 (网格, 列宽比,
+    中列行数) 供 merge。"""
+    mid = max(len(left), len(right), 1)
+    grid: list[list[dict]] = []
+    for i in range(mid):
+        lv = {"text": left[i], "fill": _DIAG_ITEM_FILL, "center": True} if i < len(left) else {}
+        rv = {"text": right[i], "fill": _DIAG_ITEM_FILL, "center": True} if i < len(right) else {}
+        grid.append(
+            [
+                lv,
+                {"text": "→" if i < len(left) else "", "center": True},
+                {
+                    "text": center if i == 0 else "",
+                    "bold": True,
+                    "fill": _DIAG_HEAD_FILL,
+                    "center": True,
+                },
+                {"text": "←" if i < len(right) else "", "center": True},
+                rv,
+            ]
+        )
+    if below:
+        grid.append([{}, {}, {"text": "↓", "center": True}, {}, {}])
+        for item in below:
+            grid.append([{}, {}, {"text": item, "fill": _DIAG_ITEM_FILL, "center": True}, {}, {}])
+    return grid, [0.26, 0.08, 0.32, 0.08, 0.26], mid
+
+
+def _parse_diagram_spec(kind: str, spec: str) -> tuple[dict | list | None, str | None]:
+    """图示 spec 解析与校验（各 kind 逐字段校验、超限给修复写法）。"""
+    try:
+        data = json.loads(spec)
+    except ValueError:
+        return None, "spec 不是合法 JSON（须为对象，各 kind 字段见工具说明）"
+    if not isinstance(data, dict):
+        return None, "spec 须为 JSON 对象"
+
+    def _strs(v: list | None, label: str, where: str) -> tuple[list[str] | None, str | None]:
+        if v is None:
+            return [], None
+        if not isinstance(v, list):
+            return None, f"{where} 的 {label} 须为字符串数组"
+        out = [_cell_str(x).strip() for x in v]
+        if any(not x for x in out):
+            return None, f"{where} 的 {label} 含空项"
+        if any(len(x) > _MAX_CELL_CHARS for x in out):
+            return None, f"{where} 的 {label} 有条目超 {_MAX_CELL_CHARS} 字上限"
+        return out, None
+
+    if kind == "layered":
+        layers = data.get("layers")
+        if not isinstance(layers, list) or not layers:
+            return None, (
+                "layered 须带 layers：[{\"title\":\"主数据域\",\"items\":[\"公司\",\"组织\",\"职位\",\"人员\"]}, …]"
+            )
+        norm: list[dict] = []
+        for i, ly in enumerate(layers, 1):
+            if not isinstance(ly, dict):
+                return None, f"layers 第 {i} 项不是对象"
+            title = _cell_str(ly.get("title")).strip()
+            items, err = _strs(ly.get("items"), "items", f"layers 第 {i} 项")
+            if err:
+                return None, err
+            if not title or not items:
+                return None, f"layers 第 {i} 项缺 title 或 items（均必填、items 非空）"
+            if len(title) > _MAX_CELL_CHARS:
+                return None, f"layers 第 {i} 项 title 超 {_MAX_CELL_CHARS} 字上限"
+            norm.append({"title": title, "items": items})
+        return norm, None
+
+    if kind == "gantt":
+        tasks = data.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            return None, (
+                "gantt 须带 tasks：[{\"name\":\"需求调研\",\"start\":1,\"end\":4}, …]（周号从 1 起）"
+            )
+        try:
+            weeks = int(data.get("weeks") or 0)
+        except (TypeError, ValueError):
+            return None, "weeks 须为整数（周数，可省略——按任务最晚结束周推定）"
+        norm_tasks: list[dict] = []
+        for i, t in enumerate(tasks, 1):
+            if not isinstance(t, dict):
+                return None, f"tasks 第 {i} 项不是对象"
+            name = _cell_str(t.get("name")).strip()
+            if not name:
+                return None, f"tasks 第 {i} 项缺 name"
+            try:
+                start, end = int(t.get("start")), int(t.get("end"))
+            except (TypeError, ValueError):
+                return None, f"tasks 第 {i} 项 start/end 须为整数（周号从 1 起）"
+            if start < 1 or end < start:
+                return None, f"tasks 第 {i} 项区间非法（须 1 ≤ start ≤ end）"
+            norm_tasks.append({"name": name, "start": start, "end": end})
+            weeks = max(weeks, end)
+        if weeks > 36:
+            return None, (
+                f"总周数 {weeks} 超上限（≤36）——长周期请以月为单位聚合"
+                '（如 {"name":"需求调研","start":1,"end":2} 的 start/end 按月计）'
+            )
+        milestones_raw = data.get("milestones") or []
+        if not isinstance(milestones_raw, list):
+            return None, "milestones 须为数组：[{\"week\":4,\"label\":\"需求评审\"}, …]（可省略）"
+        norm_ms: list[dict] = []
+        for i, m in enumerate(milestones_raw, 1):
+            if not isinstance(m, dict):
+                return None, f"milestones 第 {i} 项不是对象"
+            label = _cell_str(m.get("label")).strip()
+            if not label:
+                return None, f"milestones 第 {i} 项缺 label"
+            try:
+                week = int(m.get("week"))
+            except (TypeError, ValueError):
+                return None, f"milestones 第 {i} 项 week 须为整数"
+            if not 1 <= week <= weeks:
+                return None, f"milestones 第 {i} 项 week={week} 超出总周数 {weeks}"
+            norm_ms.append({"week": week, "label": label})
+        return {"tasks": norm_tasks, "weeks": weeks, "milestones": norm_ms}, None
+
+    # kind == "radial"（调用方已把关 kind 取值）
+    center = _cell_str(data.get("center")).strip()
+    if not center:
+        return None, 'radial 须带 center："人员主记录"（中心主题）'
+    left, err = _strs(data.get("left"), "left", "radial")
+    if err:
+        return None, err
+    right, err = _strs(data.get("right"), "right", "radial")
+    if err:
+        return None, err
+    below, err = _strs(data.get("below"), "below", "radial")
+    if err:
+        return None, err
+    if not (left or right or below):
+        return None, "radial 至少给 left/right/below 之一（中心之外要有内容）"
+    return {"center": center, "left": left, "right": right, "below": below}, None
+
+
+# flow（分支回环流程图，mermaid 消费方 2026-09-14 批三）：模型只给 JSON 拓扑，
+# 程序翻译成 mermaid 文本（模型永不手写 mermaid——非法输入当场报错的错误形态
+# 优于「解析模型半自由语法猜错画错图」）；渲染走 webview 光栅化队列出 PNG。
+_FLOW_MAX_NODES = 20
+_FLOW_MAX_EDGES = 30
+_FLOW_LABEL_MAX = 20
+_FLOW_SHAPES = {"rect", "diamond", "round"}  # 矩形(默认)/判断菱形/圆角起止
+
+
+def _parse_flow_spec(data: dict) -> tuple[dict | None, str | None]:
+    """flow spec 校验与规范化：{"nodes":[{"id","label","shape"?}],"edges":[[from,to,label?]]}。"""
+    nodes_raw = data.get("nodes")
+    edges_raw = data.get("edges")
+    if not isinstance(nodes_raw, list) or not nodes_raw:
+        return None, 'flow 须带 nodes：[{"id":"a","label":"提交故障"}, {"id":"b","label":"判定级别","shape":"diamond"}]'
+    if not isinstance(edges_raw, list) or not edges_raw:
+        return None, "flow 须带 edges：[[\"a\",\"b\"],[\"b\",\"c\",\"重大\"]]（第三元素=边标签）"
+    if len(nodes_raw) > _FLOW_MAX_NODES:
+        return None, f"节点数 {len(nodes_raw)} 超上限（≤{_FLOW_MAX_NODES}）——拆成两张图或精简步骤"
+    if len(edges_raw) > _FLOW_MAX_EDGES:
+        return None, f"连线数 {len(edges_raw)} 超上限（≤{_FLOW_MAX_EDGES}）——拆成两张图"
+    nodes: list[dict] = []
+    ids: set[str] = set()
+    for i, n in enumerate(nodes_raw, 1):
+        if not isinstance(n, dict):
+            return None, f"nodes 第 {i} 项不是对象"
+        nid = _cell_str(n.get("id")).strip()
+        label = _cell_str(n.get("label")).strip()
+        shape = _cell_str(n.get("shape") or "rect").strip() or "rect"
+        if not nid or not label:
+            return None, f"nodes 第 {i} 项缺 id 或 label（均必填）"
+        if not re.fullmatch(r"[A-Za-z0-9_\-]{1,16}", nid):
+            return None, f"节点 id「{nid}」须为 ≤16 位的字母数字/下划线/连字符（edges 用它引用）"
+        if nid in ids:
+            return None, f"节点 id「{nid}」重复"
+        if len(label) > _FLOW_LABEL_MAX:
+            return None, f"节点「{nid}」label {len(label)} 字超上限（≤{_FLOW_LABEL_MAX}）"
+        if shape not in _FLOW_SHAPES:
+            return None, f"节点「{nid}」shape 须为 {'/'.join(sorted(_FLOW_SHAPES))}（默认 rect）"
+        ids.add(nid)
+        nodes.append({"id": nid, "label": label, "shape": shape})
+    edges: list[list[str]] = []
+    for i, e in enumerate(edges_raw, 1):
+        if not isinstance(e, list) or len(e) not in (2, 3):
+            return None, f"edges 第 {i} 条须为 [from, to] 或 [from, to, \"标签\"]"
+        fr, to = _cell_str(e[0]).strip(), _cell_str(e[1]).strip()
+        if fr not in ids or to not in ids:
+            return None, f"edges 第 {i} 条引用了不存在的节点（{fr}→{to}）"
+        label = _cell_str(e[2]).strip() if len(e) == 3 else ""
+        if label and len(label) > _FLOW_LABEL_MAX:
+            return None, f"edges 第 {i} 条标签 {len(label)} 字超上限（≤{_FLOW_LABEL_MAX}）"
+        edges.append([fr, to, label])
+    return {"nodes": nodes, "edges": edges}, None
+
+
+def _flow_to_mermaid(parsed: dict) -> str:
+    """规范化的 flow 拓扑 → mermaid flowchart 文本（纵向下行）。label 里的引号/
+    竖线转成实体/全角，防语法注入——输入已过校验，这里是保险带。"""
+    lines = ["flowchart TD"]
+
+    def esc(label: str, pipe_to_full: bool) -> str:
+        out = label.replace("\\", "\\\\").replace('"', "#quot;")
+        return out.replace("|", "｜") if pipe_to_full else out
+
+    for n in parsed["nodes"]:
+        if n["shape"] == "diamond":
+            lines.append(f'  {n["id"]}{{"{esc(n["label"], False)}"}}')
+        elif n["shape"] == "round":
+            lines.append(f'  {n["id"]}("{esc(n["label"], False)}")')
+        else:
+            lines.append(f'  {n["id"]}["{esc(n["label"], False)}"]')
+    for edge in parsed["edges"]:
+        fr, to = edge[0], edge[1]
+        label = edge[2] if len(edge) > 2 else ""
+        if label:
+            lines.append(f"  {fr} -->|{esc(label, True)}| {to}")
+        else:
+            lines.append(f"  {fr} --> {to}")
+    return "\n".join(lines)
+
+
+@tool
+@_tool_guard("图示")
+def docx_diagram_insert(dest: str, kind: str, spec: str, after: str = "", caption: str = "") -> str:
+    """在正文节插入程序生成的图示（表格拼装 + webview 渲染，2026-09-14 表格通道批）
+    ——评委按图找要点比按段落找快，方案节的详实度工具。
+
+    适用：实施进度（kind=gantt）、项目组织/团队层级/系统与数据分层架构
+    （kind=layered）、以某物为中心的关系说明（kind=radial）、**带分支回环的流程图**
+    （kind=flow——故障处置/审批流转/业务流程；渲染走 webview 光栅化出 PNG，模型
+    只给 JSON 拓扑，程序翻译成 mermaid 文本）。**不适用**：纯叙述内容（加图不
+    加分）、承诺函/函件类格式节。普通数据表（配置清单/对比矩阵）用建节 body 的
+    table 块，不用本工具。按写作指引「图示」列的计划执行，计划外插图会在收尾
+    对账被点名。
+    Args:
+        dest: 目标节文件（相对任务 work/，须已用 docx_section_create 创建）
+        kind: layered（分层/组织架构）| gantt（甘特）| radial（中心辐射）|
+              flow（分支回环流程图，2026-09-14 批三）
+        spec: 各 kind 的 JSON 拓扑——
+              layered: {"layers":[{"title":"主数据域","items":["公司","组织","职位","人员"]}, …]}
+                       （组织架构=逐层 1..n 项的 layered）
+              gantt:   {"tasks":[{"name":"需求调研","start":1,"end":4}, …],
+                        "weeks":24, "milestones":[{"week":4,"label":"需求评审"}]}
+                       （start/end 为周号从 1 起；weeks 可省略按最晚结束周推定，≤36；
+                         长周期按月聚合）
+              radial:  {"center":"人员主记录","left":["公司与组织","职位与任职"],
+                        "right":["任免业务","干部考察"],"below":["同步批次","数据版本"]}
+              flow:    {"nodes":[{"id":"a","label":"提交故障"},
+                                 {"id":"b","label":"判定级别","shape":"diamond"},
+                                 {"id":"c","label":"应急处置","shape":"round"}],
+                        "edges":[["a","b"],["b","c","重大"],["c","b","重判"]]}
+                       （shape∈rect默认/diamond判断/round起止；边第三元素=标签
+                        「是/否/重大」；分支回环随意——布局归渲染器；≤20 节点≤30 边，
+                        超限拆图）
+        after: 插在该段落号之后（P 序号以 docx_section_read 视图为准，可带 P 前缀）；
+               留空=追加到节末尾
+        caption: 图示下方居中图注（如「故障处置流程」——不带编号，整本合册时
+               按树序全局编号；空=不加图注）
+    """
+    task_id = _task_id()
+    if not task_id:
+        return "[图示失败] 当前会话未归属任务"
+    try:
+        dst, rel = _dest_path(task_id, dest, must_exist=True)
+    except ValueError as e:
+        return f"[图示失败] {e}"
+    if kind not in ("layered", "gantt", "radial", "flow"):
+        return "[图示失败] kind 须为 layered|gantt|radial|flow（线框属后续批次）"
+    if kind == "flow":
+        try:
+            data = json.loads(spec)
+        except ValueError:
+            return "[图示失败] spec 不是合法 JSON（须为对象，字段见工具说明）"
+        if not isinstance(data, dict):
+            return "[图示失败] spec 须为 JSON 对象"
+        parsed_flow, err = _parse_flow_spec(data)
+        if err:
+            return f"[图示失败] {err}"
+        mermaid = _flow_to_mermaid(parsed_flow)
+        return _render_and_insert(
+            task_id, dst, rel, after, caption,
+            {"kind": "flow", "mermaid": mermaid}, "[图示失败]",
+            f"[已插图示] flow → work/{rel}：流程图 1 张（webview 渲染，"
+            f"节点 {len(parsed_flow['nodes'])}/连线 {len(parsed_flow['edges'])}）",
+        )
+    parsed, err = _parse_diagram_spec(kind, spec)
+    if err:
+        return f"[图示失败] {err}"
+    with _docx_path_lock(dst):
+        doc = Document(str(dst))
+        if kind == "layered":
+            grid, ratios = _grid_layered(parsed)
+            tbl = _grid_table(doc, grid, ratios)
+            stat = f"{len(parsed)} 层"
+        elif kind == "gantt":
+            grid, ratios = _grid_gantt(parsed["tasks"], parsed["weeks"], parsed["milestones"])
+            tbl = _grid_table(doc, grid, ratios)
+            stat = f"{len(parsed['tasks'])} 项任务×{parsed['weeks']} 周"
+        else:
+            grid, ratios, mid = _grid_radial(parsed["center"], parsed["left"], parsed["right"], parsed["below"])
+            tbl = _grid_table(doc, grid, ratios)
+            if mid > 1:
+                tbl.cell(0, 2).merge(tbl.cell(mid - 1, 2))
+            stat = f"中心「{parsed['center']}」"
+        cap_el = None
+        if (caption or "").strip():
+            cap_el = _add_caption(doc, caption)._p
+        if (after or "").strip():
+            try:
+                idx = int(after.strip().lstrip("Pp"))
+            except ValueError:
+                return "[图示失败] after 须为段落号（如 5 或 P5，以 docx_section_read 视图为准）"
+            paras = doc.paragraphs
+            if not 1 <= idx <= len(paras):
+                return f"[图示失败] 段落号超范围：after={idx}，本节视图共 {len(paras)} 段"
+            paras[idx - 1]._p.addnext(tbl._tbl)
+            if cap_el is not None:
+                tbl._tbl.addnext(cap_el)  # 图注紧随表格（建表/建注都在文末，须随表格一起搬）
+            where = f"P{idx} 之后"
+        else:
+            where = "节末"
+        _atomic_save(doc, dst)
+        # doc.tables 每次访问重新包装 Table 对象（identity 比对必失败），按 XML
+        # 元素身份找文档序号
+        t_no = [t._tbl for t in doc.tables].index(tbl._tbl) + 1
+    bits = f"[已插图示] {kind} → work/{rel}（{where}，表格 T{t_no}，{stat}）"
+    if cap_el is not None:
+        bits += (
+            "，图注 1 段（图注段使其后段落序号 +1）\n（最新读视图如下——后续修订按此序号"
+            "定位即可，无需再调 docx_section_read）\n" + "\n".join(view_lines(doc))
+        )
+    else:
+        bits += (
+            "。表格不占段落序号（P 编号不变）；图注须在插入时经 caption 参数给出——"
+            "漏了可接受无图注，或 docx_comment_add 批注（锚定表格附近段落）请用户在 "
+            "Word 补；不要再调本工具补图注（会重复出表）"
+        )
+    return bits
 
 
 @tool
@@ -1844,6 +2593,11 @@ def docx_section_revise(path: str, edits: str) -> str:
         # 99 次 revise 里 76 次紧跟整读、53 批含删/插段全是重锚定刚需）
         done: list[str | None] = []
         inserts_pending: list[tuple[int, object, str, int]] = []  # (原序号, 新段元素, 文本, done 下标)
+        # 改动后现文（2026-09-14 回读再收敛）：replace/delete 的段落序号 + 格编辑坐标
+        # ——纯改动批（无插段）返回逐对象「现文」，把回读动机从根上拿掉（实测写手
+        # 5.5 次整读/节，大部分是改完不放心再看一眼）
+        touched_paras: list[int] = []  # replace/delete 过的段序号
+        touched_cells: list[tuple[int, int, int]] = []  # 格编辑 (T,R,C)
 
         def _snip(s: str, n: int = 20) -> str:
             s = s.replace("\n", " ")
@@ -1865,6 +2619,7 @@ def docx_section_revise(path: str, edits: str) -> str:
                     done.append(
                         f"P{i} 替换「{_snip(str(it['find']))}」→「{_snip(str(it['text']))}」"
                     )
+                    touched_paras.append(i)
                 elif act == "insert_after":
                     anchor = insert_anchors.get(i, para._p)
                     style_id = body_style_id
@@ -1884,6 +2639,7 @@ def docx_section_revise(path: str, edits: str) -> str:
                 else:
                     _tracked_delete(para, rev_id)
                     done.append(f"P{i} 删除（原位保留删除标记，序号不变）")
+                    touched_paras.append(i)
             except ValueError as e:
                 return f"[修订失败] P{i}：{e}"
             applied += 1
@@ -1909,6 +2665,7 @@ def docx_section_revise(path: str, edits: str) -> str:
                     )
                 _tracked_fill(cell_paras[0], str(it["text"]), rev_id)
                 done.append(f"T{t_no} R{r}C{c} 填空「{_snip(str(it['text']))}」")
+                touched_cells.append((t_no, r, c))
             else:
                 find = str(it["find"])
                 target = next((p for p in cell_paras if find in _accepted_text(p._p)), None)
@@ -1922,6 +2679,7 @@ def docx_section_revise(path: str, edits: str) -> str:
                     done.append(
                         f"T{t_no} R{r}C{c} 替换「{_snip(find)}」→「{_snip(str(it['text']))}」"
                     )
+                    touched_cells.append((t_no, r, c))
                 except ValueError as e:
                     return f"[修订失败] T{t_no}({r},{c})：{e}"
             applied += 1
@@ -1952,24 +2710,152 @@ def docx_section_revise(path: str, edits: str) -> str:
             "定位即可，无需再调 docx_section_read）\n" + "\n".join(view_lines(doc))
         )
     else:
+        # 纯改动批（无插段，序号全部不变）：逐对象附「改动后现文」（接受视角）——
+        # 回读的动机是看结果，结果直接送到眼前（2026-09-14 回读再收敛；实测 155 次
+        # 写手整读里约 120 次是改完确认，5.5 次/节对设计「通读一次」）
+        now_parts: list[str] = []
+        for i in dict.fromkeys(touched_paras):  # 去重保序
+            para = doc.paragraphs[i - 1]
+            if para is None:
+                continue
+            # 整段删除判据=段落标记删除（pPr/rPr/w:del，_tracked_delete 落的形
+            # 态、与 view_lines 的 para_deleted 同款）——不能用「段内有 w:del」
+            # 判：replace 的旧文也包 run 级 w:del，会误判
+            ppr = para._p.find(qn("w:pPr"))
+            rpr = ppr.find(qn("w:rPr")) if ppr is not None else None
+            para_deleted = rpr is not None and rpr.find(qn("w:del")) is not None
+            if para_deleted:
+                now_parts.append(f"P{i} 现文：（已标记删除，接受修订后此段消失）")
+            else:
+                txt = _accepted_text(para._p).replace("\n", " ")
+                now_parts.append(f"P{i} 现文：{_snip(txt, _VIEW_TEXT_LIMIT)}")
+        for t_no, r, c in dict.fromkeys(touched_cells):
+            cell = doc.tables[t_no - 1].cell(r - 1, c - 1)
+            txt = " / ".join(s for p in cell.paragraphs if (s := _accepted_text(p._p).strip()))
+            now_parts.append(f"T{t_no}R{r}C{c} 现文：{_snip(txt or '（空）', 60)}")
         bits += (
             "\n（删段/替换/填空均不改变段落序号——删除段原位保留删除标记、视图序号"
             "不变，无需回读视图确认。修订后建议 check_name_residue 扫旧名残留。）"
         )
+        if now_parts:
+            bits += "\n改动后现文（接受修订视角，无需回读确认）：\n  " + "\n  ".join(now_parts)
     return bits
 
 
 # ---------- 整本合册与文本抽取 ----------
 
 def _tree_nodes(nodes: list[dict], depth: int = 1):
-    """目录树先序遍历产出 (深度, 标题, 是否容器, 交付形态)——合册的章序真值是树序，不是文件名序。"""
+    """目录树先序遍历产出 (深度, 标题, 是否容器, 交付形态, 原节点)——合册的章序
+    真值是树序，不是文件名序；原节点供空容器抑制按对象身份对位。"""
     for n in nodes:
         children = n.get("children") or []
         title = str(n.get("目录名称") or "").strip()
         mode = str(n.get("交付形态") or "").strip()
         if title:
-            yield depth, title, bool(children), mode
+            yield depth, title, bool(children), mode, n
         yield from _tree_nodes(children, depth + 1)
+
+
+def _leaf_will_emit(node: dict, wroot: Path, vol_dir: str) -> bool:
+    """叶子是否会产出整本内容：需正文的（含缺文件——标题照发、缺失另有点名）恒
+    真；模板填充类以节文件存在为准（含格式件与附件壳节）。与合册主循环同一判定。"""
+    children = node.get("children") or []
+    if children:
+        return _subtree_will_emit(children, wroot, vol_dir)
+    title = str(node.get("目录名称") or "").strip()
+    if not title:
+        return False
+    if body_contract.sanitize_name(title) == _TOC_NODE_NAME:
+        return True  # 目录节点恒产出（无手写文件时合册机械生成目录页）
+    mode = str(node.get("交付形态") or "").strip()
+    if mode not in body_contract.NON_PROSE_DELIVERY:
+        return True
+    stem = body_contract.sanitize_name(title)
+    rel = f"body/{vol_dir}/{stem}.docx" if vol_dir else f"body/{stem}.docx"
+    return (wroot / rel).is_file()
+
+
+def _subtree_will_emit(nodes: list[dict], wroot: Path, vol_dir: str) -> bool:
+    """容器子树是否还有将产出的叶子——全无则抑制容器章标题（子节点全走「按附件
+    对待」被跳过，信息由目录页「另附」行承载；2026-09-14 拍板，兜底防线）。"""
+    return any(_leaf_will_emit(n, wroot, vol_dir) for n in nodes)
+
+
+def _empty_containers(nodes: list[dict], wroot: Path, vol_dir: str) -> set[int]:
+    """收集子树无任何将产出叶子的容器节点（id() 集，主循环按对象身份跳过）。"""
+    out: set[int] = set()
+    for n in nodes:
+        children = n.get("children") or []
+        if children:
+            out |= _empty_containers(children, wroot, vol_dir)
+            if not _subtree_will_emit(children, wroot, vol_dir):
+                out.add(id(n))
+    return out
+
+
+def _body_tail(out: Document):
+    """正文当前最后一个内容元素（sectPr 前）——机械目录页的插入锚点；无内容返回 None。"""
+    for el in reversed(list(out.element.body.iterchildren())):
+        if el.tag != qn("w:sectPr"):
+            return el
+    return None
+
+
+def _insert_mechanical_toc(out: Document, anchor, entries: list[tuple[str, str, int]]) -> int:
+    """机械目录页（2026-09-14 结构缺口批）：Word 目录域 + 缓存静态清单。
+
+    域包裹缓存条目（fldChar separate…end 之间）——Word/WPS 更新域即得带页码的
+    正式目录并整体替换缓存；不更新也能交（缓存清单即目录）。条目=实收章节
+    （编号+标题，按层级缩进、无页码——页码排版后只有 Word 知道）；未产出附件
+    节在条目文本上带「（另附）」标记。anchor=目录节点位置前最后的内容元素
+    （None=插到正文最前）；标题「目录」刻意不用 Heading 样式——进大纲会被
+    目录域/导航窗格自引用。
+    """
+    if not entries:
+        return 0
+    els = []
+    h = out.add_paragraph("目录")
+    h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    h.paragraph_format.space_after = Pt(12)
+    r = h.runs[0]
+    r.bold = True
+    r.font.size = Pt(16)
+    els.append(h._p)
+    for i, (prefix, title, depth) in enumerate(entries):
+        p = out.add_paragraph()
+        p.paragraph_format.left_indent = Cm(0.74 * max(0, depth - 1))
+        if i == 0:  # 域头：begin + 指令 + separate（缓存结果由此起，更新域整体替换）
+            r = p.add_run()
+            fc = OxmlElement("w:fldChar")
+            fc.set(qn("w:fldCharType"), "begin")
+            r._r.append(fc)
+            r = p.add_run()
+            it = OxmlElement("w:instrText")
+            it.set(qn("xml:space"), "preserve")
+            it.text = ' TOC \\o "1-3" \\h \\z \\u '
+            r._r.append(it)
+            r = p.add_run()
+            fs = OxmlElement("w:fldChar")
+            fs.set(qn("w:fldCharType"), "separate")
+            r._r.append(fs)
+        p.add_run((prefix + title).strip())
+        if i == len(entries) - 1:
+            r = p.add_run()
+            fe = OxmlElement("w:fldChar")
+            fe.set(qn("w:fldCharType"), "end")
+            r._r.append(fe)
+        els.append(p._p)
+    if anchor is not None:
+        for el in reversed(els):
+            anchor.addnext(el)
+    else:
+        sect = out.element.body.find(qn("w:sectPr"))
+        for el in els:
+            if sect is not None:
+                sect.addprevious(el)
+            else:
+                out.element.body.append(el)
+    return len(entries)
 
 
 # ---------- 章节编号（合册按树序生成；格式取目录产物 numbering 字段） ----------
@@ -2024,6 +2910,53 @@ class _HeadingNumberer:
         if self.scheme == "chapter" and depth == 1:
             return f"第{_cn_num(self.counters[1])}章\u3000"
         return ".".join(str(self.counters[d]) for d in range(1, depth + 1)) + " "
+
+
+_CAP_NUM_STRIP_RE = re.compile(r"^[图表]\s*[0-9０-９\-－—–.．]+\s*")
+
+
+def _caption_style_ids(doc: Document) -> set[str]:
+    """样式名 Tender Caption 的 styleId 集（合册按样式名识别图注/表题；版式缺
+    该样式=建注时回落正文样式，识别不中=跳过重编号，不误伤）。"""
+    ids = set()
+    for st in doc.styles:
+        sid = getattr(st, "style_id", None)
+        if sid and st.name == _CAPTION_STYLE_NAME:
+            ids.add(sid)
+    return ids
+
+
+def _renumber_captions(
+    copied: list, cap_ids: set[str], chapter: int, counters: dict, numbered: bool
+) -> int:
+    """节内图注/表题重编号（合册全局序的节级增量，2026-09-14 批）：「表」=后随
+    表格的图注段（表题在表格上方——建节 body 表块形态）、「图」=其余（docx_
+    diagram_insert 的图注在表格下方，表格拼装但语义为图）。编号与章节标题同一
+    树序原则：节文件不带编号（树位置合册才知道）；numbered=False（目录产物
+    不编号档）退化为全册平铺「图 N/表 N」。返回重编号数。"""
+    n = 0
+    for i, el in enumerate(copied):
+        if el.tag != qn("w:p"):
+            continue
+        ppr = el.find(qn("w:pPr"))
+        pstyle = ppr.find(qn("w:pStyle")) if ppr is not None else None
+        if pstyle is None or (pstyle.get(qn("w:val")) or "") not in cap_ids:
+            continue
+        nxt = copied[i + 1] if i + 1 < len(copied) else None
+        kind = "表" if nxt is not None and nxt.tag == qn("w:tbl") else "图"
+        key = (kind, chapter if numbered else 0)
+        counters[key] = counters.get(key, 0) + 1
+        label = f"{kind} {chapter}-{counters[key]}" if numbered else f"{kind} {counters[key]}"
+        ts = el.findall(".//" + qn("w:t"))
+        if not ts:
+            continue
+        text = "".join(t.text or "" for t in ts)
+        ts[0].text = f"{label} {_CAP_NUM_STRIP_RE.sub('', text).strip()}".strip()
+        ts[0].set(qn("xml:space"), "preserve")
+        for t in ts[1:]:
+            t.text = ""
+        n += 1
+    return n
 
 
 def _is_title_para(p_el, title: str) -> bool:
@@ -2162,7 +3095,12 @@ def docx_assemble_volume() -> str:
     节文件即按树序并入**（拷原件填空的格式件本就是标书组成部分）、未产出的按
     附件对待不占整本位（返回行点名）。章节编号按树序自动生成（第一章/1.1；
     格式取目录产物的 numbering 字段，缺省第X章+1.1；封面不占序，目录产物里
-    可改为 1+1.1/一、（一）/不编号）。
+    可改为 1+1.1/一、（一）/不编号）；树含「目录」节点时其前的非封面节点为
+    前置区不占章号（编制索引等前置页），正文从目录后第一章起编。「目录」节点
+    无节文件→**目录页由本工具机械生成**（Word 目录域+缓存静态清单：预览即见
+    清单，Word/WPS 更新域即得带页码正式目录；未产出附件节标「另附」）；有节
+    文件→并入并对账（手写优先）。子树无任何将产出叶子的容器不发章标题（空壳
+    章抑制，信息走目录页「另附」行）。
     **整本=交付态**：节内修订标记并入时按「接受全部修订」压平（未接受修订
     前不再新旧内容并存；节文件保留修订供审阅，改内容回节文件层改再重合册）；
     拷入的树外标题段（节内小标题/素材自带标题）摘出大纲层级——导航窗格与
@@ -2204,36 +3142,69 @@ def docx_assemble_volume() -> str:
             and not nodes[0][2]
             and body_contract.sanitize_name(nodes[0][1]) == _COVER_NODE_NAME
         )
+        # 目录页节点=首个名为「目录」的一级叶子（tender-outline 结构约定，2026-09-14
+        # 批）：无手写节文件→循环后在此位置机械生成目录页（Word 目录域+缓存清单）；
+        # 有→按普通节并入（toc_lines 对账路径，手写优先）。其前的非封面一级节点=
+        # 前置区（编制索引等前置页）不占章号，正文从目录后第一章起编；树无目录
+        # 节点时维持全编号（旧目录产物兼容）。
+        toc_node_idx = next(
+            (
+                i
+                for i, (d, t, c, _m, _n) in enumerate(nodes)
+                if d == 1 and not c and body_contract.sanitize_name(t) == _TOC_NODE_NAME
+            ),
+            None,
+        )
+        empty_ids = _empty_containers(doc.get("directory") or [], wroot, vol_dir)
         out = _new_document()  # 模板自带 A4 版面/页边距/页脚页码，无需再手拼
         if has_cover:
             out.sections[0].different_first_page_header_footer = True
         else:
             out.add_heading(vol, 0)
-        merged = n_img = n_comment = 0
+        merged = n_img = n_comment = n_cap = 0
+        cap_counters: dict = {}  # (表|图, 章) → 章内序——图注/表题全局重编号
         missing: list[str] = []
-        unfilled: list[str] = []  # 模板填充类叶子未产出节文件（按附件对待）
+        unfilled: list[tuple[str, int]] = []  # 模板填充类叶子未产出节文件（按附件对待兜底）
         placeholders: list[str] = []  # 内联占位兜底扫描命中（正规落点=批注，此为防线）
         issued_titles: list[str] = []  # 本册实际发出标题的节点（目录页对账的「实有」侧）
+        toc_entries: list[tuple[str, str, int]] = []  # 目录页条目 (编号前缀, 标题, 深度)——树序
+        toc_pending = False  # 目录节点无手写节文件：循环后机械回填目录页
+        toc_anchor = None  # 目录节点位置前最后的内容元素（插入锚点；None=正文最前）
         toc_lines: list[str] | None = None  # 「目录」节条目行（条目超长=说明文字，不当条目）
         seen_chapter = False
-        for idx, (depth, title, is_container, mode) in enumerate(nodes):
+        for idx, (depth, title, is_container, mode, node) in enumerate(nodes):
+            if id(node) in empty_ids:
+                continue  # 空容器：子树无将产出叶子（壳节漏建等极端情形）——不发章标题，信息走目录页「另附」
             if _SELF_NUMBERED.match(title):
                 self_numbered.append(title)
             stem = body_contract.sanitize_name(title)
             rel_src = f"body/{vol_dir}/{stem}.docx" if vol_dir else f"body/{stem}.docx"
+            is_toc_node = idx == toc_node_idx
             if not is_container and mode in body_contract.NON_PROSE_DELIVERY:
                 if not (wroot / rel_src).is_file():
-                    unfilled.append(title)
-                    continue  # 模板填充未产出：按附件对待（打印装订时物理附上），不占整本位
-                # 已产出（拷原件+填空）：按树序并入整本，与正文叶子同路
+                    if is_toc_node:
+                        # 目录页节点无手写节文件：记锚点，循环后在此位置机械生成目录页
+                        toc_pending = True
+                        toc_anchor = _body_tail(out)
+                        continue
+                    unfilled.append((title, depth))
+                    toc_entries.append(("", f"{title}（另附）", depth))
+                    continue  # 模板填充未产出：按附件对待（壳节漏建的兜底），不占整本位
+                # 已产出（拷原件+填空/附件壳节）：按树序并入整本，与正文叶子同路
             if has_cover and idx == 0:
                 # 封面节点不发「封面」标题行（节文件内容即整页），但占一级位：
                 # seen_chapter 置位让第一章拿到分页、封面独占首页；编号不占序
                 seen_chapter = True
             else:
-                # 标题带编号发（对账剥节文件标题仍用裸 title，见 _is_title_para 调用处）
-                h = out.add_heading(numberer.prefix(depth) + title, min(depth, 9))
-                issued_titles.append(title)
+                # 标题带编号发（对账剥节文件标题仍用裸 title，见 _is_title_para 调用处）；
+                # 前置区（目录节点前的非封面节点）与目录页自身不占章号——正文从
+                # 目录后第一章起编（2026-09-14 拍板：编制索引等前置页不带编号）
+                front_matter = toc_node_idx is not None and idx < toc_node_idx
+                prefix = "" if front_matter or is_toc_node else numberer.prefix(depth)
+                h = out.add_heading(prefix + title, min(depth, 9))
+                if not is_toc_node:
+                    issued_titles.append(title)
+                    toc_entries.append((prefix, title, depth))
                 if depth == 1:
                     if seen_chapter:
                         h.paragraph_format.page_break_before = True
@@ -2280,12 +3251,27 @@ def docx_assemble_volume() -> str:
             _style_n, style_remap = _merge_missing_styles(src, out, copied)
             _merge_missing_numbering(src, out, copied, style_id_remap=style_remap)
             _demote_extra_headings(out, copied)  # 树外标题摘出大纲（样式迁完再判——导航只剩骨架）
+            # 图注/表题全局重编号（先迁样式再改文本——识别按 pStyle=样式名解析）
+            cap_ids = _caption_style_ids(src)
+            if cap_ids:
+                n_cap += _renumber_captions(
+                    copied, cap_ids, numberer.counters[1], cap_counters,
+                    numberer_scheme != "none",
+                )
             n_comment += _merge_missing_comments(src, out, copied)
             merged += 1
         if merged == 0:
             detail = f"（缺失：{'、'.join(missing)}）" if missing else "（目录树无叶子节点）"
             reports.append(f"{vol}：无已写节文件{detail}，未产出整本")
             continue
+        if toc_pending:
+            # 机械目录页回填到目录节点位置（Word 目录域+缓存清单——更新域得页码）
+            n_toc = _insert_mechanical_toc(out, toc_anchor, toc_entries)
+            if n_toc:
+                bits = f"{vol}：目录页已生成（{n_toc} 条；Word/WPS 中更新目录域可得带页码目录）"
+                if unfilled:
+                    bits += f"；未产出附件节标「另附」{len(unfilled)} 项"
+                reports.append(bits)
         try:
             dst, rel = _dest_path(
                 task_id, f"body/{body_contract.VOLUME_PREFIX}{body_contract.sanitize_name(vol)}.docx", must_exist=False
@@ -2305,6 +3291,8 @@ def docx_assemble_volume() -> str:
             bits += f"（含图片 {n_img} 张）"
         if n_comment:
             bits += f"（含批注 {n_comment} 条待处理）"
+        if n_cap:
+            bits += f"（图注/表题编号 {n_cap} 处）"
         if missing:
             bits += f"；缺失 {len(missing)} 节未并入：{'、'.join(missing)}"
         reports.append(bits)
@@ -2319,7 +3307,7 @@ def docx_assemble_volume() -> str:
         if unfilled:
             reports.append(
                 f"{vol}：模板填充类未产出 {len(unfilled)} 节（按附件对待，不占整本位）："
-                + "、".join(unfilled)
+                + "、".join(t for t, _d in unfilled)
             )
         if toc_lines:
             # 目录页对账（探测+提示，不是门禁）：目录页条目 vs 实收章节——列了

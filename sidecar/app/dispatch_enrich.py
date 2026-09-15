@@ -375,6 +375,7 @@ def build_enriched_description(desc: str, task_id: str) -> str | None:
         has_tpl = False
         mode = ""
         mat = ""
+        fig = ""
         gap = None
         loc = None
         guide = _guide_row(task_id, content, vol, title)
@@ -384,6 +385,9 @@ def build_enriched_description(desc: str, task_id: str) -> str | None:
             mode = cells[cols["模式"]].strip() if "模式" in cols else ""
             if "素材" in cols and cols["素材"] < len(cells):
                 mat = cells[cols["素材"]].strip()
+            # 图示列（2026-09-14 表格通道批）：计划先行——写手按清单逐项产出，
+            # validate_body 节级对账；旧指引无此列=空串零影响
+            fig = cells[cols["图示"]].strip() if "图示" in cols and cols["图示"] < len(cells) else ""
             gap = _gap_lines(cells, cols)
         try:
             loc = _source_location_line(task_id, title)
@@ -393,7 +397,11 @@ def build_enriched_description(desc: str, task_id: str) -> str | None:
         out = [
             desc.strip(),
             f"{_ENRICH_MARK}：本节派发上下文（程序自动生成，直接使用；"
-            "无需再读 写作指引/关键事实与承诺，也无需 check_pipeline_state）",
+            "无需再读 写作指引/关键事实与承诺，也无需 check_pipeline_state）。"
+            "开工纪律：任务目录前缀、输出路径、要求原文与出处、承诺值、素材名片"
+            "**全部已在下方**——开局禁止 ls/glob 探测目录，禁止检索或使用 "
+            "REQ/MAND/SCORE/TPL 内部编号（要求已按原文解析给出，编号不在你的语境），"
+            "直接从建节开工",
             f"任务目录前缀：{task_id}/",
             f"输出路径：{task_id}/work/{rel}",
             # 天级日期（写手子代理不继承任务上下文块拿不到日期，模型自编日期
@@ -404,6 +412,16 @@ def build_enriched_description(desc: str, task_id: str) -> str | None:
             out.append(f"写作模式：{mode}")
         elif delivery:
             out.append(f"交付形态：{delivery}（指引无对应行，按目录节点形态处理）")
+        # 图示项过滤与 validate_body 对账侧同款口径（[、;；,，] 切分、丢空与
+        # 「—」项）：混合记法「表:对比、—」不把「—」当计划项透传
+        fig_items = [x.strip() for x in re.split(r"[、;；,，]", fig) if x.strip() and x.strip() != "—"] if fig else []
+        if fig_items:
+            out.append(
+                "本节图示清单（指引计划，逐项产出，收尾对账——类型:主题；"
+                "表=建节 body 的 table 块、分层/辐射/甘特/流程=docx_diagram_insert"
+                "（流程 kind=flow）、原型=docx_html_figure（内联样式 HTML））："
+            )
+            out.append("、".join(fig_items))
         if req_lines:
             out.append("要求清单（正文呼应要求本身或招标文件真实章节条款号）：")
             out.extend(req_lines)

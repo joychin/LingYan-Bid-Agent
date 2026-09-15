@@ -29,6 +29,7 @@ import { useToast } from '@/context/Toast'
 import { useKbBadge } from '@/hooks/useKnowledge'
 import { useActiveRuns } from '@/hooks/useActiveRuns'
 import { markRead, markUnread, forgetConvs, useUnreadConvs } from '@/lib/unreadConvs'
+import { CONV_PREVIEW_LIMIT, pickVisibleConversations } from '@/lib/sidebarList'
 import { LS_MODEL_BY_CONV } from '@/components/ChatView'
 import { cn, formatRelativeTime } from '@/lib/utils'
 import type { Conversation, Task } from '@/api/client'
@@ -128,6 +129,8 @@ export function Sidebar({
   const [confirmDeleteTask, setConfirmDeleteTask] = useState<Task | null>(null)
   // 确认弹窗内联错误：删除失败时弹窗保持打开、红字展示原因，可重试（不再静默关闭）
   const [confirmError, setConfirmError] = useState<string | null>(null)
+  // 「显示更多」展开态：按任务记忆，不持久化——重启回折叠（默认视图为「最近工作」优化）
+  const [expandedTasks, setExpandedTasks] = useState<ReadonlySet<string>>(() => new Set())
   // 拖拽调宽（照 ArtifactPanel 的 resizer 模式；宽度 = 鼠标 x − app 左缘）
   const [width, setWidth] = useState(SIDE_DEFAULT_W)
   const [dragging, setDragging] = useState(false)
@@ -172,6 +175,14 @@ export function Sidebar({
     document.addEventListener('pointerdown', onDoc)
     return () => document.removeEventListener('pointerdown', onDoc)
   }, [menuFor, taskMenuFor])
+
+  const toggleTaskExpanded = (taskId: string) =>
+    setExpandedTasks((prev) => {
+      const next = new Set(prev)
+      if (next.has(taskId)) next.delete(taskId)
+      else next.add(taskId)
+      return next
+    })
 
   const handleNewConv = async (taskId: string) => {
     if (createConv.isPending) return
@@ -319,31 +330,43 @@ export function Sidebar({
           {!isLoading && tasks.length === 0 && (
             <p className="px-3 py-2 text-xs text-muted-foreground">还没有任务，点「新建任务」开始</p>
           )}
-          {groupByTask(tasks, conversations).map((g) => (
-            <TaskFolder
-              key={g.task.id}
-              task={g.task}
-              builtIn={g.task.id === '__none__'}
-              renaming={renamingTask?.id === g.task.id}
-              renameValue={taskRenameValue}
-              menuOpen={taskMenuFor === g.task.id}
-              onRenameValue={setTaskRenameValue}
-              onStartRename={() => {
-                setRenamingTask(g.task)
-                setTaskRenameValue(g.task.title)
-                setTaskMenuFor(null)
-              }}
-              onConfirmRename={() => void handleTaskRename(g.task)}
-              onCancelRename={() => setRenamingTask(null)}
-              onMenuToggle={() => setTaskMenuFor(taskMenuFor === g.task.id ? null : g.task.id)}
-              onDelete={() => {
-                setTaskMenuFor(null)
-                setConfirmError(null)
-                setConfirmDeleteTask(g.task)
-              }}
-              onNewConversation={() => void handleNewConv(g.task.id)}
-            >
-                {g.conversations.map((c) => (
+          {groupByTask(tasks, conversations).map((g) => {
+            // 会话截断：折叠态只渲染最近 LIMIT 条；运行中/等待确认/未读/当前选中
+            // 永不折叠（原位并入，visible 可超限额）。展开=一次全量，不分页。
+            const expanded = expandedTasks.has(g.task.id)
+            const { visible, hiddenCount } = pickVisibleConversations(
+              g.conversations,
+              (c) => c.id === selectedId || unreadConvs.has(c.id) || activeRunByConv.has(c.id),
+              expanded,
+            )
+            // 无东西可藏就不渲染按钮：后段全是例外（hiddenCount=0）或总数没超限额
+            const showToggle =
+              hiddenCount > 0 || (expanded && g.conversations.length > CONV_PREVIEW_LIMIT)
+            return (
+              <TaskFolder
+                key={g.task.id}
+                task={g.task}
+                builtIn={g.task.id === '__none__'}
+                renaming={renamingTask?.id === g.task.id}
+                renameValue={taskRenameValue}
+                menuOpen={taskMenuFor === g.task.id}
+                onRenameValue={setTaskRenameValue}
+                onStartRename={() => {
+                  setRenamingTask(g.task)
+                  setTaskRenameValue(g.task.title)
+                  setTaskMenuFor(null)
+                }}
+                onConfirmRename={() => void handleTaskRename(g.task)}
+                onCancelRename={() => setRenamingTask(null)}
+                onMenuToggle={() => setTaskMenuFor(taskMenuFor === g.task.id ? null : g.task.id)}
+                onDelete={() => {
+                  setTaskMenuFor(null)
+                  setConfirmError(null)
+                  setConfirmDeleteTask(g.task)
+                }}
+                onNewConversation={() => void handleNewConv(g.task.id)}
+              >
+                {visible.map((c) => (
                   <ConvItem
                     key={c.id}
                     conv={c}
@@ -371,10 +394,21 @@ export function Sidebar({
                       setConfirmError(null)
                       setConfirmDelete(c)
                     }}
-                />
-              ))}
-            </TaskFolder>
-          ))}
+                  />
+                ))}
+                {showToggle && (
+                  <button
+                    type="button"
+                    className="nav-more"
+                    style={{ paddingLeft: 24 }}
+                    onClick={() => toggleTaskExpanded(g.task.id)}
+                  >
+                    {expanded ? '显示更少' : `显示更多（${hiddenCount} 条）`}
+                  </button>
+                )}
+              </TaskFolder>
+            )
+          })}
         </NavSection>
       </div>
 

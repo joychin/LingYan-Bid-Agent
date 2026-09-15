@@ -14,10 +14,14 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import zipfile
 from pathlib import Path
 
+from PIL import Image
+
+from ..parse import pdfium_kit
 from . import store
 
 logger = logging.getLogger(__name__)
@@ -41,6 +45,9 @@ _MAGIC = [
 # 浏览器原生不解码的格式（TIFF 常见于扫描 docx 附件）——落盘/读取两端都转 PNG
 _BROWSER_UNFRIENDLY = {".tif", ".bmp"}
 
+# PNG 里浏览器可靠渲染的 Pillow 模式（其余——CMYK/16 位灰度/浮点等——归一 RGB）
+_PNG_BROWSER_SAFE_MODES = {"1", "L", "LA", "P", "RGB", "RGBA"}
+
 
 def _sniff_ext(data: bytes, fallback: str) -> str:
     for magic, ext in _MAGIC:
@@ -50,16 +57,16 @@ def _sniff_ext(data: bytes, fallback: str) -> str:
 
 
 def to_png(data: bytes) -> bytes | None:
-    """TIFF/BMP → PNG（MuPDF 解码转码；CMYK 先转 RGB；失败返回 None）。"""
+    """TIFF/BMP → PNG（Pillow 解码转码；浏览器不认的色彩模式归一到 RGB——CMYK/
+    16 位灰度等 PNG 浏览器端渲染不可靠，旧 MuPDF 转码本就归一 8bit；失败返回 None）。"""
     try:
-        import pymupdf
-
-        pix = pymupdf.Pixmap(data)
-        if pix.colorspace and pix.colorspace.n > 3:
-            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-        out = pix.tobytes("png")
-        pix = None  # noqa: F841  释放
-        return out
+        img = Image.open(io.BytesIO(data))
+        img.load()
+        if img.mode not in _PNG_BROWSER_SAFE_MODES:
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        return buf.getvalue()
     except Exception:
         return None
 
@@ -74,14 +81,10 @@ def as_browser_friendly(data: bytes, ext: str) -> tuple[bytes, str]:
 
 
 def _image_size(data: bytes) -> tuple[int, int] | None:
-    """读图片宽高（PyMuPDF Pixmap 解码；失败返回 None）。"""
+    """读图片宽高（Pillow 懒读文件头不解码全图；失败返回 None）。"""
     try:
-        import pymupdf
-
-        pix = pymupdf.Pixmap(data)
-        w, h = pix.width, pix.height
-        pix = None  # noqa: F841  释放
-        return w, h
+        with Image.open(io.BytesIO(data)) as img:
+            return img.size
     except Exception:
         return None
 
@@ -151,15 +154,6 @@ def _extract_docx(src: Path) -> list[tuple[bytes, str]]:
     return out
 
 
-def _blank_page(page) -> bool:
-    """空白页判定：无文字、无图、无矢量绘制——纯噪音，无需渲染。"""
-    if page.get_text().strip():
-        return False
-    if page.get_images():
-        return False
-    return not page.get_drawings()
-
-
 def _render_pdf_pages(src: Path, img_dir: Path) -> tuple[int, int]:
     """PDF → 逐页整页渲染 PNG 落盘（→ (写入张数, 跳过张数)）。
 
@@ -168,25 +162,18 @@ def _render_pdf_pages(src: Path, img_dir: Path) -> tuple[int, int]:
     只剩空底框）。文件名即页码（img_007.png=第 7 页），空白页跳过、编号留空洞，
     模型据转录 md 的 <!-- p:N --> 页锚点即可推回页图。
     """
-    import pymupdf
-
     written = 0
     skipped = 0
-    doc = pymupdf.open(src)
-    try:
-        for pno in range(len(doc)):
+    with pdfium_kit.open_document(src) as doc:
+        for pno in range(pdfium_kit.n_pages(doc)):
             if written >= _MAX_IMAGES:
                 break
-            page = doc[pno]
-            if _blank_page(page):
+            page = pdfium_kit.get_page(doc, pno)
+            if pdfium_kit.page_is_blank(page):
                 skipped += 1
                 continue
-            pix = page.get_pixmap(dpi=_RENDER_DPI)
-            pix.save(str(img_dir / f"img_{pno + 1:03d}.png"))
-            pix = None  # noqa: F841  释放
+            pdfium_kit.render_page(page, dpi=_RENDER_DPI).save(str(img_dir / f"img_{pno + 1:03d}.png"))
             written += 1
-    finally:
-        doc.close()
     return written, skipped
 
 
