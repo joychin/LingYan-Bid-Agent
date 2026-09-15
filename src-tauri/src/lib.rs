@@ -204,11 +204,16 @@ pub fn run() {
             }
         }))
         // 记住窗口大小/位置（退出自动持久化到系统 app 配置目录），纯 plumbing 无 IPC。
+        // splash 进拉黑名单：它是每次居中出生的固定尺寸一次性小窗，几何只由 tauri.conf
+        // 的 center:true 决定；一旦被记住，插件在 window ready 时 restore 存档位置会盖掉
+        // center（实测启动画面固定出现在屏幕左上方、与随后亮出的主窗完全错位），且该存档
+        // 位置每次退出写回、之后每次启动复用。
         // flags 去掉 VISIBLE：插件默认含它，restore 会把 visible:false 的主窗提前
         // show 出来（与 splash 并存，用户实测「同时展示很怪异」）——显示时机只归
         // sidecar.rs 的 reveal_main_from_splash。DECORATIONS/FULLSCREEN 同理不跨启动恢复。
         .plugin(
             tauri_plugin_window_state::Builder::default()
+                .with_denylist(&["splash"])
                 .with_state_flags(
                     tauri_plugin_window_state::StateFlags::SIZE
                         | tauri_plugin_window_state::StateFlags::POSITION
