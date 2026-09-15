@@ -111,6 +111,23 @@ def test_tender_body_kickoff_and_material_first():
     assert "ask_human 请用户确认" not in text and "ask_human 收承诺值" not in text
 
 
+def test_tender_body_dispatch_grouping_discipline():
+    """派发分组纪律锚点（2026-09-15 模型自主拆分批）：程序不再给均衡分波参考、
+    分组归模型自主规划——数字锚点（轻节 3~5 捆/重节单独/每消息 ≤8 任务）、全覆盖
+    自查、description 首行=节名清单契约。负向锚：旧「一节一个」硬规则不得回流。"""
+    root = skills_source_dir() / "tender-body"
+    skill = (root / "SKILL.md").read_text(encoding="utf-8")
+    for kw in ("待写节清单", "3~5 个捆成一个任务", "单独成任务", "每消息 ≤8 个任务",
+               "不按一级章节分批", "每一节都落进了某个任务", "逐字抄待写节清单",
+               "由系统在派发时自动补全"):
+        assert kw in skill, f"tender-body/SKILL.md 缺少派发分组纪律关键词：{kw}"
+    assert "一节一个" not in skill, \
+        "旧「一节一个」硬规则不得回流——派发分组粒度归模型（2026-09-15 拍板）"
+    detail = (root / "references" / "section-writing.md").read_text(encoding="utf-8")
+    for kw in ("逐节完成、全部节完成才收尾", "一节一段、一节不漏"):
+        assert kw in detail, f"section-writing.md 缺少多节写手细则关键词：{kw}"
+
+
 def test_tender_body_replay_reconciliation_anchor():
     """续跑对账锚点（2026-09-15 路径可靠性批）：中断落在波中间时存档整波回退，
     凭记忆重派=把写完的节整轮重写（r_eedd621716b5：59 节书派发 86 次）。纪律

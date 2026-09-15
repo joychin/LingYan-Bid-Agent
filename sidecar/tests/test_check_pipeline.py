@@ -7,7 +7,7 @@ from datetime import datetime
 import pytest
 
 from app import artifact_store, runctx
-from app.tools.check_pipeline import _balanced_waves, check_pipeline_state
+from app.tools.check_pipeline import check_pipeline_state
 from tests.util import init_env
 
 
@@ -329,31 +329,9 @@ def _write_guide(env, rows: list[str]):
     _write_body(env, "body/写作指引.md", "\n".join(_GUIDE_HEADER + rows) + "\n")
 
 
-def test_balanced_waves_lpt_balance():
-    """LPT 贪心：降序逐项补最轻波——2 波时权重 9..1 分成 23/22（蛇形奇偶交替是 25/20）。"""
-    items = [(f"n{w}", w) for w in range(9, 0, -1)]
-    waves = _balanced_waves(items)
-    assert len(waves) == 2
-    sums = [sum(w for _, w in wave) for wave in waves]
-    assert sum(sums) == 45
-    assert max(sums) - min(sums) <= 1
-
-
-def test_balanced_waves_capacity_respected():
-    """容量上限优先于负载均衡：10 + 九个 1 → 轻波满 8 项封顶，溢出项进重波。"""
-    items = [("heavy", 10)] + [(f"l{i}", 1) for i in range(9)]
-    waves = _balanced_waves(items)
-    assert sum(len(w) for w in waves) == 10
-    assert all(len(w) <= 8 for w in waves)
-
-
-def test_balanced_waves_small_set_single_wave():
-    assert [len(w) for w in _balanced_waves([(f"n{i}", 1) for i in range(8)])] == [8]
-    assert _balanced_waves([]) == []
-
-
-def test_body_wave_reference(env):
-    """分波参考：格式件参与、物理附件排除、指引缺行兜底、已写节剔除、权重=基数+块数。"""
+def test_body_pending_sections_facts(env):
+    """待写节清单（2026-09-15 模型自主拆分批，取代均衡分波参考）：零结论事实——
+    每节一行 模式·素材块数；格式件参与、物理附件排除、指引缺行兜底、已写节剔除。"""
     content = _dir_content()
     content["response_documents"][0]["directory"].insert(0, {
         "目录名称": "投标函", "level": 1, "children": [],
@@ -372,22 +350,23 @@ def test_body_wave_reference(env):
         "| 附件：资质证书复印件 | — | MAND-02 | — | 物理附件，列待填清单 |",
     ])  # 3.3 指引缺行 → 兜底补入
     r = check_pipeline_state.invoke({})
-    assert "[body] 均衡分波参考" in r
-    wave_text = r.split("均衡分波参考", 1)[1]
-    # 投标函1 + 3.1(2+1块) + 3.2(max(2,3)+1块) + 3.3兜底1 + 3.4格式跟随1
-    assert "第1波（权重和 10）" in wave_text
-    assert "投标函" in wave_text
-    assert "3.3 项目团队配置" in wave_text and "兜底" in wave_text
-    assert "资质证书复印件" not in wave_text  # 物理附件不参与
+    assert "[body] 待写节清单（共 5" in r
+    assert "均衡分波" not in r  # 机械分波结论已删（分组决策归模型）
+    facts = r.split("待写节清单", 1)[1]
+    assert "投标函（模式未填·素材0块）" in facts
+    assert "3.1 项目理解与需求分析（素材修订·素材1块）" in facts
+    assert "3.2 总体设计方案（素材修订+推理撰写·素材1块）" in facts
+    assert "3.3 项目团队配置（指引缺行·素材0块）" in facts
+    assert "3.4 实施与服务方案（格式跟随·素材0块）" in facts
+    assert "资质证书复印件" not in facts  # 物理附件不参与
     _make_docx(env, "body/3.1 项目理解与需求分析.docx")
     r = check_pipeline_state.invoke({})
-    assert "均衡分波参考" in r  # 仍有 4 节待写 → 参考仍在
-    wave_text = r.split("均衡分波参考", 1)[1]
-    assert "3.1 项目理解与需求分析" not in wave_text  # 已写节剔除
-    assert "第1波（权重和 7）" in wave_text  # 10 - 3.1 的权重 3
+    assert "[body] 待写节清单（共 4" in r
+    facts = r.split("待写节清单", 1)[1]
+    assert "3.1 项目理解与需求分析" not in facts  # 已写节剔除
 
 
-def test_body_wave_reference_gap_column_variant(env):
+def test_body_pending_sections_gap_column_variant(env):
     """缺口列头变体（「缺口」而非契约名「缺口/备注」）：物理附件仍被剔除——
     与 dispatch_enrich._GAP_COL_KEYS 同口径，两处判定不分叉（2026-09-10 review）。"""
     content = _dir_content()  # 已含「附件：资质证书复印件」节点
@@ -413,14 +392,14 @@ def test_body_wave_reference_gap_column_variant(env):
         ]) + "\n",
     )
     r = check_pipeline_state.invoke({})
-    assert "[body] 均衡分波参考" in r
-    wave_text = r.split("均衡分波参考", 1)[1]
-    assert "资质证书复印件" not in wave_text  # 变体列头下物理附件照样剔除
-    assert "投标函" in wave_text and "3.1 项目理解与需求分析" in wave_text
+    assert "[body] 待写节清单" in r
+    facts = r.split("待写节清单", 1)[1]
+    assert "资质证书复印件" not in facts  # 变体列头下物理附件照样剔除
+    assert "投标函" in facts and "3.1 项目理解与需求分析" in facts
 
 
-def test_body_wave_reference_multi_volume_keys(env):
-    """多册分波键=「册名/标题」，与对账行同口径。"""
+def test_body_pending_sections_multi_volume_keys(env):
+    """多册清单键=「册名/标题」，与对账行同口径。"""
     content = _dir_content()
     content["response_documents"].append({
         "name": "商务部分", "scope": "",
@@ -435,28 +414,17 @@ def test_body_wave_reference_multi_volume_keys(env):
         "| 商务部分/6.1 售后服务承诺 | 素材修订 | SCORE-09 | — | — |",
     ])
     r = check_pipeline_state.invoke({})
-    wave_text = r.split("均衡分波参考", 1)[1]
-    assert "商务部分/6.1 售后服务承诺" in wave_text
-    assert "技术部分/3.3 项目团队配置" in wave_text
-    assert "兜底" not in wave_text  # 指引行齐 → 无兜底
+    facts = r.split("待写节清单", 1)[1]
+    assert "商务部分/6.1 售后服务承诺（素材修订·素材0块）" in facts
+    assert "技术部分/3.3 项目团队配置（推理撰写·素材0块）" in facts
+    assert "指引缺行" not in facts  # 指引行齐 → 无兜底
 
 
-def test_body_wave_reference_skipped_when_few_pending(env):
-    """待写节 <4 不值得分波：不出参考行（既有占位指引用例也不受影响）。"""
+def test_body_pending_sections_no_threshold(env):
+    """无 ≥4 节门槛（2026-09-15 删）：少量待写也列清单——分组决策随时有输入。"""
     _seed_directory(env)
     _write_body(env, "body/写作指引.md", "指引表\n")
     r = check_pipeline_state.invoke({})
-    assert "均衡分波参考" not in r
-
-
-def test_wave_capacity_matches_concurrency_ceiling():
-    """跨文件同值守卫：波容量（_WAVE_CAPACITY）= 图并发上限（_MAX_CONCURRENT_STEPS）。
-
-    两处独立常量只靠注释互相声明（agent.py 侧注明「与波容量对齐」）：波容量 >
-    并发上限 → 波内任务排队、清单同步守卫误拦滞后派发；< 上限 → 并发余量浪费。
-    只改一处即此测试红——调容量时两处一起动。
-    """
-    from app import agent
-    from app.tools import check_pipeline
-
-    assert check_pipeline._WAVE_CAPACITY == agent._MAX_CONCURRENT_STEPS
+    assert "待写节清单" in r
+    facts = r.split("待写节清单", 1)[1]
+    assert "3.1 项目理解与需求分析（指引缺行" in facts

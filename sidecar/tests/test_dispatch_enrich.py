@@ -130,6 +130,94 @@ def test_thin_dispatch_enriched_with_all_blocks(env):
         assert tag not in _data_part(out)
 
 
+def test_multi_section_dispatch_shared_plus_per_section(env):
+    """多节派发（2026-09-15 模型自主拆分批）：首行顿号分隔多节名 → 共享块一份 +
+    逐节块每节一份；兄弟摘要排除本任务全部节（同任务节互见没必要）。"""
+    from docx import Document
+
+    tid = _seed(env, sibling=True)
+    # 把 3.2 预写成兄弟文件：多节任务派发时它不该出现在兄弟摘要里（是本任务的节）
+    d = Document()
+    d.add_paragraph("预写的总体设计方案正文。")
+    d.save(str(artifact_store.work_dir(tid) / "body/3.2 总体设计方案.docx"))
+    out = build_enriched_description("写 3.1 项目理解、3.2 总体设计", tid)
+    assert out is not None
+    assert out.startswith("写 3.1 项目理解、3.2 总体设计\n〔系统附")
+    assert "本任务共 2 节" in out
+    assert "逐节完成" in out
+    # 逐节块：两节各一份【第 N 节】+输出路径+模式
+    assert "【第 1 节：3.1 项目理解与需求分析】" in out
+    assert "【第 2 节：3.2 总体设计方案】" in out
+    assert f"输出路径：{tid}/work/body/3.1 项目理解与需求分析.docx" in out
+    assert f"输出路径：{tid}/work/body/3.2 总体设计方案.docx" in out
+    # 共享块只一份：承诺/前缀不随节数翻倍（只看数据段——内联方法论自身会提到这些词）
+    assert _data_part(out).count("承诺清单全部值") == 1
+    assert _data_part(out).count(f"任务目录前缀：{tid}/") == 1
+    assert out.count("写作纪律（完整方法论已在下方给出") == 1
+    # 兄弟摘要：无关节（门户与工作台）在、本任务的节（3.2）不在
+    assert "- 门户与工作台：" in out
+    assert "- 3.2 总体设计方案：" not in out
+    # 派发契约：编号零出现
+    for tag in ("REQ-", "SCORE-", "MAND-", "TPL-"):
+        assert tag not in _data_part(out)
+
+
+def test_multi_section_dispatch_any_unmatched_passthrough(env):
+    """全部节名都对不上（分块与首行整体兜底都救不回）→ 整体放行（不半拼）。"""
+    tid = _seed(env)
+    assert build_enriched_description("写 一个不存在的节、另一个也没有的节", tid) is None
+
+
+def test_partial_names_fallback_enriches_resolvable(env):
+    """一真一假节名：碎片失败后首行整体兜底命中真节、按单节拼装——与 2026-09-15
+    前旧版整段探针行为一致（对两节全瘦放行更糟）；假名留给模型自纠，对账/extra
+    侧报告兜底。"""
+    tid = _seed(env)
+    out = build_enriched_description("写 3.1 项目理解、一个不存在的节", tid)
+    assert out is not None
+    assert "本任务共" not in out  # 单节形态
+    assert f"输出路径：{tid}/work/body/3.1 项目理解与需求分析.docx" in out
+
+
+def test_separator_inside_title_falls_back_to_whole_line(env):
+    """节名自身含顿号且前缀撞库：碎片探针歧义全灭 → 首行整体单探针兜底命中，
+    按单节拼装（防「人员、设备配置表」这类名字被当多节拆碎后整体放行成瘦派发）。"""
+    content = _dir_content()
+    content["response_documents"][0]["directory"] = [
+        {"目录名称": "人员、设备配置表", "level": 1, "children": [], "交付形态": "正文编写"},
+        {"目录名称": "人员、设备清单", "level": 1, "children": [], "交付形态": "正文编写"},
+    ]
+    tid = _seed(env, content=content)
+    out = build_enriched_description("写 人员、设备配置表", tid)
+    assert out is not None
+    assert f"输出路径：{tid}/work/body/人员、设备配置表.docx" in out
+    assert "本任务共" not in out  # 单节形态（非多节）
+
+
+def test_intent_on_second_line_does_not_break_match(env):
+    """意图句在第二行不参与匹配——旧实现把整段描述当单一探针，被意图句打碎后
+    静默放行（瘦派发事故形态）；2026-09-15 起只解析首行。"""
+    tid = _seed(env)
+    out = build_enriched_description("写 3.1 项目理解\n重点补移动端表单细节", tid)
+    assert out is not None
+    assert out.startswith("写 3.1 项目理解\n重点补移动端表单细节\n〔系统附")
+    assert f"输出路径：{tid}/work/body/3.1 项目理解与需求分析.docx" in out
+
+
+def test_rich_description_multi_section_anchors(env):
+    """富描述多节：每节一条带节名的输出路径锚点（区分哪条路径属哪节）。"""
+    tid = _seed(env)
+    rich = "写 3.1 项目理解、3.2 总体设计\n补充说明：" + "细节" * 160
+    assert len(rich) > 300
+    out = build_enriched_description(rich, tid)
+    assert out is not None
+    assert (
+        f"输出路径（3.1 项目理解与需求分析）：{tid}/work/body/3.1 项目理解与需求分析.docx"
+        in out
+    )
+    assert f"输出路径（3.2 总体设计方案）：{tid}/work/body/3.2 总体设计方案.docx" in out
+
+
 def test_writer_skill_inlined_with_no_reread_hint(env):
     """写作方法论内联（2026-09-12）：写手子代理无 SkillsMiddleware，此前每节都要自己
     read_file 读一遍 section-writing.md（实测全库 215 次、205 次在子代理）；改为主代理
@@ -223,20 +311,20 @@ def test_enrich_mark_idempotent(env):
 def test_rich_description_passthrough_when_first_line_unmatched(env):
     """富描述且首行对不上目录叶子 → 放行原文（宁可不猜原则不变）。"""
     tid = _seed(env)
-    rich = "写 3.1 项目理解。" + "细节" * 150
-    assert len(rich) > 200
+    rich = "写 3.1 项目理解。" + "细节" * 160
+    assert len(rich) > 300
     assert build_enriched_description(rich, tid) is None
 
 
 def test_rich_description_gets_path_anchor(env):
-    """富描述（>200 字）：语义信任原文，但仍注入最小路径锚点。
+    """富描述（>300 字）：语义信任原文，但仍注入最小路径锚点。
 
     2026-09-15 路径可靠性批：r_eedd621716b5 富描述被整体放行后，13 节由写手
     自选了章节子目录路径、合册只认出 46/59——输出路径是程序算的契约事实，
     不随描述长度丢失。"""
     tid = _seed(env)
-    rich = "写 3.1 项目理解\n推理撰写模式。覆盖招标提出的稳定性要求：" + "细节" * 100
-    assert len(rich) > 200
+    rich = "写 3.1 项目理解\n推理撰写模式。覆盖招标提出的稳定性要求：" + "细节" * 160
+    assert len(rich) > 300
     out = build_enriched_description(rich, tid)
     assert out is not None
     # 原文完整保留（首行=模型原话），锚点块追加在末尾
@@ -247,7 +335,7 @@ def test_rich_description_gets_path_anchor(env):
         f"输出路径：{tid}/work/body/3.1 项目理解与需求分析.docx\n"
         f"今天日期：{date.today().isoformat()}"
     )
-    # 最小块：语义上下文不重复拼（承诺/素材/要求清单只在 ≤200 全量路径给）
+    # 最小块：语义上下文不重复拼（承诺/素材/要求清单只在全量路径给）
     assert "承诺清单全部值" not in out
     assert "要求清单" not in out
     # 幂等：带锚点的描述再进一层不再拼装

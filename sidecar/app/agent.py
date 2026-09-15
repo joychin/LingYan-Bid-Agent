@@ -68,8 +68,8 @@ INTERRUPT_ON: dict = {
 # task 子代理，并经 ensure_config 的 ContextVar 拷贝自动传入子代理图（各图自建
 # executor/semaphore，无共享无死锁）。行业标配（Claude Code 20 / OpenAI SDK
 # max_function_tool_concurrency / LangGraph 原生）；8 = 自建网关实测稳定并发，
-# 且与 tender-body 均衡分波的波容量对齐（波 ≤ 上限 → 波内任务不排队，
-# 见 tools/check_pipeline._WAVE_CAPACITY）。
+# tender-body 派发纪律的「每消息 ≤8 个任务」与此对齐（2026-09-15 起分组由模型
+# 自主规划，波容量不再是程序侧概念）。
 _MAX_CONCURRENT_STEPS = 8
 
 # LLM 流式调用的瞬时错误（连接断开/超时/限流）：可从 checkpoint 断点自动重试——
@@ -407,7 +407,9 @@ class _ReplayGuardMiddleware(AgentMiddleware):
     """重派守卫：本 run 内已写出的节、无重写意图的再次派发 → 拒绝执行。
 
     与 _DispatchEnrichMiddleware 同款三层过滤（task/写手/任务上下文）；节名对账
-    复用 dispatch_enrich.resolve_section（「节名→输出路径」单点推导）。拒绝=不调
+    复用 dispatch_enrich.resolve_section（「节名→输出路径」单点推导；2026-09-15
+    模型自主拆分批起派发可一任务多节——逐节名检查，任一节本轮已写即拒，把模型
+    推回「只补派缺失的节」）。拒绝=不调
     handler 直接回 error ToolMessage（_ToolTimeoutMiddleware 同款，批内其他派发
     照常执行）。放行面有意宽：节名对不上/文件不存在/历史 run 写的旧节/描述含
     意图词/保险丝打满——守卫只治整波重放这一种确定性浪费，不当重写裁判。
@@ -437,26 +439,26 @@ class _ReplayGuardMiddleware(AgentMiddleware):
                 state["start"] = (
                     datetime.fromisoformat(row["created_at"]).timestamp() if row else float("inf")
                 )
-            target = dispatch_enrich.resolve_section(
-                dispatch_enrich.first_line_needle(desc), ctx.task_id
-            )
-            if target is None:
-                return handler(request)
-            path = artifact_store.work_dir(ctx.task_id) / target.rel
-            if not path.is_file() or path.stat().st_mtime <= state["start"] - _REPLAY_MTIME_SLACK:
-                return handler(request)
-            state["hits"] += 1
-            return ToolMessage(
-                content=(
-                    f"{_REPLAY_GUARD_MARK}该节本轮已写出（{target.rel}），这多半是"
-                    "断点续跑/中断重放的重复派发。先调 check_pipeline_state 对账"
-                    "已写节、只补派缺失的节；确要重写本节，请在派发描述里写明"
-                    "「重写」等意图词。"
-                ),
-                status="error",
-                tool_call_id=call.get("id") or "",
-                name="task",
-            )
+            for needle in dispatch_enrich.first_line_needles(desc):
+                target = dispatch_enrich.resolve_section(needle, ctx.task_id)
+                if target is None:
+                    continue
+                path = artifact_store.work_dir(ctx.task_id) / target.rel
+                if not path.is_file() or path.stat().st_mtime <= state["start"] - _REPLAY_MTIME_SLACK:
+                    continue
+                state["hits"] += 1
+                return ToolMessage(
+                    content=(
+                        f"{_REPLAY_GUARD_MARK}节「{target.title}」本轮已写出"
+                        f"（{target.rel}），这多半是断点续跑/中断重放的重复派发。先调"
+                        " check_pipeline_state 对账已写节、只补派缺失的节；确要重写"
+                        "本节，请在派发描述里写明「重写」等意图词。"
+                    ),
+                    status="error",
+                    tool_call_id=call.get("id") or "",
+                    name="task",
+                )
+            return handler(request)
         except Exception:
             logger.debug("重派守卫检查失败，放行（rid=%s）", ctx.run_id, exc_info=True)
             return handler(request)
@@ -611,27 +613,34 @@ SUBAGENTS: list[dict] = [
         "middleware": [_SUBAGENT_COMPASS_MW, _SUBAGENT_SCOPE_MW, _PATH_RESCUE_MW, _TOOL_TIMEOUT_MW],
     },
     {
-        # 正文编写子代理：单节生成的执行单元（tender-body 多节并发）。同 outline-writer：
-        # 任务目录前缀不注入子代理。派发说明由 _DispatchEnrichMiddleware 程序拼装
-        # （模型只写节短名+意图，共享上下文机械补全——2026-09-08 实测模型派发塌成
-        # 五字节名、32 个子代理开局自救烧掉整本六成输入 token，纪律清单管不住故升机制）；
+        # 正文编写子代理：一任务一节或多节的执行单元（tender-body 并发派发）。同
+        # outline-writer：任务目录前缀不注入子代理。派发说明由 _DispatchEnrichMiddleware
+        # 程序拼装（模型只写节名清单+意图，共享上下文机械补全——2026-09-08 实测模型
+        # 派发塌成五字节名、32 个子代理开局自救烧掉整本六成输入 token，纪律清单管
+        # 不住故升机制；2026-09-15 模型自主拆分批起支持一任务多节：主代理自行决定
+        # 捆组粒度，首行列多个节名，拼装层共享块一份+逐节块每节一份）；
         # 要求以「内容+出处」形式传达，REQ 等内部编号不进派发（子代理会把「覆盖REQ-xx」
         # 镜像进正文首句），罗盘中间件兜底注入三行布局事实。
         "name": _BODY_WRITER_NAME,
         "description": (
-            "按写作指引写单个目录节的响应文件正文（tender-body 技能多节并发时的执行单元）"
+            "按写作指引写一个或多个目录节的响应文件正文（tender-body 技能并发派发时的执行单元）"
         ),
         # 最小工具集（机制化收窄，见 _BODY_WRITER_TOOLS 注释）——不写则继承全量
         "tools": [t for t in TOOLS if t.name in _BODY_WRITER_TOOLS],
         "system_prompt": (
-            "你是响应文件正文编写子代理，只负责一个目录节的正文。任务描述=首行节名与"
-            "主代理意图，其后系统自动附上本节派发上下文：任务目录前缀（读写路径都必须"
-            "带该前缀）、节文件输出路径（.docx）、今天日期（封面/函件落款用这行，"
-            "不要自编日期）、写作模式、要求清单（每条=要求内容+"
+            "你是响应文件正文编写子代理，只负责任务描述点名的目录节的正文（2026-09-15 起"
+            "一个任务可能带多个节）。任务描述=首行节名清单（一节或多节，多节以顿号分隔）"
+            "与主代理意图，其后系统自动附上本任务派发上下文：任务目录前缀（读写路径都必须"
+            "带该前缀）、各节文件输出路径（.docx，多节任务逐节给出【第 N 节：…】块）、"
+            "今天日期（封面/函件落款用这行，"
+            "不要自编日期）、各节写作模式、要求清单（每条=要求内容+"
             "出处，随时可按出处读招标原文核对）、可用素材块 id（格式跟随/格式件节另带"
             "拷原件指引）、公司材料与缺口（指引缺口列原文——【知识库】=知识库命中的"
             "公司事实，证书数字照抄不改写；【缺】=库里没有，批注待办）、承诺清单的全部"
             "值、兄弟节开头摘要——已含你所需的全部共享信息。\n"
+            "多节任务执行纪律：**逐节完成、全部节完成才收尾**——每节独立走一遍"
+            " 建节→注入/拷件→改写→validate_body 自查 再进下一节（不把多节内容混进"
+            "同一个文件、不漏节；每节文件互不依赖，顺序按【第 N 节】块给定的次序）。\n"
             "开局纪律：写作方法论（section-writing.md 全文）已随任务描述给出，"
             "**不要 read_file 它**；若还需其它参考文件，在同一条消息里一次读齐"
             "（禁止逐个串行）；禁止调用"
@@ -688,12 +697,13 @@ SUBAGENTS: list[dict] = [
             "不带任何头部/元信息，且 REQ/MAND/SCORE/TPL-xx 内部对账编号（无论从任务"
             "描述还是指引等文件里看到）一个都不写进正文——呼应招标要求用要求内容或"
             "招标文件真实印着的章节/条款号（如「按第三章 2.3 条」，评标人可对照原文，"
-            "内部编号他们对不上）；兄弟节已覆盖的要点参考摘要避免重复展开；只写自己"
-            "名分的节文件（已存在的节重建传 replace=true），不动任何其他文件。\n"
+            "内部编号他们对不上）；兄弟节已覆盖的要点参考摘要避免重复展开；只写任务"
+            "描述点名的节文件（已存在的节重建传 replace=true），不动任何其他文件。\n"
             "禁止调用 ask_human（无人应答）：需要用户裁决的用 docx_comment_add 加批注带回。\n"
             "禁止改写写作指引与关键事实与承诺清单（共享文件只归主线程维护）。\n"
-            "完成后返回简短中文摘要：节名、字数、使用素材块与重叠率、自查结果、"
-            "素材异议（无则写「无」；有则逐条列块 id 与理由）、待办批注清单。"
+            "完成后返回简短中文摘要：**逐节**列 节名、字数、使用素材块与重叠率、自查"
+            "结果、素材异议（无则写「无」；有则逐条列块 id 与理由）、待办批注清单——"
+            "多节任务一节一段、一节不漏。"
         ),
         "interrupt_on": {},
         "middleware": [_SUBAGENT_COMPASS_MW, _SUBAGENT_SCOPE_MW, _PATH_RESCUE_MW, _TOOL_TIMEOUT_MW],

@@ -1741,6 +1741,45 @@ def test_replay_guard_passes_for_intent_old_or_missing(tmp_path, monkeypatch):
         agent_mod._REPLAY_GUARD_STATE.clear()
 
 
+def test_replay_guard_blocks_multi_section_if_any_written_this_run(tmp_path, monkeypatch):
+    """多节派发（2026-09-15 模型自主拆分批）：捆内任一节本轮已写 → 整体拒绝并
+    点名已写节——把模型推回「对账后只补派缺失的节」（守卫若对多节首行失配即
+    放行，断点续跑的整波重放就绕过守卫了）。"""
+    from app import publish
+
+    tid, run, sec = _replay_env(tmp_path, monkeypatch)  # 3.1 已在本轮写出
+    publish.publish_artifact(
+        _DIR_KEY,
+        {
+            "response_documents": [
+                {
+                    "name": "技术部分",
+                    "scope": "",
+                    "directory": [
+                        {"目录名称": "3.1 项目理解与需求分析", "level": 1, "children": [],
+                         "交付形态": "正文编写"},
+                        {"目录名称": "3.2 总体设计方案", "level": 1, "children": [],
+                         "交付形态": "正文编写"},
+                    ],
+                }
+            ],
+            "registry": {},
+        },
+        task_id=tid,
+    )
+    seen: list = []
+    runctx.set_run("c1", run["id"], tid)
+    try:
+        out = _replay_dispatch("写 3.1 项目理解、3.2 总体设计", seen)
+    finally:
+        runctx.clear_run()
+        agent_mod._REPLAY_GUARD_STATE.clear()
+    assert seen == []  # 未执行（整捆拒绝，哪怕 3.2 还没写）
+    assert isinstance(out, ToolMessage) and out.status == "error"
+    assert "3.1 项目理解与需求分析" in out.content  # 点名已写节
+    assert "check_pipeline_state" in out.content
+
+
 def test_replay_guard_valve_opens_after_bounded_rejections(tmp_path, monkeypatch):
     """泄压阀：同 run 拒绝满 _REPLAY_GUARD_VALVE 次后放行（防「拒绝→原样重发」
     死循环烧轮次）；拒绝计数在 run 收尾清理（finally 钩子）。"""
