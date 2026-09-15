@@ -6,6 +6,7 @@
 
 import json
 import re
+from datetime import date
 
 import pytest
 
@@ -219,11 +220,38 @@ def test_enrich_mark_idempotent(env):
     assert build_enriched_description("〔系统附：本节派发上下文\n写 3.1 项目理解", tid) is None
 
 
-def test_rich_description_passthrough(env):
+def test_rich_description_passthrough_when_first_line_unmatched(env):
+    """富描述且首行对不上目录叶子 → 放行原文（宁可不猜原则不变）。"""
     tid = _seed(env)
     rich = "写 3.1 项目理解。" + "细节" * 150
     assert len(rich) > 200
     assert build_enriched_description(rich, tid) is None
+
+
+def test_rich_description_gets_path_anchor(env):
+    """富描述（>200 字）：语义信任原文，但仍注入最小路径锚点。
+
+    2026-09-15 路径可靠性批：r_eedd621716b5 富描述被整体放行后，13 节由写手
+    自选了章节子目录路径、合册只认出 46/59——输出路径是程序算的契约事实，
+    不随描述长度丢失。"""
+    tid = _seed(env)
+    rich = "写 3.1 项目理解\n推理撰写模式。覆盖招标提出的稳定性要求：" + "细节" * 100
+    assert len(rich) > 200
+    out = build_enriched_description(rich, tid)
+    assert out is not None
+    # 原文完整保留（首行=模型原话），锚点块追加在末尾
+    assert out.startswith("写 3.1 项目理解\n推理撰写模式。")
+    assert out.endswith(
+        f"\n〔系统附：路径锚点（程序自动生成，直接使用）：\n"
+        f"任务目录前缀：{tid}/\n"
+        f"输出路径：{tid}/work/body/3.1 项目理解与需求分析.docx\n"
+        f"今天日期：{date.today().isoformat()}"
+    )
+    # 最小块：语义上下文不重复拼（承诺/素材/要求清单只在 ≤200 全量路径给）
+    assert "承诺清单全部值" not in out
+    assert "要求清单" not in out
+    # 幂等：带锚点的描述再进一层不再拼装
+    assert build_enriched_description(out, tid) is None
 
 
 def test_material_card_resolved_from_guide(env):

@@ -111,6 +111,15 @@ def test_tender_body_kickoff_and_material_first():
     assert "ask_human 请用户确认" not in text and "ask_human 收承诺值" not in text
 
 
+def test_tender_body_replay_reconciliation_anchor():
+    """续跑对账锚点（2026-09-15 路径可靠性批）：中断落在波中间时存档整波回退，
+    凭记忆重派=把写完的节整轮重写（r_eedd621716b5：59 节书派发 86 次）。纪律
+    句与重派守卫（agent._ReplayGuardMiddleware）双层，此锚点防纪律句被删。"""
+    text = (skills_source_dir() / "tender-body" / "SKILL.md").read_text(encoding="utf-8")
+    for kw in ("断点续跑或中断后重新派发前", "对账已写节、已写的节不重派"):
+        assert kw in text, f"tender-body/SKILL.md 缺少续跑对账关键词：{kw}"
+
+
 def test_tender_body_material_objection_channel():
     """素材异议出口（2026-09-13）：用户手选素材与本节要求不符时，写手此前只有
     「顺从」和「沉默」两种反应（不许重检索、不许跳过注入、不许改指引、不许问人），

@@ -21,7 +21,8 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from .. import agent, bg, db, events
+from .. import agent, bg, db, events, model_ping
+from .. import config as cfg
 from ..agent import _frozen_ctx_cleanup, get_run_snapshot, request_cancel, run_stream
 from ..bus import publish as bus_publish
 
@@ -192,6 +193,28 @@ async def resume(rid: str, body: ResumeBody):
     return {"ok": True, "run_id": rid}
 
 
+async def _preflight_ping(model_id: str | None) -> str | None:
+    """续跑预检：模型不可用返回人话文案（409 detail 用）；可用/无法判定返回 None。
+
+    fail-open：profile 已删、Key 走 env、探活自身异常都放行——预检只挡「确定
+    还会再死一次」的情形（欠费/Key 失效/连不上），不做第二道门禁。
+    """
+    try:
+        profile = cfg.get_profile(model_id or cfg.default_model_id())
+        if profile is None:
+            return None  # 模型配置已删：留给 run_stream 按原路径报错，不在此拦截
+        key = cfg.model_key(profile.id)
+        if not key:
+            return "模型 Key 未配置——请先在设置里填写"
+        ok, message, _latency = await asyncio.to_thread(
+            model_ping.ping, profile.base_url, profile.model, key
+        )
+        return None if ok else message
+    except Exception:
+        logger.debug("续跑预检失败，跳过（fail-open）", exc_info=True)
+        return None
+
+
 @router.post("/runs/{rid}/continue", status_code=202)
 async def continue_run(rid: str):
     """终态断点续跑（2026-09-12）：error 终态且定性可续（db.RESUMABLE_ERROR_CODES）
@@ -219,6 +242,13 @@ async def continue_run(rid: str):
         raise HTTPException(status_code=409, detail="该会话已有进行中的任务")
     if not agent.checkpoint_exists(run["conversation_id"]):
         raise HTTPException(status_code=409, detail="断点数据缺失，请重新执行")
+    # 模型探活预检（2026-09-15 路径可靠性批）：在抢占前先确认模型服务可用——
+    # r_eedd621716b5 两次续跑撞 402 各 1 秒即死、报错看不出是欠费，用户空点两轮。
+    # 置于 db.continue_run 之前：失败不动 run 行（无需收尸）。fail-open：profile
+    # 已删/ping 自身炸 → 跳过检查照常续跑（增强逻辑绝不打断主流程）。
+    preflight = await _preflight_ping(run.get("model"))
+    if preflight is not None:
+        raise HTTPException(status_code=409, detail=f"模型暂不可用，未启动续跑：{preflight}")
     if not db.continue_run(rid):
         raise HTTPException(status_code=409, detail="该任务已在别处续跑，请稍候")
     try:

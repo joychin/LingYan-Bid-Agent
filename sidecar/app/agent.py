@@ -15,6 +15,7 @@ import dataclasses
 import itertools
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -32,7 +33,18 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from openai import APIError, APIStatusError, BadRequestError, InternalServerError
 
-from . import artifact_store, db, deliverables, dispatch_enrich, events, model_registry, run_files, runctx, token_usage
+from . import (
+    artifact_store,
+    db,
+    deliverables,
+    dispatch_enrich,
+    events,
+    model_registry,
+    path_resolve,
+    run_files,
+    runctx,
+    token_usage,
+)
 from . import config as cfg
 from .bus import publish
 from .fs_guard import GuardedBackend
@@ -223,59 +235,10 @@ _FS_PATH_TOOLS: dict[str, str] = {
     "write_file": "file_path",
     "edit_file": "file_path",
 }
-_GLOBAL_DIR_NAMES = ("skills", "materials", "knowledge")
-
-
-def _norm_vpath(path: str) -> str | None:
-    """模型给的路径归一为虚拟绝对路径（"/x/y"）；带穿越段/家目录则 None（不碰）。"""
-    p = "/" + path.strip().lstrip("/")
-    segments = p.split("/")
-    if ".." in segments or "~" in segments:
-        return None
-    return p
-
-
-def _path_rescue_candidates(path: str, task_id: str, workspace_root: str) -> list[str]:
-    """坏路径的换算候选（确定性、按序、去重、规则可叠两层）。
-
-    覆盖实测四类猜错形态：①多余 /workspace 段；②拼了本机真实根前缀；③缺任务
-    前缀（主形态，14 次）；④任务前缀误套在全局目录前。两层叠加处理复合形态
-    （/真实根/work/x → /work/x → /t_x/work/x；/workspace/t_x/skills/ → → /skills/）。
-    """
-    norm = _norm_vpath(path)
-    if norm is None:
-        return []
-    out: list[str] = []
-    seen: set[str] = set()
-
-    def push(cand: str | None) -> None:
-        if cand and cand not in seen:
-            seen.add(cand)
-            out.append(cand)
-
-    def rules(p: str) -> list[str]:
-        results: list[str] = []
-        if p.startswith("/workspace/"):
-            results.append(p[len("/workspace"):])
-        if workspace_root and p.startswith(workspace_root):
-            results.append(p[len(workspace_root):] or "/")
-        if task_id and not p.startswith(f"/{task_id}/"):
-            results.append(f"/{task_id}{p}")
-        if task_id:
-            parts = p.lstrip("/").split("/", 1)
-            if (
-                len(parts) == 2
-                and parts[0] == task_id
-                and parts[1].split("/", 1)[0] in _GLOBAL_DIR_NAMES
-            ):
-                results.append("/" + parts[1])
-        return results
-
-    for first in rules(norm):
-        push(first)
-        for second in rules(first):
-            push(second)
-    return out
+# 换算候选序已收拢进 path_resolve（2026-09-15 路径可靠性批单点化）；别名保留
+# 供既有调用方与测试引用
+_norm_vpath = path_resolve.norm_vpath
+_path_rescue_candidates = path_resolve.norm_candidates
 
 
 def _is_path_miss_error(tool: str, content: str) -> bool:
@@ -423,6 +386,82 @@ class _DispatchEnrichMiddleware(AgentMiddleware):
         return handler(request)
 
 
+# ── 重派守卫（2026-09-15 路径可靠性批）─────────────────────────────────────
+# 动因：r_eedd621716b5 整本 run 两次 402 中断后 checkpoint 整波重放——中断落在
+# 波中间（ToolNode 未落 superstep 存档）时续跑把整轮重派，59 节书派发 86 次、
+# 13 节被完整重写一两遍。模型续跑后凭记忆重派不对账已写节，纪律管不住（SKILL
+# 的「续跑后先对账」是软防线），故升机制：机械识别「本 run 内已写出的节被无
+# 重写意图地再次派发」并拒绝执行——与清单同步守卫同款「拒绝+意图词泄压+次数
+# 保险丝」模式。run 起点沿用 runs.created_at 原值（continue 不改写），续跑段
+# 写出的文件同样算「本轮」，正是要拦的重放对象。
+_REPLAY_GUARD_MARK = "〔重派守卫〕"
+_REPLAY_INTENT_RE = re.compile(r"重写|覆盖|更新|修订|重派")
+_REPLAY_GUARD_VALVE = 3  # 同 run 拒绝上限：防「拒绝→原样重发」死循环烧轮次
+# runs.created_at 秒级精度 + 文件系统时钟差余量：mtime 早于起点-2s 才算历史产物
+_REPLAY_MTIME_SLACK = 2.0
+# rid -> {"hits": 拒绝次数, "start": run 起点 epoch 秒（懒加载，None=未初始化）}
+_REPLAY_GUARD_STATE: dict[str, dict] = {}
+
+
+class _ReplayGuardMiddleware(AgentMiddleware):
+    """重派守卫：本 run 内已写出的节、无重写意图的再次派发 → 拒绝执行。
+
+    与 _DispatchEnrichMiddleware 同款三层过滤（task/写手/任务上下文）；节名对账
+    复用 dispatch_enrich.resolve_section（「节名→输出路径」单点推导）。拒绝=不调
+    handler 直接回 error ToolMessage（_ToolTimeoutMiddleware 同款，批内其他派发
+    照常执行）。放行面有意宽：节名对不上/文件不存在/历史 run 写的旧节/描述含
+    意图词/保险丝打满——守卫只治整波重放这一种确定性浪费，不当重写裁判。
+    任何内部异常放行（增强逻辑绝不打断 run）。
+    """
+
+    def wrap_tool_call(self, request: "ToolCallRequest", handler):
+        call = request.tool_call
+        if call.get("name") != "task":
+            return handler(request)
+        args = call.get("args") or {}
+        if args.get("subagent_type") != _BODY_WRITER_NAME:
+            return handler(request)
+        ctx = runctx.current_run()
+        if ctx is None or not ctx.task_id or not ctx.run_id:
+            return handler(request)
+        desc = args.get("description")
+        if not isinstance(desc, str) or _REPLAY_INTENT_RE.search(desc):
+            return handler(request)
+        try:
+            state = _REPLAY_GUARD_STATE.setdefault(ctx.run_id, {"hits": 0, "start": None})
+            if state["hits"] >= _REPLAY_GUARD_VALVE:
+                return handler(request)
+            if state["start"] is None:
+                row = db.get_run(ctx.run_id)
+                # 行缺失（理论不可达）=起点不可判：置 inf 恒放行，宁漏拦不误拦
+                state["start"] = (
+                    datetime.fromisoformat(row["created_at"]).timestamp() if row else float("inf")
+                )
+            target = dispatch_enrich.resolve_section(
+                dispatch_enrich.first_line_needle(desc), ctx.task_id
+            )
+            if target is None:
+                return handler(request)
+            path = artifact_store.work_dir(ctx.task_id) / target.rel
+            if not path.is_file() or path.stat().st_mtime <= state["start"] - _REPLAY_MTIME_SLACK:
+                return handler(request)
+            state["hits"] += 1
+            return ToolMessage(
+                content=(
+                    f"{_REPLAY_GUARD_MARK}该节本轮已写出（{target.rel}），这多半是"
+                    "断点续跑/中断重放的重复派发。先调 check_pipeline_state 对账"
+                    "已写节、只补派缺失的节；确要重写本节，请在派发描述里写明"
+                    "「重写」等意图词。"
+                ),
+                status="error",
+                tool_call_id=call.get("id") or "",
+                name="task",
+            )
+        except Exception:
+            logger.debug("重派守卫检查失败，放行（rid=%s）", ctx.run_id, exc_info=True)
+            return handler(request)
+
+
 # 工具超时档位（秒）。重工具 600（磁盘+CPU 密集、无自身超时，对齐 Claude Code
 # bash「默认 2min/硬上限 10min」的机制纪律）；其余全部工具默认 120——2026-09-12
 # 从清单制改为兜底制：搜索/校验/发布/文件七件套 hang 时此前无上界，取消的事件
@@ -536,6 +575,7 @@ _SUBAGENT_COMPASS_MW = _SubagentCompassMiddleware()
 _SUBAGENT_SCOPE_MW = _SubagentScopeMiddleware()
 _PATH_RESCUE_MW = _PathRescueMiddleware()
 _DISPATCH_ENRICH_MW = _DispatchEnrichMiddleware()
+_REPLAY_GUARD_MW = _ReplayGuardMiddleware()
 _TOOL_TIMEOUT_MW = _ToolTimeoutMiddleware()
 
 # 显式注册的子代理（deepagents 还会自动补 general-purpose）。tools 不指定 → 继承主
@@ -1309,6 +1349,7 @@ def build_agent(profile: cfg.ModelProfile | None = None):
             _TaskContextMiddleware(),
             ToolErrorMiddleware(on_error=_task_failure_content, tools=["task"]),
             _PATH_RESCUE_MW,
+            _REPLAY_GUARD_MW,
             _DISPATCH_ENRICH_MW,
             _TOOL_TIMEOUT_MW,
         ],
@@ -2397,4 +2438,5 @@ async def run_stream(
             logger.exception("run_stream 终态落库/事件发布失败（cid=%s rid=%s）", cid, rid)
     finally:
         CANCEL_EVENTS.pop(rid, None)
+        _REPLAY_GUARD_STATE.pop(rid, None)  # 重派守卫状态（起点缓存/泄压计数）不跨 run 残留
         deliverables.clear(rid)  # 清呈现信号桶：防异常路径残留累积（正常路径 drain 已空）

@@ -703,6 +703,47 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    ——年份过滤/契合评分是把语义伪装成机械（「最近三年」口径本身模糊归
    模型）。search_references 刻意不加（用户手挑块+备注已是挑选依据+数字已
    禁用）。枚举招标措辞形态而非材料类型（举例即边界，写窄了模型照着窄化）。
+   **路径可靠性批（2026-09-15，四件+配套，断 r_eedd621716b5 事故链）**：当日
+   实证=59 节整本 run 两次 402（DeepSeek 欠费）中断→续跑 checkpoint 整波重放
+   （59 节派发 86 次、13 节完整重写一两遍）→重派描述膨胀 150-324 字超
+   `_MAX_ORIG_DESC=200` 被拼装器整体放行→写手自选章节子目录路径
+   （body/总体技术方案/x.docx）而合册约定是平铺 body/x.docx→合册 46/59→
+   模型删三个章节目录+第三遍重写 10 节自救，48.6min 运行+21min 挂机（正常
+   ~25-30min）。历史路径事故同根（24 次 path_not_found/指引 404/派发塌陷）：
+   路径=必须逐字节复现的长字符串是 LLM 弱项，防线点状各管一段新链路就绕过。
+   四件（全 sidecar，须重启）：①**拼装器富描述仍注入路径锚点**——>200 字描述
+   改为「首行探针匹配命中→原文末尾追加最小锚点块（任务前缀/输出路径/今天日期
+   三行，含 _ENRICH_MARK 幂等）」，语义信任原文不重复拼；首行对不上维持放行；
+   「节名→输出路径」推导抽 `dispatch_enrich.resolve_section`（SectionTarget
+   NamedTuple）单点供全量拼装与重派守卫共用。②**重派守卫**
+   （agent `_ReplayGuardMiddleware`，wrap_tool_call 挂主栈、清单同步守卫同款
+   「拒绝+意图词泄压+次数保险丝」）：task+tender-body-writer+节名对账命中+
+   规范节文件 is_file 且 mtime>本 run 起点（db.get_run created_at 解析+2s 余量，
+   continue 沿用原起点=续跑段写的也算本轮）且描述无意图词（重写/覆盖/更新/修订/
+   重派）→ 不调 handler 直接回 error ToolMessage 指路 check_pipeline_state；泄压
+   阀同 run 拒满 3 次放行（`_REPLAY_GUARD_STATE` worker finally 清）；对不上/
+   不存在/历史旧节/异常一律放行。③**路径解析收拢单点**——新 `app/path_resolve.py`
+   搬入 norm_candidates（原 agent._path_rescue_candidates）与
+   unique_suffix_match（原 workbench._unique_suffix_match），原调用方别名引用
+   行为零变化；`PATH_RESOLVER_REGISTRY` 声明式登记表=每个模型可达路径参数→
+   解析器点路径（fs 六件套/docx _dest_path/parse _resolve_ws_path/publish
+   _resolve_draft/workbench/_resolve；内联解析登记工具体本身），守卫测试
+   （test_path_resolve.py）扫 TOOLS 参数名（PATH_PARAM_RE）对账登记+登记可
+   import，新工具不接线当场红；REGISTRY_IGNORE 白名单带理由（如
+   source_item_id=KB 条目 id）。领域解析器原地不动只登记。④**续跑探活预检**
+   ——`_ping_model_sync`+`_status_message` 抽 `app/model_ping.py`（settings 改
+   引用），continue 端点在 checkpoint 预检后、db.continue_run 抢占**前**插入
+   `_preflight_ping(run.model)`（asyncio.to_thread）：profile 缺失→跳过放行；
+   无 Key→409「Key 未配置」；ping 失败→409「模型暂不可用，未启动续跑：{人话}」
+   （run 行不动无需收尸）；ping 自身异常→fail-open 放行。配套=tender-body SKILL
+   整本段加「断点续跑/中断后重新派发前重调 check_pipeline_state 对账已写节」
+   （test_skills 锚点防删）。明确不做（拍板）：docx 工具节名寻址（第二批）、
+   任务根虚拟挂载（终极形态立档）、trace 幽灵步骤收尾（维持 09-12 拍板）。
+   行业依据=SWE-agent ACI（search-first 不裸打路径）/Claude Code·Codex·OpenHands
+   （单根锚定+框架解析）/Anthropic 工具设计（服务端解析、不让模型构造未给过的
+   标识符）。测试：dispatch_enrich +2（锚点/首行不中放行）、agent +5（守卫
+   四态+valve+wired）、path_resolve 新 5、run_continue +3（409/fail-open/直测）、
+   skills +1；824 绿+check.sh 全绿。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。

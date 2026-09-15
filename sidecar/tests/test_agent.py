@@ -1645,6 +1645,163 @@ def test_todo_sync_gate_aafter_model_delegates():
     assert out is not None and out["messages"][0].tool_call_id == "b0"
 
 
+# ---- 重派守卫（wrap_tool_call，2026-09-15 路径可靠性批） ----
+
+_DIR_KEY = "tender.directory/tender-response-docs@1"
+
+
+def _replay_env(tmp_path, monkeypatch, *, with_section=True, mtime=None):
+    """重派守卫测试环境：任务+会话+run（起点=created_at）+目录产物+节文件。
+
+    返回 (tid, run, sec_path)。mtime 显式指定可模拟「历史 run 写的旧节」。"""
+    import os
+
+    from app import db, publish
+    from app.artifact_store import work_dir
+
+    task, conv = init_env(tmp_path, monkeypatch)
+    tid = task["id"]
+    publish.publish_artifact(
+        _DIR_KEY,
+        {
+            "response_documents": [
+                {
+                    "name": "技术部分",
+                    "scope": "",
+                    "directory": [
+                        {"目录名称": "3.1 项目理解与需求分析", "level": 1, "children": [],
+                         "交付形态": "正文编写"},
+                    ],
+                }
+            ],
+            "registry": {},
+        },
+        task_id=tid,
+    )
+    run = db.create_run(conv["id"])
+    body = work_dir(tid) / "body"
+    body.mkdir(parents=True, exist_ok=True)
+    sec = body / "3.1 项目理解与需求分析.docx"
+    if with_section:
+        sec.write_bytes(b"docx")
+        if mtime is not None:
+            os.utime(sec, (mtime, mtime))
+    return tid, run, sec
+
+
+def _replay_dispatch(desc, handler_seen):
+    def handler(req):
+        handler_seen.append(dict(req.tool_call["args"]))
+        return ToolMessage(content="ok", name="task", tool_call_id="call_test")
+
+    return agent_mod._REPLAY_GUARD_MW.wrap_tool_call(
+        _tc_request(
+            "task",
+            {"description": desc, "subagent_type": agent_mod._BODY_WRITER_NAME},
+        ),
+        handler,
+    )
+
+
+def test_replay_guard_blocks_same_run_rewrite_without_intent(tmp_path, monkeypatch):
+    """本轮已写出的节 + 无重写意图 → 拒绝执行（handler 不被调），文案带守卫标记、
+    规范路径与对账指引（r_eedd621716b5：13 节整波重放、86 次派发对 59 节书）。"""
+    tid, run, _sec = _replay_env(tmp_path, monkeypatch)  # 节文件在 run 之后写（mtime 新）
+    seen: list = []
+    runctx.set_run("c1", run["id"], tid)
+    try:
+        out = _replay_dispatch("写 3.1 项目理解", seen)
+    finally:
+        runctx.clear_run()
+        agent_mod._REPLAY_GUARD_STATE.clear()
+    assert seen == []  # 未执行
+    assert isinstance(out, ToolMessage) and out.status == "error"
+    assert agent_mod._REPLAY_GUARD_MARK in out.content
+    assert "body/3.1 项目理解与需求分析.docx" in out.content
+    assert "check_pipeline_state" in out.content
+
+
+def test_replay_guard_passes_for_intent_old_or_missing(tmp_path, monkeypatch):
+    """放行面：描述含意图词（重写）/ 历史 run 写的旧节 / 节文件不存在 → 照常执行。"""
+    import time as _time
+
+    tid, run, sec = _replay_env(tmp_path, monkeypatch, mtime=_time.time() - 3600)
+    seen: list = []
+    runctx.set_run("c1", run["id"], tid)
+    try:
+        out = _replay_dispatch("重写 3.1 项目理解，按新要求更新", seen)
+        assert out.content == "ok" and len(seen) == 1  # 意图词放行
+        out = _replay_dispatch("写 3.1 项目理解", seen)
+        assert out.content == "ok" and len(seen) == 2  # 旧文件（早于 run 起点）放行
+        sec.unlink()
+        out = _replay_dispatch("写 3.1 项目理解", seen)
+        assert out.content == "ok" and len(seen) == 3  # 文件不存在放行
+    finally:
+        runctx.clear_run()
+        agent_mod._REPLAY_GUARD_STATE.clear()
+
+
+def test_replay_guard_valve_opens_after_bounded_rejections(tmp_path, monkeypatch):
+    """泄压阀：同 run 拒绝满 _REPLAY_GUARD_VALVE 次后放行（防「拒绝→原样重发」
+    死循环烧轮次）；拒绝计数在 run 收尾清理（finally 钩子）。"""
+    tid, run, _sec = _replay_env(tmp_path, monkeypatch)
+    seen: list = []
+    runctx.set_run("c1", run["id"], tid)
+    try:
+        for _ in range(agent_mod._REPLAY_GUARD_VALVE):
+            _replay_dispatch("写 3.1 项目理解", seen)
+        assert len(seen) == 0  # 阀内全拒
+        out = _replay_dispatch("写 3.1 项目理解", seen)
+        assert out.content == "ok" and len(seen) == 1  # 阀打开放行
+    finally:
+        runctx.clear_run()
+        agent_mod._REPLAY_GUARD_STATE.clear()
+
+
+def test_replay_guard_quiet_paths(tmp_path, monkeypatch):
+    """非 task / 非写手子代理 / 无任务上下文 / 节名对不上 → 直通不评判。"""
+    tid, run, _sec = _replay_env(tmp_path, monkeypatch)
+    seen: list = []
+
+    def handler(req):
+        seen.append(req.tool_call["name"])
+        return ToolMessage(content="ok", name=req.tool_call["name"], tool_call_id="call_test")
+
+    runctx.set_run("c1", run["id"], tid)
+    try:
+        agent_mod._REPLAY_GUARD_MW.wrap_tool_call(_tc_request("ls", {"path": "/x"}), handler)
+        agent_mod._REPLAY_GUARD_MW.wrap_tool_call(
+            _tc_request("task", {"description": "写 3.1 项目理解", "subagent_type": "general-purpose"}),
+            handler,
+        )
+        agent_mod._REPLAY_GUARD_MW.wrap_tool_call(
+            _tc_request("task", {"description": "写一个不存在的节", "subagent_type": agent_mod._BODY_WRITER_NAME}),
+            handler,
+        )
+    finally:
+        runctx.clear_run()
+        agent_mod._REPLAY_GUARD_STATE.clear()
+    runctx.clear_run()
+    agent_mod._REPLAY_GUARD_MW.wrap_tool_call(
+        _tc_request("task", {"description": "写 3.1 项目理解", "subagent_type": agent_mod._BODY_WRITER_NAME}),
+        handler,
+    )
+    assert seen == ["ls", "task", "task", "task"]  # 全部直通
+
+
+def test_replay_guard_wired():
+    """守卫只挂主栈（派发归主线程；写手子代理不派 task）；SUBAGENTS 不挂。"""
+    import inspect
+
+    src = inspect.getsource(agent_mod.build_agent)
+    assert "_REPLAY_GUARD_MW" in src
+    assert not any(
+        isinstance(m, agent_mod._ReplayGuardMiddleware)
+        for s in agent_mod.SUBAGENTS
+        for m in (s.get("middleware") or [])
+    )
+
+
 def test_sub_reasoning_buffer_collapses_to_single_copy():
     """子代理思考缓冲 join 后收敛为单元素：run 期间思考文本单份驻留（不再
     chunk 列表+拼好串双份），后续 chunk 追加的增量 join 语义不变。"""

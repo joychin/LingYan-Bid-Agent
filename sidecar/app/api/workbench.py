@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from .. import artifact_store, db
+from .. import artifact_store, db, path_resolve
 from ..artifact_store import RESTORE_KEEP
 
 router = APIRouter()
@@ -40,30 +40,8 @@ def _require_task(task_id: str) -> None:
         raise HTTPException(status_code=404, detail="任务不存在")
 
 
-def _unique_suffix_match(root: Path, path: str, task_id: str) -> Path | None:
-    """work/ 全树唯一后缀兜底：模型给的路径（ask_human guide_path 等）可能少前缀
-    （body/ 下相对）或多前缀（work/、<task_id>/）。剥掉已知前缀后在全树找以剩余
-    路径结尾的唯一真实文件（按路径边界匹配，防 asub/x.md 误中 sub/x.md）；
-    无命中或歧义返回 None——维持精确路径的原有行为（下游 404）。
-    """
-    parts = path.split("/")
-    while parts and parts[0] in ("work", task_id):
-        parts.pop(0)
-    cleaned = "/".join(parts)
-    if not cleaned:
-        return None
-
-    def _hit(p: Path) -> bool:
-        if not p.is_file() or p.suffix not in (".md", ".docx") or p.name.startswith("."):
-            return False
-        parts = p.relative_to(root).parts
-        if parts and parts[0] == "artifacts":  # 产物包文件走产物卡通道，不参与后缀兜底
-            return False
-        rel = "/".join(parts)
-        return rel == cleaned or rel.endswith("/" + cleaned)
-
-    hits = [p for p in root.rglob("*") if _hit(p)]
-    return hits[0] if len(hits) == 1 else None
+# 唯一后缀兜底已收拢进 path_resolve（2026-09-15 路径可靠性批单点化）；别名保留
+_unique_suffix_match = path_resolve.unique_suffix_match
 
 
 def _resolve(task_id: str, path: str) -> Path:

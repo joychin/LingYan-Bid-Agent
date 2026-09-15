@@ -31,6 +31,7 @@ import json
 import logging
 import re
 from datetime import date
+from typing import NamedTuple
 
 from . import artifact_store, config, db
 from .tools import body_contract, docx_ops
@@ -44,7 +45,7 @@ from .tools.validate_body import _parse_guide_rows
 logger = logging.getLogger(__name__)
 
 _ENRICH_MARK = "〔系统附"  # 幂等标记：含此标记的描述（重派/续跑再走一层）不再拼装
-_MAX_ORIG_DESC = 200  # 模型已写富文本的稀有情況：信任原文，不重复拼装
+_MAX_ORIG_DESC = 200  # 超过=富描述：语义信任原文不重复拼装，但仍注入最小路径锚点
 _MAX_SIBLINGS = 3  # 兄弟摘要上限（防派发随波数线性膨胀）
 _SIBLING_HEAD_CHARS = 200
 _ID_RE = re.compile(r"^(?:MAND|TPL|REQ|SCORE)-\d+$", re.IGNORECASE)
@@ -348,28 +349,77 @@ def _gap_lines(cells: list[str], cols: dict[str, int]) -> str | None:
     return text or None
 
 
-def build_enriched_description(desc: str, task_id: str) -> str | None:
-    """瘦派发描述 → 补全派发说明；不适合拼装返回 None（调用方原样放行）。
+class SectionTarget(NamedTuple):
+    """节名对账命中的目录叶子目标（含规范输出路径）。"""
 
-    模型原话永远第一行（UI 子代理卡标题取首行）；其后是程序拼的共享上下文块。
+    vol: str
+    title: str
+    delivery: str
+    rel: str  # 相对任务 work/ 的节文件路径，如 body/3.1 需求分析.docx
+    content: dict  # 目录产物 content（多册判定等调用方自取）
+    multi: bool
+
+
+def resolve_section(needle: str, task_id: str) -> SectionTarget | None:
+    """探针对账目录叶子 → 目标（含「节名→输出路径」的单点推导）。
+
+    全量拼装与重派守卫共用：路径推导只允许存在这一份（2026-09-15 路径可靠性批）。
+    对不上/多义返回 None（宁可不猜）。任何异常也返回 None（不打断调用方）。
     """
     try:
-        if not isinstance(desc, str) or not desc.strip() or _ENRICH_MARK in desc:
-            return None
-        if len(desc) > _MAX_ORIG_DESC:
-            return None
         _row, content, _mtime = body_contract.load_directory(task_id)
         if not content:
             return None
         leaves = body_contract.iter_leaves(content)
         if not leaves:
             return None
-        match = _match_leaf(_needle(desc), leaves)
+        match = _match_leaf(needle, leaves)
         if match is None:
             return None
         vol, title, delivery = match
         multi = body_contract.multi_volume(content)
         rel = f"body/{body_contract.sanitize_name(vol) + '/' if multi else ''}{body_contract.sanitize_name(title)}.docx"
+        return SectionTarget(vol, title, delivery, rel, content, multi)
+    except Exception:
+        logger.debug("节名对账失败（task=%s needle=%s）", task_id, needle[:30], exc_info=True)
+        return None
+
+
+def first_line_needle(desc: str) -> str:
+    """富/瘦描述通用探针：取首行（节名约定在首行）剥「写」类前缀与「节」后缀。"""
+    first = (desc or "").strip().splitlines()[0] if (desc or "").strip() else ""
+    return _needle(first) if first else ""
+
+
+def build_enriched_description(desc: str, task_id: str) -> str | None:
+    """瘦派发描述 → 补全派发说明；不适合拼装返回 None（调用方原样放行）。
+
+    模型原话永远第一行（UI 子代理卡标题取首行）；其后是程序拼的共享上下文块。
+    富描述（>200 字）：语义信任原文，但仍注入最小路径锚点——输出路径是程序算的
+    契约事实，不随描述长度丢失（2026-09-15 r_eedd621716b5：13 节富描述被整体
+    放行后写手自选了章节子目录路径，合册 46/59 触发删目录+第三遍重写）。
+    """
+    try:
+        if not isinstance(desc, str) or not desc.strip() or _ENRICH_MARK in desc:
+            return None
+        if len(desc) > _MAX_ORIG_DESC:
+            target = resolve_section(first_line_needle(desc), task_id)
+            if target is None:
+                return None
+            return "\n".join(
+                [
+                    desc.strip(),
+                    f"{_ENRICH_MARK}：路径锚点（程序自动生成，直接使用）：",
+                    f"任务目录前缀：{task_id}/",
+                    f"输出路径：{task_id}/work/{target.rel}",
+                    f"今天日期：{date.today().isoformat()}",
+                ]
+            )
+        target = resolve_section(_needle(desc), task_id)
+        if target is None:
+            return None
+        vol, title, delivery = target.vol, target.title, target.delivery
+        rel, content = target.rel, target.content
 
         req_lines: list[str] = []
         has_tpl = False

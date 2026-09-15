@@ -66,6 +66,104 @@ def test_continue_endpoint_flow(client, tmp_path, monkeypatch):
     assert client.post(f"/api/runs/{rid}/continue").status_code == 409
 
 
+def test_continue_preflight_blocks_dead_model(client, tmp_path, monkeypatch):
+    """续跑预检（2026-09-15）：模型仍不可用（欠费等）→ 409 人话、run 不动、不 spawn。
+
+    r_eedd621716b5 实证：两次续跑撞 402 各 1 秒即死，报错看不出是欠费——预检
+    把话提前说在启动前（预检在抢占前，失败无需收尸）。"""
+    cid, rid = _error_setup(tmp_path, monkeypatch, code="llm_auth")
+    spawned: list = []
+
+    async def fake_run_stream(*_a, **_kw):
+        spawned.append(1)
+
+    monkeypatch.setattr(runs_api, "run_stream", fake_run_stream)
+    monkeypatch.setattr(agent_mod, "checkpoint_exists", lambda c: True)
+
+    async def _dead(model_id):
+        return "账户额度不足（欠费）——请充值，或切换到其他模型"
+
+    monkeypatch.setattr(runs_api, "_preflight_ping", _dead)
+    resp = client.post(f"/api/runs/{rid}/continue")
+    assert resp.status_code == 409
+    assert "额度不足" in resp.json()["detail"]
+    assert "未启动续跑" in resp.json()["detail"]
+    assert db.get_run(rid)["status"] == "error"  # 未抢占、无需收尸
+    assert spawned == []
+
+
+def test_continue_preflight_fail_open(client, tmp_path, monkeypatch):
+    """fail-open：探活内部层炸（ping 抛异常）→ 照常续跑（增强不打断主流程）。
+    run 模型取 default + env Key，确保链路真走到 ping 层再炸（profile 缺失的
+    放行分支另由直测覆盖）。"""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    db.init_db()
+    task = db.create_task("t")
+    conv = db.create_conversation(task["id"])
+    run = db.create_run(conv["id"], thinking="low", model="default")
+    db.finish_run(run["id"], "error", "应用服务重启，任务被中断", last_seq=3, error_code="interrupted")
+    captured: dict = {}
+
+    async def fake_run_stream(*_a, rid_=None, **_kw):
+        captured["rid"] = rid_
+
+    monkeypatch.setattr(runs_api, "run_stream", fake_run_stream)
+    monkeypatch.setattr(agent_mod, "checkpoint_exists", lambda c: True)
+    monkeypatch.setenv("LLM_API_KEY", "sk-test")
+
+    def _boom(base_url, model, key):
+        raise RuntimeError("ping 层自身故障")
+
+    monkeypatch.setattr(runs_api.model_ping, "ping", _boom)
+    assert client.post(f"/api/runs/{run['id']}/continue").status_code == 202
+    _wait_captured(captured, "rid")
+
+
+def test_preflight_ping_resolves_profile_and_missing_key(client, tmp_path, monkeypatch):
+    """_preflight_ping 直测：profile 不存在→None 放行（run_stream 原路径报错）；
+    profile 在但无 Key→人话拦截（llm_auth 预判）；ping 失败→文案透传、成功→None。"""
+    import asyncio
+    import dataclasses
+
+    from app import config as cfg
+    from app.api import runs as ra
+
+    async def run_it(model_id):
+        return await ra._preflight_ping(model_id)
+
+    # ① profile 不存在（测试环境无 p_missing）→ 放行
+    assert asyncio.run(run_it("p_missing")) is None
+
+    # ② 注入一个无 Key 的 profile → 明确人话（不留到 run 里撞 llm_auth）
+    monkeypatch.setattr(
+        cfg, "model_profiles",
+        lambda: [dataclasses.replace(
+            cfg._builtin_default_profile(), id="p_nok", base_url="https://x/v1", model="m1"
+        )],
+    )
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("MODEL_KEYS", raising=False)
+    out = asyncio.run(run_it("p_nok"))
+    assert out is not None and "Key 未配置" in out
+
+    # ③ 有 Key（env LLM_API_KEY 只挂 default profile，同款口径）：成功→None、
+    # 失败→文案透传（model_ping 层的归一单测在 test_settings 已覆盖）
+    monkeypatch.setattr(
+        cfg, "model_profiles",
+        lambda: [dataclasses.replace(
+            cfg._builtin_default_profile(), id="default", base_url="https://x/v1", model="m1"
+        )],
+    )
+    monkeypatch.setenv("LLM_API_KEY", "sk-test")
+    monkeypatch.setattr(ra.model_ping, "ping", lambda *a: (True, "连接正常", 3))
+    assert asyncio.run(run_it("default")) is None
+    monkeypatch.setattr(
+        ra.model_ping, "ping",
+        lambda *a: (False, "账户额度不足（欠费）——请充值，或切换到其他模型", 3),
+    )
+    assert "额度不足" in asyncio.run(run_it("default"))
+
+
 def test_continue_preconditions(client, tmp_path, monkeypatch):
     monkeypatch.setattr(agent_mod, "checkpoint_exists", lambda c: True)
 
