@@ -195,7 +195,7 @@ fn confirm_exit(app: AppHandle, state: State<'_, Arc<SidecarManager>>) {
 // ---------------------------------------------------------------------------
 
 /// 内置默认更新清单地址；域名定稿后填入随版发布（空串=未配置，检查报「更新源尚未配置」）。
-const DEFAULT_UPDATE_MANIFEST_URL: &str = "";
+const DEFAULT_UPDATE_MANIFEST_URL: &str = "https://ddmdj.com/release/version.json";
 
 /// 清单里 changes 要点条数上限（超出丢弃，防异常清单撑爆设置卡）。
 const MAX_UPDATE_CHANGES: usize = 20;
