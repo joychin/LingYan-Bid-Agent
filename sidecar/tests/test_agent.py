@@ -611,7 +611,10 @@ def test_retry_publishes_agent_retry_event(monkeypatch):
     assert len(retries) == 1
     assert retries[0]["attempt"] == 1
     assert retries[0]["total"] == 2
-    assert retries[0]["wait_seconds"] == 0.01
+    # 抖动（2026-09-15）：wait_seconds 是抖动后的真值（基准 0.01 × [0.5, 1.5]）
+    assert 0.005 <= retries[0]["wait_seconds"] <= 0.015
+    # scope 缺省 main（stub 直抛未标记异常；2026-09-15 additive）
+    assert retries[0]["scope"] == "main"
 
 
 def test_classify_error_codes():
@@ -1234,6 +1237,295 @@ def test_overflow_400_learn_rejects_unparseable_wordings():
     # 纯解析函数边界：三位数不匹配 \d{4,9}
     assert agent_mod._parse_context_limit("maximum context length is 999 tokens") is None
     assert agent_mod._parse_context_limit("context window is 131072") == 131072
+
+
+# ---- 自适应并发闸接线（2026-09-15，llm_throttle） ----
+
+
+def _rate_limit_429() -> Exception:
+    from openai import RateLimitError
+
+    response = httpx.Response(
+        429,
+        request=httpx.Request("POST", "https://gw.example/v1/chat/completions"),
+        json={"error": {"code": "rate_limit_exceeded", "message": "Rate limit reached for requests", "type": "rate_limit_error"}},
+    )
+    return RateLimitError(
+        "Error code: 429 - Rate limit reached for requests",
+        response=response,
+        body=None,
+    )
+
+
+def _request_timeout() -> Exception:
+    from openai import APITimeoutError
+
+    return APITimeoutError(request=httpx.Request("POST", "https://gw.example/v1/chat/completions"))
+
+
+def test_throttle_429_shrinks_limiter_hard_and_reraises():
+    """429 = 硬背压：许可按 hard 归还（limit 减半）且原样上抛走既有重试链。"""
+    import pytest
+    from openai import RateLimitError
+
+    from app import llm_throttle
+
+    lim = llm_throttle.AIMDLimiter(ceiling=8)
+    inner = _RecordingCompletions([_rate_limit_429()])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, limiter=lim)
+    with pytest.raises(RateLimitError):
+        wrapper.create(model="m", messages=[])
+    assert lim.limit == 4
+    assert lim.inflight == 0
+
+
+def test_throttle_timeout_soft_shrinks_one_step():
+    """请求超时 = 弱背压：soft 归还（limit −1）后上抛。"""
+    import pytest
+    from openai import APITimeoutError
+
+    from app import llm_throttle
+
+    lim = llm_throttle.AIMDLimiter(ceiling=8)
+    inner = _RecordingCompletions([_request_timeout()])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, limiter=lim)
+    with pytest.raises(APITimeoutError):
+        wrapper.create(model="m", messages=[])
+    assert lim.limit == 7
+    assert lim.inflight == 0
+
+
+def test_throttle_other_errors_neutral():
+    """其余异常（如普通 400）只归还许可，不调闸——与网关容量无关。"""
+    from app import llm_throttle
+
+    lim = llm_throttle.AIMDLimiter(ceiling=8)
+    inner = _RecordingCompletions([_other_400()])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, limiter=lim)
+    try:
+        wrapper.create(model="m", messages=[], reasoning_effort="low")
+        raise AssertionError("应上抛 BadRequestError")
+    except Exception:
+        pass
+    assert lim.limit == 8
+    assert lim.inflight == 0
+
+
+def test_throttle_nonstream_success_releases_ok():
+    """非流式成功：ok 归还（limit 不动），响应原样透传。"""
+    from app import llm_throttle
+
+    lim = llm_throttle.AIMDLimiter(ceiling=8)
+    ok = object()
+    inner = _RecordingCompletions([ok])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, limiter=lim)
+    assert wrapper.create(model="m", messages=[]) is ok
+    assert lim.inflight == 0
+    assert lim.limit == 8
+
+
+def test_throttle_stream_releases_on_exhaustion():
+    """流式：create 返回时许可仍持有（流未消费），耗尽后才 ok 归还。"""
+    from app import llm_throttle
+
+    lim = llm_throttle.AIMDLimiter(ceiling=8)
+    inner = _RecordingCompletions([["a", "b"]])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, limiter=lim)
+    stream = wrapper.create(model="m", messages=[], stream=True)
+    assert lim.inflight == 1, "流式 create 返回≠流结束，许可必须仍持有"
+    assert list(stream) == ["a", "b"]
+    assert lim.inflight == 0
+    assert lim.limit == 8
+
+
+def test_throttle_stream_releases_on_early_exit():
+    """流式提前放弃（with 块未耗尽退出）：__exit__ 路径归还许可，不泄漏。"""
+    from app import llm_throttle
+
+    lim = llm_throttle.AIMDLimiter(ceiling=8)
+    inner = _RecordingCompletions([iter(["a", "b", "c"])])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, limiter=lim)
+    with wrapper.create(model="m", messages=[], stream=True) as stream:
+        it = iter(stream)  # 持引用：临时 iter() 被式后 GC 会走生成器 finally 归还（另一条合法归路）
+        assert next(it) == "a"
+        assert lim.inflight == 1
+    assert lim.inflight == 0, "with 提前退出应经 __exit__ 归还许可"
+
+
+def test_throttle_stream_releases_on_generator_gc():
+    """消费方弃掉迭代器（持引用消失 → GC close 生成器）：finally 路径归还许可。
+
+    这是许可防泄漏的关键兜底——流式 create 已返回、迭代器又被弃置时，没有这条
+    路许可会一直被占（直到进程重启）。"""
+    import gc
+
+    from app import llm_throttle
+
+    lim = llm_throttle.AIMDLimiter(ceiling=8)
+    inner = _RecordingCompletions([iter(["a", "b", "c"])])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, limiter=lim)
+    stream = wrapper.create(model="m", messages=[], stream=True)
+    it = iter(stream)
+    assert next(it) == "a"
+    assert lim.inflight == 1
+    del it, stream
+    gc.collect()  # 生成器引用归零 → close → GeneratorExit → finally 归还
+    assert lim.inflight == 0
+
+
+def test_throttle_release_idempotent_across_paths():
+    """归还可以多路触发（流耗尽 + __exit__/GC）：one-shot 抢锁保证不重复归还。"""
+    from app import llm_throttle
+
+    lim = llm_throttle.AIMDLimiter(ceiling=8)
+    inner = _RecordingCompletions([iter(["a"])])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, limiter=lim)
+    with wrapper.create(model="m", messages=[], stream=True) as stream:
+        list(stream)  # 耗尽 → 生成器 finally 已归还
+    # with 退出 → __exit__ 再触发一次 on_release；inflight 不应为 -1
+    assert lim.inflight == 0
+
+
+def test_throttle_stream_explicit_close_releases():
+    """显式 close()（不经 with 协议、也从未迭代）：必须归还许可且不算成功样本。
+
+    close 若走 __getattr__ 委派到内层就绕过了归还钩子——没人 iter 过时生成器
+    finally 不存在，许可直接漏。"""
+    from app import llm_throttle
+
+    lim = llm_throttle.AIMDLimiter(ceiling=8)
+    inner = _RecordingCompletions([iter(["a", "b"])])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, limiter=lim)
+    stream = wrapper.create(model="m", messages=[], stream=True)
+    assert lim.inflight == 1
+    stream.close()
+    assert lim.inflight == 0
+    # NEUTRAL 归还：成功连击不因半途 close +1（streak 保持 0）
+    assert lim.limit == 8
+
+
+def test_throttle_wired_in_build_agent():
+    """build_agent 把 per-profile 并发闸接进 wrapper（沿用源码断言先例）；
+    上限与图并发步数单源对齐。"""
+    import inspect
+
+    src = inspect.getsource(agent_mod.build_agent)
+    assert "llm_throttle.for_profile(p.id, ceiling=_MAX_CONCURRENT_STEPS)" in src
+    assert "limiter=limiter" in src
+
+
+def test_jittered_backoff_stays_in_bounds():
+    """退避抖动 ±50%：多轮采样全部落在界内（载荷与真实等待共用抖动值）。"""
+    for _ in range(50):
+        v = agent_mod._jittered_backoff(3.0)
+        assert 1.5 <= v <= 4.5
+    assert agent_mod._jittered_backoff(10.0) <= 15.0
+
+
+# ---- 重试失败源归属（2026-09-15，agent.retry scope additive） ----
+
+
+def test_exc_agent_scope_walker():
+    """walker：直挂 / cause 链穿透（langchain raise ... from e）/ 无标记兜底 main /
+    环链不死循环。"""
+    e1 = ValueError("直挂")
+    e1._tender_agent_scope = "sub"
+    assert agent_mod._exc_agent_scope(e1) == "sub"
+    inner = ValueError("inner")
+    inner._tender_agent_scope = "sub"
+    outer = ValueError("outer")
+    outer.__cause__ = inner  # langchain 包装同款形状
+    assert agent_mod._exc_agent_scope(outer) == "sub"
+    # 深链：两层 cause 也能读到
+    deeper = ValueError("deeper")
+    deeper._tender_agent_scope = "sub"
+    mid = ValueError("mid")
+    mid.__cause__ = deeper
+    outer2 = ValueError("outer2")
+    outer2.__cause__ = mid
+    assert agent_mod._exc_agent_scope(outer2) == "sub"
+    # 无标记
+    assert agent_mod._exc_agent_scope(ValueError("plain")) == "main"
+    # 环链（防御：深度上限兜住）
+    a, b = ValueError("a"), ValueError("b")
+    a.__cause__ = b
+    b.__cause__ = a
+    assert agent_mod._exc_agent_scope(a) == "main"
+
+
+def test_throttle_wrapper_tags_scope_on_error():
+    """建连期错误（429）：抛出点在 runctx 作用域内挂 scope——异常带着归属上抛。"""
+    import pytest
+    from openai import RateLimitError
+
+    from app import llm_throttle
+    from app import runctx as _rc
+
+    lim = llm_throttle.AIMDLimiter(ceiling=8)
+    inner = _RecordingCompletions([_rate_limit_429()])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, limiter=lim)
+    token = _rc.set_agent_scope("sub")
+    try:
+        with pytest.raises(RateLimitError) as ei:
+            wrapper.create(model="m", messages=[])
+    finally:
+        _rc.reset_agent_scope(token)
+    assert getattr(ei.value, "_tender_agent_scope", None) == "sub"
+
+
+def test_stream_midstream_error_tagged_scope():
+    """流中途断连（裸 httpx 异常不经 langchain 包装）：生成器 except 是挂归属的
+    唯一机会。"""
+    import pytest
+
+    from app import llm_throttle
+    from app import runctx as _rc
+
+    def _boom_stream():
+        yield "a"
+        raise httpx.RemoteProtocolError("peer closed connection")
+
+    lim = llm_throttle.AIMDLimiter(ceiling=8)
+    inner = _RecordingCompletions([_boom_stream()])
+    wrapper = agent_mod._NoThinkingRetryCompletions(inner, limiter=lim)
+    token = _rc.set_agent_scope("sub")
+    try:
+        with pytest.raises(httpx.RemoteProtocolError) as ei:
+            list(wrapper.create(model="m", messages=[], stream=True))
+    finally:
+        _rc.reset_agent_scope(token)
+    assert getattr(ei.value, "_tender_agent_scope", None) == "sub"
+    assert lim.inflight == 0  # 异常路径许可照常归还
+
+
+def test_retry_payload_carries_scope_from_tagged_exception(monkeypatch):
+    """worker 重试：异常链带 sub 标记 → agent.retry 载荷 scope=sub + llm_retry
+    伪步骤 summary 标「子代理」（用户可见断在哪一侧）。"""
+    monkeypatch.setattr(agent_mod, "_LLM_RETRY_BACKOFFS", (0.01, 0.01))
+    inner = ModelConnectionError("peer closed connection")
+    inner._tender_agent_scope = "sub"
+    wrapped = ModelConnectionError("peer closed connection")
+    wrapped.__cause__ = inner  # langchain raise ... from e 同款形状
+    stub = _FlakyAgent(1, wrapped, _ok_items())
+    published: list[tuple[str, dict]] = []
+    _text, error, _ecode, trace, _interrupt = _run_agent_stream(
+        stub, "c1", "r1", None, lambda e, d: published.append((e, d)), "hi", None
+    )
+    assert error is None
+    retries = [d for e, d in published if e == "agent.retry"]
+    assert len(retries) == 1
+    assert retries[0]["scope"] == "sub"
+    steps = [s for s in trace["tools"] if s["tool"] == "llm_retry"]
+    assert len(steps) == 1
+    assert steps[0]["args"]["scope"] == "sub"
+    assert "子代理" in steps[0]["summary"]
+
+
+def test_llm_retry_step_scope_default_main():
+    """伪步骤 scope 缺省 main（旧调用方兼容），summary 标「主线程」。"""
+    step = agent_mod._llm_retry_step(2, "boom", 8.0)
+    assert step["args"]["scope"] == "main"
+    assert "主线程" in step["summary"]
 
 
 def test_merge_trace_trees_fills_empty_text_reasoning():

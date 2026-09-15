@@ -112,6 +112,10 @@ def test_run_boundary_payload_builders_match_contract():
         )
     retry = events_module.retry_payload("r", "c", 1, 3, 10.0)
     EVENT_PAYLOAD_MODELS["agent.retry"].model_validate({**retry, "seq": 5})
+    # scope 取值域（2026-09-15 additive）：sub 过模型；缺省 main 兼容旧载荷
+    retry_sub = events_module.retry_payload("r", "c", 2, 3, 22.0, scope="sub")
+    EVENT_PAYLOAD_MODELS["agent.retry"].model_validate({**retry_sub, "seq": 6})
+    assert retry_sub["scope"] == "sub" and retry["scope"] == "main"
     evt = events_module.interrupt_payload("r", "c", [], 4)
     EVENT_PAYLOAD_MODELS["run.interrupt"].model_validate(evt)
 

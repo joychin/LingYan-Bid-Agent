@@ -810,7 +810,8 @@ describe('agent.retry（LLM 自动重试可见，2026-09-08 契约 additive）',
       now: NOW,
       data: { run_id: 'r1', conversation_id: 'c1', attempt: 1, total: 3, wait_seconds: 3, seq: 3 },
     }).state
-    expect(s2.retrying).toEqual({ attempt: 1, total: 3, waitSeconds: 3 })
+    // scope 缺省 main（旧 sidecar 兼容）、receivedAt=事件到达时刻（活倒计时起点）
+    expect(s2.retrying).toEqual({ attempt: 1, total: 3, waitSeconds: 3, scope: 'main', receivedAt: NOW })
     expect(s2.streamText).toBe('') // 重试完整重流出，半截 token 不拼重复
     // 重试成功：流恢复，token 继续到达 → shimmer 撤下
     const s3 = runReducer(s2, {
@@ -835,6 +836,25 @@ describe('agent.retry（LLM 自动重试可见，2026-09-08 契约 additive）',
     }).state
     expect(settled.retrying).toBeNull()
     expect(settled.errorCode).toBe('llm_unavailable')
+  })
+
+  it('scope 透传：sub 标注子代理失败源；缺省 main 兼容旧 sidecar（2026-09-15 additive）', () => {
+    const started = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    const s1 = runReducer(started, {
+      type: 'sse',
+      event: 'agent.retry',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', attempt: 1, total: 3, wait_seconds: 8, scope: 'sub', seq: 3 },
+    }).state
+    expect(s1.retrying?.scope).toBe('sub')
+    expect(s1.retrying?.receivedAt).toBe(NOW)
+    const s2 = runReducer(started, {
+      type: 'sse',
+      event: 'agent.retry',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', attempt: 2, total: 3, wait_seconds: 22, seq: 4 },
+    }).state
+    expect(s2.retrying?.scope).toBe('main') // 旧载荷无 scope
   })
 
   it('stream-batch 流增量清除 retrying；仅 seq 推进（无 token/思考）不清除', () => {

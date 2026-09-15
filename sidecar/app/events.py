@@ -116,14 +116,18 @@ def error_payload(rid: str, cid: str, error: str, code: str | None, seq: int) ->
     return {"run_id": rid, "conversation_id": cid, "error": error, "code": code, "seq": seq}
 
 
-def retry_payload(rid: str, cid: str, attempt: int, total: int, wait_seconds: float) -> dict:
-    """agent.retry：自动重试等待期通知（seq 由 _publish 闭包统一补，同 tool 事件）。"""
+def retry_payload(
+    rid: str, cid: str, attempt: int, total: int, wait_seconds: float, scope: str = "main"
+) -> dict:
+    """agent.retry：自动重试等待期通知（seq 由 _publish 闭包统一补，同 tool 事件）。
+    scope=失败源（main=主线程/sub=子代理，additive 2026-09-15，缺省兼容旧调用）。"""
     return {
         "run_id": rid,
         "conversation_id": cid,
         "attempt": attempt,
         "total": total,
         "wait_seconds": wait_seconds,
+        "scope": scope,
     }
 
 

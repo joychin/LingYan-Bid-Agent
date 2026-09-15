@@ -42,6 +42,7 @@ import { useToast } from '@/context/Toast'
 import { formatDay, cn } from '@/lib/utils'
 import { isLivePauseMessage, isRespondAnswer, lastInstructionText, splitMarker } from '@/lib/hitlMessage'
 import { computeWindowStart } from '@/lib/messageWindow'
+import { retryNoticeText, retrySecondsLeft } from '@/lib/retryNotice'
 import { getLatestRun } from '@/api/client'
 import type { Artifact, Message, ThinkingLevel } from '@/api/client'
 
@@ -825,16 +826,34 @@ function RunMessage({
             </>
           ) : retrying ? (
             // 自动重试等待期（agent.retry）：后台在退避等待（最长 30s/次），不显示成
-            // 卡死——服务方不稳的事实直接说给人听
-            <TextShimmer className="text-sm">
-              {`模型服务不稳，正在自动重试（第 ${retrying.attempt}/${retrying.total} 次）…`}
-            </TextShimmer>
+            // 卡死——服务方不稳的事实直接说给人听；活倒计时 + 失败源（主线程/子代理）
+            <RetryShimmer retrying={retrying} />
           ) : (
             <ThinkingBar text={label} />
           )}
         </div>
       )}
     </WMessage>
+  )
+}
+
+/** 重试等待期的 shimmer：活倒计时（每秒递减，仿 Duration 的 tick 模式）+ 失败源
+ *  归属。文案计算在 lib/retryNotice 纯函数（node 环境测渲染不了组件）。 */
+function RetryShimmer({ retrying }: { retrying: NonNullable<RunState['retrying']> }) {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 1000)
+    return () => clearInterval(t)
+  }, [])
+  return (
+    <TextShimmer className="text-sm">
+      {retryNoticeText({
+        attempt: retrying.attempt,
+        total: retrying.total,
+        scope: retrying.scope,
+        secondsLeft: retrySecondsLeft(retrying.waitSeconds, retrying.receivedAt, Date.now()),
+      })}
+    </TextShimmer>
   )
 }
 

@@ -15,6 +15,7 @@ import dataclasses
 import itertools
 import json
 import logging
+import random
 import re
 import sqlite3
 import threading
@@ -31,7 +32,7 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
-from openai import APIError, APIStatusError, BadRequestError, InternalServerError
+from openai import APIError, APIStatusError, APITimeoutError, BadRequestError, InternalServerError, RateLimitError
 
 from . import (
     artifact_store,
@@ -39,6 +40,7 @@ from . import (
     deliverables,
     dispatch_enrich,
     events,
+    llm_throttle,
     model_registry,
     path_resolve,
     run_files,
@@ -77,6 +79,14 @@ _MAX_CONCURRENT_STEPS = 8
 # 模型调用（见 _run_agent_stream）。认证/参数类永久错误不走重试，直接失败。
 _LLM_RETRYABLE_ERRORS = (ModelConnectionError, ModelRateLimitError, ModelTimeoutError)
 _LLM_RETRY_BACKOFFS = (3.0, 10.0, 30.0)  # 三次重试的等待秒数（等待期间尊重停止请求）
+
+
+def _jittered_backoff(base: float) -> float:
+    """退避加随机抖动（±50%）：整波并发同时被拒后不再同秒齐重试（重试风暴）。
+
+    OpenAI Cookbook 明确建议的防同步重试标配；「任意用户网关」前提下整波齐拒
+    是真实现场景（AIMD 收闸前的那一波）。agent.retry 载荷带抖动后的真值。"""
+    return base * random.uniform(0.5, 1.5)
 # SSE 流迭代期断连（"peer closed connection ... incomplete chunked read"）以裸
 # httpx.RemoteProtocolError 逸出：openai SDK 只在建连阶段包装 httpx 异常，流路径不包；
 # langchain_openai 也只在 openai.APIError 路径包装成 ModelConnectionError。类型匹配
@@ -1127,6 +1137,10 @@ class _NoThinkingRetryCompletions:
     统一 re-raise 成 langchain_core 的 ContextOverflowError——deepagents 的
     SummarizationMiddleware 捕获它后当场压缩历史并重试，会话不会因超限永久报废。
     未命中标记词的其余 400 记 warning 日志（截断消息），供将来发现新措辞扩表。
+
+    并发闸收口（2026-09-15）：create 的进出点同时是自适应并发闸的 acquire/release
+    （429/超时按背压收缩，见 llm_throttle 模块头）——主 agent 与全部子代理共享本
+    实例，流式/非流式调用都过这里，是唯一能看见「调用何时开始与结束」的层。
     """
 
     # 小写化后子串匹配；覆盖 openai 官方（新旧两种报错措辞）/Anthropic/常见网关
@@ -1139,36 +1153,68 @@ class _NoThinkingRetryCompletions:
         "input length and `max_tokens`",
     )
 
-    def __init__(self, inner, on_overflow_window=None):
+    def __init__(self, inner, on_overflow_window=None, limiter=None):
         self._inner = inner
         # 撞线学习回调（build_agent 注入：写回共享模型实例的 profile）——比例档
         # 压缩中间件每轮活读 model.profile，下一轮即按真实窗口触发/保留
         self._on_overflow_window = on_overflow_window
+        # 自适应并发闸（build_agent 注入 per-profile 实例；缺省透传——测试直构
+        # 不配速），见 llm_throttle 模块头
+        self._limiter = limiter or llm_throttle.NoopLimiter()
 
     def create(self, **kwargs):
+        # 并发闸：进门取许可，出口一次恰好一次归还（one-shot 抢锁——归路有三条：
+        # 流耗尽的生成器 finally、with 块 __exit__、显式/GC close，生成器进循环
+        # 引用时 GC 关闭可能落在别的线程，与消费线程并发到达；非阻塞抢锁原子，
+        # 恰一人成功，Event 先查后设有竞态窗口）。429/超时按背压调闸（hard/
+        # soft）、其余异常只归还（neutral）、成功 ok；流式许可持有到流耗尽/
+        # 提前关闭——流式 create 立即返回，此刻归还是把闸门架空。
+        self._limiter.acquire()
+        once = threading.Lock()
+
+        def _release(outcome: str) -> None:
+            if once.acquire(blocking=False):  # 首抢者归还，锁不再释放=一次性
+                self._limiter.release(outcome)
+
         try:
-            resp = self._inner.create(**kwargs)
-        except BadRequestError as e:
-            msg = str(e)
-            msg_lower = msg.lower()
-            if any(m in msg_lower for m in self._OVERFLOW_MARKERS):
-                logger.warning("上下文超限 400（%.200s），归一化为 ContextOverflowError 走压缩自愈", msg)
-                self._learn_window(msg_lower)
-                raise ContextOverflowError(msg) from e
-            if "reasoning_text" not in msg or kwargs.get("reasoning_effort") == "none":
-                logger.warning("模型 400（%.400s）", msg)
-                raise
-            logger.warning(
-                "网关思考回传校验 400（reasoning_text），本请求降级 reasoning_effort=none 重试"
-            )
-            resp = self._inner.create(**{**kwargs, "reasoning_effort": "none"})
+            try:
+                resp = self._inner.create(**kwargs)
+            except BadRequestError as e:
+                msg = str(e)
+                msg_lower = msg.lower()
+                if any(m in msg_lower for m in self._OVERFLOW_MARKERS):
+                    logger.warning("上下文超限 400（%.200s），归一化为 ContextOverflowError 走压缩自愈", msg)
+                    self._learn_window(msg_lower)
+                    raise ContextOverflowError(msg) from e
+                if "reasoning_text" not in msg or kwargs.get("reasoning_effort") == "none":
+                    logger.warning("模型 400（%.400s）", msg)
+                    raise
+                logger.warning(
+                    "网关思考回传校验 400（reasoning_text），本请求降级 reasoning_effort=none 重试"
+                )
+                # 内层重试同样可能撞 429/超时——外层 except 对 except 块内抛出的
+                # 异常同样生效（sibling except 不接，嵌套一层才接得住）
+                resp = self._inner.create(**{**kwargs, "reasoning_effort": "none"})
+        except RateLimitError as e:
+            _tag_agent_scope(e)
+            _release(llm_throttle.HARD)
+            raise
+        except APITimeoutError as e:
+            _tag_agent_scope(e)
+            _release(llm_throttle.SOFT)
+            raise
+        except BaseException as e:
+            _tag_agent_scope(e)
+            _release(llm_throttle.NEUTRAL)
+            raise
         # run 级 token 用量观测：主 agent 与子代理共享本实例，每次响应都过这里
         #（runctx 传播已验证；非 run 态在内部丢弃）。全链路流式——create(stream=True)
         # 返回的是逐块 Stream，usage 只在流吐完后的最后一块（stream_usage=True 让
         # langchain 请求 stream_options.include_usage 服务端才回），故流式包一层、
         # 消费完再记账；非流式（_generate 等）响应自带 .usage 直接取。
         if kwargs.get("stream") and resp is not None and hasattr(resp, "__iter__"):
-            return _UsageCapturingStream(resp)
+            return _UsageCapturingStream(resp, on_release=_release)
+        _release(llm_throttle.OK)
         try:
             token_usage.record_from_response(resp)
         except Exception:
@@ -1198,42 +1244,79 @@ class _NoThinkingRetryCompletions:
 
 
 class _UsageCapturingStream:
-    """流式响应包装：逐块吐完后从最后一块的 usage 记账。
+    """流式响应包装：逐块吐完后从最后一块的 usage 记账 + 并发闸归还。
 
     langchain 以 `with create(...) as stream: for chunk in stream` 消费，包这一层
     不改变迭代契约，只在流耗尽后取最后一块的 usage（服务端在 include_usage 时于
     末块回 usage）交给 token_usage——观测点从「请求返回」（此刻流未消费、usage 取
     不到）挪到「流消费完」。chunk 可能是 SDK 模型或 dict，防御性两种都取。
+
+    on_release（并发闸归还，2026-09-15）：流式许可必须持有到流真正结束，归看点
+    双路覆盖——生成器 finally（耗尽/中途异常/GC close 都会走）与 __exit__（with
+    块提前退出还没耗尽时）；注入侧的幂等护栏保证只归还一次。归还**带结果语义**：
+    正常吐完=OK（计回升进度），中途异常/提前放弃=NEUTRAL（半途而废不算成功样本）。
     """
 
-    def __init__(self, inner):
+    def __init__(self, inner, on_release=None):
         self._inner = inner
+        self._on_release = on_release
 
     def __iter__(self):
         last_usage = None
-        for chunk in self._inner:
-            usage = getattr(chunk, "usage", None)
-            if usage is None and isinstance(chunk, dict):
-                usage = chunk.get("usage")
-            if usage is not None:
-                last_usage = usage
-            yield chunk
-        if last_usage is not None:
-            try:
-                token_usage.record_usage(last_usage)
-            except Exception:
-                logger.debug("token 用量提取失败（不影响主流程）", exc_info=True)
+        exhausted = False
+        try:
+            for chunk in self._inner:
+                usage = getattr(chunk, "usage", None)
+                if usage is None and isinstance(chunk, dict):
+                    usage = chunk.get("usage")
+                if usage is not None:
+                    last_usage = usage
+                yield chunk
+            exhausted = True
+            if last_usage is not None:
+                try:
+                    token_usage.record_usage(last_usage)
+                except Exception:
+                    logger.debug("token 用量提取失败（不影响主流程）", exc_info=True)
+        except BaseException as e:
+            # 流中途断连（502/RemoteProtocolError 多发生在这里）：裸 httpx 异常
+            # 不经 langchain 包装直穿，抛出点是挂失败源的唯一机会
+            _tag_agent_scope(e)
+            raise
+        finally:
+            if self._on_release is not None:
+                self._on_release(llm_throttle.OK if exhausted else llm_throttle.NEUTRAL)
 
     def __enter__(self):
         return self
 
+    def close(self):
+        # 显式 close 不走 __getattr__ 委派——否则直接打到内层、绕过 on_release
+        # （没人 iter 过就 close 时生成器 finally 不存在，许可会漏）。提前终止
+        # 不算成功样本（NEUTRAL）。
+        try:
+            close = getattr(self._inner, "close", None)
+            if close:
+                close()
+        finally:
+            if self._on_release is not None:
+                self._on_release(llm_throttle.NEUTRAL)
+
     def __exit__(self, *exc_info):
-        if hasattr(self._inner, "__exit__"):
-            return self._inner.__exit__(*exc_info)
-        close = getattr(self._inner, "close", None)
-        if close:
-            close()
-        return False
+        try:
+            if hasattr(self._inner, "__exit__"):
+                return self._inner.__exit__(*exc_info)
+            close = getattr(self._inner, "close", None)
+            if close:
+                close()
+            return False
+        finally:
+            if self._on_release is not None:
+                # with 块带异常退出=半途而废（NEUTRAL）；正常退出（流已耗尽，
+                # finally 多半已归还，幂等护栏吃掉）=OK
+                self._on_release(
+                    llm_throttle.OK if not (exc_info and exc_info[0]) else llm_throttle.NEUTRAL
+                )
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -1328,7 +1411,11 @@ def build_agent(profile: cfg.ModelProfile | None = None):
     def _learn_overflow_window(window: int) -> None:
         model.profile = {**(model.profile or {}), "max_input_tokens": window}
 
-    model.client = _NoThinkingRetryCompletions(model.client, on_overflow_window=_learn_overflow_window)
+    # 客户端自适应并发闸（AIMD，2026-09-15）：用户网关并发额度不可知，429/超时
+    # 按背压自动收缩、连续成功缓慢回升（见 llm_throttle 模块头）；per-profile
+    # 注册表共享——跨 run 同 profile 互护，rebuild 不清（纯运行态）
+    limiter = llm_throttle.for_profile(p.id, ceiling=_MAX_CONCURRENT_STEPS)
+    model.client = _NoThinkingRetryCompletions(model.client, on_overflow_window=_learn_overflow_window, limiter=limiter)
     # 写保护后端：通用文件工具对来源/产物包/谱系暂存/归档/技能目录只读（fs_guard）
     # ——读完全放开，work/ 下过程文件（parse/analysis/outline/body）正常可写
     backend = GuardedBackend(root_dir=str(cfg.workspace_dir()))
@@ -1610,17 +1697,46 @@ def _revive_step(top_steps: list[dict], payload: dict) -> dict | None:
 # 此识别可覆写/复活的假终态——tools 节点失败重试会复用同 tool_call_id 真实执行）
 _RETRY_RETIRED_ERROR = "LLM 流中断，已自动重试"
 
+# 重试失败源归属（2026-09-15 重试可见性批）：LLM 调用异常在**抛出点**挂上
+# main/sub——_SubagentScopeMiddleware 的 finally 在异常穿到 worker 前已复位
+# contextvar，worker 侧读不到当前值，只能在作用域还在的抛出点挂到异常对象上；
+# worker 经 _exc_agent_scope 沿 __cause__ 链读回（langchain 包装统一
+# `raise ... from e`，cause 链保留；裸 httpx 断流不经包装、抛出点直挂）。
+# 去向=agent.retry 载荷（additive scope 字段）+ llm_retry 伪步骤——用户可见
+# 「这次重试断在主线程还是子代理」。
+_SCOPE_LABELS = {"main": "主线程", "sub": "子代理"}
 
-def _llm_retry_step(attempt: int, err: str, backoff: float) -> dict:
+
+def _tag_agent_scope(exc: BaseException) -> None:
+    try:
+        exc._tender_agent_scope = runctx.current_scope()
+    except Exception:
+        pass  # 归属是观测增强，任何失败都不影响异常主路径
+
+
+def _exc_agent_scope(exc: BaseException) -> str:
+    cur, depth = exc, 0
+    while cur is not None and depth < 8:
+        scope = getattr(cur, "_tender_agent_scope", None)
+        if scope in ("main", "sub"):
+            return scope
+        cur = cur.__cause__
+        depth += 1
+    return "main"  # 无标记（不经模型包装层的异常/旧路径）按主线程
+
+
+def _llm_retry_step(attempt: int, err: str, backoff: float, scope: str = "main") -> dict:
     """断流自动重试的 trace 伪步骤（复用步骤 dict 形状，随 run_traces 落库，
-    历史回放可见重试发生过；前端零改动，按普通步骤渲染）。"""
+    历史回放可见重试发生过；前端零改动，按普通步骤渲染）。scope=失败源
+    （主线程/子代理），历史 trace 行直接可读。"""
     now = int(time.time() * 1000)
+    label = _SCOPE_LABELS.get(scope, scope)
     return {
         "id": f"llm_retry@{now}",
         "tool": "llm_retry",
-        "args": {"attempt": attempt, "error": err[:300], "backoff_s": backoff},
+        "args": {"attempt": attempt, "error": err[:300], "backoff_s": backoff, "scope": scope},
         "status": "done",
-        "summary": f"LLM 流式连接中断，{backoff:.0f}s 后从断点自动重试（第 {attempt} 次）",
+        "summary": f"LLM 流式连接中断，{backoff:.0f}s 后从断点自动重试（第 {attempt} 次 · {label}）",
         "error": None,
         "tool_call_id": None,
         "reasoning": "",
@@ -1883,24 +1999,28 @@ def _run_agent_stream(
                     error_code = "llm_unavailable"
                     logger.error("agent 流重试耗尽（cid=%s rid=%s）：%s", cid, rid, e)
                     break
-                backoff = _LLM_RETRY_BACKOFFS[n_retries]
+                backoff = _jittered_backoff(_LLM_RETRY_BACKOFFS[n_retries])
                 n_retries += 1
+                failure_scope = _exc_agent_scope(e)
                 logger.warning(
                     "agent 流瞬时错误，%.0fs 后从 checkpoint 断点重试（第 %d 次）：%s",
                     backoff, n_retries, e,
                 )
                 # 重试可见（契约 additive 2026-09-08）：等待期前端在输出区显示
                 # 「正在自动重试」shimmer，并同时清空未封口正文（与本函数
-                # cur_text_parts.clear() 对齐，重流出后半截 token 不重复）
+                # cur_text_parts.clear() 对齐，重流出后半截 token 不重复）；
+                # scope=失败源（additive 2026-09-15），前端文案区分主线程/子代理
                 _publish(
                     events.EVENT_AGENT_RETRY,
-                    events.retry_payload(rid, cid, n_retries, len(_LLM_RETRY_BACKOFFS), backoff),
+                    events.retry_payload(
+                        rid, cid, n_retries, len(_LLM_RETRY_BACKOFFS), backoff, scope=failure_scope
+                    ),
                 )
                 # 失败那轮的半截正文清空（重试会完整重流出，保留会拼进最终回复）；
                 # reasoning 不清（跨轮累积，只可能尾部多一小段重复，展示层瑕疵无害）
                 cur_text_parts.clear()
                 _retire_broken_steps(top_steps, rid, cid, _publish)
-                top_steps.append(_llm_retry_step(n_retries, str(e), backoff))
+                top_steps.append(_llm_retry_step(n_retries, str(e), backoff, failure_scope))
                 if cancel_event is not None and cancel_event.wait(timeout=backoff):
                     error = events.CANCELLED_MESSAGE
                     error_code = "cancelled"

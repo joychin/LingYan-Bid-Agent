@@ -744,6 +744,84 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
    标识符）。测试：dispatch_enrich +2（锚点/首行不中放行）、agent +5（守卫
    四态+valve+wired）、path_resolve 新 5、run_continue +3（409/fail-open/直测）、
    skills +1；824 绿+check.sh 全绿。
+   **客户端自适应并发闸 AIMD + 退避抖动（2026-09-15，feat/llm-adaptive-concurrency
+   批，SSE 契约零改动）**：动因=**用户可自配任意 OpenAI 兼容网关**（小网关/本地/
+   免费档并发额度 1~3 真实存在），整本派发 8 路齐发下排队者 429 或 180s 超时→
+   瞬时错误→checkpoint 整波重放→又 8 路齐发→死循环到 llm_unavailable——窄额度
+   网关跑不了整本（单节无并行反而正常=用户体感「时好时坏」）。行业调研定案：
+   429/超时=**背压信号**非错误（OpenAI Cookbook/LiteLLM 部署冷却/Netflix
+   concurrency-limits，AIMD 与 TCP 拥塞控制同源）；Cline/Cursor BYOK 均未做
+   （429 原样透传）——我们做=差异化。新模块 `app/llm_throttle.py`：进程内
+   per-profile 并发闸（`AIMDLimiter`，Condition 实现）——acquire 在飞满则阻塞
+   （不超时，持有者受 180s HTTP 超时约束）；release 四语义：**hard（429，openai
+   RateLimitError）limit 减半下限 1 / soft（APITimeoutError）−1 下限 1 / neutral
+   （其余异常）只归还 / ok 连续 8 次成功 +1 上限 `_MAX_CONCURRENT_STEPS`（8，
+   调用方传入避免循环导入）**；窄网关自动降到真实容量交错推进（慢但走完）、宽
+   网关零感知；SDK 内建 max_retries=2 保留（瞬时抖动 SDK 层消化，闸门只接持续
+   背压）。落点=`_NoThinkingRetryCompletions.create` 进出点（**LangChain 原生
+   rate_limiter 钩子只有 acquire 无 release**——框架不知道调用何时结束，做不了
+   并发数闸，调研实证）：进门 acquire、出口**恰好一次归还**（one-shot 非阻塞
+   抢锁，二轮 review 修——归路三条：流耗尽生成器 finally、with 块 __exit__、
+   显式/GC close；生成器进循环引用时 GC 关闭可能落在别的线程与消费线程并发，
+   Event 先查后设有竞态窗口、非阻塞 Lock.acquire 原子恰一人成功）；**流式许可
+   持有到流真正结束**（流式 create 立即返回，此刻归还=闸门架空）——归路三保险
+   =`_UsageCapturingStream` 新 on_release 回调挂生成器 finally（耗尽/中途异常/
+   GC close 都走）+ `__exit__`（with 提前退出）+ **显式 close() 定义**（二轮
+   review 修——不走 __getattr__ 委派，委派直接打到内层绕过归还钩子，没人 iter
+   过就 close 时生成器 finally 不存在、许可直接漏）；429/超时在 create
+   抛错路径按 hard/soft 归还后原样上抛走既有重试链；思考降级内层重试（reasoning_
+   effort=none）经嵌套 try 同被出口 except 接住；归还**带结果语义**（正常吐完=OK
+   计回升进度、中途异常/提前放弃=NEUTRAL 不算成功样本）。注册表 `for_profile(p.id,
+   ceiling=)`：同 profile 跨 run 共享互护网关、rebuild 不清（纯运行态，撞线学习
+   同款口径）。**收缩冷却窗 5s（review 修，本批最关键一处）**：同一波并发调用会
+   同时失败（8 路齐发撞窄额度网关=本功能要治的场景），逐个减半会把 limit 从 8
+   直接砸到 1、而回升到 8 要 56 次连续成功——一次网关抖动=整个 run 打成爬行；
+   经典 AIMD 是「每拥塞窗口一次减」非「每丢包一次减」（TCP 同源，行业对应物=
+   LiteLLM 部署冷却 `cooldown_time`）；冷却窗内跳过的失败信号同样清零回升进度
+   （背压期成功不该推高 limit）；clock 可注入（测试用假时钟控窗）。已知边界
+   （review 记录，当前不可达）：包装层挂 `model.client`，langchain `_stream` 走
+   `self.client.create` 正常分支即被覆盖；`include_response_headers=True` 或
+   LangSmith 网关（lsv2_ key）会改走 `with_raw_response.create` 经 `__getattr__`
+   委派绕过闸门——我方两者都不成立，将来若开 response headers 需一并收口。
+   配套**退避抖动**：`_jittered_backoff(base)=base×uniform(0.5,1.5)`
+   应用于 worker 重试取值点，agent.retry 载荷 wait_seconds 传抖动后真值（防整波
+   齐拒后同秒齐重试的重试风暴，OpenAI Cookbook 标配建议）。明确不做：Retry-After
+   解析（AIMD 即替代，维持 09-12 搁置拍板）、设置项/监测 UI（用户答不上自己额度，
+   自适应就是为了不问；「自动监控层」旧否决仍有效）、titler/KB 抽取/vlm 进闸
+   （独立实例单发低频）、SKILL「≤8 任务」锚点与 max_concurrency 动（派发廉价，
+   闸门配速；降并发只改纪律锚点、升并发才动常量）。测试：test_llm_throttle 新
+   13（减半/−1/回升/封顶/清零/**一波并发失败只减一次**/**冷却窗过期后继续收缩**/
+   **跳过收缩仍清零**/阻塞唤醒/回升广播/注册表/Noop）+ test_agent +11
+   （429 hard/超时 soft/其余 neutral/非流 ok/流耗尽归还/with 提前退出/GC 弃置
+   迭代器归还——防泄漏关键路/幂等多径触发/显式 close 归还/接线源码断言/抖动
+   界内；wait_seconds 精确断言改界内）。生效须重启 sidecar。
+   **重试可见性批（2026-09-15 二批，A 活倒计时+B 失败源归属，agent.retry
+   additive）**：动因=实测 lfans 502 窗口期用户两个困惑——重试提示是静态文字
+   （waitSeconds 数据在前端状态里但从未渲染，第 3 次 22s 等待整行静止）；且
+   llm_retry 无从知道断在主线程还是子代理（载荷无归属，UI 与 trace 均无展示）。
+   机制前提（调研实证）：重试恒为**整流级**——子代理 LLM 调用失败经
+   ToolErrorMiddleware（瞬时放行 re-raise）穿到主图 superstep → worker 从
+   checkpoint 断点重放，波次中失败=整波重放（402 事故形态）；scope 只标注
+   **断在哪一侧**不改变重试粒度。B 侧 sidecar：`_tag_agent_scope`（异常在
+   **抛出点**挂 runctx.agent_scope——_SubagentScopeMiddleware 的 finally 在异常
+   到达 worker 前已复位 contextvar，worker 侧读不到，只能抛出点挂异常对象）+
+   `_exc_agent_scope`（沿 `__cause__` 链深度≤8 读回——langchain 包装统一
+   `raise ... from e` 保留 cause 链；裸 httpx 断流不经包装直挂）；挂点两处=
+   wrapper create 三 except（建连期）+ `_UsageCapturingStream.__iter__` except
+   （**流中途断连**，502 多发生处、裸异常唯一挂点）；`AgentRetry` 契约加
+   `scope: Literal["main","sub"]="main"`、retry_payload 透传、`_llm_retry_step`
+   args+summary 尾缀「· 主线程/子代理」（trace 行直接可读）。A 侧前端：
+   `lib/retryNotice.ts` 纯函数（retrySecondsLeft=ceil 递减钳零/retryScopeLabel/
+   retryNoticeText——node 环境无组件渲染测试故抽纯函数）+ runReducer retrying
+   状态加 `scope`（`data.scope ?? 'main'` 旧 sidecar 兼容）与 `receivedAt`
+   （事件到达时刻=倒计时起点，误差≤SSE 传播延迟）+ ChatView 新 `RetryShimmer`
+   （仿 Duration 1s tick；归零后退化为无秒数形态=重试已发出在等响应；waitSeconds
+   =0 旧载荷同退化）。events.gen.ts 已再生。测试：sidecar walker 五态（直挂/
+   cause 穿透/深链/无标记/环链）+建连与流中两挂点+载荷 scope（sub 经 cause 链/
+   缺省 main）+伪步骤文案+contract 取值域；前端 retryNotice 三组+reducer 透传
+   与旧载荷默认。明确不做：波中重放白烧 token（C 项结构性无干净解，立档）、
+   倒计时与服务端真实时钟对齐（到达时刻起算足够）、取消重试按钮。生效须
+   重启 sidecar + 前端重载。
 4. **设计铁则（用户明令）**：保持简洁；冲突处理用「探测 + 提示用户裁决 + 恢复点兜底」，
    **不加锁/互斥/租约/排队**等后台协调机制；锁只允许用户不可见的 plumbing
    （原子落盘、发布进程内写锁）且需用户认可。

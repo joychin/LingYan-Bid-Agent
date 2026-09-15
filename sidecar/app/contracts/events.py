@@ -134,13 +134,19 @@ class AgentError(BaseModel):
 
 class AgentRetry(BaseModel):
     """LLM 瞬时错误自动重试的等待期通知（additive 2026-09-08）：前端在输出区显示
-    「正在自动重试」shimmer 并清空未封口正文。attempt 从 1 起。"""
+    「正在自动重试」shimmer 并清空未封口正文。attempt 从 1 起。
+
+    scope（additive 2026-09-15）：失败源归属——main=主线程模型调用 / sub=子代理
+    模型调用（异常抛出点经 runctx.agent_scope 挂到异常对象、worker 沿 __cause__
+    链读回）。重试本身恒为整流级（从 checkpoint 断点重放，波次中失败=整波重放），
+    scope 只标注断在哪一侧；缺省 main 兼容旧载荷。"""
 
     run_id: str
     conversation_id: str
     attempt: int
     total: int
     wait_seconds: float
+    scope: Literal["main", "sub"] = "main"
     seq: int
 
 

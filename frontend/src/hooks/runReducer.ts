@@ -32,8 +32,16 @@ export interface RunState {
    *  失效（附「去设置」）、internal=程序错误（2026-09-08 扩展取值域） */
   errorCode: string | null
   /** LLM 瞬时错误自动重试等待期（agent.retry，2026-09-08 additive）：非空 = 输出区显示
-   *  「正在自动重试」shimmer；任何流增量（token/reasoning/tool）到达即清除（流已恢复）。 */
-  retrying: { attempt: number; total: number; waitSeconds: number } | null
+   *  「正在自动重试」shimmer；任何流增量（token/reasoning/tool）到达即清除（流已恢复）。
+   *  scope=失败源（主线程/子代理，2026-09-15 additive）、receivedAt=事件到达时刻
+   *  （活倒计时起点，误差 ≤ SSE 传播延迟）。 */
+  retrying: {
+    attempt: number
+    total: number
+    waitSeconds: number
+    scope: 'main' | 'sub'
+    receivedAt: number
+  } | null
   /** 最近一次普通用户指令：发送失败/任务失败时重试用。 */
   lastInstruction: string
   /** 本次 HITL respond 的回答：仅在续跑空窗期显示，纯审批不产生。 */
@@ -601,7 +609,8 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
     case 'agent.retry':
       // LLM 瞬时错误自动重试等待期（2026-09-08 additive）：清未封口正文（与 sidecar
       // cur_text_parts.clear() 对齐——重试会完整重流出，不清则半截 token 拼重复），
-      // 正文气泡区改显示「正在自动重试」shimmer
+      // 正文气泡区改显示「正在自动重试」shimmer；scope=失败源（2026-09-15 additive，
+      // 旧 sidecar 缺省 main）、receivedAt=倒计时起点（事件到达时刻）
       return result({
         ...s,
         streamText: '',
@@ -609,6 +618,8 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
           attempt: data.attempt ?? 1,
           total: data.total ?? 3,
           waitSeconds: data.wait_seconds ?? 0,
+          scope: data.scope ?? 'main',
+          receivedAt: now,
         },
       })
     case 'agent.reasoning':
