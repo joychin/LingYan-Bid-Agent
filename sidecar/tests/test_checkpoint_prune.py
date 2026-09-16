@@ -165,5 +165,5 @@ def test_prune_idempotent(monkeypatch, tmp_path):
 
 
 def test_keep_window_constant():
-    """保留窗常量钉住（改它=改原则 P0，须连带改模块头与 AGENTS.md）。"""
+    """保留窗常量钉住（改它=改原则 P0，须连带改 checkpoint_prune 模块头与 docs/decision-log.md 对应条目）。"""
     assert KEEP_MAIN_CHECKPOINTS == 3
