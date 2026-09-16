@@ -281,6 +281,17 @@ function reviveStep(steps: ToolStep[], toolCallId: string, now: number): ToolSte
   return steps
 }
 
+/** 树内是否已有已回填答案的 ask_human 步骤：快照对账时让顶部「你的回答」chip
+ *  退场——SSE 丢了代答 tool.result 的场景下 summary 由 mergeTraceTree 合回树，
+ *  不退场则重复会挂满整个 run（summary 只在终态回填时写入，非空即已代答）。 */
+function hasAnsweredAsk(steps: ToolStep[]): boolean {
+  return steps.some(
+    (s) =>
+      (s.tool === 'ask_human' && !!s.summary) ||
+      (s.children.length > 0 && hasAnsweredAsk(s.children)),
+  )
+}
+
 /** 幂等判定：树内是否已有该 tool_call_id 的步骤（双连接窗口去重）。 */
 function hasStepByCallId(steps: ToolStep[], toolCallId: string): boolean {
   return steps.some(
@@ -541,6 +552,8 @@ export function runReducer(s: RunState, action: Action): ReducerResult {
         // merge 路径不动未封口思考（本地常比快照新——快照 ≥500ms 滞后，回退会在
         // 封段时把思考尾部永久封丢；本地空才采快照值）；树空重建才整段替换
         reasoningText: merging ? s.reasoningText || action.reasoningText : action.reasoningText,
+        // 代答回填对账收尾：丢代答事件时 summary 靠合并回树，chip 同步退场
+        continuationAnswer: hasAnsweredAsk(tools) ? '' : s.continuationAnswer,
         ...(snapSeq != null ? { lastSeq: { runId: action.runId, seq: snapSeq } } : {}),
       })
     }
@@ -651,7 +664,16 @@ function reduceSse(s: RunState, action: Extract<Action, { type: 'sse' }>): Reduc
       return result({ ...s, tools: attachStep(s.tools, step, data.agent_id), retrying: null })
     }
     case 'tool.result':
-      return result({ ...s, tools: fillStep(s.tools, data, now) })
+      return result({
+        ...s,
+        tools: fillStep(s.tools, data, now),
+        // ask_human 的 tool.result = respond/reject 裁决的服务端代答：答案已由过程组
+        // 「已询问」行承载，顶部「你的回答」chip 随之退场（收回纯「提交后防空窗」
+        // 职责，不再与过程组双显——09-12 代答回填修复后的遗留重叠）。按事件身份判断、
+        // 不依赖 fillStep 命中（409 双窗口/树内无步骤同样退场）；reject/approve 本就
+        // 不设 chip，清空无害。
+        continuationAnswer: data.tool === 'ask_human' ? '' : s.continuationAnswer,
+      })
     case 'todo.updated':
       return result({
         ...s,

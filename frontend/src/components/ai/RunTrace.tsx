@@ -13,6 +13,7 @@ import {
   sameSteps,
 } from '@/components/ai/ToolStepRow'
 import { segmentToolSteps } from '@/components/ai/traceGroups'
+import { stripSelectedPrefix } from '@/lib/hitlMessage'
 import { mdRemarkPlugins } from '@/lib/markdown'
 import {
   Collapsible,
@@ -53,7 +54,7 @@ const AskedQuestions = memo(
                 </ReactMarkdown>
               </div>
               {s.summary && (
-                <div className="text-xs text-muted-foreground">你的回答：{s.summary}</div>
+                <div className="text-xs text-muted-foreground">你的回答：{stripSelectedPrefix(s.summary)}</div>
               )}
             </div>
           ))}

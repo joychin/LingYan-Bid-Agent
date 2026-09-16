@@ -41,7 +41,7 @@ import { taskOfConversation, useTasks } from '@/hooks/useTasks'
 import { useFileUpload } from '@/context/FileUpload'
 import { useToast } from '@/context/Toast'
 import { formatDay, cn } from '@/lib/utils'
-import { isLivePauseMessage, isRespondAnswer, lastInstructionText, splitMarker } from '@/lib/hitlMessage'
+import { isLivePauseMessage, isRespondAnswer, lastInstructionText, splitMarker, stripSelectedPrefix } from '@/lib/hitlMessage'
 import { computeWindowStart } from '@/lib/messageWindow'
 import { retryNoticeText, retrySecondsLeft } from '@/lib/retryNotice'
 import { getLatestRun } from '@/api/client'
@@ -771,7 +771,7 @@ function RunMessage({
       }
     >
       {continuation && continuationAnswer && (
-        <div className="turn-chip mb-1.5">你的回答：{continuationAnswer.replace(/^已选：/, '')}</div>
+        <div className="turn-chip mb-1.5">你的回答：{stripSelectedPrefix(continuationAnswer)}</div>
       )}
       {(reasoningText ||
         tools.length > 0 ||

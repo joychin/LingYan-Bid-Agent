@@ -36,6 +36,15 @@ export const MARKER_CHIP: Record<'pause' | 'interrupted', string> = {
   interrupted: '已中断',
 }
 
+/** 问答卡点选项拼装的回答既定前缀（ChatView wizardNav 组装、hitlMessage 判定、
+ *  续跑 chip 与过程组问答行的显示剥离共用——「你的回答：已选：…」双标签不做）。 */
+export const SELECTED_PREFIX = '已选：'
+
+/** 只剥行首一处前缀（自由文本回答/拒绝理由等无前缀内容原样返回）。 */
+export function stripSelectedPrefix(text: string): string {
+  return text.startsWith(SELECTED_PREFIX) ? text.slice(SELECTED_PREFIX.length) : text
+}
+
 /**
  * 是否为 HITL respond 回答的落库消息（不渲染为对话气泡，答案由过程卡的
  * 问答组展示）：判定 = 前一条 assistant 消息带暂停/中断标记（同回合位置判定，
@@ -52,7 +61,7 @@ export function isRespondAnswer(messages: Message[], i: number): boolean {
   if (!m || m.role !== 'user' || i === 0) return false
   const prev = messages[i - 1]
   const prevMarked = prev.role === 'assistant' && isPauseMarked(prev.content)
-  const prefixSignal = m.content.startsWith('已选：')
+  const prefixSignal = m.content.startsWith(SELECTED_PREFIX)
   if (!prefixSignal && !prevMarked) return false
   if (m.run_id && prev.run_id) return m.run_id === prev.run_id
   return true

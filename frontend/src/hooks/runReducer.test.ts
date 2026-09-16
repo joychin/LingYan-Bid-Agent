@@ -235,6 +235,118 @@ describe('HITL 中断与续跑', () => {
     expect(s.tools[0].summary).toBe('方案A')
   })
 
+  it('代笔回填后顶部回答 chip 退场：ask_human 的 tool.result 清 continuationAnswer（不再与过程组双显）', () => {
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        tool: 'ask_human',
+        args: { question: '用哪个方案？' },
+        tool_call_id: 'ask_1',
+      },
+    }).state
+    s = runReducer(s, {
+      type: 'settle-interrupt',
+      runId: 'r1',
+      requests: [{ tool: 'ask_human', args: { question: '用哪个方案？' }, description: '确认', allowed: ['respond'] }],
+    }).state
+    s = runReducer(s, { type: 'remember-answer', text: '已选：方案A' }).state
+    s = runReducer(s, { type: 'started', runId: 'r1', now: NOW, continuation: true, continuationKind: 'answer' }).state
+    // 提交后到代答到达前的空窗期，chip 可见（记住的回答即其内容）
+    expect(s.continuationAnswer).toBe('已选：方案A')
+
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.result',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        tool: 'ask_human',
+        summary: '已选：方案A',
+        tool_call_id: 'ask_1',
+      },
+    }).state
+    // 答案已由过程组「已询问」行承载（summary 回填），chip 退场
+    expect(s.tools[0].summary).toBe('已选：方案A')
+    expect(s.continuationAnswer).toBe('')
+  })
+
+  it('其他工具的 tool.result 不清回答 chip（chip 只让位给 ask_human 代答回填）', () => {
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW, continuation: true, continuationKind: 'answer' }).state
+    s = runReducer(s, { type: 'remember-answer', text: '方案 A' }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'ls', args: { path: '/' }, tool_call_id: 'c1' },
+    }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.result',
+      now: NOW,
+      data: { run_id: 'r1', conversation_id: 'c1', tool: 'ls', summary: '3 个文件', tool_call_id: 'c1' },
+    }).state
+    expect(s.continuationAnswer).toBe('方案 A')
+  })
+
+  it('快照对账带回已回填的 ask_human 步骤时同样让 chip 退场（SSE 丢代答事件场景）', () => {
+    const askStep = {
+      id: 's1',
+      tool: 'ask_human',
+      args: { question: '用哪个方案？' },
+      status: 'running' as const,
+      summary: '',
+      toolCallId: 'ask_1',
+      reasoning: '',
+      children: [],
+      startedAt: NOW,
+      endedAt: null,
+    }
+    let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
+    s = runReducer(s, {
+      type: 'sse',
+      event: 'tool.called',
+      now: NOW,
+      data: {
+        run_id: 'r1',
+        conversation_id: 'c1',
+        tool: 'ask_human',
+        args: { question: '用哪个方案？' },
+        tool_call_id: 'ask_1',
+      },
+    }).state
+    s = runReducer(s, { type: 'remember-answer', text: '方案 A' }).state
+    s = runReducer(s, { type: 'started', runId: 'r1', now: NOW, continuation: true, continuationKind: 'answer' }).state
+
+    // 本地 running（代答 tool.result 被 SSE 丢弃），快照带 done+summary：合并回填 + chip 退场
+    const merged = runReducer(s, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools: [{ ...askStep, status: 'done' as const, summary: '方案 A' }],
+      todos: [],
+      reasoningText: '',
+    }).state
+    expect(merged.tools[0].summary).toBe('方案 A')
+    expect(merged.continuationAnswer).toBe('')
+
+    // 快照没有已回填的 ask 步骤时不清：chip 保留到代答事件/settle
+    const noAnswer = runReducer(s, {
+      type: 'snapshot',
+      runId: 'r1',
+      status: 'running',
+      tools: [askStep],
+      todos: [],
+      reasoningText: '',
+    }).state
+    expect(noAnswer.continuationAnswer).toBe('方案 A')
+  })
+
   it('settle-interrupt 原地冻结：未封口正文转暂停旁白，running 步骤（含子级）转 paused', () => {
     let s = runReducer(INITIAL_STATE, { type: 'started', runId: 'r1', now: NOW }).state
     s = runReducer(s, {

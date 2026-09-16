@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { Message } from '@/api/client'
-import { isLivePauseMessage, isRespondAnswer, lastInstructionText, splitMarker } from './hitlMessage'
+import {
+  isLivePauseMessage,
+  isRespondAnswer,
+  lastInstructionText,
+  splitMarker,
+  stripSelectedPrefix,
+} from './hitlMessage'
 
 function msg(role: Message['role'], content: string, run_id?: string): Message {
   return {
@@ -86,6 +92,22 @@ describe('isRespondAnswer', () => {
       msg('user', '技术册先行'),
     ]
     expect(isRespondAnswer(msgs, 1)).toBe(true)
+  })
+})
+
+describe('stripSelectedPrefix', () => {
+  it('剥行首一处「已选：」前缀（续跑 chip 与过程组显示统一，避免「你的回答：已选：」双标签）', () => {
+    expect(stripSelectedPrefix('已选：A；B\n补充说明')).toBe('A；B\n补充说明')
+  })
+
+  it('无前缀原样返回（自由文本回答/拒绝理由）', () => {
+    expect(stripSelectedPrefix('方案 A')).toBe('方案 A')
+    expect(stripSelectedPrefix('')).toBe('')
+  })
+
+  it('只剥行首一处：行中前缀与第二处前缀不动', () => {
+    expect(stripSelectedPrefix('备注：已选：A')).toBe('备注：已选：A')
+    expect(stripSelectedPrefix('已选：已选：A')).toBe('已选：A')
   })
 })
 
