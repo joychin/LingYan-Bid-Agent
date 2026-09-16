@@ -52,6 +52,8 @@ export interface SidebarProps {
   /** 主区形态：决定知识库/素材库/版式库入口的 active 态 */
   activeView?: 'chat' | 'kb' | 'library' | 'templates'
   onOpenSettings: () => void
+  /** 有新版本且未忽略：设置入口图标亮红点（版本检查，2026-09-15） */
+  updateAvailable?: boolean
   /** 当前主题（图标即状态）；切换由 App 落 localStorage + documentElement */
   theme: 'light' | 'dark'
   onToggleTheme: () => void
@@ -104,6 +106,7 @@ export function Sidebar({
   onOpenLibrary,
   onOpenTemplates,
   onOpenSettings,
+  updateAvailable,
   theme,
   onToggleTheme,
   collapsed,
@@ -431,6 +434,12 @@ export function Sidebar({
             </IconButtonAction>
             <IconButtonAction title="设置" onClick={onOpenSettings}>
               <Settings className="h-4 w-4" />
+              {updateAvailable && (
+                <span
+                  className="absolute right-0.5 top-0.5 h-2 w-2 rounded-full bg-warning"
+                  title="发现新版本"
+                />
+              )}
             </IconButtonAction>
           </>
         }
@@ -647,7 +656,7 @@ function IconButtonAction({
       type="button"
       onClick={onClick}
       title={title}
-      className="grid h-7 w-7 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+      className="relative grid h-7 w-7 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
     >
       {children}
     </button>

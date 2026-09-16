@@ -18,7 +18,8 @@ step() { run "$@" || fail=1; }
 
 check_versions() {
   # 版本号一致性守卫：五处必须同步（tauri.conf.json 由 CI 从 tag 覆写，其余手动）。
-  # package.json 的版本经 vite 注入设置页 __APP_VERSION__——脱节即用户可见的错版号。
+  # tauri.conf.json 的版本经 vite 注入设置页 __APP_VERSION__ 与版本检查比较
+  # （2026-09-15 起；此前读 package.json 导致脱节即用户可见的错版号）。
   echo "\n==> 版本号一致性（tauri.conf / Cargo.toml / package.json / pyproject / main.py）"
   if ! python3 - <<'EOF'
 import json, re, sys

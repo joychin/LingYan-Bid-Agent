@@ -110,6 +110,7 @@
 - L656-693 *PyMuPDF 整体替换为 pypdfium2（2026-09-14，许可治理批，sidecar 内部件+测试+打包）：
 - L2547-2592 打包分发（2026-09-07 已实施，取代原「生产分发限制」备注）：PyInstaller one-file 冻结
 - L2593-2594 ~~钥匙串用 macOS `security` CLI 子进程~~（2026-08-29 已移除：Key 改存 app.db，见铁则 2；
+- L2595-2623 客户端版本检查+更新提示一期（2026-09-15，Rust 壳+前端，零新依赖；含版本号同源修复）：
 
 ---
 
@@ -2590,4 +2591,43 @@
 
   - ~~钥匙串用 macOS `security` CLI 子进程~~（2026-08-29 已移除：Key 改存 app.db，见铁则 2；
     历史：keyring crate 在此 macOS 写 Data Protection 钥匙串，`security` CLI 不可见）。
+
+  - **客户端版本检查+更新提示一期（2026-09-15，Rust 壳+前端，零新依赖零
+    capabilities）**：动因=用户要求「client 版本检查，更新功能」，两步走拍板——
+    一期=检查+提示+跳转下载，应用内自动更新（tauri-plugin-updater）二期与签名公证
+    绑定（macOS 未签名更新后重启会被 Gatekeeper 拦，已核实：updater 的 minisign
+    清单签名与 Apple 代码签名是两回事，但 quarantine 门槛仍在）。**版本号同源修复**
+    （前置 bug）：`__APP_VERSION__` 原读 frontend/package.json（恒 0.0.0）→ 改读
+    `../src-tauri/tauri.conf.json`（CI 从 tag 同步的唯一真源），设置页此前显示
+    0.0.0 即此 bug（check.sh 五处一致性守卫的注释同步改写）。**更新源三层取值**
+    （`resolve_manifest_url`）：环境变量 `UPDATE_MANIFEST_URL`（本地测试）>
+    `<数据目录>/updater.json` 的 manifestUrl（生产改址免重编译）> 内置常量
+    `DEFAULT_UPDATE_MANIFEST_URL`（域名定稿后填入，见下条）；刻意不放设置界面
+    （更新源=下载跳转信任根，谁都能改=恶意下载页入口）。清单契约=官网
+    `version.json`（version/url 必填 + notesUrl/publishedAt/highlights/changes
+    可选；字段可加不可删；漏更=不提示不误报 fail-safe）；**检查源与下载目标解耦**
+    （url 现指 GitHub Releases，换官网下载页不动客户端）。Rust 两命令：
+    `check_latest_version`（blocking reqwest 5s 超时+UA；清洗=剥 v/数字段校验、
+    https-only、changes ≤20 条×200 字符截断，远端内容不合法整次判失败）与
+    `open_download_page`（https-only 白名单后 opener 打开；Rust 侧调 opener 不经
+    ACL 同 reveal 口径）。前端 `lib/updateCheck.ts`：启动 query 静默查一次（成功
+    后 24h 节流、失败不写 lastAt 下次启动重试=每启动最多一次请求）、忽略态折进
+    同一 query 缓存（红点/版本卡全局一致；按版本号精确匹配，忽略 0.1.2 后出
+    0.2.0 红点回归）、`isNewerVersion` 逐段数值比较（防 0.10.0<0.9.0 字符串坑，
+    不合法输入一律 false 宁漏报不误报）。UI=侧栏设置图标红点（bg-warning 8px，
+    IconButtonAction 加 relative）+点设置直达「通用」页（SettingsModal 加
+    initialSection prop+open 对齐 effect——组件常驻挂载、useState 初值只首次生效）
+    +版本卡内嵌状态机（无新版一行含检查时间/检查中/有新版=徽章+highlights+
+    changes 逐条 bullet >8 折叠+前往下载+忽略此版本+完整发布说明 ↗/已忽略收成
+    一行可恢复/手动失败红字可重试——启动静默失败不上 UI）。App 的 openSettings
+    （section?）统一两处设置入口传参。测试：updateCheck.test.ts 10 例（比较/节流/
+    时间人话化）+ lib.rs 3 例（normalize/clamp/https 校验）。发版新增手动步骤=
+    更新官网 version.json（文档化在 packaging.md §9）。已知边界：清单无签名
+    （一期只读版本号+跳转可接受，二期自动更新必须上 minisign）；api.github.com
+    不再依赖（自建源，国内直连可控）。
+
+  - **更新源默认常量填入正式地址（2026-09-16，同分支续）**：
+    `DEFAULT_UPDATE_MANIFEST_URL` 由空串改为 `https://ddmdj.com/release/version.json`
+    （域名上线）。空串时检查报「更新源尚未配置」——正式地址落地后一期功能才真正生效，
+    随下个版本发布。
 

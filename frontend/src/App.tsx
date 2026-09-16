@@ -8,7 +8,7 @@ import { KnowledgeView } from '@/components/KnowledgeView'
 import { HoverTip } from '@/components/HoverTip'
 import { MaterialsLibraryView } from '@/components/MaterialsLibraryView'
 import { TemplatesView } from '@/components/TemplatesView'
-import { SettingsModal } from '@/components/SettingsModal'
+import { SettingsModal, type SectionId } from '@/components/SettingsModal'
 import { ArtifactPanel } from '@/components/ArtifactPanel'
 import { SidecarBanner } from '@/components/SidecarBanner'
 import { ExitGuard } from '@/components/ExitGuard'
@@ -20,6 +20,7 @@ import { useCreateTask, useTasks, taskOfConversation } from '@/hooks/useTasks'
 import { useToast } from '@/context/Toast'
 import type { DeliverableSignal } from '@/api/sse'
 import { useHtmlRenderService } from '@/lib/htmlRenderer'
+import { useUpdateCheck } from '@/lib/updateCheck'
 
 const LS_SIDEBAR = 'tender-agent.sidebar-collapsed'
 const LS_ARTIFACTS = 'tender-agent.artifacts-collapsed'
@@ -44,6 +45,10 @@ export default function App() {
   // library=写作素材库（内容资产）/ templates=版式库（格式资产；2026-09-09 由「模板库」改名，标识符不动）
   const [activeView, setActiveView] = useState<'chat' | 'kb' | 'library' | 'templates'>('chat')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // 打开设置时落的 section（undefined=缺省「模型」页）；有新版时侧栏入口直达「通用」
+  const [settingsSection, setSettingsSection] = useState<SectionId | undefined>(undefined)
+  // 版本检查：启动静默查一次（节流在 updateCheck 内部），hasUpdate 驱动侧栏红点
+  const { hasUpdate } = useUpdateCheck()
   const [previewId, setPreviewId] = useState<string | null>(null)
   // 工作台文件（work/ 的 md 过程产物）查看器当前打开的相对路径
   const [workbenchPath, setWorkbenchPath] = useState<string | null>(null)
@@ -82,6 +87,12 @@ export default function App() {
       localStorage.setItem(LS_ARTIFACTS, v ? '0' : '1')
       return !v
     })
+
+  // 打开设置：可指定落点 section（不传=清掉上次落点回默认「模型」页）
+  const openSettings = useCallback((section?: SectionId) => {
+    setSettingsSection(section)
+    setSettingsOpen(true)
+  }, [])
 
   // 工作区单槽的来源标记（交付物呈现守卫，2026-09-13）：user=用户手开（永不被
   // 自动呈现抢走——Canvas「自动打开被打扰」的社区抱怨教训）、auto=交付物自动
@@ -209,7 +220,8 @@ export default function App() {
         onOpenLibrary={() => setActiveView('library')}
         onOpenTemplates={() => setActiveView('templates')}
         activeView={activeView}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => openSettings(hasUpdate ? 'general' : undefined)}
+        updateAvailable={hasUpdate}
         theme={theme}
         onToggleTheme={toggleTheme}
         collapsed={sidebarCollapsed}
@@ -243,7 +255,7 @@ export default function App() {
               onPresentDeliverable={presentDeliverable}
               initialFiles={pendingFiles}
               onInitialFilesConsumed={() => setPendingFiles([])}
-              onOpenSettings={() => setSettingsOpen(true)}
+              onOpenSettings={() => openSettings()}
             />
           </>
         ) : (
@@ -308,7 +320,11 @@ export default function App() {
           {artifactsCollapsed ? <PanelRightOpen /> : <PanelRightClose />}
         </button>
       )}
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsModal
+        open={settingsOpen}
+        initialSection={settingsSection}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
     </ErrorBoundary>
   )

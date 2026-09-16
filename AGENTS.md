@@ -473,6 +473,12 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
     macOS universal=两个 triple 产物放 binaries/ + `tauri build --target
     universal-apple-darwin`（x86_64 半边可在 arm 机 Rosetta 构建）；Linux /tmp noexec
     需 `--runtime-tmpdir`。签名/公证/CI/自动更新器=后续门未做。
+    **版本号唯一真源=`src-tauri/tauri.conf.json`**（CI 从 tag 同步；前端 `__APP_VERSION__`
+    由 vite 从它注入，2026-09-15 前读 package.json 的恒 0.0.0——check.sh 有五处一致性守卫）。
+    **客户端版本检查+更新提示一期**（2026-09-15，Rust 两命令 `check_latest_version`/
+    `open_download_page` + 前端 `lib/updateCheck.ts`，详情与更新源三层取值见
+    docs/packaging.md §9）：应用内自动更新是二期、与签名公证绑定。**发版除推 tag 外
+    必做一步=更新官网 `version.json`**（漏更=客户端不提示新版）。
   - 已装插件仅三枚官方 plumbing：`tauri-plugin-single-instance`（须第一个注册——GUI 双开会撞
     agent.db 单库 checkpoint，二次启动聚焦已有窗口，不做互斥协调）+ `tauri-plugin-window-state`
     （记住窗口大小/位置）+ `tauri-plugin-shell`（2026-09-07 打包分发：bundled 模式经

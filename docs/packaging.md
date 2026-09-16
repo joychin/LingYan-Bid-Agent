@@ -178,7 +178,51 @@ Word 修订与批注作者）与 `identifier` 全部去掉了旧名。
    版式退化成英文默认模板就是 `app/resources` 收集漏了，冒烟门应已拦住）。
 5. 退出应用后无残留 sidecar 进程（`ps aux | grep tender-agent`）。
 
-## 7. 后续门（明确未做，勿在本文找）
+## 8. 后续门（明确未做，勿在本文找）
 
 代码签名与公证（mac Developer ID / Windows signtool）、CI 矩阵自动出三平台包、
-自动更新器（tauri-plugin-updater）。做其中任何一项时，同步更新本文件与 AGENTS.md 打包节。
+应用内自动更新（tauri-plugin-updater + minisign 清单签名，依赖签名公证先行）。
+做其中任何一项时，同步更新本文件与 AGENTS.md 打包节。
+
+## 9. 版本检查与更新提示（2026-09-15 一期，发版必做）
+
+客户端启动时静默查一次更新清单（成功后 24h 节流；失败下次启动重试），有新版在
+侧栏设置入口亮红点、设置页「通用」内嵌更新内容卡 + 跳转浏览器下载。清单拉取与
+外链打开都在 Rust 壳（`check_latest_version` / `open_download_page`，前端直连外网
+会被 CSP 挡）。应用内自动更新是二期，与签名公证绑定。
+
+### 发版时（推 tag 之外）必做的一步
+
+更新官网上的 `version.json`（手动改 `version` 与 `changes`；漏更 = 客户端不提示，
+方向安全但用户拿不到新版提醒）：
+
+```json
+{
+  "version": "0.1.2",
+  "url": "https://github.com/joychin/LingYan-Bid-Agent/releases/latest",
+  "notesUrl": "https://github.com/joychin/LingYan-Bid-Agent/releases/latest",
+  "publishedAt": "2026-09-15",
+  "highlights": "一句话摘要（可选）",
+  "changes": ["新增：……", "修复：……"]
+}
+```
+
+- `version`（必填）：与 tag 一致的 X.Y.Z；`url`（必填）：「前往下载」跳转目标，
+  现阶段 = GitHub Releases（安装包由 CI 挂在那里）。**检查源与下载目标解耦**：
+  以后换官网下载页只改 `url`，客户端不动。
+- `changes`：每版手写的要点，应用内逐条渲染（超过 20 条丢弃、单条截 200 字）；
+  `notesUrl`：「完整发布说明 ↗」目标（CI 在 Release 页自动生成完整 changelog，
+  这是详细内容第二层）；`highlights` / `publishedAt` 仅展示。
+- 字段可加不可删：客户端忽略未知字段，旧客户端向前兼容。
+
+### 更新源三层取值（开发者可配、用户不可见）
+
+按序取：环境变量 `UPDATE_MANIFEST_URL`（开发/测试，可指本地静态服务器）>
+`<数据目录>/updater.json` 的 `manifestUrl` 字段（生产改址免重编译）> 内置常量
+`DEFAULT_UPDATE_MANIFEST_URL`（`src-tauri/src/lib.rs`，域名定稿后填入随版发布；
+当前为空 = 未配置，检查报「更新源尚未配置」）。刻意不做设置界面：更新源是下载
+跳转的信任根，谁都能改就是引导恶意下载页的入口，留在文件层即可。
+
+已知边界：清单接口无签名（一期只是读版本号+跳转，风险可接受；二期自动更新必须
+上签名）；版本号比较在前端按数值逐段进行，清单版本不合法一律视为「无新版」
+（宁漏报不误报）。
