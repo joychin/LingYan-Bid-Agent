@@ -181,6 +181,30 @@ jobs:
             echo "==> 首次发布，changelog 为空说明"
           fi
 
+      # GitHub 会把 Release 资产名里的非 ASCII 字符整段剥掉：v0.2.0 实测
+      # 灵燕智能_0.2.0_x64-setup.exe → _0.2.0_x64-setup.exe（产品名全丢，下载页
+      # 与用户本地磁盘文件名都成了「_0.2.0_…」；旧名 Tender Agent 只是空格→点，
+      # 所以一直没暴露）。上传前把下载文件名换成 ASCII slug；label 仍带中文，
+      # 应用与安装器内的显示名来自 productName，都不受影响。
+      # 显示名真源=frontend/src/lib/brand.ts（CI 读不到 TS，故 slug 在此单列）。
+      - name: 产物改 ASCII 下载名（GitHub 剥资产名里的中文）
+        env:
+          PRODUCT_NAME: 灵燕智能
+          RELEASE_SLUG: LingYan
+        run: |
+          find dist -type f -print0 | while IFS= read -r -d '' f; do
+            b="$(basename "$f")"
+            nb="${b//$PRODUCT_NAME/$RELEASE_SLUG}"
+            # 兜底：其余非 ASCII 与空格一并换掉，避免再出现被剥空/断名
+            nb="$(printf '%s' "$nb" | sed -E 's/[^A-Za-z0-9._-]+/_/g; s/_+/_/g; s/^[-_.]+//')"
+            if [ "$nb" != "$b" ]; then
+              mv "$f" "$(dirname "$f")/$nb"
+              echo "  $b → $nb"
+            fi
+          done
+          echo "==> 待上传产物："
+          find dist -type f | sort
+
       - name: 上传安装包到 Release
         uses: softprops/action-gh-release@v2
         with:

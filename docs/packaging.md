@@ -114,6 +114,14 @@ npm run build:release
   回退内建 UI 串）。**NSIS 侧无需处理**：全程 `write_utf8_with_bom` 写脚本且
   `Unicode true`，中文名安全。踩坑成本=一次 Windows job（约 8 分钟）白跑。
   本机 macOS 造不出 WiX 复现，此类改动只能靠 CI 验证（推 tag 即验）。
+- **实测坑④（2026-09-16 v0.2.0 同批发现）**：`productName` 含中文时 **Release 资产名
+  被 GitHub 剥掉中文**——CI 日志里上传的是 `灵燕智能_0.2.0_x64-setup.exe`，但 Release
+  上落成的 `name` 是 `_0.2.0_x64-setup.exe`（产品名全丢，下载 URL 与用户本地磁盘
+  文件名都成了 `_0.2.0_…`；中文只保留在 `label`）。旧名 `Tender Agent` 只是空格→点、
+  仍是合法 ASCII，所以一直没暴露。**修法=上传前把下载文件名换成 ASCII slug**
+  （release.yml 的「产物改 ASCII 下载名」步：`PRODUCT_NAME`→`RELEASE_SLUG`=LingYan，
+  其余非 ASCII/空格一并兜底替换）。应用与安装器内的显示名来自 `productName`，label
+  仍带中文——**只有下载文件名是 ASCII**。
 
 ## 4. Linux
 
