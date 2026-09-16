@@ -4,13 +4,18 @@
 
 **让每一份标书，都有依据地写。**
 
-> Local-first desktop AI agent that turns tender documents into bid proposals:
-> evidence-linked section writing, human-in-the-loop commitments, and a
-> tracked-changes .docx as the final deliverable. No cloud service, no data leaving your machine.
+Local-first desktop AI agent for tender documents: evidence-linked section writing,
+human-in-the-loop commitments, and a tracked-changes `.docx` as the deliverable.
+Files stay on your machine, and you choose and configure the model service it calls.
 
-[![Release](https://img.shields.io/github/v/release/joychin/LingYan-Bid-Agent?label=%E4%B8%8B%E8%BD%BD)](https://github.com/joychin/LingYan-Bid-Agent/releases)
+[![Release](https://img.shields.io/github/v/release/joychin/LingYan-Bid-Agent?label=%E4%B8%8B%E8%BD%BD&sort=semver)](https://github.com/joychin/LingYan-Bid-Agent/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue)](https://github.com/joychin/LingYan-Bid-Agent/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+官网：<https://ddmdj.com>
+
+<!-- TODO: 发布前补一张 Banner（1200×630，官网 assets/og-image.png 可直接复用），
+     以及 4 张真实客户端截图到 docs/screenshots/，插到「界面速览」表格下方。 -->
 
 ## 这是什么
 
@@ -20,17 +25,15 @@
 - 写作不凭感觉——每一节都围绕评分项组织，关键内容标注招标原文出处；
 - 交付不再是聊天框里的零散文字——产出带封面、目录、页码的标准 Word，AI 改动留修订痕迹，缺材料的地方标批注。
 
-文件和工作区保存在你自己的电脑上；用哪家模型服务，由你配置和决定。
-
 ## 为什么做这个
 
 写过标书的人都懂：
 
-1. 文件长、要求多——几百页招标文件，要求散落在正文、表格、附件里，人工很难一条不漏；
-2. 评分项对不上目录——响应结构和评分办法各写各的，评委找不到给分点，等于白写；
-3. 企业资料反复找——资质、业绩、人员材料每次重新翻共享盘和聊天记录，同一个证明文件找了十几遍；
-4. 数字和承诺不敢信——AI 顺手编出的工期、数量、案例，一旦写进标书就是实质性风险；
-5. 从聊天框复制粘贴——手工搬进模板、调层级、加页码，交给谁审都费劲。
+- **要求漏不起**——几百页招标文件，要求散落在正文、表格、附件里，人工很难一条不漏；
+- **目录对不上评分**——响应结构和评分办法常常各写各的，评委找不到给分点，等于白写；
+- **资料反复找**——资质、业绩、人员材料每次都要重新翻共享盘；
+- **数字不敢信**——AI 顺手编出的工期、数量、案例，一旦写进标书就是实质性风险；
+- **最后还得手搬**——调层级、加页码，交给谁审都费劲。
 
 我们不帮你「一键生成」，而是陪你把每条要求都落到实处。
 
@@ -45,13 +48,11 @@
 | 03 写正文 | AI 负责整理、起草和查漏；关键要求、数字和结论尽量关联到招标原文的章节与页码；资料不足时明确提示待补，而不是编造成事实 | 不猜数字，不编承诺 |
 | 04 Word 交付 | 输出标准 Word，带封面、目录、页码；AI 改过的留下修订痕迹，缺材料的地方标批注 | 最后一遍审核由你掌握 |
 
-## 为什么可信
+三处关键设计：
 
-**有出处。** 关键要求、数字和结论不是凭空生成，而是尽量关联到招标原文的章节、页码和行号；引用企业资料时同步标注来源文件与页码；找不到依据的内容，标记为「待补」而不是补全。
-
-**大事由人拍板。** 工期多久、质保几年、方案做几套——这些大事 AI 不会自己拍板。写到关键处它会停下来问你，确认后再继续；资料不够就标出来，不用没确认的数据填空白。
-
-**Word 可审阅。** 目标不是在对话框里生成一堆文字，而是产出可继续处理的正式文档：支持封面、标题层级、表格、页码等交付结构；AI 的每一处改动都留下修订痕迹，待确认事项以批注提示。
+- **有出处。** 关键要求、数字和结论尽量关联到招标原文的章节、页码和行号；引用企业资料时同步标注来源文件与页码；找不到依据的内容标记为「待补」，而不是补全。
+- **大事由人拍板。** 工期多久、质保几年、方案做几套——这些大事 AI 不会自己拍板，写到关键处会停下来问你；确认前不改正文。
+- **Word 可审阅。** 目标是产出可继续处理的正式文档，而不是对话框里的一堆文字：支持封面、标题层级、表格、页码，AI 的每一处改动都留修订痕迹，待确认事项以批注提示。
 
 ## 企业资料库
 
@@ -61,29 +62,14 @@
 - **知识库**：管理营业执照、资质证书、业绩案例、人员材料等证明文件，随时定位到手；
 - **版式库**：沉淀单位常用的 Word 版式和标书格式，交付时直接套用。
 
-传一次，后续项目按需复用。
-
 ## 界面速览
 
 | 界面 | 说明 |
 |------|------|
-| 原文出处 | 关键要求高亮标注，点击可跳转回招标原文位置 |
+| 原文出处 | 关键要求高亮标注，点击可跳回招标原文位置 |
 | 评分目录 | 按评分办法组织响应目录，自动走查遗漏（如「应急预案」尚未响应） |
 | 关键节点确认 | 补遗改期、承诺条款等大事暂停等你决定，确认前不改正文 |
-| 待补材料 | 资料不足时明确列清单提示待补，不编造为既成事实 |
-
-<!-- TODO: 发布前补充各界面截图（建议截真实客户端），存放于 docs/screenshots/ 并取消注释
-| 原文出处 | 评分目录 |
-|:---:|:---:|
-| ![原文出处](docs/screenshots/source.png) | ![评分目录](docs/screenshots/outline.png) |
-| ![确认卡](docs/screenshots/confirm.png) | ![待补材料](docs/screenshots/todos.png) |
--->
-
-## 安全与隐私
-
-- **本地优先**：文件和工作区保存在你的电脑上；
-- **模型自己选、自己配**：使用哪家模型服务，由你决定；
-- **联网范围可控**：只有调用你启用的模型服务时需要联网，除此之外不额外上传资料。
+| 待补材料 | 资料不足时列清单提示待补，不编造成既成事实 |
 
 ## 快速开始
 
@@ -91,10 +77,14 @@
 
 从 [Releases](https://github.com/joychin/LingYan-Bid-Agent/releases) 下载对应平台的安装包：
 
-- **Windows**（x64）：`Tender.Agent_x64-setup.exe`
-- **macOS**（Apple Silicon）：`Tender.Agent_aarch64.dmg`
+| 平台 | 安装包 |
+|------|--------|
+| Windows（x64） | `LingYan_<版本>_x64-setup.exe`（推荐）或 `LingYan_<版本>_x64_zh-CN.msi` |
+| macOS（Apple Silicon） | `LingYan_<版本>_aarch64.dmg` |
 
-安装包未做代码签名：macOS 首次打开被 Gatekeeper 拦截时，在访达中右键点应用选「打开」；Windows 弹出 SmartScreen 提示时，选「仍要运行」。
+Intel Mac 目前没有预编译包，请按下方「从源码运行 / 打包」自行构建。
+
+安装包**未做代码签名**：macOS 首次打开被 Gatekeeper 拦截时，在访达中右键点应用选「打开」（或 `xattr -cr "/Applications/灵燕智能.app"`）；Windows 弹出 SmartScreen 提示时选「仍要运行」。
 
 ### 首次运行
 
@@ -112,25 +102,35 @@ cd LingYan-Bid-Agent
 npm install                            # 根目录开发依赖（Tauri CLI 等）
 (cd frontend && npm install)           # 前端依赖
 cp sidecar/.env.example sidecar/.env   # 环境变量模板（模型密钥也可在应用内配置）
-./dev.sh browser                       # 浏览器模式开发；完整客户端用 ./dev.sh tauri
+./dev.sh browser                       # 浏览器模式开发，打开 http://localhost:5173
 ```
 
-改动后用 `./check.sh` 做全栈检查；自行构建安装包见 [docs/packaging.md](docs/packaging.md)。
+`./dev.sh` 不带参数是交互菜单，可选 `tauri`（完整客户端）/ `browser`（推荐）/ `sidecar` / `frontend` / `preview` / `stop`。两点注意：浏览器模式必须用 `localhost`，Vite 只绑 IPv6；不要让 `tauri` 与 `browser` 同时跑，两个 sidecar 共用 `agent.db` 会冲突。
 
+改动后用 `./check.sh` 跑全栈检查（Python 测试与 lint、前端 lint/typecheck/test/build、Rust check/clippy）；自行构建安装包见 [docs/packaging.md](docs/packaging.md)。
+
+## 技术栈
+
+- **桌面壳**：Tauri 2（Rust），负责窗口、钥匙串、拉起并守护 sidecar；
+- **前端**：React 19 + TypeScript + Vite + Tailwind v4；
+- **后端 sidecar**：Python 3.12，FastAPI + DeepAgents/LangGraph + SQLite（FTS5 全文检索）；
+- **方法论与提示词**：`sidecar/app/skills/` 下的 SKILL.md 与参考文档，属于仓库的一部分，可以单独阅读和改写。
+
+打包时 Python 侧车由 PyInstaller 冻结随包分发；PyInstaller 无法跨 OS 交叉编译，各平台需在各自系统上构建（见 `docs/packaging.md`）。
+
+## 安全与隐私
+
+- **本地优先**：文件和工作区保存在你的电脑上（macOS 数据目录 `~/Library/Application Support/lingyan.ddmdj.com`）；
+- **模型自己选、自己配**（BYOK）：使用哪家模型服务由你决定，密钥存在本机钥匙串；
+- **联网范围可控**：只有调用你启用的模型服务时需要联网，除此之外不额外上传资料。
 
 ## 常见问题
-
-**适不适合「直接用聊天模型写标书」？**
-如果只是随便写段话，ChatGPT 就够了。但投标需要的是：每条要求都能在原文里找到，每个数字都有人负责。这需要先把招标文件读透、按评分搭好目录、再逐节写作——这正是灵燕智能做的事。
 
 **AI 会自己编工期、数量和企业承诺吗？**
 不会。工期、数量、承诺这些关键事项，系统写到一半会停下来问你。资料不够就标「待补」，不会替你编。
 
 **支持哪些文件格式？**
 招标文件支持 PDF、Word、文本及扫描件，并可同时处理主文件、补遗和答疑等多份来源。企业资料支持常见文档与图片格式。
-
-**需要用哪家模型？必须联网吗？**
-模型你自己选、自己配。文件都存在本地，只有调用模型时需要联网。
 
 **怎么开始用？**
 下载后，拿一份你手边的真实招标文件走一遍：读原文、搭目录、写一节、导 Word。走完这一圈，你就知道它有没有用了。
@@ -143,10 +143,10 @@ cp sidecar/.env.example sidecar/.env   # 环境变量模板（模型密钥也可
 
 ## 参与贡献
 
-问题与建议请提 [Issue](https://github.com/joychin/LingYan-Bid-Agent/issues)。
+问题与建议请提 [Issue](https://github.com/joychin/LingYan-Bid-Agent/issues)，欢迎把使用场景和踩坑记录下来。
 
 ## License
 
-本项目以 [MIT](LICENSE) 协议开源，`skills/` 中的方法论与提示词一并按 MIT 授权。
+本项目以 [MIT](LICENSE) 协议开源，`sidecar/app/skills/` 中的方法论与提示词一并按 MIT 授权。
 
 第三方组件保留各自的许可与署名（例如 `sidecar/app/skills/humanizer-zh/` 为第三方 MIT 作品，其 LICENSE 随文件放在同目录）。
