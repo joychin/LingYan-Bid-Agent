@@ -103,6 +103,17 @@ npm run build:release
 - **实测坑②（已修）**：CI changelog 用 `git describe` 找上一个 tag——actions/checkout
   默认 shallow（fetch-depth: 1）拉不到 tag 引用的 commit，describe 必失败走「首次发布」
   分支。修法=checkout 加 `fetch-depth: 0`。
+- **实测坑③（2026-09-16 品牌改名后首包，v0.2.0 首次触发）**：`productName` 含中文
+  （灵燕智能）时 **MSI 构建必挂**——NSIS 正常、Rust 编译正常，只有 WiX 的 light 链接
+  失败，报 `failed to run ...\light.exe`（真正的错在 light 的 stderr 里，Tauri 默认
+  不回显，加 `--verbose` 才看到 **LGHT0311：字符串含代码页 1252 里不存在的字符**——
+  中文名在 `main.wxs(20)` 的 Product/Name 上）。WiX 默认语言 `en-US` ⇒ codepage 1252，
+  编不了中文（上游同款：tauri-apps/tauri#8363）。**修法=`bundle.windows.wix.language:
+  "zh-CN"`**——Tauri 用它查 `languages.json` 得 asciiCode=936（GBK 码页）并注入
+  `!(loc.TauriCodepage)`，light 加 `-cultures:zh-cn;en-US`（非 en-US 自动补 en-US
+  回退内建 UI 串）。**NSIS 侧无需处理**：全程 `write_utf8_with_bom` 写脚本且
+  `Unicode true`，中文名安全。踩坑成本=一次 Windows job（约 8 分钟）白跑。
+  本机 macOS 造不出 WiX 复现，此类改动只能靠 CI 验证（推 tag 即验）。
 
 ## 4. Linux
 
@@ -145,8 +156,9 @@ Word 修订与批注作者）与 `identifier` 全部去掉了旧名。
   旧版 `/Applications/Tender Agent.app` 需手工删除，否则磁盘上两个 App）；
   Windows 安装器注册表键变化，旧版不会被覆盖安装，**建议先卸载旧版再装新版**；
   数据由上述迁移自动搬过来。
-- Windows 的包名/App 名含非 ASCII 字符（灵燕智能）：本机 macOS 无法验证 NSIS/WiX
-  对此的处理，**下次打 tag 时在 CI 产物上确认**（安装器文件名、开始菜单项、卸载项）。
+- Windows 的包名/App 名含非 ASCII 字符（灵燕智能）：**2026-09-16 v0.2.0 首次带此名出包
+  即触发构建失败**（MSI/WiX 码页 1252 编不了中文），已由 `bundle.windows.wix.language:
+  "zh-CN"` 修复——详见 §3「实测坑③」。NSIS 侧 Unicode 安全无需处理。
 
 ## 6. 产物矩阵速查
 

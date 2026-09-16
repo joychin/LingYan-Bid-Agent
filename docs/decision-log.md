@@ -2631,3 +2631,18 @@
     （域名上线）。空串时检查报「更新源尚未配置」——正式地址落地后一期功能才真正生效，
     随下个版本发布。
 
+  - **中文 productName 的 MSI 构建修复（2026-09-16，v0.2.0 发版首次触发）**：品牌
+    改名批（灵燕智能）落地后**首次带非 ASCII productName 出包**——Windows job 失败，
+    Rust 编译与 NSIS 均正常，只有 WiX 的 light 链接挂掉，报 `failed to run ...
+    light.exe`（Tauri 默认不回显 light 的 stderr，真正错误要 `--verbose` 才看到
+    **LGHT0311：字符串含代码页 1252 里不存在的字符**，定位在 main.wxs 的 Product/Name
+    ——即中文产品名）。根因=WiX 默认语言 en-US ⇒ codepage 1252 编不了中文；上游同款
+    tauri-apps/tauri#8363 的结论也是「WiX 在此上下文不支持中文字符」。**修法=
+    `bundle.windows.wix.language: "zh-CN"`**（Tauri 查 languages.json 得 asciiCode=936
+    注入 !(loc.TauriCodepage)，light 带 `-cultures:zh-cn;en-US`，非 en-US 自动补 en-US
+    回退内建 UI 串）。**NSIS 侧刻意不动**：实测 tauri-bundler 的 nsis 全程
+    write_utf8_with_bom 写脚本 + installer.nsi `Unicode true`，中文名本就安全。
+    教训：macOS 本机造不出 WiX 复现**——平台特有的打包配置只能在 CI 上验证**，
+    品牌改名这类「改名时无法验证、发版时才炸」的项，留给 CI 首验是唯一路径
+    （代价=一次 Windows job 白跑 ~8 分钟）。修复已随 v0.2.0 tag 重打验证。
+
