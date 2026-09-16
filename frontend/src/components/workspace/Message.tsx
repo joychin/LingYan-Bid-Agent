@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 
 export interface MessageProps {
   role: 'user' | 'assistant'
-  /** assistant 名（如 "Hy3"） */
+  /** assistant 名（如 "灵燕智能"） */
   name?: string
   avatar?: ReactNode
   /** assistant 状态胶囊（如「已完成 · 3 个步骤」） */

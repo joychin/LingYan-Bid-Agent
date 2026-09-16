@@ -98,7 +98,7 @@ fn export_diagnostics(
     std::fs::create_dir_all(&logs_dir).map_err(|e| format!("创建日志目录失败: {e}"))?;
 
     let mut report = String::new();
-    report.push_str("==== Tender Agent 诊断报告 ====\n");
+    report.push_str("==== 灵燕智能 诊断报告 ====\n");
     report.push_str(&format!("生成时间: {timestamp}\n"));
     report.push_str(&format!(
         "应用版本: {}  系统: {} {}\n",

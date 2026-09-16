@@ -1,4 +1,4 @@
-/* Tender Agent Design Tokens · v1.2
+/* 灵燕智能 Design Tokens · v1.2
  * 来源：docs/designtokens/（Ardot 画布 720053744468339）vendor 副本，运行时唯一叶子层。
  * 48 token · 5 集合（Color/Spacing/Radius/Typography/Shadow）· Light + Dark 双 mode。
  * 切换暗色：<html data-theme="dark">（main.tsx 首帧前写入；token 名不变只换值）。

@@ -1,4 +1,4 @@
-# Tender Agent monorepo — 按工程技术栈分层的 .gitignore
+# 灵燕智能 monorepo — 按工程技术栈分层的 .gitignore
 # 依赖锁文件一律入库（package-lock.json / uv.lock / Cargo.lock），不要忽略。
 
 # ─── 根目录 / npm 编排 ────────────────────────────────────

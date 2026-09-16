@@ -1,4 +1,4 @@
-# Tender Agent 用户故事集
+# 灵燕智能 用户故事集
 
 > 依据：`tender-agent-mvp-prd.md`（产品唯一事实来源）、`artifact-system-design.md`（产物系统设计）、
 > `tender-agent-ui-spec.md`（M3 UI 规范）及当前已实施功能整理。

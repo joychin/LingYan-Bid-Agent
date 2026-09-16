@@ -25,6 +25,7 @@ import { toolDisplayName } from '@/components/ai/toolDisplay'
 import { Message as WMessage } from '@/components/workspace/Message'
 import { ArtifactCard } from '@/components/ArtifactCard'
 import { placeArtifacts } from '@/lib/artifactPlacement'
+import { ASSISTANT_NAME } from '@/lib/brand'
 import { capStreamingText } from '@/lib/streamTextCap'
 import { WelcomeScreen } from '@/components/WelcomeScreen'
 import { InputComposer } from '@/components/InputComposer'
@@ -747,7 +748,7 @@ function RunMessage({
   return (
     <WMessage
       role="assistant"
-      name="Swift Agent"
+      name={ASSISTANT_NAME}
       avatar={<div className="msg-avatar" aria-hidden />}
       status={
         paused ? (

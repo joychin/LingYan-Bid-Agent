@@ -48,7 +48,7 @@ server 栈/app.main）会拦住「收集漏了但只静默退化」的问题（�
 ./check.sh && npm run build:release
 ```
 
-产物：`src-tauri/target/release/bundle/dmg/Tender Agent_0.1.0_aarch64.dmg`（+ `.app`）。
+产物：`src-tauri/target/release/bundle/dmg/灵燕智能_0.1.0_aarch64.dmg`（+ `.app`）。
 
 ### 2b. Intel / Universal 包（在 Apple Silicon 机上打 x86_64 半边）
 
@@ -71,9 +71,9 @@ npm run tauri build -- --target universal-apple-darwin        # 需两个 triple
 
 ### 2c. macOS 已知边界
 
-- **未签名**：用户首次打开会遇 Gatekeeper——右键→打开，或 `xattr -cr "/Applications/Tender Agent.app"`。
+- **未签名**：用户首次打开会遇 Gatekeeper——右键→打开，或 `xattr -cr "/Applications/灵燕智能.app"`。
   Developer ID 签名 + 公证 = 后续门（Tauri bundler 届时会对 externalBin 逐个签名公证）。
-- 用户数据目录（bundled 模式 `DATA_DIR`）：`~/Library/Application Support/com.tenderagent.app`。
+- 用户数据目录（bundled 模式 `DATA_DIR`）：`~/Library/Application Support/lingyan.ddmdj.com`。
 
 ## 3. Windows（2026-09-09 首次真机出包已跑通，v0.1.1 经 GitHub Actions 产出）
 
@@ -94,7 +94,7 @@ npm run build:release
   （注入设置页 `__APP_VERSION__`）、`sidecar/pyproject.toml`、`sidecar/app/main.py` 的
   `VERSION`。`./check.sh`（all 模式）有一致性守卫，漏抬即红。
 - 未签名 exe 杀软误报偏高，正式代码签名证书 = 后续门。
-- 用户数据目录：`%APPDATA%\com.tenderagent.app`。
+- 用户数据目录：`%APPDATA%\lingyan.ddmdj.com`。
 - **实测坑①（已修）**：Windows 的 stdout/stderr 默认 locale 编码（cp1252），
   `run_frozen.py --smoke` 打印含中文的 JSON 结果时 `UnicodeEncodeError` 必炸
   （mac/Linux 默认 UTF-8 复现不了）。修法=`run_frozen.py` 入口统一
@@ -119,14 +119,36 @@ sudo apt update && sudo apt install -y libwebkit2gtk-4.1-dev build-essential \
 
 产物：`bundle/` 下 `deb/*.deb`、`appimage/*.AppImage`、`rpm/*.rpm`（`targets: "all"`）。
 
-- 用户数据目录：`~/.local/share/com.tenderagent.app`。
+- 用户数据目录：`~/.local/share/lingyan.ddmdj.com`。
 - 已知坑备案：目标机 `/tmp` 挂 noexec 时 one-file 侧车无法自解压——届时的出路是 spec 改
   `runtime_tmpdir` 指向用户数据目录（现在不动，遇到再加）。
 - 无 Linux 机器时可用 Tauri 官方 Docker 镜像（`ghcr.io/tauri-apps/tauri`）容器内装 uv 后
   跑同一条流水线；AppImage 在容器内构建需要额外处理 fuse（`--appimage-extract-and-run`），
   首次走通后把命令补记到这里。
 
-## 5. 产物矩阵速查
+## 5. 品牌与 bundle identifier（改名迁移备忘）
+
+2026-09-15 统一为**灵燕智能**：显示名（`productName`／窗口标题／启动画面／聊天助手名／
+Word 修订与批注作者）与 `identifier` 全部去掉了旧名。
+
+- `identifier`：`com.tenderagent.app` → **`lingyan.ddmdj.com`**。它决定 bundled 模式的
+  数据目录（app_data_dir 按 identifier 派生），**改名会让用户历史数据「消失」**，
+  故 `src-tauri/src/sidecar.rs` 内置一次性迁移（`migrate_data_dir_if_legacy`）：
+  新目录为空或不存在、且旧目录有内容时才整目录 rename；新目录已有数据不动；
+  失败只告警不删（最坏=用户按日志手工搬）。幂等，dev 模式不涉及（数据在仓内 `sidecar/data`）。
+  旧路径由新路径父目录 + `LEGACY_BUNDLE_ID` 推导，无需各平台硬编码。
+- **不随品牌改的内部标识**（改名会连锁破坏，刻意保留）：侧车二进制名
+  `tender-agent-sidecar`（壳 `SIDECAR_BINARY` / 孤儿清扫命令行核验 / 打包脚本 /
+  spec 四处耦合）、`localStorage` 键前缀 `tender-agent.*`（改了用户偏好静默重置）、
+  契约与 skill 标识符 `tender.*`（改了要迁移存量产物）。
+- 升级用户须知（会出现在发版说明里）：macOS 视为**全新应用**（TCC 权限重新申请，
+  旧版 `/Applications/Tender Agent.app` 需手工删除，否则磁盘上两个 App）；
+  Windows 安装器注册表键变化，旧版不会被覆盖安装，**建议先卸载旧版再装新版**；
+  数据由上述迁移自动搬过来。
+- Windows 的包名/App 名含非 ASCII 字符（灵燕智能）：本机 macOS 无法验证 NSIS/WiX
+  对此的处理，**下次打 tag 时在 CI 产物上确认**（安装器文件名、开始菜单项、卸载项）。
+
+## 6. 产物矩阵速查
 
 | 想要的产物 | 在哪构建 | 命令 |
 |---|---|---|
@@ -145,7 +167,7 @@ sudo apt update && sudo apt install -y libwebkit2gtk-4.1-dev build-essential \
 | `x86_64-pc-windows-msvc` | `tender-agent-sidecar-x86_64-pc-windows-msvc.exe` |
 | `x86_64-unknown-linux-gnu` | `tender-agent-sidecar-x86_64-unknown-linux-gnu` |
 
-## 6. 首次出包人工验收清单
+## 7. 首次出包人工验收清单
 
 冒烟门只验「依赖收集齐全」，整包行为还需人工过一遍（每个新平台首次出包时）：
 

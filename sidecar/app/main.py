@@ -179,7 +179,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(
-    title="Tender Agent Sidecar",
+    title="灵燕智能 Sidecar",
     version=VERSION,
     lifespan=lifespan,
     # 文档端点免鉴权暴露全 API 形状（/docs、/openapi.json 不在 /api 前缀下吃不到
@@ -243,7 +243,7 @@ app.include_router(render.router, prefix="/api")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Tender Agent sidecar")
+    parser = argparse.ArgumentParser(description="灵燕智能 sidecar")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     # log_config=None：uvicorn 不再自配 handler，其 error/access 日志传播到 root——

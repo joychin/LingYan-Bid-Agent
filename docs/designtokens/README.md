@@ -1,4 +1,4 @@
-# Tender Agent Design Tokens · v1.2
+# 灵燕智能 Design Tokens · v1.2
 
 **Source:** Ardot 画布文件 `720053744468339`
 **更新时间:** 2026-08-29

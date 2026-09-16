@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tender Agent 开发启动器：一次选择一种模式启动。
+# 灵燕智能 开发启动器：一次选择一种模式启动。
 #
 # 用法：
 #   ./dev.sh            # 交互菜单
@@ -129,8 +129,8 @@ main() {
   if [ -z "$mode" ]; then
     while true; do
       echo ""
-      echo "Tender Agent 开发启动器"
-      echo "========================"
+      echo "灵燕智能 开发启动器"
+      echo "==================="
       echo "  1) tauri     完整桌面客户端"
       echo "  2) browser   浏览器模式（sidecar + Vite，推荐）"
       echo "  3) sidecar   只起 sidecar（8765）"

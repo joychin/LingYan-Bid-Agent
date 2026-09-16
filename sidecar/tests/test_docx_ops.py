@@ -2045,6 +2045,35 @@ def test_comment_add_anchor_view_and_errors(env):
     assert "文件不存在" in docx_comment_add.invoke({"path": "body/无此节.docx", "text": "x"})
 
 
+def test_revision_and_comment_authors_are_branded(env):
+    """修订/批注署名钉在 _AUTHOR/_COMMENT_AUTHOR 单点上（Word 审阅侧栏用户可见）。"""
+    from app.tools.docx_ops import _AUTHOR, _COMMENT_AUTHOR
+
+    assert _AUTHOR == _COMMENT_AUTHOR == "灵燕智能", (_AUTHOR, _COMMENT_AUTHOR)
+
+    section, _ = _injected_section(env)
+    view = docx_section_read.invoke({"path": section})
+    para_no = next(int(ln.split("]")[0][2:]) for ln in view.splitlines() if COMPANY in ln)
+    assert docx_section_revise.invoke({
+        "path": section,
+        "edits": json.dumps([
+            {"para": para_no, "action": "replace", "find": COMPANY, "text": "上海中信科技有限公司"},
+        ]),
+    }).startswith("[已修订]")
+    assert docx_comment_add.invoke({
+        "path": section, "after": str(para_no), "text": "署名核对",
+    }).startswith("[已加批注]")
+
+    doc = Document(str(_abs(env, section)))
+    # 只看目标段（素材自带修订不参与，署名断言不因夹具形态漂移）
+    assert {
+        el.get(qn("w:author"))
+        for el in doc.paragraphs[para_no - 1]._p.iter()
+        if el.tag in (qn("w:ins"), qn("w:del"))
+    } == {_AUTHOR}
+    assert {c.author for c in doc.comments if (c.text or "").strip()} == {_COMMENT_AUTHOR}
+
+
 # ---------- 样式/编号迁移去重 + 拷贝卫生（2026-09-13 目录乱号批） ----------
 # 实证背景：素材自带「styleId=3 name="heading 2" + 挂多级编号」样式随注入/合册
 # 迁入，与目标内建 heading 2 同名并存——WPS/LibreOffice 按名解析把整本全部二级

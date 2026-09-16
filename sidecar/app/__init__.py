@@ -1,1 +1,1 @@
-"""Tender Agent sidecar package."""
+"""灵燕智能 sidecar package."""

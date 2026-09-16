@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tender Agent 一键全栈检查：sidecar(Python) + frontend(TS) + src-tauri(Rust)。
+# 灵燕智能 一键全栈检查：sidecar(Python) + frontend(TS) + src-tauri(Rust)。
 # 提交前 / 改动后快速回归用；将来若上 CI，直接把这里的命令搬进 workflow。
 #
 # 用法：

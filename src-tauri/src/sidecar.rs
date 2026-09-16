@@ -21,7 +21,7 @@
 //! 无歧义锚点）→ SIGKILL 兜底。Windows 用 taskkill /T /F 沿进程树整棵带走。
 
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -45,6 +45,51 @@ const MAX_RESTARTS: u32 = 3;
 const STABLE_WINDOW: Duration = Duration::from_secs(30);
 /// externalBin 注册名（tauri.conf.json bundle.externalBin，构建产物带 triple 后缀）
 const SIDECAR_BINARY: &str = "tender-agent-sidecar";
+
+/// 更名前（Tender Agent 时期）的 bundle identifier：打包模式数据目录曾落
+/// `…/com.tenderagent.app`（app_data_dir 按 identifier 派生），改名后需一次性搬迁，
+/// 否则用户历史会话/任务/知识库全部「消失」。
+const LEGACY_BUNDLE_ID: &str = "com.tenderagent.app";
+
+/// 数据目录改名迁移：新目录为空（或不存在）且旧目录有内容才整目录 rename。
+///
+/// 幂等且保守——新目录已是非空（迁过了 / 新装已有数据）一律不动；任何失败只告警
+/// 返回 false，绝不删任何一边（最坏结果=用户按日志手工搬）。旧路径由新路径的父目录
+/// 推导（`app_data_dir` 各平台都在同一父下按 identifier 分目录），天然跨平台。
+fn migrate_data_dir_if_legacy(new: &Path, legacy: &Path) -> bool {
+    let newer = |p: &Path| {
+        std::fs::read_dir(p)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
+    };
+    if newer(new) {
+        return false; // 已有数据（含迁移后的现场），不覆盖
+    }
+    if !newer(legacy) {
+        return false; // 全新安装：旧目录不存在或为空
+    }
+    // 空的新目录（或占位目录）先移除：rename 的非空目标在 Windows 上会失败
+    if new.exists() {
+        if let Err(e) = std::fs::remove_dir(new) {
+            log::warn!("数据目录迁移：清理空目录 {} 失败，跳过迁移: {e}", new.display());
+            return false;
+        }
+    }
+    match std::fs::rename(legacy, new) {
+        Ok(()) => {
+            log::info!("数据目录已迁移: {} → {}", legacy.display(), new.display());
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "数据目录迁移失败（{} → {}）：{e}；请手工移动旧目录内容",
+                legacy.display(),
+                new.display()
+            );
+            false
+        }
+    }
+}
 
 /// 解析后的数据目录（supervisor 启动时按模式置位一次）：export_diagnostics /
 /// reveal_sidecar_logs / reveal 前缀校验与 Python 侧注入的 DATA_DIR 保持同源。
@@ -656,6 +701,12 @@ pub fn run_supervisor(app: AppHandle, mgr: Arc<SidecarManager>) {
     // reveal_sidecar_logs / reveal 前缀校验都依赖 RESOLVED_DATA_DIR 已就位
     let mode = resolve_launch_mode(&app);
     let healthz_attempts = mode.healthz_attempts();
+    // 改名迁移必须早于 RESOLVED_DATA_DIR 置位与 spawn：sidecar 一启动就读 DATA_DIR
+    if let LaunchMode::Bundled { data_dir } = &mode {
+        if let Some(parent) = data_dir.parent() {
+            migrate_data_dir_if_legacy(data_dir, &parent.join(LEGACY_BUNDLE_ID));
+        }
+    }
     let _ = RESOLVED_DATA_DIR.set(mode.data_dir().clone());
     let mode_name = match mode {
         LaunchMode::Dev { .. } => "dev",
@@ -934,5 +985,61 @@ mod tests {
             assert_eq!(f.kind, "crashed");
             assert!(f.detail.contains("强制终止"));
         }
+    }
+
+    /// 临时目录下的 (new, legacy) 一对，调用方自行造内容。
+    fn tmp_dirs(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("tender-migrate-{name}-{}", Uuid::new_v4()));
+        (root.join("lingyan.ddmdj.com"), root.join(LEGACY_BUNDLE_ID))
+    }
+
+    fn write_marker(dir: &Path, file: &str, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(file), body).unwrap();
+    }
+
+    #[test]
+    fn migrate_moves_legacy_data_dir() {
+        let (new, legacy) = tmp_dirs("move");
+        write_marker(&legacy, "agent.db", "old-state");
+
+        assert!(migrate_data_dir_if_legacy(&new, &legacy));
+        assert_eq!(std::fs::read_to_string(new.join("agent.db")).unwrap(), "old-state");
+        assert!(!legacy.exists()); // 是搬迁不是拷贝：旧目录不留残骸
+
+        // 再跑一次幂等（新目录已非空）
+        assert!(!migrate_data_dir_if_legacy(&new, &legacy));
+        let _ = std::fs::remove_dir_all(new.parent().unwrap());
+    }
+
+    #[test]
+    fn migrate_replaces_empty_new_dir_without_touching_content() {
+        let (new, legacy) = tmp_dirs("empty-new");
+        std::fs::create_dir_all(&new).unwrap(); // 用户曾启动过一次新版留下的空目录
+        write_marker(&legacy, "app.db", "old-state");
+
+        assert!(migrate_data_dir_if_legacy(&new, &legacy));
+        assert_eq!(std::fs::read_to_string(new.join("app.db")).unwrap(), "old-state");
+        let _ = std::fs::remove_dir_all(new.parent().unwrap());
+    }
+
+    #[test]
+    fn migrate_keeps_existing_new_data() {
+        let (new, legacy) = tmp_dirs("keep-new");
+        write_marker(&new, "app.db", "new-state");
+        write_marker(&legacy, "app.db", "old-state");
+
+        assert!(!migrate_data_dir_if_legacy(&new, &legacy));
+        assert_eq!(std::fs::read_to_string(new.join("app.db")).unwrap(), "new-state");
+        // 旧目录原样保留（绝不删——用户可手工抢救）
+        assert_eq!(std::fs::read_to_string(legacy.join("app.db")).unwrap(), "old-state");
+        let _ = std::fs::remove_dir_all(new.parent().unwrap());
+    }
+
+    #[test]
+    fn migrate_noop_when_no_legacy() {
+        let (new, legacy) = tmp_dirs("no-legacy");
+        assert!(!migrate_data_dir_if_legacy(&new, &legacy)); // 全新安装
+        assert!(!new.exists());
     }
 }

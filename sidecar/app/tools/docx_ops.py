@@ -26,7 +26,7 @@ docx 翻译成文本世界（读视图/编号寻址），写入全由程序机�
   （PDF 整页渲染/ docx 内嵌图）/任务 sources 图片/PDF 原件按页现场渲染；全宽居中、段落标记+内容双插入修订
   （与插段同构——拒绝修订=整段含图消失）
 - docx_section_revise：定向修订，全部落成 Word 原生修订标记（w:ins/w:del，
-  author=Tender Agent）——用户在 Word 审阅界面逐条接受/拒绝；正文段落按
+  author=灵燕智能）——用户在 Word 审阅界面逐条接受/拒绝；正文段落按
   P 序号、表格单元格按 table/row/col（replace 改旧值、fill 填空格）；落盘前
   程序做「拒绝全部修订后文本与修订前逐字一致」的自校验（标记写坏的机械防线，
   覆盖正文与表格单元格段落）
@@ -86,8 +86,8 @@ from ..parse import pdfium_kit
 from ..parse.pdf import render_page_png
 from . import body_contract
 
-_AUTHOR = "Tender Agent"
-_COMMENT_AUTHOR = "Swift Agent"  # 批注作者（Word 审阅侧栏可见；待办批注与修订标记分属两套体系）
+_AUTHOR = "灵燕智能"
+_COMMENT_AUTHOR = "灵燕智能"  # 批注作者（Word 审阅侧栏可见；待办批注与修订标记分属两套体系）
 _VIEW_TEXT_LIMIT = 800  # 视图单段截断（修订需精确文本，超长段提示去 Word 处理）
 _CELL_TEXT_LIMIT = 60  # 视图单元格截断（填空场景格文本短；长格内容去 Word 看）
 
@@ -2066,7 +2066,7 @@ def _render_and_insert(
 def docx_comment_add(path: str, text: str, after: str = "") -> str:
     """给正文节 docx 加一条 Word 批注——缺料/待澄清/待核验等待办的唯一落点。
 
-    批注锚定在指定段落上：Word 审阅侧栏可见（作者 Swift Agent）、打印与 PDF
+    批注锚定在指定段落上：Word 审阅侧栏可见（作者 灵燕智能）、打印与 PDF
     导出默认不带；docx_section_read 视图该段行尾显示〔批注：…〕，validate_body
     清点待办批注，合册时批注原样迁移进整本。**正文里禁止写【待补】【待澄清】
     占位文字**（会进交付稿）——缺什么、要用户裁决什么、哪个数字待核验，都走本工具。
@@ -2506,7 +2506,7 @@ def docx_section_revise(path: str, edits: str) -> str:
 
     用途：素材底稿注入后的适配修订（换公司名/项目名/参数）、招标格式件填空
     （函件空栏/表格空格子）、局部新写、删除无关段。每处修订在 Word 修订视图可见
-    （作者 Tender Agent）；程序落盘前自校验「拒绝全部修订后与修订前逐字一致」
+    （作者 灵燕智能）；程序落盘前自校验「拒绝全部修订后与修订前逐字一致」
     （覆盖正文段落与表格单元格），标记损坏即拒绝保存。
     Args:
         path: 目标节文件（相对任务 work/，如 body/技术部分/3.1 需求分析.docx）

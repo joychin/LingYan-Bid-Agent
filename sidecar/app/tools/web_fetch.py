@@ -38,7 +38,7 @@ _ALLOWED_CONTENT_TYPES = (
     "application/json",
 )
 
-_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) TenderAgent/0.1 (research sidecar)"
+_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) LingYanBidAgent/0.1 (research sidecar)"
 
 
 class _FetchDenied(Exception):

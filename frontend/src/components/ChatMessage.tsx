@@ -12,10 +12,9 @@ import { RunFiles } from '@/components/ai/RunFiles'
 import { RunTrace } from '@/components/ai/RunTrace'
 import { TextShimmer } from '@/components/ai/TextShimmer'
 import { Message as WMessage } from '@/components/workspace/Message'
+import { ASSISTANT_NAME } from '@/lib/brand'
 import { splitMarker, MARKER_CHIP, type PauseMarker } from '@/lib/hitlMessage'
 import { capStreamingText } from '@/lib/streamTextCap'
-
-const ASSISTANT_NAME = 'Swift Agent'
 
 /** 复制按钮（copied 2s 反馈：Copy→Check）。align 随所在行位置防 tooltip 溢出。 */
 function CopyAction({ content, align }: { content: string; align: 'start' | 'end' }) {

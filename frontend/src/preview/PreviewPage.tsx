@@ -17,6 +17,7 @@ import { ProcessArtifact, TodoList, Spinner, ArtPulse } from '@/components/works
 import { Composer } from '@/components/workspace/Composer'
 import { ProductPanel } from '@/components/workspace/ProductPanel'
 import type { ArtifactRow } from '@/components/workspace/ProductPanel'
+import { ASSISTANT_NAME } from '@/lib/brand'
 
 const QUICK_NAV: QuickNavItem[] = [
   { id: 'new', icon: <Plus />, label: '新建任务' },
@@ -271,7 +272,7 @@ export function PreviewPage() {
           </GalleryCell>
           <GalleryCell label="assistant · 已完成">
             <div className="gallery-card" style={{ width: 420 }}>
-              <Message role="assistant" name="Hy3" status={<>已完成 · 3 个步骤</>}>
+              <Message role="assistant" name={ASSISTANT_NAME} status={<>已完成 · 3 个步骤</>}>
                 <div className="bubble">
                   基于以上调研，建议后端采用 <strong>NestJS</strong>：团队已掌握 TypeScript。
                 </div>
@@ -280,7 +281,7 @@ export function PreviewPage() {
           </GalleryCell>
           <GalleryCell label="assistant · 执行中">
             <div className="gallery-card" style={{ width: 420 }}>
-              <Message role="assistant" name="Hy3" status={<>执行中</>}>
+              <Message role="assistant" name={ASSISTANT_NAME} status={<>执行中</>}>
                 <ProcessArtifact variant="tool" label="read_table" meta={<Spinner />}>
                   <div className="kv">
                     <span className="k">source</span>
@@ -327,7 +328,7 @@ const shellChat = (
   <>
     <Message role="user">帮我做一份投标技术方案里的技术选型建议，重点对比后端框架。</Message>
 
-    <Message role="assistant" name="Hy3" status={<>已完成 · 3 个步骤</>}>
+    <Message role="assistant" name={ASSISTANT_NAME} status={<>已完成 · 3 个步骤</>}>
       <ProcessArtifact variant="thinking" meta={<>已完成</>}>
         <p>先锁定选型维度：团队熟悉度、生态成熟度、性能、长期维护成本。后端方案集中在 NestJS 与 FastAPI 两条线。</p>
         <p>权衡：NestJS 与前端 Vue 同源，协作成本最低；FastAPI 在算法服务上更轻。先把对比框架搭好，再补数据。</p>
@@ -360,7 +361,7 @@ const shellChat = (
 
     <Message role="user">把候选框架的对比表补进正文。</Message>
 
-    <Message role="assistant" name="Hy3" status={<>执行中</>}>
+    <Message role="assistant" name={ASSISTANT_NAME} status={<>执行中</>}>
       <ProcessArtifact variant="tool" label="read_table" meta={<Spinner />}>
         <div className="kv">
           <span className="k">source</span>

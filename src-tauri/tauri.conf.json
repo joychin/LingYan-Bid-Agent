@@ -1,8 +1,8 @@
 {
   "$schema": "../frontend/node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Tender Agent",
+  "productName": "灵燕智能",
   "version": "0.1.0",
-  "identifier": "com.tenderagent.app",
+  "identifier": "lingyan.ddmdj.com",
   "build": {
     "frontendDist": "../frontend/dist",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Tender Agent",
+        "title": "灵燕智能",
         "width": 1200,
         "height": 800,
         "resizable": true,
@@ -24,7 +24,7 @@
       },
       {
         "label": "splash",
-        "title": "Tender Agent",
+        "title": "灵燕智能",
         "url": "splash.html",
         "width": 420,
         "height": 300,
