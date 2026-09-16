@@ -1513,18 +1513,45 @@ def docx_section_read(path: str) -> str:
     return "\n".join(view_lines(doc))
 
 
+def _parse_material_ranges(lines: str) -> list[tuple[int, int]]:
+    """素材注入的 lines 参数：逗号/顿号分隔的「起-止」行号区间列表（容 L/l 前缀，
+    如 "L133-L318,L400-L450"）。解析失败抛 ValueError（消息给人话、由调用方转
+    注入失败文案）。"""
+    out: list[tuple[int, int]] = []
+    for seg in re.split(r"[，,、]", (lines or "").strip()):
+        seg = seg.strip()
+        if not seg:
+            continue
+        a, _, b = seg.partition("-")
+        try:
+            lo, hi = int(a.strip().lstrip("Ll")), int(b.strip().lstrip("Ll"))
+        except ValueError:
+            raise ValueError(
+                "lines 须为「起-止」行号区间（如 133-318 或 L133-L318，多段用逗号分隔），"
+                "取自素材块的勾选区间/精读指引"
+            ) from None
+        if lo > hi:
+            lo, hi = hi, lo
+        out.append((lo, hi))
+    return out
+
+
 @tool
 @_tool_guard("注入")
-def docx_material_inject(block_id: str, dest: str) -> str:
-    """把写作素材块原样注入正文节 docx（元素级拷贝：段落/表格含合并单元格、图片零转写）。
+def docx_material_inject(block_id: str, dest: str, lines: str = "") -> str:
+    """把写作素材块注入正文节 docx（元素级拷贝：段落/表格含合并单元格、图片零转写）。
 
     用途：素材修订模式的底稿落地——检索（search_references）命中块后，用其块 id
-    （blk_ 开头）把历史章节整体拷进目标节文件，格式与内容保真，后续用
-    docx_section_revise 定向修订。注入内容不带修订标记（干净底稿，修订才标记）。
-    仅支持 docx 原件的素材（历史标书大头）；pdf 等原件无可注入元素。
+    （blk_ 开头）把素材拷进目标节文件，格式与内容保真，后续用 docx_section_revise
+    定向修订。**块是拷贝授权范围、不是注入原子**：默认整块注入；本节只需要块内
+    某些章节时传 lines 只注入对应行号区间（先 read_file 精读块 md 挑区间；同一
+    内容区间不要进两节，节间查重兜底）。注入内容不带修订标记（干净底稿，修订
+    才标记）。仅支持 docx 原件的素材（历史标书大头）；pdf 等原件无可注入元素。
     Args:
         block_id: 素材块 id（search_references 命中的引用键 mt:<fid>:b:<块id> 中的块 id）
         dest: 目标节文件（须已用 docx_section_create 创建）
+        lines: 可选，只注入块内这些行号区间（如 L133-L318，多段逗号分隔；须完全
+               落在块的勾选区间内——授权围栏；缺省=整块）
     """
     task_id = _task_id()
     if not task_id:
@@ -1564,35 +1591,62 @@ def docx_material_inject(block_id: str, dest: str) -> str:
             )
     if element_map is None:
         return "[注入失败] 素材元素映射不可用（解析未产出），请删除后重新上传该素材"
-    # 同块重复注入探测：注入是 append 语义，重复=内容翻倍。块特征 shingle 已大量
-    # 出现在节文件接受视角文本中=已注入过（硬拦；概率防线，注入后大幅改写会漏拦
-    # ——validate_body 的素材使用率另有兜底）
-    block_sections = (materials_lib.block_content(b["id"]) or {}).get("sections") or []
-    bs = _sig_shingles("\n".join(sec.get("text") or "" for sec in block_sections))
-    if len(bs) >= 5:
-        cur = "\n".join(section_text_lines(Document(str(dst))))
-        if len(bs & _sig_shingles(cur)) / len(bs) >= 0.6:
-            return (
-                f"[注入失败] 素材块《{b.get('title') or b['id']}》的内容已大量出现在 "
-                f"work/{rel}（已注入过）——注入是追加语义，重复注入会翻倍内容；"
-                "确需重新贴底稿请先重建节文件（docx_section_create 传 replace=true）"
-            )
-    ranges = b.get("ranges") or []  # db 层已反序列化为 [[s,e],…]
+    block_ranges = [
+        (int(r[0]), int(r[1]))
+        for r in (b.get("ranges") or [])
+        if isinstance(r, (list, tuple)) and len(r) == 2
+    ]
+    # lines → 有效区间（授权围栏：请求区间须完全落在块的勾选区间内——块=拷贝
+    # 授权范围，块外内容是用户没挑过的，机械拒绝比事后清理可靠）
+    try:
+        req = _parse_material_ranges(lines)
+    except ValueError as e:
+        return f"[注入失败] {e}"
+    if req:
+        for lo, hi in req:
+            if not any(s <= lo and hi <= e for s, e in block_ranges):
+                legal = "、".join(f"L{s}-L{e}" for s, e in block_ranges) or "（无）"
+                return (
+                    f"[注入失败] 行号区间 {lo}-{hi} 超出素材块《{b.get('title') or b['id']}》"
+                    f"的勾选范围（{legal}）——块是拷贝授权范围，只能在其勾选区间内挑选；"
+                    "需要块外内容请先在写作素材库调整勾选区间"
+                )
+        ranges = req
+    else:
+        ranges = block_ranges
     idx = sorted({
         el for el, s, e in element_map
-        if isinstance(el, int) and any(
-            isinstance(r, (list, tuple)) and len(r) == 2 and r[0] <= e and r[1] >= s
-            for r in ranges
-        )
+        if isinstance(el, int) and any(r[0] <= e and r[1] >= s for r in ranges)
     })
     if not idx:
-        return "[注入失败] 素材块区间未映射到任何 docx 元素（可能只勾选了空段落）"
+        scope_hint = f"（lines 区间 {req}）" if req else ""
+        return (
+            "[注入失败] 素材块区间未映射到任何 docx 元素（可能只勾选了空段落）"
+            + scope_hint
+        )
     with _docx_path_lock(dst):
         src = Document(str(src_path))
         dst_doc = Document(str(dst))
         body_style = _body_style(dst_doc)
         body_style_id = body_style.element.get(qn("w:styleId")) if body_style else None
         children = list(src.element.body.iterchildren())
+        # 同块/同区间重复注入探测：注入是 append 语义，重复=内容翻倍。基数=本次
+        # 实际选中元素的文本（子区间注入时按选中内容算，不误伤 disjoint 区间）；
+        # 已大量出现在目标节接受视角=已注入过（硬拦；概率防线，注入后大幅改写会
+        # 漏拦——validate_body 的素材使用率另有兜底）。dst 侧用 itertext 全文：
+        # 接受视图对表格截断，会稀释比值（docx_source_inject 同款口径）
+        incoming = _sig_shingles(
+            "".join("".join(children[i].itertext()) for i in idx if i < len(children))
+        )
+        if len(incoming) >= 5:
+            cur = _sig_shingles("".join(dst_doc.element.body.itertext()))
+            if len(incoming & cur) / len(incoming) >= 0.6:
+                scope = "整块" if not req else "、".join(f"L{lo}-L{hi}" for lo, hi in req)
+                return (
+                    f"[注入失败] 素材块《{b.get('title') or b['id']}》（{scope}）的内容已大量出现在 "
+                    f"work/{rel}（已注入过）——注入是追加语义，重复注入会翻倍内容；"
+                    "确需重新贴底稿请先重建节文件（docx_section_create 传 replace=true）"
+                )
         sect = dst_doc.element.body.find(qn("w:sectPr"))
         n_para = n_tbl = n_img = 0
         copied: list = []
@@ -1627,8 +1681,9 @@ def docx_material_inject(block_id: str, dest: str) -> str:
         db.mt_touch_blocks([b["id"]])
     except Exception:
         pass
+    scope = "整块" if not req else "、".join(f"L{lo}-L{hi}" for lo, hi in req)
     return (
-        f"[已注入] 《{b.get('title') or '素材块'}》→ work/{rel}：段落 {n_para} 个、"
+        f"[已注入] 《{b.get('title') or '素材块'}》（{scope}）→ work/{rel}：段落 {n_para} 个、"
         f"表格 {n_tbl} 张、图片 {n_img} 张（内容与格式逐字节取自素材原件，样式引用沿用源文档）"
         + (f"，随迁样式定义 {n_style} 个、编号定义 {n_num} 组" if n_style or n_num else "")
         + "\n下一步：docx_section_read 拿段落序号 → docx_section_revise 定向修订"

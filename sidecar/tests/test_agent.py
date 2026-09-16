@@ -255,6 +255,11 @@ def test_subagent_specs():
     # 素材复用纪律（2026-09-10 收口回归线）：派发已给块清单不再重检索素材库
     assert "直接采用" in body["system_prompt"]
     assert "不再调用 search_references" in body["system_prompt"]
+    # 注入粒度自选（2026-09-15 契约修正批）：块=拷贝授权范围非注入原子，写手
+    # 按节挑选整块或块内区间（lines），同一内容区间不得进两节
+    assert "拷贝授权范围" in body["system_prompt"]
+    assert "同一内容区间不得进两节" in body["system_prompt"]
+    assert "blk_…:L起-L止" in body["system_prompt"]  # validate 后缀写法教学在位
     assert "禁止调用 ask_human" in body["system_prompt"]
     # 读取瘦身纪律（2026-09-14 回读收敛批）：禁探测/禁编号/不回读
     assert "开局禁止 ls/glob 探测目录" in body["system_prompt"]

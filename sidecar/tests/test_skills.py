@@ -155,6 +155,25 @@ def test_tender_body_material_objection_channel():
         assert kw in detail, f"section-writing.md 缺少素材异议细则关键词：{kw}"
 
 
+def test_tender_body_material_column_range_contract():
+    """素材契约批（2026-09-15）锚点：块=拷贝授权范围非注入原子——同一块可派
+    多个节（各写手只注入自己需要的行号区间）、同一内容区间不得进两节、
+    同主题优先素材块（知识库只补证书图/核对/未覆盖事实）。旧「一块只派一节」
+    教学不得回流——它就是 BPM 大块只进总体架构节、流程各节零引用的病灶。"""
+    root = skills_source_dir() / "tender-body"
+    guide = (root / "references" / "guide-format.md").read_text(encoding="utf-8")
+    for kw in ("同一块可派多个节", "同一内容区间不得进两节", "优先素材块",
+               "块大不必拆块", "docx_material_inject 传 lines"):
+        assert kw in guide, f"guide-format.md 缺少素材列契约关键词：{kw}"
+    assert "一块只派一节" not in guide, \
+        "旧的「一块只派一节」教学不得回流——块=拷贝授权范围非注入原子"
+    detail = (root / "references" / "section-writing.md").read_text(encoding="utf-8")
+    for kw in ("拷贝授权范围", "blk_…:L起-L止"):
+        assert kw in detail, f"section-writing.md 缺少区间自选教学关键词：{kw}"
+    skill = (root / "SKILL.md").read_text(encoding="utf-8")
+    assert "拷贝授权范围非注入原子" in skill, "SKILL.md 缺少注入粒度自选教学"
+
+
 def test_tender_body_table_channel_teaching():
     """表格通道批（2026-09-14）教学锚点：五层教学落地——SKILL 指引期图示规划/
     第 2 步混排路由/收尾图示产出、section-writing 正向示例（模型模仿示例远胜

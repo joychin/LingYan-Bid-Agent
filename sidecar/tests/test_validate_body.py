@@ -81,7 +81,7 @@ def _write_body(env, rel: str, text: str):
 
 
 def _guide(bid: str) -> str:
-    # 块只出现在 3.1 行——同块多派在新校验下是 issue（一块只派一节）
+    # 块只出现在 3.1 行（同块多派 2026-09-15 契约修正起为弱提示，不再是 issue）
     return (
         "# 写作指引\n\n"
         "| 节 | 模式 | 依据 | 素材 | 缺口/备注 |\n"
@@ -161,17 +161,18 @@ def test_guide_without_directory_warns(env):
 
 
 def test_guide_same_block_two_rows_is_issue(env):
-    """同块多派=issue（2026-09-08 实测事故：同一 625 段素材块全文进了
-    「总体建设方案」与「系统集成方案」两节）——注入两节即正文逐字重复。"""
+    """同块多派=弱级提示（2026-09-15 契约修正：块=拷贝授权范围非注入原子，
+    同一块的不同区间派不同节合法——2026-09-08「同块全文进两节」事故的现防线
+    =各写手只注入自己需要的区间+节间查重，指引层降为提醒而非门禁）。"""
     _seed_directory(env)
     bid = _seed_block("园区方案.txt", "# 方案\n\n正文。\n", "服务方案", (3, 3))
     text = _guide(bid).replace("SCORE-02 | 【缺】", f"SCORE-02 | {bid}")
     _write_body(env, "body/写作指引.md", text)
     r = validate_body.invoke({"section": "body/写作指引.md"})
-    assert "[校验未通过]" in r
+    assert r.startswith("[校验通过]")  # 弱级提示不挡
     assert "素材块" in r and "《服务方案》" in r
     assert "同时派给 2 个节（3.1 项目理解与需求分析、3.2 总体设计方案）" in r
-    assert "拆成小范围块" in r  # 修复出路随行给出
+    assert "同一内容区间不得进两节" in r  # 区间纪律随行给出
 
 
 def test_guide_overlapping_blocks_on_same_file_warns(env):
@@ -235,6 +236,37 @@ def test_section_low_overlap_warns(env):
     r = validate_body.invoke({"section": "body/3.2 总体设计方案.md", "block_ids": [bid]})
     assert r.startswith("[校验通过]")  # 提示不是门禁
     assert "未实质使用素材" in r
+
+
+def test_section_block_id_range_suffix_usage(env):
+    """block_ids 支持 blk_…:L起-L止 后缀（2026-09-15 注入粒度自选批）：只注入了
+    块内区间时使用率按该区间算——整块口径会把子区间注入误报「未实质使用」；
+    裸 id 行为不变；后缀解析由校验侧宽松处理（授权围栏在注入工具侧硬拦）。"""
+    _seed_directory(env)
+    lines = [
+        f"第{i:02d}章：平台功能描述与实施方案详述，覆盖流程引擎、表单设计与业务模型能力第{i:02d}段展开说明。"
+        for i in range(1, 61)
+    ]
+    md = "# 平台介绍\n\n" + "\n".join(lines) + "\n"
+    # 块勾选全文（L1-L62）；节正文只承袭最后 3 段（第 58-60 章 → md L60-L62）
+    bid = _seed_block("平台方案.txt", md, "平台大块", (1, 62))
+    used = "\n".join(lines[57:])
+    _write_body(env, "body/3.2 总体设计方案.md", f"## 3.2 总体设计方案\n\n{used}\n")
+    # 裸 id：整块口径 → 3/60 低于阈值，报「未实质使用」（旧口径的误报形态）
+    r = validate_body.invoke({"section": "body/3.2 总体设计方案.md", "block_ids": [bid]})
+    assert r.startswith("[校验通过]")  # 提示不是门禁
+    assert "未实质使用素材" in r
+    # 后缀区间：按实际注入的区间算 → 不再误报
+    r2 = validate_body.invoke(
+        {"section": "body/3.2 总体设计方案.md", "block_ids": [f"{bid}:L60-L62"]}
+    )
+    assert r2.startswith("[校验通过]")
+    assert "未实质使用素材" not in r2
+    # 后缀不在块勾选范围内：校验侧宽松不崩（回落区间文本照算，提示与否随内容）
+    r3 = validate_body.invoke(
+        {"section": "body/3.2 总体设计方案.md", "block_ids": [f"{bid}:L1-L999"]}
+    )
+    assert r3.startswith("[校验通过]")
 
 
 def test_section_residue_warns_as_weak_signal(env):

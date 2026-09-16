@@ -3,14 +3,16 @@
 校验契约（真值 = tender-body SKILL.md + references/guide-format.md）：
 - 写作指引（body/写作指引.md）：需正文的目录叶子每节有行（多册键=「册名/标题」，
   与目录标题逐字一致）、模式列取值合法（素材修订/格式跟随/推理撰写，「+」组合；
-  非正文节点可「—」）、素材列块 id 可解析（blk_ 存在于素材库）、素材不跨节复用
-  （同块多派=issue——注入两节即逐字重复；不同块同素材文件区间重叠=弱级提示，
-  治历史重复建块）
+  非正文节点可「—」）、素材列块 id 可解析（blk_ 存在于素材库）、同块多派=弱级
+  提示（2026-09-15 契约修正：块=拷贝授权范围非注入原子，同一块的不同区间派
+  不同节合法——各写手只注入自己需要的区间，同一内容区间不进两节由节间查重
+  兜底；不同块同素材文件区间重叠=弱级提示，治历史重复建块）
 - 正文节（body/<册>/<节>.docx，兼容旧 .md）：待办批注清点（docx_comment_add 落的
   Word 批注——收尾汇报逐条点名）、内联占位【待补/待澄清】**判不过**（占位文字会进
   交付稿，正规落点是批注）、疑似残留（选用素材块所在文件名主干入扫描表——弱级来源，
   通用产品词可能误报，提示核对而非必须清零）、素材使用率（正文与选用
-  块的字符级 shingle 重叠率——「查到素材却凭空写」的机械防线，提示不是门禁）；
+  块的字符级 shingle 重叠率——「查到素材却凭空写」的机械防线，提示不是门禁；
+  block_ids 支持 blk_…:L起-L止 后缀，只注入了块内区间时按区间算）；
   docx 节按**接受全部修订后的终稿视角**取文本（评委最终看到的），批注/占位定位段落
   为 P 段号、表格行为 T{t}R{r}（与 docx_section_read 视图互查），md 节仍为 L 行号
   （旧任务兼容：md 无批注能力，内联占位维持清点不判不过）
@@ -101,24 +103,50 @@ def _overlap_ratio(section_text: str, block_text: str) -> float | None:
     return len(bs & _shingles(_normalize(section_text))) / len(bs)
 
 
+def _parse_id_ranges(tail: str) -> list[list[int]] | None:
+    """block_ids 后缀区间「L133-L318,L400-L450」→ [[s,e],…]；空/解析失败返回
+    None（回落整块——校验侧宽松，授权围栏在注入工具侧硬拦）。"""
+    out: list[list[int]] = []
+    for seg in re.split(r"[，,、]", (tail or "").strip()):
+        seg = seg.strip()
+        if not seg:
+            continue
+        a, _, b = seg.partition("-")
+        try:
+            lo, hi = int(a.strip().lstrip("Ll")), int(b.strip().lstrip("Ll"))
+        except ValueError:
+            return None
+        if lo > hi:
+            lo, hi = hi, lo
+        out.append([lo, hi])
+    return out or None
+
+
 def _block_text(bid: str) -> tuple[dict | None, str]:
-    """按块 id 取块行与切片全文（块失效返回 (None, "")）。"""
-    b = db.mt_get_block(bid)
+    """按块 id 取块行与切片全文（块失效返回 (None, "")）。
+
+    bid 支持「blk_xxx:L133-L318」后缀写法（2026-09-15 注入粒度自选批）：写手
+    只注入了块内区间时，使用率按该子区间算——整块算会把子区间注入误报
+    「未实质使用」；后缀解析失败回落整块。"""
+    base, sep, tail = bid.partition(":")
+    sub = _parse_id_ranges(tail) if sep else None
+    b = db.mt_get_block(base)
     if not b:
         return None, ""
     f = db.mt_get_file(b["file_id"])
     if not f:
         return b, ""
     md_path, _, _ = materials_lib.mt_parse_paths(f["file_name"])
-    return b, materials_lib._slice(md_path, b.get("ranges") or [])
+    return b, materials_lib._slice(md_path, sub or (b.get("ranges") or []))
 
 
 def _residue_names(block_ids: list[str]) -> list[str]:
-    """选用素材块所在文件名的主干词（≥4 字）——旧项目名最常见的藏身处。"""
+    """选用素材块所在文件名的主干词（≥4 字）——旧项目名最常见的藏身处。
+    容 blk 后缀写法（取「:」前的裸 id）。"""
     names: list[str] = []
     seen: set[str] = set()
     for bid in block_ids:
-        b = db.mt_get_block(bid)
+        b = db.mt_get_block(bid.partition(":")[0])
         if not b:
             continue
         f = db.mt_get_file(b["file_id"])
@@ -258,16 +286,18 @@ def _validate_guide(lines: list[str], task_id: str) -> tuple[list[str], list[str
                     "请列具体字段名（如「公司全称、注册地址、成立时间、法定代表人姓名」）"
                 )
 
-    # 同块多派：同一素材块出现在多行 → 注入两节=正文逐字重复（2026-09-08 实测事故：
-    # 同一 625 段素材块全文进了两个节）。issue 级——与 docx_material_inject 的
-    # 同文件重复拦截同语义，格式跟随不用素材块、推理撰写不该挂块，无正当场景
+    # 同块多派（2026-09-15 契约修正：块=拷贝授权范围非注入原子，同一块的不同区间
+    # 派给不同节是合法用法——BPM 平台大块喂多个功能节的正道）。弱级提示——写手
+    # 各注入各的区间，真正要防的是「同一内容区间进两节」，那由节间查重（内容级）
+    # 兜底；此提示只提醒派发说明里带区间指引
     for bid, keys in row_blocks.items():
         if len(keys) > 1:
             title = (block_cache.get(bid) or {}).get("title") or bid
-            issues.append(
+            warnings.append(
                 f"素材块 {bid}《{title}》同时派给 {len(keys)} 个节（{'、'.join(keys)}）——"
-                "同一块注入两节会造成正文逐字重复：素材库按行号拆成小范围块一节一块，"
-                "或只保留一节用该块、其余节改推理撰写"
+                "同一块可多节共用，但各写手只注入自己需要的行号区间"
+                "（docx_material_inject 传 lines），同一内容区间不得进两节（节间查重兜底）；"
+                "派发说明/备注列写明各节取哪些章节"
             )
     # 马甲块：不同块 id 同素材文件且区间有交集、派给不同节（弱级——历史重复建块
     # 不会被失效检查发现，点名核对）
@@ -385,7 +415,8 @@ def _validate_section(
         if ratio < _OVERLAP_HINT:
             warnings.append(
                 f"素材块「{b.get('title') or bid}」重叠率 {ratio:.0%}——未实质使用素材"
-                f"（素材修订=先把块贴进底稿再改写适配，不是看着参考另写一篇）"
+                f"（素材修订=先把选用的区间贴进底稿再改写适配，不是看着参考另写一篇；"
+                "只注入了块内区间时 block_ids 写 blk_…:L起-L止 按区间算）"
             )
     return issues, warnings, notes
 
@@ -565,8 +596,9 @@ def validate_body(section: str, block_ids: list[str] | None = None) -> str:
     """机器校验正文产物：写作指引表 / 单节正文 / body 全局承诺比对+节间查重。
 
     写完指引后传 section="body/写作指引.md" 校验表完整性（每节有行/模式合法/
-    素材块可解析/素材不跨节复用——同块派多节直接判不过：注入两节=正文逐字重复，
-    拆块或只留一节用块）；写完一节正文后传该节路径与使用计划选用的素材块 id
+    素材块可解析/同块多派弱提示——块是拷贝授权范围，同一块的不同区间可派不同节，
+    各写手只注入自己需要的区间、同一内容区间不进两节，节间查重兜底）；写完一节
+    正文后传该节路径与使用计划选用的素材块 id
     （docx 节按接受全部修订后的终稿视角校验，docx_comment_add 落的待办批注清点进
     收尾点名、内联占位判不过；定位段落为 P 段号、表格行为 T 行号；旧 .md 节兼容）；
     整本收尾传 section="body"（目录）跑全局承诺比对与节间查重——承诺清单每个值
@@ -578,7 +610,8 @@ def validate_body(section: str, block_ids: list[str] | None = None) -> str:
         section: work/ 下的相对路径（如 body/写作指引.md、body/技术部分/3.1
                  项目理解.docx）；传 "body" 触发全局承诺比对
         block_ids: 本节使用计划选用的素材块 id（blk_…，search_references 的
-                   evidence 里带；校验指引与全局模式时忽略）
+                   evidence 里带；只注入了块内区间时写 blk_…:L起-L止 按区间算
+                   使用率；校验指引与全局模式时忽略）
     """
     try:
         ctx = runctx.current_run()

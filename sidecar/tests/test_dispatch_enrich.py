@@ -343,8 +343,9 @@ def test_rich_description_gets_path_anchor(env):
 
 
 def test_material_card_resolved_from_guide(env):
-    """素材列 blk id → 逐块名片（标题/字数/来源文件/备注）：写手据此直接使用，
-    不再每节重检索素材库（指引期检索的内容层复用）。"""
+    """素材列 blk id → 逐块名片（标题/字数/来源文件/区间/备注）：写手据此直接
+    使用，不再每节重检索素材库（指引期检索的内容层复用）；区间随名片下发——
+    块是拷贝授权范围，写手据此挑本节要注入的行号区间。"""
     from app import db
 
     f = db.mt_insert_file("历史标书-某政务项目.docx", file_hash="h_mt1")
@@ -363,10 +364,11 @@ def test_material_card_resolved_from_guide(env):
     tid = _seed(env)
     out = build_enriched_description("写 3.2 总体设计", tid)
     assert out is not None
-    assert "可用素材块（直接据此列使用计划并注入，无需再检索）：" in out
+    assert "可用素材块（拷贝授权范围：据此列使用计划，按需整块或挑块内区间注入，无需再检索）：" in out
     assert "《运维服务方案》（约 1,200 字）" in out
     assert "来源文件：历史标书-某政务项目.docx" in out
     assert "id：blk_abc123def456" in out
+    assert "区间：L10-L80" in out  # 区间随名片——写手挑 lines 的依据
     assert "备注：通用运维章节，改项目名即可" in out
     assert "SCORE-" not in _data_part(out)  # 派发契约：编号零出现
 
@@ -382,7 +384,7 @@ def test_material_section_absent_or_stale(env):
     # 3.2 行素材列=blk_abc123def456 但素材库无此块（未 seed）：失效提示
     out = build_enriched_description("写 3.2 总体设计", tid)
     assert out is not None
-    assert "可用素材块（直接据此列使用计划并注入，无需再检索）：" in out
+    assert "可用素材块（拷贝授权范围：据此列使用计划，按需整块或挑块内区间注入，无需再检索）：" in out
     assert "- blk_abc123def456（已失效——请自行检索确认）" in out
 
 

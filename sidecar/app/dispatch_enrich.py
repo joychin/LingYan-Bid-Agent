@@ -45,7 +45,7 @@ from .tools import body_contract, docx_ops
 
 # 注意：assemble_tender 在 tools/__init__ 里被同名 @tool 对象遮蔽，私有函数须走模块路径
 from .tools.assemble_tender import _norm_id
-from .tools.search_knowledge import _mt_image_count
+from .tools.search_knowledge import _mt_image_count, _mt_ranges_str
 from .tools.validate_analysis import _iter_tables
 from .tools.validate_body import _parse_guide_rows
 
@@ -238,11 +238,13 @@ def _sibling_lines(
 
 
 def _material_lines(mat: str) -> list[str] | None:
-    """素材列 blk id → 逐块名片（标题/字数/含图/来源文件/备注）。
+    """素材列 blk id → 逐块名片（标题/字数/含图/区间/来源文件/备注）。
 
     指引期检索的内容层复用：此前派发只传 id 字符串，写手不知块内是什么、
     被迫每节再 search_references 一遍（2026-09-10 收口——名片够列使用计划，
-    全文走 docx_material_inject 注入后经读视图可见）。素材列无任何 blk id
+    全文走 docx_material_inject 注入后经读视图可见）。区间随名片下发——
+    块是拷贝授权范围非注入原子，写手据此 read_file 精读后挑本节要用的
+    行号区间（docx_material_inject 传 lines）。素材列无任何 blk id
     （【缺】/—）返回 None，调用方维持旧行；查不到的 id 以失效提示降级
     （写手自行检索）。来源文件名必须随行——改写后 check_name_residue 扫
     旧机构名的 old_names 取自它。
@@ -262,7 +264,12 @@ def _material_lines(mat: str) -> list[str] | None:
         src = f["file_name"] if f else "（来源文件已删除）"
         img = _mt_image_count(src, b.get("ranges")) if f else 0
         img_bit = f"，含图 {img} 处" if img else ""
-        line = f"- 《{b['title']}》（约 {b.get('chars') or 0:,} 字{img_bit}）｜来源文件：{src}｜id：{bid}"
+        rng = _mt_ranges_str(b.get("ranges")) if f else ""
+        rng_bit = f"｜区间：{rng}" if rng else ""
+        line = (
+            f"- 《{b['title']}》（约 {b.get('chars') or 0:,} 字{img_bit}）"
+            f"{rng_bit}｜来源文件：{src}｜id：{bid}"
+        )
         if b.get("note"):
             line += f"｜备注：{b['note']}"
         out.append(line)
@@ -494,7 +501,9 @@ def _section_context_lines(task_id: str, target: SectionTarget) -> tuple[str, li
             logger.debug("派发拼装：素材块名片解析失败，降级 id 原文", exc_info=True)
             mat_lines = None
         if mat_lines:
-            lines.append("可用素材块（直接据此列使用计划并注入，无需再检索）：")
+            lines.append(
+                "可用素材块（拷贝授权范围：据此列使用计划，按需整块或挑块内区间注入，无需再检索）："
+            )
             lines.extend(mat_lines)
         else:
             lines.append(f"可用素材块：{mat}")

@@ -118,7 +118,8 @@ def test_references_hits_blocks_with_note(tmp_path, monkeypatch):
 
     out = search_references.invoke({"query": "运维 承诺"})
     assert "写作素材命中" in out
-    assert "禁止直接沿用" in out
+    assert "可拷贝内容的授权范围" in out       # 契约修正：块=拷贝底稿（非仅供写法参考）
+    assert "重新核对" in out and "不得沿用历史值" in out  # 数字纪律保留
     assert "《运维 SLA 章节块》" in out        # 块标题
     assert "政务云运维，写法成熟" in out       # 备注
     assert "check_name_residue" in out         # 拷贝指引

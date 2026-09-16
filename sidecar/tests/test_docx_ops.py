@@ -418,6 +418,76 @@ def test_material_inject_block_after_table(env, tmp_path):
     assert len(chk.tables) == 0  # 只注入勾选段，表格不带
 
 
+# ---------- 素材注入：lines 区间自选（2026-09-15 契约修正批） ----------
+
+
+def test_material_inject_lines_subset(env):
+    """lines=块内行号区间：只注入该区间元素（块=拷贝授权范围非注入原子——
+    大块只取本节相关章节）；区间外标题/表格/图片不带，成功摘要带区间。"""
+    md_lines = mlib.mt_parse_paths("历史运维方案.docx")[0].read_text(encoding="utf-8").splitlines()
+    para_ln = next(i for i, ln in enumerate(md_lines, 1) if "北京华信" in ln)
+    section = _make_section()
+    r = docx_material_inject.invoke(
+        {"block_id": env["block"]["id"], "dest": section, "lines": f"L{para_ln}-L{para_ln}"}
+    )
+    assert r.startswith("[已注入]"), r
+    assert f"（L{para_ln}-L{para_ln}）" in r  # 摘要带区间 scope
+    chk = Document(str(_abs(env, section)))
+    texts = "\n".join(p.text for p in chk.paragraphs)
+    assert "北京华信" in texts                  # 区间内段落注入
+    assert "运维服务方案" not in texts          # 区间外标题不带
+    assert len(chk.tables) == 0                 # 区间外表格不带
+    assert not chk.element.body.findall(".//" + qn("a:blip"))  # 区间外图片不带
+
+
+def test_material_inject_lines_fence(env):
+    """授权围栏：lines 请求区间须完全落在块勾选范围内——块是用户授权的拷贝
+    范围，块外内容机械拒绝（报错带块的合法区间）；格式错给人话。"""
+    md_lines = mlib.mt_parse_paths("历史运维方案.docx")[0].read_text(encoding="utf-8").splitlines()
+    n = len(md_lines)
+    para_ln = next(i for i, ln in enumerate(md_lines, 1) if "北京华信" in ln)
+    narrow = mlib.create_block(env["file"]["id"], "窄块", "", ranges=[[para_ln, para_ln + 1]])
+    section = _make_section()
+    # 完全在勾选范围外
+    r = docx_material_inject.invoke(
+        {"block_id": narrow["id"], "dest": section, "lines": f"L{n}-L{n}"}
+    )
+    assert r.startswith("[注入失败]") and "超出素材块《窄块》" in r
+    assert f"L{para_ln}-L{para_ln + 1}" in r  # 合法区间随报错给出
+    # 跨出勾选边界（部分越界同样拒）
+    r = docx_material_inject.invoke(
+        {"block_id": narrow["id"], "dest": section, "lines": f"L{para_ln - 1}-L{para_ln}"}
+    )
+    assert r.startswith("[注入失败]") and "超出素材块" in r
+    # 格式错误
+    r = docx_material_inject.invoke({"block_id": narrow["id"], "dest": section, "lines": "第三段"})
+    assert r.startswith("[注入失败]") and "lines 须为" in r
+
+
+def test_material_inject_lines_multi_range_and_dup(env):
+    """多区间一次注入（段落+表格）；同区间二次注入被拦（防重基数=本次选中
+    元素、摘要带区间），另一区间不受牵连——同块不同区间进不同内容的正道。"""
+    md_lines = mlib.mt_parse_paths("历史运维方案.docx")[0].read_text(encoding="utf-8").splitlines()
+    para_ln = next(i for i, ln in enumerate(md_lines, 1) if "北京华信" in ln)
+    tbl_lns = [i for i, ln in enumerate(md_lines, 1) if "|" in ln]
+    section = _make_section()
+    # 多区间（中文逗号分隔也认）：正文段 + 表格
+    r = docx_material_inject.invoke(
+        {"block_id": env["block"]["id"], "dest": section,
+         "lines": f"L{para_ln}-L{para_ln}，L{tbl_lns[0]}-L{tbl_lns[-1]}"}
+    )
+    assert r.startswith("[已注入]") and "表格 1 张" in r, r
+    chk = Document(str(_abs(env, section)))
+    assert "北京华信" in "\n".join(p.text for p in chk.paragraphs)
+    assert len(chk.tables) == 1
+    # 同区间二次注入 → 拦（追加语义，重复=翻倍）
+    r2 = docx_material_inject.invoke(
+        {"block_id": env["block"]["id"], "dest": section, "lines": f"L{para_ln}-L{para_ln}"}
+    )
+    assert r2.startswith("[注入失败]") and "已注入过" in r2
+    assert f"（L{para_ln}-L{para_ln}）" in r2
+
+
 def test_source_inject_rejects(env):
     from app.artifact_store import sources_dir
 
