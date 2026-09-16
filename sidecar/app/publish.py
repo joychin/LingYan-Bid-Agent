@@ -276,6 +276,7 @@ def publish_file_artifact(
                 return {
                     **(artifact_store.read_meta(aid, existing) or {}),
                     "_unchanged": True,
+                    "_seq": existing.get("content_seq"),
                 }
             # 新 docx 先落包内暂存名，簿记全部完成后最后一步原子换装——中途任何
             # 一步失败，包内保持完整旧态（旧 docx + 旧 content.json），下次重跑
@@ -311,7 +312,12 @@ def publish_file_artifact(
                 staging.unlink(missing_ok=True)
             logger.info("artifact 文件更新 %s (%s) seq=%s", aid, contract_key, existing["content_seq"] + 1)
             deliverables.note("artifact", artifact_id=aid, display_name=name)
-            return artifact_store.read_meta(aid, existing) or {}
+            # _seq（与索引 content_seq 同源）：docx_ops 工具结果文案用——「第 N 版」
+            # 把「真发了新版本」与「内容未变未重发」两种结局摆到模型眼前，防总结混写
+            return {
+                **(artifact_store.read_meta(aid, existing) or {}),
+                "_seq": existing["content_seq"] + 1,
+            }
 
         aid = artifact_store.new_artifact_id()
         meta = {
@@ -361,4 +367,4 @@ def publish_file_artifact(
         )
         logger.info("artifact 文件发布 %s (%s)", aid, contract_key)
         deliverables.note("artifact", artifact_id=aid, display_name=name)
-        return meta
+        return {**meta, "_seq": 1}

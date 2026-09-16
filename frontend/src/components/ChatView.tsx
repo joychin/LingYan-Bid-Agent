@@ -24,7 +24,7 @@ import { TextShimmer } from '@/components/ai/TextShimmer'
 import { toolDisplayName } from '@/components/ai/toolDisplay'
 import { Message as WMessage } from '@/components/workspace/Message'
 import { ArtifactCard } from '@/components/ArtifactCard'
-import { placeArtifacts } from '@/lib/artifactPlacement'
+import { filterConversationArtifacts, placeArtifacts } from '@/lib/artifactPlacement'
 import { ASSISTANT_NAME } from '@/lib/brand'
 import { capStreamingText } from '@/lib/streamTextCap'
 import { WelcomeScreen } from '@/components/WelcomeScreen'
@@ -359,10 +359,17 @@ export function ChatView({
   )
 
   // memo 化 MessageList 的前提：三个 prop 引用都必须稳定（流式 token 期间 messages
-  // 来自 react-query 缓存不变、onOpenArtifact 是 setState setter、本值 useMemo）
+  // 来自 react-query 缓存不变、onOpenArtifact 是 setState setter、本值 useMemo）。
+  // 口径见 filterConversationArtifacts：首发会话 + 本会话刚发布过的产物（provenance
+  // 冻结在首发会话，换会话重发的产物靠 source.run_id 命中）
   const convArtifacts = useMemo(
-    () => (convId ? artifacts.filter((a) => a.conversation_id === convId) : []),
-    [artifacts, convId],
+    () =>
+      filterConversationArtifacts(
+        artifacts,
+        convId,
+        messages.map((m) => m.run_id).filter((r): r is string => r != null),
+      ),
+    [artifacts, convId, messages],
   )
   // ---- 长会话尾部窗口（INP：切换会话的冷挂载从全量降到尾部）----
   // 首屏只渲染最近一个窗口，「加载更早」逐步扩窗；ChatView 以 convId 为 key 挂载

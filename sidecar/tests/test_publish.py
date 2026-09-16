@@ -295,6 +295,7 @@ def test_publish_volume_creates_package_with_docx(env):
     aid = m["artifact_id"]
 
     assert m["kind"] == "tender.volume"
+    assert m["_seq"] == 1  # 工具文案用版本号（与索引 content_seq 同源）
     assert m["content_type"].startswith("application/vnd.openxmlformats")
     # 包内唯一 docx 与源字节一致；content.json 是机器元信息（schema 校验对象）
     files = artifact_store.package_files(aid, m)
@@ -324,6 +325,7 @@ def test_publish_volume_zip_equal_noop_and_change_publishes(env):
     doc.save(src)  # 同内容重保存——字节必变（zip 时间戳），CRC 不变
     m2 = _pub_volume(env, src, "技术册", run_id="r_2")
     assert m2.get("_unchanged") is True
+    assert m2["_seq"] == 1  # 未重发也回当前版本号（文案「仍是第 1 版」）
     row = db.get_artifact_index(m1["artifact_id"])
     assert (row["content_seq"], row["last_run_id"], row["emitted"]) == (1, "r_1", 1)
     assert db.pending_emit("r_2") == []
@@ -334,6 +336,7 @@ def test_publish_volume_zip_equal_noop_and_change_publishes(env):
     m3 = _pub_volume(env, src, "技术册", run_id="r_3")
     assert m3["artifact_id"] == m1["artifact_id"]
     assert "_unchanged" not in m3
+    assert m3["_seq"] == 2  # 覆盖发布回新版本号
     assert db.get_artifact_index(m1["artifact_id"])["content_seq"] == 2
     assert db.pending_emit("r_3") != []
     assert artifact_store.package_files(m1["artifact_id"], m1)[0].read_bytes() == src.read_bytes()

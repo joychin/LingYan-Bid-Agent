@@ -3077,9 +3077,14 @@ def _publish_volume(task_id: str, dst: Path, vol: str, merged: int, images: int,
             task_id=task_id,
             conversation_id=ctx.conversation_id if ctx else None,
         )
+        # 两种结局带版本号（_seq 与索引 content_seq 同源）：2026-09-16 实测模型把
+        # 「已发布新版本」总结成「与上一版一致，不需要重复发布」——事实与文案相反，
+        # 版本号把「发了第 N 版」与「仍是第 N 版未重发」钉成两个一眼可辨的结局
+        seq = meta.get("_seq")
+        ver = f"（第 {seq} 版）" if isinstance(seq, int) else ""
         if meta.get("_unchanged"):
-            return f"{vol}：整本内容与已发布版本一致，未重复发布（{meta.get('artifact_id')}）"
-        return f"{vol}：已发布为整本标书成果 {meta.get('artifact_id')}（聊天产物卡可预览/下载）"
+            return f"{vol}：内容与已发布版本一致{ver}，未重复发布（{meta.get('artifact_id')}）"
+        return f"{vol}：已发布为整本标书成果{ver} {meta.get('artifact_id')}（聊天产物卡可预览/下载）"
     except Exception as e:
         return f"⚠️ {vol}：整本产物发布失败（{type(e).__name__}: {e}）——文件仍在 work/body/，重新合册可补发布"
 

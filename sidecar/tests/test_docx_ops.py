@@ -1130,6 +1130,7 @@ def test_assemble_tree_order_headings_and_missing(env):
     from app import db as _adb
 
     assert "已发布为整本标书成果" in r
+    assert "（第 1 版）" in r  # 版本号钉结局：真发新版本 vs 未重发（2026-09-16）
     vrows = [r_ for r_ in _adb.list_artifact_index() if r_["kind"] == "tender.volume"]
     assert len(vrows) == 1
     assert vrows[0]["display_name"] == "技术部分"
@@ -1154,6 +1155,7 @@ def test_assemble_tree_order_headings_and_missing(env):
     r2 = docx_assemble_volume.invoke({})
     assert "个节文件未并入" not in r2
     assert "未重复发布" in r2
+    assert "（第 1 版）" in r2  # 未重发分支同样带当前版本号
     assert _adb.get_artifact_index(vrows[0]["artifact_id"])["content_seq"] == 1
 
 
