@@ -37,7 +37,12 @@ from ..artifact_store import work_dir
 from ..knowledge import materials_lib
 from . import body_contract
 from .check_residue import re_split_name, scan_residue
-from .docx_ops import section_comments_labeled, section_lines_labeled, section_text_lines
+from .docx_ops import (
+    _heading_style_ids,
+    section_comments_labeled,
+    section_lines_labeled,
+    section_text_lines,
+)
 from .validate_analysis import _iter_tables
 
 _BLOCK_ID_RE = re.compile(r"blk_[0-9a-f]{12}")
@@ -660,6 +665,40 @@ def validate_body(section: str, block_ids: list[str] | None = None) -> str:
                     f"〔大纲级别〕{len(outline_paras)} 段直挂大纲级别（{shown}）——"
                     "历史拷贝残留，Word 导航窗格会出现树外条目（合册会自动摘出）；"
                     "如需正文层级请改用标题样式"
+                )
+            # 标题段自动编号清点（提示级，2026-09-16 批）：素材拷入的标题段带
+            # 多级自动编号（直挂 numPr 或标题样式自带 numPr），整本里会按素材
+            # 内部层级渲染（实测「1.1.2.4.1」）；新拷贝已被注入/合册两层剥除，
+            # 命中多为历史残留——只清点不判不过，写手无需重建段落
+            heading_ids = _heading_style_ids(doc)
+            numbered_style_ids: set[str] = set()
+            for sid in heading_ids:
+                style_el = doc.styles.element.find(
+                    f'{qn("w:style")}[@{qn("w:styleId")}="{sid}"]'
+                )
+                sppr = style_el.find(qn("w:pPr")) if style_el is not None else None
+                if sppr is not None and sppr.find(qn("w:numPr")) is not None:
+                    numbered_style_ids.add(sid)
+
+            def _para_numbered(para) -> bool:
+                ppr = para._p.find(qn("w:pPr"))
+                if ppr is None:
+                    return False
+                pstyle = ppr.find(qn("w:pStyle"))
+                sid = pstyle.get(qn("w:val")) if pstyle is not None else None
+                if ppr.find(qn("w:numPr")) is not None:
+                    return sid in heading_ids
+                return sid in numbered_style_ids
+
+            numbered_paras = [
+                str(i) for i, para in enumerate(doc.paragraphs, 1) if _para_numbered(para)
+            ]
+            if numbered_paras:
+                shown = "、".join(f"P{x}" for x in numbered_paras[:6]) + ("…" if len(numbered_paras) > 6 else "")
+                notes.append(
+                    f"〔自动编号〕{len(numbered_paras)} 个标题段带自动编号（{shown}）——"
+                    "素材拷入残留，整本会渲染素材内部层级号（合册会自动剥除）；"
+                    "无需处理，继续写作即可"
                 )
         elif p.suffix == ".md":
             lines = p.read_text(encoding="utf-8", errors="replace").splitlines()

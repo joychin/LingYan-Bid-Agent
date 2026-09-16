@@ -513,20 +513,25 @@ def _accept_revisions_inplace(el) -> bool:
     return True
 
 
+def _style_is_heading_like(style_el) -> bool:
+    """样式是否「标题类」（`_heading_style_ids` 与样式迁移剥编号共用判据）：
+    段落样式名含 heading/标题（大小写不敏感，改名变体 heading 5 2 天然命中）、
+    或样式定义自带 outlineLvl（素材迁入的自定义标题样式多带）。"""
+    name_el = style_el.find(qn("w:name"))
+    name = (name_el.get(qn("w:val")) or "").lower() if name_el is not None else ""
+    ppr = style_el.find(qn("w:pPr"))
+    has_outline = ppr is not None and ppr.find(qn("w:outlineLvl")) is not None
+    return "heading" in name or "标题" in name or has_outline
+
+
 def _heading_style_ids(doc: Document) -> set[str]:
-    """样式表里大纲标题样式的 styleId 集：段落样式名含 heading/标题、或样式
-    定义自带 outlineLvl（素材迁入的自定义标题样式多带）。Word 导航窗格与
-    自动目录按样式的大纲层级取条目。"""
+    """样式表里大纲标题样式的 styleId 集（判据见 `_style_is_heading_like`）。
+    Word 导航窗格与自动目录按样式的大纲层级取条目。"""
     ids: set[str] = set()
     for style in doc.styles:
         if style.type != WD_STYLE_TYPE.PARAGRAPH or not style.style_id:
             continue
-        el = style.element
-        name_el = el.find(qn("w:name"))
-        name = (name_el.get(qn("w:val")) or "").lower() if name_el is not None else ""
-        ppr = el.find(qn("w:pPr"))
-        has_outline = ppr is not None and ppr.find(qn("w:outlineLvl")) is not None
-        if "heading" in name or "标题" in name or has_outline:
+        if _style_is_heading_like(style.element):
             ids.add(style.style_id)
     return ids
 
@@ -578,6 +583,96 @@ def _demote_extra_headings(doc: Document, elements) -> int:
                 ppr.append(node)
             demoted += 1
     return demoted
+
+
+_HEAD_LEVEL_NAME = re.compile(r"(?:heading|标题)\s*([1-9])", re.I)
+
+
+def _src_heading_level(src_doc: Document, sid: str) -> int:
+    """源标题样式的标题级别：样式名 heading N/标题 N（含改名变体 "heading 5 2"）
+    取首现 N；无名次取样式 outlineLvl+1；都无按 2（节内小标题最常见级）。"""
+    style = _find_by_id(src_doc.styles.element, "w:style", "w:styleId", sid)
+    if style is None:
+        return 2
+    name_el = style.find(qn("w:name"))
+    m = _HEAD_LEVEL_NAME.search((name_el.get(qn("w:val")) or "") if name_el is not None else "")
+    if m:
+        return max(1, min(int(m.group(1)), 9))
+    ppr = style.find(qn("w:pPr"))
+    ol = ppr.find(qn("w:outlineLvl")) if ppr is not None else None
+    if ol is not None:
+        try:
+            return max(1, min(int(ol.get(qn("w:val")) or "1") + 1, 9))
+        except ValueError:
+            pass
+    return 2
+
+
+def _restyle_subhead_levels(out: Document, elements, src_doc: Document,
+                            heading_ids: set[str], depth: int,
+                            scheme: str, section_prefix: str) -> int:
+    """整本侧节内小标题按树深度降级（2026-09-16 拍板）：拷入面的标题段必然全是
+    节内小标题（节文件自身标题段拷贝前已按裸名剥掉、树发标题是合册另一条通道）
+    ——目标级 = clamp(树深度 + 源级 − 1, 2, 9)，深度 2 节下的 H2→H3、H3→H4，
+    章直接挂内容的叶子（深度 1）维持 H2 观感。改挂输出文档内建 Heading N：
+    与树发骨架标题同族、层级观感一致；`_demote_extra_headings` 随后照旧钉
+    outlineLvl=9——导航窗格/目录域不收录不变，只有视觉层级下沉。须在
+    `_merge_missing_styles` 之前调：改挂后素材标题样式不再被引用、整本不迁入。
+    源级解析不到目标样式（版式缺该级标题，极端情形）保持原样不硬造。
+
+    同批：降级的同时**程序拼编号**进标题文本（2026-09-16 二批，用户拍板「编号
+    是重复工作不花 token」）——H3/H4 按节内出现顺序编：chapter/decimal 接续节号
+    （5.1.1 / 5.1.1.1，节内计数器每叶重置）、gov 接续中文层级（1. / （1））；
+    深度 1 章叶与 none 格式不编（章叶无节号可嵌套）、H5+ 不编（防素材深标题编出
+    5.1.1.1.1.1 式深号）、文字已带编号形态（_SELF_NUMBERED）不编防双拼——
+    09-10「小标题不自动编号」拍板的修订：当年两个否决前提（程序分不清小标题/
+    不知道树位置）已被降级批解决，「模型自编必错」依然成立故写手仍零参与。"""
+    if not elements or not heading_ids:
+        return 0
+    level_cache: dict[str, int] = {}
+    target_cache: dict[int, str | None] = {}
+    number_on = scheme != "none" and bool(section_prefix) and depth >= 2
+    c3 = c4 = 0
+    moved = 0
+    for el in elements:
+        for p in ([el] if el.tag == qn("w:p") else []) + el.findall(".//" + qn("w:p")):
+            ppr = p.find(qn("w:pPr"))
+            ps = ppr.find(qn("w:pStyle")) if ppr is not None else None
+            sid = ps.get(qn("w:val")) if ps is not None else None
+            if sid not in heading_ids:
+                continue
+            if sid not in level_cache:
+                level_cache[sid] = _src_heading_level(src_doc, sid)
+            target = max(2, min(depth + level_cache[sid] - 1, 9))
+            if target not in target_cache:
+                tid = _style_id_by_name(out, f"heading {target}")
+                target_cache[target] = tid or _style_id_by_name(out, f"标题 {target}")
+            tid = target_cache[target]
+            if not tid:
+                continue  # 版式缺该级标题：保持原样
+            ps.set(qn("w:val"), tid)
+            moved += 1
+            if not (number_on and target in (3, 4)):
+                continue
+            texts = [t for t in p.iter(qn("w:t")) if (t.text or "").strip()]
+            if not texts or _SELF_NUMBERED.match(texts[0].text.lstrip()):
+                continue  # 空标题段 / 文字自带编号形态：不编（防双拼）
+            if target == 3:
+                c3 += 1
+                c4 = 0
+                num = (
+                    f"{c3}." if scheme == "gov"
+                    else f"{section_prefix.rstrip()}.{c3} "
+                )
+            else:
+                c3 = c3 or 1  # 首个就是 H4（素材跳级）：垫 1 防编出 .0.x
+                c4 += 1
+                num = (
+                    f"（{c4}）" if scheme == "gov"
+                    else f"{section_prefix.rstrip()}.{c3}.{c4} "
+                )
+            texts[0].text = num + texts[0].text.lstrip()
+    return moved
 
 
 _TOC_TAIL_PAGE = re.compile(r"[.·．…]{2,}\s*\d+\s*$")
@@ -722,21 +817,36 @@ def _strip_inner_sectpr(el) -> None:
         ppr.remove(sect)
 
 
-def _strip_copy_residue(el) -> None:
-    """拷入卫生（2026-09-13 目录乱号批）：剥段落直接挂的大纲级别与 Word 内部书签。
+def _strip_copy_residue(el, heading_ids: set[str] | None = None) -> None:
+    """拷入卫生（2026-09-13 目录乱号批；2026-09-16 批扩标题编号剥除）：剥段落
+    直接挂的大纲级别与 Word 内部书签；标题类段落整棵剥自动编号。
 
     大纲级别是导航元数据不是版式——「保真拷贝」不含它：招标格式件/素材段落带着
     直挂 outlineLvl 进来，轻则导航出现树外条目，重则写手在该段里改写文本后整段
     正文混进大纲（实测 P469 形态）。节内小标题要走 Heading 样式（视图可见）。
     `_` 前缀书签（_Toc/_Ref…）指向源文档自己的目录/交叉引用域，我们的文档没有
     这些域——死引用留着无意义，同段拷进多个节还会造成书签 id 重复（Word 严格
-    校验可能弹修复）；普通书签保留。"""
+    校验可能弹修复）；普通书签保留。
+    编号剥除（heading_ids 传入时生效）：标题类段落（pStyle∈源文档标题样式集，
+    或直挂 outlineLvl）直挂的 numPr 整棵剥——素材多级编号标题拷进节/整本会按
+    素材内部层级渲染（实测 6.1 下「1.1.2.4.1 数据项定义」）；迁入样式侧的编号
+    在 `_merge_missing_styles` 同步剥。正文列表（非标题段）不动，保真如旧——
+    「节内小标题不自动编号」铁则从「合册不加号」扩展到「拷入的号也摘掉」。"""
     paras = [el] if el.tag == qn("w:p") else []
     paras += el.findall(".//" + qn("w:p"))
     for p in paras:
         ppr = p.find(qn("w:pPr"))
         if ppr is None:
             continue
+        direct_outline = ppr.find(qn("w:outlineLvl")) is not None
+        if heading_ids is not None:
+            pstyle = ppr.find(qn("w:pStyle"))
+            if direct_outline or (
+                pstyle is not None
+                and (pstyle.get(qn("w:val")) or "") in heading_ids
+            ):
+                for numpr in ppr.findall(qn("w:numPr")):
+                    ppr.remove(numpr)
         for ol in ppr.findall(qn("w:outlineLvl")):
             ppr.remove(ol)
     starts = [
@@ -1112,6 +1222,12 @@ def _merge_missing_styles(src_doc: Document, dst_doc: Document, elements) -> tup
       （"name 2"、"name 3"…直到唯一）——Word/WPS/LibreOffice 对样式存在按名
       解析路径，同名并存会让素材的编号/格式挂到全部同名段落；改名只断名字
       合并路径，styleId 绑定与观感不变。
+    - **迁入标题样式剥编号**（2026-09-16，「素材自有编号保真」拍板收窄）：标题类
+      段落样式（`_style_is_heading_like`，改名变体天然命中）迁入时剥掉样式定义
+      里的 numPr——样式级编号与段落直挂 numPr（拷入卫生层剥）是素材编号标题的
+      两条通道，只剥段落级=样式照旧出号。在下方编号迁移触发前剥，仅被标题样式
+      引用的编号定义随之不再迁入（numbering.xml 不留孤儿）；正文列表样式不命中
+      判据，编号定义照常迁入保真。
     - 迁入副本剥 `w:default`（源文档的默认样式标记不顶掉目标默认）。
     返回 (迁入数, 源styleId→目标styleId 重映射表)——调用方传给
     `_merge_missing_numbering` 改写 abstractNum 的 pStyle 绑定。
@@ -1164,6 +1280,13 @@ def _merge_missing_styles(src_doc: Document, dst_doc: Document, elements) -> tup
                 name = f"{name} {k}"
                 new_style.find(qn("w:name")).set(qn("w:val"), name)
             have_names.add(name.lower())
+        if new_style.get(qn("w:type")) == "paragraph" and _style_is_heading_like(new_style):
+            # 标题样式不带自动编号（章节编号不走样式绑定铁则）；在编号迁移触发前
+            # 剥——仅被它引用的编号定义随之不迁
+            style_ppr = new_style.find(qn("w:pPr"))
+            if style_ppr is not None:
+                for numpr in style_ppr.findall(qn("w:numPr")):
+                    style_ppr.remove(numpr)
         dst_root.append(new_style)
         have_ids.add(new_sid)
         if new_sid != sid:
@@ -1650,6 +1773,7 @@ def docx_material_inject(block_id: str, dest: str, lines: str = "") -> str:
         sect = dst_doc.element.body.find(qn("w:sectPr"))
         n_para = n_tbl = n_img = 0
         copied: list = []
+        src_heading_ids = _heading_style_ids(src)  # 拷入卫生按源样式判标题属性
         for i in idx:
             if i >= len(children):
                 continue
@@ -1658,7 +1782,7 @@ def docx_material_inject(block_id: str, dest: str, lines: str = "") -> str:
                 continue
             new_el = deepcopy(el)
             _strip_inner_sectpr(new_el)
-            _strip_copy_residue(new_el)
+            _strip_copy_residue(new_el, src_heading_ids)
             if new_el.tag == qn("w:p") and body_style_id:
                 _ensure_body_style(new_el, body_style_id)
             n_img += _migrate_images(src, dst_doc, new_el)
@@ -1776,6 +1900,7 @@ def docx_source_inject(source: str, dest: str, lines: str = "") -> str:
         sect = dst_doc.element.body.find(qn("w:sectPr"))
         n_para = n_tbl = n_img = 0
         copied: list = []
+        src_heading_ids = _heading_style_ids(src)  # 拷入卫生按源样式判标题属性
         for i in idx:
             if i >= len(children):
                 continue
@@ -1784,7 +1909,7 @@ def docx_source_inject(source: str, dest: str, lines: str = "") -> str:
                 continue
             new_el = deepcopy(el)
             _strip_inner_sectpr(new_el)
-            _strip_copy_residue(new_el)
+            _strip_copy_residue(new_el, src_heading_ids)
             n_img += _migrate_images(src, dst_doc, new_el)
             if sect is not None:
                 sect.addprevious(new_el)
@@ -3253,7 +3378,7 @@ def docx_assemble_volume() -> str:
             out.sections[0].different_first_page_header_footer = True
         else:
             out.add_heading(vol, 0)
-        merged = n_img = n_comment = n_cap = 0
+        merged = n_img = n_comment = n_cap = n_sub = 0
         cap_counters: dict = {}  # (表|图, 章) → 章内序——图注/表题全局重编号
         missing: list[str] = []
         unfilled: list[tuple[str, int]] = []  # 模板填充类叶子未产出节文件（按附件对待兜底）
@@ -3358,6 +3483,20 @@ def docx_assemble_volume() -> str:
                     sect.addprevious(new_el)
                 else:
                     out.element.body.append(new_el)
+            # 节内小标题按树深度降级（2026-09-16 拍板）：前置区/目录页/格式件
+            # （NON_PROSE 招标件零改动保真）/封面页不降，其余叶子拷入面的标题段
+            # 全部改挂对应级内建标题——须在样式迁移之前（素材标题样式不再被
+            # 引用，整本不迁入）；同批程序拼编号（H3/H4 接续节号，见 docstring）
+            front_zone = toc_node_idx is not None and idx < toc_node_idx
+            if not (
+                front_zone
+                or is_toc_node
+                or mode in body_contract.NON_PROSE_DELIVERY
+                or (has_cover and idx == 0)
+            ):
+                n_sub += _restyle_subhead_levels(
+                    out, copied, src, src_heading_ids, depth, numberer_scheme, prefix
+                )
             _style_n, style_remap = _merge_missing_styles(src, out, copied)
             _merge_missing_numbering(src, out, copied, style_id_remap=style_remap)
             _demote_extra_headings(out, copied)  # 树外标题摘出大纲（样式迁完再判——导航只剩骨架）
@@ -3419,6 +3558,8 @@ def docx_assemble_volume() -> str:
             bits += f"（含批注 {n_comment} 条待处理）"
         if n_cap:
             bits += f"（图注/表题编号 {n_cap} 处）"
+        if n_sub:
+            bits += f"（节内小标题降级 {n_sub} 段）"
         if missing:
             bits += f"；缺失 {len(missing)} 节未并入：{'、'.join(missing)}"
         reports.append(bits)

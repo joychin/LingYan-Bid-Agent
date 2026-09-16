@@ -1467,10 +1467,12 @@ def test_assemble_demotes_off_tree_headings(env):
     assert [h for h in headings if h[1] is None] == [
         ("Heading 1", None, "第一章\u3000运维实施方案")
     ]
-    # 树外标题全部显式降 9、样式不动（视觉不变，导航/自动目录不再收录）
+    # 树外标题全部显式降 9（导航/自动目录不再收录）；样式按树深度降级
+    # （2026-09-16 拍板：本叶深度 1，源 H2 小标题目标级 2 不变；素材章标题
+    # 源 H1 → 目标级 2——视觉层级有意下沉，替代 09-12「样式不动」旧口径）
     demoted = {h[2]: h for h in headings if h[1] == "9"}
     assert demoted["沟通与报告机制"][0] == "Heading 2"
-    assert demoted["运维服务方案"][0] == "Heading 1"  # 素材章标题同样摘出
+    assert demoted["运维服务方案"][0] == "Heading 2"  # 素材章标题摘大纲且降级
 
 
 def test_assemble_toc_reconciliation(env):
@@ -2355,10 +2357,11 @@ def _style_name_map(doc) -> dict[str, str]:
     return out
 
 
-def test_merge_styles_same_name_renames_and_keeps_numbering():
+def test_merge_styles_same_name_renames_and_disarms_numbering():
     """同名样式迁入改名（治 D1）：目标仍只有一个 "heading 2"（内建、无编号），
-    素材样式改名 "heading 2 2"、id 与编号引用原样——观感不变，按名合并的
-    污染路径（整本标题被套连续序号）被断掉。"""
+    素材样式改名 "heading 2 2"——按名合并的污染路径（整本标题被套连续序号）
+    被断掉。2026-09-16 拍板收窄：迁入**标题样式**的编号引用剥除（素材编号
+    标题不再原样渲染，节内小标题一律裸标题）。"""
     from app.tools.docx_ops import _merge_missing_styles
 
     src = Document()
@@ -2377,8 +2380,29 @@ def test_merge_styles_same_name_renames_and_keeps_numbering():
     assert names.get("3") == "heading 2 2"  # 同名 → 改名迁入
     st3 = next(s for s in dst.styles.element.findall(qn("w:style"))
                if s.get(qn("w:styleId")) == "3")
-    assert st3.find(qn("w:pPr")).find(qn("w:numPr")) is not None  # 编号定义保留
+    st3_ppr = st3.find(qn("w:pPr"))
+    assert st3_ppr is None or st3_ppr.find(qn("w:numPr")) is None  # 标题样式编号已剥
     assert el.find(qn("w:pPr")).find(qn("w:pStyle")).get(qn("w:val")) == "3"
+
+
+def test_merge_styles_body_list_style_keeps_numbering():
+    """非标题样式（正文列表）迁入编号保真：剥编号只命中标题类样式，
+    圆点/(1) 型列表样式及其编号定义照常迁入。"""
+    from app.tools.docx_ops import _merge_missing_styles
+
+    src = Document()
+    _add_para_style(
+        src, "21", "List Paragraph",
+        '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="12"/></w:numPr></w:pPr>',
+    )
+    el = _ref_para(src, "21", "列表项一条")
+    dst = Document()
+
+    moved, _remap = _merge_missing_styles(src, dst, [el])
+    assert moved == 1
+    st21 = next(s for s in dst.styles.element.findall(qn("w:style"))
+                if s.get(qn("w:styleId")) == "21")
+    assert st21.find(qn("w:pPr")).find(qn("w:numPr")) is not None  # 正文列表保真
 
 
 def test_merge_styles_id_collision_different_def_remaps():
@@ -2520,8 +2544,9 @@ def test_source_inject_strips_outline_and_toc_bookmarks(env):
 
 
 def _make_armed_material_docx(path: Path) -> None:
-    """复刻腾励标书形态的「武装」素材：styleId=3 name="heading 2" 挂多级编号
-    （abstractNum 带 pStyle 链接 2/3），段落引用之——拷贝即引入同名编号标题样式。"""
+    """复刻腾励/云枢形态的「武装」素材：styleId=3 name="heading 2" 挂多级编号
+    （abstractNum 带 pStyle 链接 2/3），标题段**同时**直挂 numPr（真实素材
+    双通道形态）——拷贝即引入同名编号标题样式；另带一条正文列表段（编号保真面）。"""
     doc = Document()
     doc.styles.element.append(parse_xml(
         f'<w:style {nsdecls("w")} w:type="paragraph" w:styleId="3">'
@@ -2529,6 +2554,11 @@ def _make_armed_material_docx(path: Path) -> None:
         '<w:uiPriority w:val="9"/><w:qFormat/>'
         '<w:pPr><w:keepNext/><w:numPr><w:ilvl w:val="1"/><w:numId w:val="11"/></w:numPr>'
         '<w:outlineLvl w:val="1"/></w:pPr></w:style>'
+    ))
+    doc.styles.element.append(parse_xml(
+        f'<w:style {nsdecls("w")} w:type="paragraph" w:styleId="21">'
+        '<w:name w:val="List Paragraph"/>'
+        '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="12"/></w:numPr></w:pPr></w:style>'
     ))
     np_ = doc.part.numbering_part.element
     ab = parse_xml(
@@ -2539,11 +2569,30 @@ def _make_armed_material_docx(path: Path) -> None:
         '<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
         '<w:lvlText w:val="%1.%2"/><w:pStyle w:val="3"/></w:lvl></w:abstractNum>'
     )
+    ab_bullet = parse_xml(
+        f'<w:abstractNum {nsdecls("w")} w:abstractNumId="96">'
+        '<w:multiLevelType w:val="hybridMultilevel"/>'
+        '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/>'
+        '<w:lvlText w:val="·"/></w:lvl></w:abstractNum>'
+    )
     first = np_.find(qn("w:num"))
-    first.addprevious(ab) if first is not None else np_.append(ab)
+    if first is not None:
+        first.addprevious(ab)
+        first.addprevious(ab_bullet)
+    else:
+        np_.append(ab)
+        np_.append(ab_bullet)
     np_.append(parse_xml(f'<w:num {nsdecls("w")} w:numId="11"><w:abstractNumId w:val="95"/></w:num>'))
+    np_.append(parse_xml(f'<w:num {nsdecls("w")} w:numId="12"><w:abstractNumId w:val="96"/></w:num>'))
     p = doc.add_paragraph("素材小节标题甲")
-    p._p.get_or_add_pPr().insert(0, parse_xml(f'<w:pStyle {nsdecls("w")} w:val="3"/>'))
+    ppr = p._p.get_or_add_pPr()
+    ppr.insert(0, parse_xml(f'<w:pStyle {nsdecls("w")} w:val="3"/>'))
+    # 直挂 numPr（素材真实形态：样式级与段落级编号并存，段落级优先渲染）
+    ppr.append(parse_xml(
+        f'<w:numPr {nsdecls("w")}><w:ilvl w:val="1"/><w:numId w:val="11"/></w:numPr>'
+    ))
+    bl = doc.add_paragraph("素材列表项一条")
+    bl._p.get_or_add_pPr().insert(0, parse_xml(f'<w:pStyle {nsdecls("w")} w:val="21"/>'))
     doc.add_paragraph("素材正文一句，内容足够构成检索块。")
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(path)
@@ -2551,8 +2600,10 @@ def _make_armed_material_docx(path: Path) -> None:
 
 def test_assemble_disarms_armed_styles_and_strips_outline(env):
     """端到端（注入+合册两层同治）：武装素材注入节文件、合册成整本后——
-    目标唯一 "heading 2"（骨架样式无编号）；素材样式改名迁入、自身编号保留；
-    编号定义不绑内建标题/Normal；无直挂大纲级别段、无 _Toc 死书签。"""
+    目标唯一 "heading 2"（骨架样式无编号）；素材标题样式迁入但**编号剥除**
+    （2026-09-16 拍板收窄：样式级+段落级双通道都摘，节内小标题裸标题）、
+    标题段直挂 numPr 剥除；正文列表样式与编号定义保真迁入；无直挂大纲
+    级别段、无 _Toc 死书签。"""
     _seed_dir_artifact(env, _DIR_SINGLE)
     section = "body/项目理解与需求分析.docx"
     r = docx_section_create.invoke(
@@ -2569,9 +2620,27 @@ def test_assemble_disarms_armed_styles_and_strips_outline(env):
     blk = mlib.create_block(f["id"], "公司介绍", "奥哲介绍素材", ranges=[[1, 10 ** 6]])
     ri = docx_material_inject.invoke({"block_id": blk["id"], "dest": section})
     assert ri.startswith("[已注入]"), ri
-    # 节文件层：同名即改名（注入层与合册层共用同一迁移函数）
-    sec_names = _style_name_map(Document(str(_abs(env, section))))
+    # 节文件层：同名即改名（注入层与合册层共用同一迁移函数）；标题段已裸化
+    sec_doc = Document(str(_abs(env, section)))
+    sec_names = _style_name_map(sec_doc)
     assert [s for s, nm in sec_names.items() if nm.lower() == "heading 2"] == ["Heading2"]
+    sec_body = sec_doc.element.body
+    sec_heading_p = next(
+        p for p in sec_body.findall(f".//{qn('w:p')}")
+        if "素材小节标题甲" in "".join(p.itertext())
+    )
+    sec_hppr = sec_heading_p.find(qn("w:pPr"))
+    assert sec_hppr.find(qn("w:numPr")) is None  # 段落直挂编号已剥
+    sec_st3 = next(s for s in sec_doc.styles.element.findall(qn("w:style"))
+                   if s.get(qn("w:styleId")) == "3")
+    sec_st3_ppr = sec_st3.find(qn("w:pPr"))
+    assert sec_st3_ppr.find(qn("w:numPr")) is None  # 样式级编号已剥
+    sec_bl = next(
+        p for p in sec_body.findall(f".//{qn('w:p')}")
+        if "素材列表项一条" in "".join(p.itertext())
+    )
+    # 正文列表的编号保真走样式通道（节内直挂本就无）
+    assert sec_bl.find(qn("w:pPr")).find(qn("w:pStyle")) is not None
 
     # 存量残留模拟：历史节文件里的直挂大纲段 + _Toc 书签（注入剥除对存量无效，
     # 合册侧 _strip_copy_residue + _demote_extra_headings 兜底）
@@ -2584,14 +2653,27 @@ def test_assemble_disarms_armed_styles_and_strips_outline(env):
 
     r = docx_assemble_volume.invoke({})
     assert r.startswith("[已合册]"), r
+    assert "节内小标题降级 1 段" in r  # 武装素材标题段按树深度降级（深度 2 + 源级 2 → H3）
     final = Document(str(_abs(env, "body/整本-技术部分.docx")))
     names = _style_name_map(final)
     assert [s for s, nm in names.items() if nm.lower() == "heading 2"] == ["Heading2"]
-    # 素材样式改名迁入、编号引用保留（素材自己的段落照常编号，观感不变）
-    assert names.get("3") == "heading 2 2"
-    st3 = next(s for s in final.styles.element.findall(qn("w:style"))
-               if s.get(qn("w:styleId")) == "3")
-    assert st3.find(qn("w:pPr")).find(qn("w:numPr")) is not None
+    # 2026-09-16 降级批：拷入标题段改挂内建 Heading3（与骨架同族、层级下沉），
+    # 素材标题样式不再被引用 → 整本完全不迁入（styles 无 styleId=3）
+    body = final.element.body
+    final_heading_p = next(
+        p for p in body.findall(f".//{qn('w:p')}")
+        if "素材小节标题甲" in "".join(p.itertext())
+    )
+    fh_ps = final_heading_p.find(qn("w:pPr")).find(qn("w:pStyle"))
+    assert fh_ps.get(qn("w:val")) == "Heading3"
+    assert "3" not in names
+    # 降级后 demote 照旧钉大纲 9（导航/目录不收录不变）
+    fh_ol = final_heading_p.find(qn("w:pPr")).find(qn("w:outlineLvl"))
+    assert fh_ol is not None and fh_ol.get(qn("w:val")) == "9"
+    # 正文列表样式在整本里编号保真（剥除只命中标题类）
+    st21 = next(s for s in final.styles.element.findall(qn("w:style"))
+                if s.get(qn("w:styleId")) == "21")
+    assert st21.find(qn("w:pPr")).find(qn("w:numPr")) is not None
     # 骨架样式无编号（编号按树序写进标题文本，不走样式绑定）
     h2 = next(s for s in final.styles.element.findall(qn("w:style"))
               if s.get(qn("w:styleId")) == "Heading2")
@@ -2605,11 +2687,253 @@ def test_assemble_disarms_armed_styles_and_strips_outline(env):
             if ps is not None:
                 assert names.get(ps.get(qn("w:val")), "").lower() not in guard
     # 直挂大纲段被剥（余下的 outlineLvl 全是摘除标记 9）、无 _Toc 书签
-    body = final.element.body
     ols = body.findall(f".//{qn('w:outlineLvl')}")
     assert ols and all(o.get(qn("w:val")) == "9" for o in ols)
     assert not [b for b in body.iter(qn("w:bookmarkStart"))
                 if (b.get(qn("w:name")) or "").startswith("_")]
+
+
+def _numpr_para(doc, text: str, *, pstyle: str | None, num_id: int, ilvl: int = 0,
+                outline: int | None = None):
+    p = doc.add_paragraph(text)
+    ppr = p._p.get_or_add_pPr()
+    if pstyle:
+        ppr.insert(0, parse_xml(f'<w:pStyle {nsdecls("w")} w:val="{pstyle}"/>'))
+    if outline is not None:
+        ppr.append(parse_xml(f'<w:outlineLvl {nsdecls("w")} w:val="{outline}"/>'))
+    ppr.append(parse_xml(
+        f'<w:numPr {nsdecls("w")}><w:ilvl w:val="{ilvl}"/><w:numId w:val="{num_id}"/></w:numPr>'
+    ))
+    return p._p
+
+
+def test_strip_copy_residue_strips_heading_numbering():
+    """拷入卫生剥标题编号（2026-09-16 批）：标题样式段/直挂大纲段的直挂
+    numPr 整棵剥；正文列表段（非标题）保真；heading_ids 不传=旧行为（不碰
+    numPr，兼容）。"""
+    from app.tools.docx_ops import _strip_copy_residue
+
+    doc = Document()
+    head = _numpr_para(doc, "素材标题", pstyle="Heading2", num_id=11, ilvl=4)
+    outl = _numpr_para(doc, "格式件标题", pstyle=None, num_id=12, outline=2)
+    plain = _numpr_para(doc, "列表项", pstyle=None, num_id=13)
+
+    ids = {"Heading2"}
+    for el in (head, outl, plain):
+        _strip_copy_residue(el, ids)
+
+    assert head.find(qn("w:pPr")).find(qn("w:numPr")) is None  # 标题样式段剥
+    assert head.find(qn("w:pPr")).find(qn("w:pStyle")) is not None
+    outl_ppr = outl.find(qn("w:pPr"))
+    assert outl_ppr.find(qn("w:numPr")) is None  # 直挂大纲段剥
+    assert outl_ppr.find(qn("w:outlineLvl")) is None  # 大纲级别照旧剥
+    assert plain.find(qn("w:pPr")).find(qn("w:numPr")) is not None  # 正文列表保真
+
+    # 不传 heading_ids：旧行为，numPr 不动（存量调用兼容）
+    doc2 = Document()
+    keep = _numpr_para(doc2, "素材标题", pstyle="Heading2", num_id=11)
+    _strip_copy_residue(keep)
+    assert keep.find(qn("w:pPr")).find(qn("w:numPr")) is not None
+
+
+# ---------- 节内小标题按树深度降级（2026-09-16 整本平铺观感批） ----------
+# 实证背景：真实任务整本 218 个裸 H2 小标题与 54 个真节标题（5.1 式）同级平铺，
+# 评委视角分不清层级；节文件层级本来就对（节标题 H1 > 小标题 H2/H3），撞级只发生
+# 在整本（节变 H2）——修合册这一层：目标级 = clamp(树深度 + 源级 − 1, 2, 9)。
+
+
+def _subhead_section(env, path: str, title: str, subheads: list[tuple[str, int]],
+                     table_head: str | None = None) -> None:
+    """建节并往里塞写手小标题（(文本, 级) 列表），可选表格内标题段。"""
+    r = docx_section_create.invoke({"path": path, "title": title, "paragraphs": f"{title}正文。"})
+    assert r.startswith("[已创建]"), r
+    p = _abs(env, path if path.endswith(".docx") else path + ".docx")
+    doc = Document(str(p))
+    for text, lvl in subheads:
+        para = doc.add_paragraph(text)
+        para.style = doc.styles[f"Heading {lvl}"]
+    if table_head:
+        tbl = doc.add_table(rows=1, cols=1)
+        cell_p = tbl.rows[0].cells[0].paragraphs[0]
+        cell_p.text = table_head
+        cell_p.style = doc.styles["Heading 2"]
+    doc.save(str(p))
+
+
+def _vol_pstyle(vol_doc, text: str) -> tuple[str, str | None]:
+    """按文本找整本段落，回 (pStyleId, outlineLvl|None)。"""
+    p = next(
+        p_ for p_ in vol_doc.element.body.findall(f".//{qn('w:p')}")
+        if text in "".join(p_.itertext())
+    )
+    ppr = p.find(qn("w:pPr"))
+    ps = ppr.find(qn("w:pStyle")) if ppr is not None else None
+    ol = ppr.find(qn("w:outlineLvl")) if ppr is not None else None
+    return (
+        ps.get(qn("w:val")) if ps is not None else None,
+        ol.get(qn("w:val")) if ol is not None else None,
+    )
+
+
+def _vol_ptext(vol_doc, text: str) -> str:
+    """按子串找整本段落，回接受视角全文（编号断言用）。"""
+    p = next(
+        p_ for p_ in vol_doc.element.body.findall(f".//{qn('w:p')}")
+        if text in "".join(p_.itertext())
+    )
+    return "".join(t.text or "" for t in p.iter(qn("w:t"))).strip()
+
+
+def test_assemble_restyles_subheads_by_tree_depth(env):
+    """深度 2 节：H2→Heading3、H3→Heading4（层级下沉一档）、表格内标题段
+    同降（规则统一）；demote 照旧钉 olvl=9（导航/目录不收录不变）；
+    节文件零改动（工作台层级本来就对）。"""
+    _seed_dir_artifact(env, _DIR_SINGLE)
+    _subhead_section(
+        env, "body/项目理解与需求分析", "项目理解与需求分析",
+        [("二级小标题", 2), ("三级小标题", 3)], table_head="表内标题",
+    )
+
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]"), r
+    assert "节内小标题降级 3 段" in r
+
+    vol = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    assert _vol_pstyle(vol, "二级小标题") == ("Heading3", "9")
+    assert _vol_pstyle(vol, "三级小标题") == ("Heading4", "9")
+    assert _vol_pstyle(vol, "表内标题") == ("Heading3", "9")  # 表格内同降
+    # 程序拼编号（2026-09-16 二批）：H3/H4 按节内出现顺序接续节号 1.1
+    assert _vol_ptext(vol, "二级小标题") == "1.1.1 二级小标题"
+    assert _vol_ptext(vol, "三级小标题") == "1.1.1.1 三级小标题"
+    assert _vol_ptext(vol, "表内标题") == "1.1.2 表内标题"
+    # 骨架节标题不受影响（仍是 H2）
+    assert _vol_pstyle(vol, "1.1 项目理解与需求分析")[0] == "Heading2"
+    # 节文件原样未动（重开断言仍是写手层级）
+    sec = Document(str(_abs(env, "body/项目理解与需求分析.docx")))
+    sec_ps = lambda t: next(  # noqa: E731
+        p_.find(qn("w:pPr")).find(qn("w:pStyle")).get(qn("w:val"))
+        for p_ in sec.element.body.findall(f".//{qn('w:p')}")
+        if t in "".join(p_.itertext())
+    )
+    assert sec_ps("二级小标题") == "Heading2"
+    assert sec_ps("三级小标题") == "Heading3"
+
+
+def test_assemble_subhead_depth1_keeps_level(env):
+    """深度 1 章叶（培训方案式，章下直接挂内容）：源 H2 → 目标级 2 不变
+    （公式钉住：章叶小标题本就是节级观感，不越级下沉）。"""
+    tree = {
+        "response_documents": [
+            {
+                "name": "技术部分", "scope": "",
+                "directory": [
+                    {"目录名称": "培训方案", "level": 1, "children": [],
+                     "交付形态": "正文编写", "来源位置": []},
+                ],
+            }
+        ]
+    }
+    _seed_dir_artifact(env, tree)
+    _subhead_section(env, "body/培训方案", "培训方案", [("培训目标与总体安排", 2)])
+
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]"), r
+    vol = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    sid, olvl = _vol_pstyle(vol, "培训目标与总体安排")
+    assert sid == "Heading2"  # 深度 1 + 源级 2 → 目标 2（观感不降）
+    assert olvl == "9"  # 导航/目录照旧不收录
+    assert _vol_ptext(vol, "培训目标与总体安排") == "培训目标与总体安排"  # 章叶不编号
+
+
+_DIR_SUBHEAD_GUARD = {
+    "response_documents": [
+        {
+            "name": "技术部分", "scope": "",
+            "directory": [
+                {"目录名称": "编制说明章", "level": 1, "children": [
+                    {"目录名称": "索引明细", "level": 2, "children": [],
+                     "交付形态": "正文编写", "来源位置": []},
+                ]},
+                {"目录名称": "目录", "level": 1, "children": [],
+                 "交付形态": "模板或附件填充", "来源位置": []},
+                {"目录名称": "格式章", "level": 1, "children": [
+                    {"目录名称": "投标函格式", "level": 2, "children": [],
+                     "交付形态": "模板或附件填充", "来源位置": []},
+                ]},
+                {"目录名称": "正文章", "level": 1, "children": [
+                    {"目录名称": "正文节", "level": 2, "children": [],
+                     "交付形态": "正文编写", "来源位置": []},
+                ]},
+            ],
+        }
+    ]
+}
+
+
+def test_assemble_subhead_guard_frontmatter_and_nonprose(env):
+    """降级护栏（守卫放在深度 2 上才能观察——深度 1 时目标级=源级，降与不降
+    同形）：前置区（目录节点前）与格式件章（NON_PROSE 招标件零改动保真）的
+    标题段保持原 pStyle 不降；同一次合册里正文节照常降级（对照组）。"""
+    _seed_dir_artifact(env, _DIR_SUBHEAD_GUARD)
+    _subhead_section(env, "body/索引明细", "索引明细", [("前置区小标题", 2)])
+    _subhead_section(env, "body/投标函格式", "投标函格式", [("格式件内部标题", 2)])
+    _subhead_section(env, "body/正文节", "正文节", [("正文小标题", 2)])
+
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]"), r
+    vol = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    assert _vol_pstyle(vol, "前置区小标题")[0] == "Heading2"  # 前置区不降
+    assert _vol_pstyle(vol, "格式件内部标题")[0] == "Heading2"  # 格式件保真不降
+    assert _vol_pstyle(vol, "正文小标题")[0] == "Heading3"  # 对照组：正文照降
+    # 护栏同时免编号；对照组正文节接续节号（前置区不占章号：格式章=第一章、
+    # 正文章=第二章 → 正文节 2.1 → 小标题 2.1.1）
+    assert _vol_ptext(vol, "前置区小标题") == "前置区小标题"
+    assert _vol_ptext(vol, "格式件内部标题") == "格式件内部标题"
+    assert _vol_ptext(vol, "正文小标题") == "2.1.1 正文小标题"
+
+
+def test_assemble_subhead_numbering_gov_and_none(env):
+    """小标题编号格式矩阵：gov 接续中文层级（节（一）下 H3→1.、H4→（1））；
+    numbering=none 全册零编号（骨架与小标题都不加）。"""
+    tree = {
+        "numbering": "gov",
+        "response_documents": [
+            {
+                "name": "技术部分", "scope": "",
+                "directory": [
+                    {"目录名称": "建设方案", "level": 1, "children": [
+                        {"目录名称": "总体设计", "level": 2, "children": [],
+                         "交付形态": "正文编写", "来源位置": []},
+                    ]},
+                ],
+            }
+        ],
+    }
+    _seed_dir_artifact(env, tree)
+    _subhead_section(env, "body/总体设计", "总体设计",
+                     [("政务一级小标题", 2), ("政务二级小标题", 3)])
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]"), r
+    vol = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    assert _vol_ptext(vol, "政务一级小标题") == "1.政务一级小标题"
+    assert _vol_ptext(vol, "政务二级小标题") == "（1）政务二级小标题"
+
+    tree["numbering"] = "none"
+    _seed_dir_artifact(env, tree)
+    r = docx_section_create.invoke({"path": "body/总体设计", "title": "总体设计",
+                                    "paragraphs": "总体设计正文。", "replace": True})
+    assert r.startswith(("[已创建]", "[已重建]")), r
+    p = _abs(env, "body/总体设计.docx")
+    doc = Document(str(p))
+    para = doc.add_paragraph("无编号小标题")
+    para.style = doc.styles["Heading 2"]
+    doc.save(str(p))
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]"), r
+    vol = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    assert _vol_ptext(vol, "无编号小标题") == "无编号小标题"
+    texts = [_vol_ptext(vol, "总体设计")]
+    assert all(not t.startswith(("一、", "（一）", "1.", "1 ")) for t in texts)
 
 
 # ---------- 同文件并发写防线（2026-09-13 事故批） ----------

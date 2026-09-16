@@ -637,6 +637,36 @@ def test_section_docx_direct_outline_note(env):
     assert "合册会自动摘出" in r
 
 
+def test_section_docx_numbered_heading_note(env):
+    """标题段自动编号清点（提示级，2026-09-16 批）：素材拷入的编号标题段
+    （直挂 numPr 或标题样式自带 numPr）在整本里按素材内部层级渲染——清点
+    点名（合册两层剥除，不判不过）；正文列表段（非标题样式）不点名。"""
+    from docx import Document as _Doc
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    _make_docx_section(env, "body/3.1 项目理解.docx", "3.1 项目理解", "正文一段。")
+    p = _wroot(env[0]) / "body" / "3.1 项目理解.docx"
+    doc = _Doc(str(p))
+    # 标题段直挂 numPr
+    head = doc.add_paragraph("素材小节标题甲")
+    head.style = doc.styles["Heading 2"]
+    head._p.get_or_add_pPr().append(parse_xml(
+        f'<w:numPr {nsdecls("w")}><w:ilvl w:val="4"/><w:numId w:val="12"/></w:numPr>'
+    ))
+    # 正文列表段（Normal 样式，不命中标题判据）
+    plain = doc.add_paragraph("列表项一条")
+    plain._p.get_or_add_pPr().append(parse_xml(
+        f'<w:numPr {nsdecls("w")}><w:ilvl w:val="0"/><w:numId w:val="13"/></w:numPr>'
+    ))
+    doc.save(p)
+
+    r = validate_body.invoke({"section": "body/3.1 项目理解.docx", "block_ids": []})
+    assert r.startswith("[校验通过]")  # 提示不是门禁
+    assert "〔自动编号〕1 个标题段带自动编号（P3）" in r
+    assert "合册会自动剥除" in r
+
+
 # ---------- 表格通道批（2026-09-14）：md 残字扫描 + 图示对账 ----------
 
 
