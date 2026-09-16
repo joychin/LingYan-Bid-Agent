@@ -3127,9 +3127,28 @@ def docx_assemble_volume() -> str:
     wroot = work_dir(task_id).resolve()
     consumed: set[str] = set()
     reports: list[str] = []
+    # 各册整本产物的相对路径（孤儿扫描只排除这些；子目录里的 整本-*.docx 是
+    # 写手错放，照常按孤儿点名——裸「文件名前缀」排除会让合法节文件三处对账
+    # 同时隐身，2026-09-15 审计修复）
+    volume_rels = {
+        f"body/{body_contract.VOLUME_PREFIX}{body_contract.sanitize_name(str(d.get('name') or '').strip() or '主册')}.docx"
+        for d in docs
+    }
+    seen_vols: dict[str, str] = {}  # sanitized 册名 → 原册名（清洗后重名册互覆，先到先得）
     for doc in docs:
         vol = str(doc.get("name") or "").strip() or "主册"
-        vol_dir = body_contract.sanitize_name(vol) if multi else ""
+        vol_key = body_contract.sanitize_name(vol)
+        if vol_key in seen_vols:
+            reports.append(
+                f"⚠️ 册名「{vol}」与「{seen_vols[vol_key]}」清洗后同名（节目录与整本文件会互覆），"
+                "本册未合册——请在目录产物中改册名后重新合册"
+            )
+            continue
+        seen_vols[vol_key] = vol
+        vol_dir = vol_key if multi else ""
+        # 本册整本输出路径（与循环后 _dest_path 同式）：叶子标题清洗后撞上它时
+        # 上一轮整本会被当节内容并进自身（自噬翻倍），循环内守卫拦截
+        dst_rel = f"body/{body_contract.VOLUME_PREFIX}{vol_key}.docx"
         nodes = list(_tree_nodes(doc.get("directory") or []))
         numberer = _HeadingNumberer(numberer_scheme)  # 各册从首章重起
         self_numbered: list[str] = []  # 节点名自带编号（合册再编号会双重，探测点名）
@@ -3142,6 +3161,13 @@ def docx_assemble_volume() -> str:
             and not nodes[0][2]
             and body_contract.sanitize_name(nodes[0][1]) == _COVER_NODE_NAME
         )
+        if nodes and not has_cover and nodes[0][0] == 1 and not nodes[0][2] and "封面" in nodes[0][1]:
+            # 「封面页」「投标封面」等变体不识别（清洗后≠「封面」）——占号+发标题，
+            # 事实提示交用户裁决，不做模糊匹配
+            reports.append(
+                f"{vol}：树首节点「{nodes[0][1]}」含「封面」但非约定名「封面」，未按封面页处理"
+                "（会发标题并占编号）——如需封面页请在目录产物中把该节点命名为「封面」"
+            )
         # 目录页节点=首个名为「目录」的一级叶子（tender-outline 结构约定，2026-09-14
         # 批）：无手写节文件→循环后在此位置机械生成目录页（Word 目录域+缓存清单）；
         # 有→按普通节并入（toc_lines 对账路径，手写优先）。其前的非封面一级节点=
@@ -3155,6 +3181,11 @@ def docx_assemble_volume() -> str:
             ),
             None,
         )
+        if nodes and toc_node_idx is None:
+            reports.append(
+                f"{vol}：目录树无「目录」节点，全部一级节点按章编号（旧目录产物兼容；"
+                "编制说明等前置页会占章号——如需前置区请在目录里加「目录」节点）"
+            )
         empty_ids = _empty_containers(doc.get("directory") or [], wroot, vol_dir)
         out = _new_document()  # 模板自带 A4 版面/页边距/页脚页码，无需再手拼
         if has_cover:
@@ -3165,6 +3196,10 @@ def docx_assemble_volume() -> str:
         cap_counters: dict = {}  # (表|图, 章) → 章内序——图注/表题全局重编号
         missing: list[str] = []
         unfilled: list[tuple[str, int]] = []  # 模板填充类叶子未产出节文件（按附件对待兜底）
+        suppressed: list[str] = []  # 被抑制空容器标题（不发标题也不进目录页——点名防三处皆无）
+        merged_once: dict[str, str] = {}  # rel_src → 首并节点标题（清洗后同名内容只并一次）
+        dup_content: list[tuple[str, str]] = []  # (本次标题, 首并标题)——同名第二次命中
+        self_volumed: list[str] = []  # 叶子标题清洗后与整本输出同名（上一轮整本不能当节内容）
         placeholders: list[str] = []  # 内联占位兜底扫描命中（正规落点=批注，此为防线）
         issued_titles: list[str] = []  # 本册实际发出标题的节点（目录页对账的「实有」侧）
         toc_entries: list[tuple[str, str, int]] = []  # 目录页条目 (编号前缀, 标题, 深度)——树序
@@ -3174,6 +3209,7 @@ def docx_assemble_volume() -> str:
         seen_chapter = False
         for idx, (depth, title, is_container, mode, node) in enumerate(nodes):
             if id(node) in empty_ids:
+                suppressed.append(title)
                 continue  # 空容器：子树无将产出叶子（壳节漏建等极端情形）——不发章标题，信息走目录页「另附」
             if _SELF_NUMBERED.match(title):
                 self_numbered.append(title)
@@ -3215,6 +3251,18 @@ def docx_assemble_volume() -> str:
             if not src_path.is_file():
                 missing.append(title)
                 continue
+            if rel_src == dst_rel:
+                # 叶子标题清洗后与整本输出同名：探测到的是上一轮合册产物，读回并入
+                # =自噬翻倍、且孤儿扫描按输出名排除永远照不到——按缺失处理并单独点名
+                self_volumed.append(title)
+                continue
+            first = merged_once.get(rel_src)
+            if first is not None:
+                # 同册同名叶子：同一文件内容已在整本出现一次，再并=整份重复——
+                # 标题照发、内容只并一次，点名请用户改目录标题其一
+                dup_content.append((title, first))
+                continue
+            merged_once[rel_src] = title
             consumed.add(rel_src)
             src = Document(str(src_path))
             # 内联占位兜底：接受视角逐行扫（整段删除修订不误报）——正规待办落点是
@@ -3235,10 +3283,11 @@ def docx_assemble_volume() -> str:
                 # 目录页条目行（非空、≤60 字——更长的行是说明文字不是条目）
                 toc_lines = [t for t in section_text_lines(src) if t.strip() and len(t.strip()) <= 60]
             copied: list = []
+            src_heading_ids = _heading_style_ids(src)  # 拷入卫生按源样式判标题属性
             for el in children:
                 new_el = deepcopy(el)
                 _strip_inner_sectpr(new_el)
-                _strip_copy_residue(new_el)
+                _strip_copy_residue(new_el, src_heading_ids)
                 if not _accept_revisions_inplace(new_el):
                     continue  # 整段删除修订：接受后不存在
                 n_img += _migrate_images(src, out, new_el)
@@ -3251,17 +3300,30 @@ def docx_assemble_volume() -> str:
             _style_n, style_remap = _merge_missing_styles(src, out, copied)
             _merge_missing_numbering(src, out, copied, style_id_remap=style_remap)
             _demote_extra_headings(out, copied)  # 树外标题摘出大纲（样式迁完再判——导航只剩骨架）
-            # 图注/表题全局重编号（先迁样式再改文本——识别按 pStyle=样式名解析）
+            # 图注/表题全局重编号（先迁样式再改文本——识别按 pStyle=样式名解析）；
+            # 章号钳底 1：前置区叶子章号未消费时 counters[1]=0，会编出「图 0-1」
             cap_ids = _caption_style_ids(src)
             if cap_ids:
                 n_cap += _renumber_captions(
-                    copied, cap_ids, numberer.counters[1], cap_counters,
+                    copied, cap_ids, max(numberer.counters[1], 1), cap_counters,
                     numberer_scheme != "none",
                 )
             n_comment += _merge_missing_comments(src, out, copied)
             merged += 1
         if merged == 0:
-            detail = f"（缺失：{'、'.join(missing)}）" if missing else "（目录树无叶子节点）"
+            notes: list[str] = []
+            if missing:
+                notes.append("缺失：" + "、".join(missing))
+            if unfilled:
+                notes.append(
+                    "模板填充类未产出 " + str(len(unfilled)) + " 节（按附件对待）："
+                    + "、".join(t for t, _d in unfilled)
+                )
+            if self_volumed:
+                notes.append(
+                    "标题与整本产物同名未并入：" + "、".join(self_volumed) + "（请改节点名后重新合册）"
+                )
+            detail = f"（{'；'.join(notes)}）" if notes else "（目录树无叶子节点）"
             reports.append(f"{vol}：无已写节文件{detail}，未产出整本")
             continue
         if toc_pending:
@@ -3283,6 +3345,9 @@ def docx_assemble_volume() -> str:
             # 原子替换：整本是派生产物，重跑直接覆盖（恢复语义在节文件层）；
             # _atomic_save 的 uuid 后缀 tmp 防并发合册同册互踩（固定 .tmp 名会互相截断）
             _atomic_save(out, dst)
+            # 发布在同一把路径锁内做：并发合册同册时，发布读到的字节保证是本次落盘的
+            # （锁外发布可能读到另一轮刚覆盖进来的整本，产物字节错册）
+            pub_line = _publish_volume(task_id, dst, vol, merged, n_img, n_comment)
         # 呈现信号（产出即开）走 _publish_volume 的 tender.volume 产物发布路径
         # （publish_file_artifact 成功分支 note kind=artifact）——工作台整本行已隐藏，
         # 不再 note kind=file 防打开隐藏行；发布失败=不自动开，chips 仍是手动出口
@@ -3296,7 +3361,7 @@ def docx_assemble_volume() -> str:
         if missing:
             bits += f"；缺失 {len(missing)} 节未并入：{'、'.join(missing)}"
         reports.append(bits)
-        reports.append(_publish_volume(task_id, dst, vol, merged, n_img, n_comment))
+        reports.append(pub_line)
         if placeholders:
             shown = "；".join(placeholders[:8]) + ("…" if len(placeholders) > 8 else "")
             reports.append(
@@ -3308,6 +3373,27 @@ def docx_assemble_volume() -> str:
             reports.append(
                 f"{vol}：模板填充类未产出 {len(unfilled)} 节（按附件对待，不占整本位）："
                 + "、".join(t for t, _d in unfilled)
+            )
+        if suppressed:
+            shown = "、".join(suppressed[:8]) + ("…" if len(suppressed) > 8 else "")
+            reports.append(
+                f"{vol}：{len(suppressed)} 个容器章节整体未产出（其下均为另附件/未建节，"
+                f"不发章标题）：{shown}"
+            )
+        if self_volumed:
+            reports.append(
+                f"⚠️ {vol}：{len(self_volumed)} 个节点标题与整本产物文件同名"
+                f"（{'、'.join(self_volumed[:6])}{'…' if len(self_volumed) > 6 else ''}）——"
+                "上一轮整本不会被当节内容并入，该节内容实缺，请把节点改名后重新合册"
+            )
+        if dup_content:
+            pairs = "；".join(f"「{t}」与「{f}」" for t, f in dup_content[:6]) + (
+                "…" if len(dup_content) > 6 else ""
+            )
+            reports.append(
+                f"⚠️ {vol}：{len(dup_content)} 处清洗后同名的节点（{pairs}）——"
+                "同名内容只并入一次，整本会出现有标题无内容的节；"
+                "请改目录标题其一后重新合册"
             )
         if toc_lines:
             # 目录页对账（探测+提示，不是门禁）：目录页条目 vs 实收章节——列了
@@ -3344,8 +3430,11 @@ def docx_assemble_volume() -> str:
     if body_root.is_dir():
         for p in sorted(body_root.rglob("*.docx")):
             rel_path = p.relative_to(wroot).as_posix()
-            if not p.name.startswith(body_contract.VOLUME_PREFIX) and rel_path not in consumed:
-                orphans.append(rel_path)
+            # 只排除本轮各册整本产物的确切路径——裸「文件名前缀」排除会把标题
+            # 恰以「整本-」开头的合法节文件在对账三处同时隐身（check/validate 同批收窄）
+            if rel_path in volume_rels or rel_path in consumed:
+                continue
+            orphans.append(rel_path)
     lines = ["[已合册]", *reports]
     if orphans:
         shown = "、".join(orphans[:8]) + ("…" if len(orphans) > 8 else "")

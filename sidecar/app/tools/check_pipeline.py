@@ -190,10 +190,23 @@ def check_pipeline_state() -> str:
         section_files: list = []
         coexist: list[str] = []
         seen_stems: dict[tuple, Path] = {}
+        # 整本产物恒落 body 根层且名为「整本-<清洗后册名>.docx」（合册约定）——
+        # 只排除这些确切路径；子目录里的 整本-*.docx 是写手错放，照常进对账
+        #（合册侧会按孤儿点名）。裸「文件名前缀」排除会把标题恰以「整本-」开头的
+        # 合法节文件在对账三处同时隐身（2026-09-15 审计修复）
+        vol_file_names: set[str] = set()
+        if dir_content:
+            for d in dir_content.get("response_documents") or []:
+                _vol = str(d.get("name") or "").strip() or "主册"
+                vol_file_names.add(
+                    body_contract.VOLUME_PREFIX + body_contract.sanitize_name(_vol) + ".docx"
+                )
         for p in all_body:
-            if (
-                p.name in (body_contract.GUIDE_NAME, body_contract.PROMISE_NAME)
-                or p.name.startswith(body_contract.VOLUME_PREFIX)
+            if p.name in (body_contract.GUIDE_NAME, body_contract.PROMISE_NAME):
+                continue
+            if p.parent == bdir and (
+                p.name in vol_file_names
+                or (not vol_file_names and p.name.startswith(body_contract.VOLUME_PREFIX))
             ):
                 continue
             key = (p.parent, p.stem)
@@ -210,6 +223,13 @@ def check_pipeline_state() -> str:
                 continue
             seen_stems[key] = p
             section_files.append(p)
+        # 孤立 .md（无同名 docx）不计入已写/对账：合册只并 docx（现役形态），计入
+        # 会「check 报已写、合册报缺节」两侧矛盾——降为旧稿残留提示
+        _docx_keys = {(p.parent, p.stem) for p in section_files if p.suffix == ".docx"}
+        _lone_md = [p for p in section_files if p.suffix == ".md" and (p.parent, p.stem) not in _docx_keys]
+        if _lone_md:
+            _drop = {(p.parent, p.stem) for p in _lone_md}
+            section_files = [p for p in section_files if (p.parent, p.stem) not in _drop]
         if dir_row is None:
             lines.append("[body] 无目录产物（正文依据投标目录当前内容，需先 tender-outline 生成）")
             if all_body:
@@ -225,6 +245,13 @@ def check_pipeline_state() -> str:
             lines.append(seg)
             if coexist:
                 lines.append("[body] 同时存在 .docx 与 .md 的节：" + "、".join(coexist))
+            if _lone_md:
+                lines.append(
+                    "[body] " + str(len(_lone_md)) + " 个旧稿 .md 残留（现役形态 docx，"
+                    "合册不并入——请用户确认后清理）："
+                    + "、".join(str(p.relative_to(bdir).with_suffix("")) for p in _lone_md[:8])
+                    + ("…" if len(_lone_md) > 8 else "")
+                )
             if dir_content is None:
                 lines.append("[body] 目录产物内容无法读取——叶子对账与新鲜度跳过")
             else:
@@ -234,12 +261,27 @@ def check_pipeline_state() -> str:
                 # 节文件（2026-09-06 拍板：产出即并整本）；missing 侧维持需正文叶子
                 # ——格式件未产出不算缺（按附件对待）
                 actual: set[tuple[str, str]] = set()
+                # 合册只认固定深度：单册 body/<stem>.docx、多册 body/<册>/<stem>.docx
+                #——更深的嵌套文件（09-15 事故形态：写手自选章节子目录）按「错位」
+                # 单列点名，不再折名进 actual（折名会把它当成正常文件判「对账一致」，
+                # 与合册 missing+孤儿两侧矛盾）
+                misplaced: list[str] = []
+                expected_depth = 2 if multi else 1
                 for p in section_files:
                     rel = p.relative_to(bdir)
+                    if len(rel.parts) > expected_depth:
+                        misplaced.append(rel.as_posix())
+                        continue
                     vol = body_contract.sanitize_name(rel.parts[0]) if len(rel.parts) > 1 else ""
                     # stem 同过清洗（与期望侧同规则）：超长标题被 sanitize 截到 60 字、
                     # 连续空白折叠——两侧规则不一会同时误报 extra+missing
                     actual.add((vol, body_contract.sanitize_name(p.stem)))
+                if misplaced:
+                    lines.append(
+                        "[body] " + str(len(misplaced)) + " 个文件嵌套在子目录（与合册平铺"
+                        "约定不符，合册找不到——移到 body/ 根层或多册目录下）："
+                        + "、".join(misplaced[:8]) + ("…" if len(misplaced) > 8 else "")
+                    )
                 seen_titles: dict[tuple[str, str], int] = {}
                 known: set[tuple[str, str]] = set()
                 for vol, title, _mode in body_contract.iter_leaves(dir_content):

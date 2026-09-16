@@ -17,6 +17,8 @@ task-single 语义：同契约同任务内已存在 → 复用 artifact_id 与 m
 
 import json
 import logging
+import shutil
+import uuid
 from datetime import datetime, timezone
 
 from . import artifact_store, contracts, db, deliverables
@@ -261,34 +263,52 @@ def publish_file_artifact(
 
         if existing is not None:
             aid = existing["artifact_id"]
+            pkg_dir = artifact_store.artifact_dir(aid, existing)
+            # 崩溃残留的暂存件清掉（正常路径 finally 已清，这里是兜底）
+            for stale in pkg_dir.glob("incoming-*.part"):
+                stale.unlink(missing_ok=True)
             pkg_files = artifact_store.package_files(aid, existing)
             # 内容未变短路：docx 内容级相等且显示名未变 → 不重复发布（seq/emitted/
             # last_run_id 全不动，run 收尾 pending_emit 捞不到 → 无 artifact.created，
             # 聊天产物卡不挪位）——与 JSON 路径的 2026-09-12 短路同款语义
             if pkg_files and _zip_content_equal(pkg_files[0], file_path):
                 logger.info("artifact 文件内容未变跳过发布 %s (%s)", aid, contract_key)
-                return {**(artifact_store.read_meta(aid, existing) or {}), "_unchanged": True}
-            artifact_store.write_package_file(aid, existing, filename, file_path.read_bytes())
-            # 单文件不变量：册名清洗后文件名变了的话，摘掉包内旧 docx（file 端点
-            # 按「包内唯一 .docx」取文件）
-            for p in artifact_store.package_files(aid, existing):
-                if p.name != filename:
-                    p.unlink(missing_ok=True)
-            artifact_store.replace_current_content(aid, existing, content_text)
-            db.upsert_artifact_index(
-                {
-                    **existing,
-                    # content_path 恒指包内 content.json（机器元信息）——与 JSON 发布路径及
-                    # 重启 rebuild_artifact_index 的重算口径一致（该列无读者；写 docx 路径
-                    # 会在重启后被静默翻回，账目漂移）。
-                    "content_path": str(artifact_store.content_path(aid, existing)),
-                    "content_seq": existing["content_seq"] + 1,
-                    "updated_at": _now(),
-                    "last_run_id": source.get("run_id"),
-                    "last_thread_id": source.get("thread_id"),
-                    "emitted": 0,
+                return {
+                    **(artifact_store.read_meta(aid, existing) or {}),
+                    "_unchanged": True,
                 }
-            )
+            # 新 docx 先落包内暂存名，簿记全部完成后最后一步原子换装——中途任何
+            # 一步失败，包内保持完整旧态（旧 docx + 旧 content.json），下次重跑
+            # 比对不等自然走完整更新路径收敛。此前「先写正式名后簿记」的顺序一旦
+            # 中途失败，重跑会命中内容短路把失败半态固化（content.json/seq 永不
+            # 修正、artifact.created 永不发、文案误报「未重复发布」）。
+            staging = pkg_dir / f"incoming-{uuid.uuid4().hex[:8]}.part"
+            staging.parent.mkdir(parents=True, exist_ok=True)
+            staging.write_bytes(file_path.read_bytes())
+            try:
+                artifact_store.replace_current_content(aid, existing, content_text)
+                db.upsert_artifact_index(
+                    {
+                        **existing,
+                        # content_path 恒指包内 content.json（机器元信息）——与 JSON 发布路径及
+                        # 重启 rebuild_artifact_index 的重算口径一致（该列无读者；写 docx 路径
+                        # 会在重启后被静默翻回，账目漂移）。
+                        "content_path": str(artifact_store.content_path(aid, existing)),
+                        "content_seq": existing["content_seq"] + 1,
+                        "updated_at": _now(),
+                        "last_run_id": source.get("run_id"),
+                        "last_thread_id": source.get("thread_id"),
+                        "emitted": 0,
+                    }
+                )
+                staging.replace(pkg_dir / filename)
+                # 单文件不变量：册名清洗后文件名变了的话，摘掉包内旧 docx（file 端点
+                # 按「包内唯一 .docx」取文件）
+                for p in artifact_store.package_files(aid, existing):
+                    if p.name != filename:
+                        p.unlink(missing_ok=True)
+            finally:
+                staging.unlink(missing_ok=True)
             logger.info("artifact 文件更新 %s (%s) seq=%s", aid, contract_key, existing["content_seq"] + 1)
             deliverables.note("artifact", artifact_id=aid, display_name=name)
             return artifact_store.read_meta(aid, existing) or {}
@@ -311,9 +331,15 @@ def publish_file_artifact(
             },
             "created_at": _now(),
         }
-        # 先文件后 content.json 再 meta.json（meta 落盘即发布完成，与 create_package 同序）
-        artifact_store.write_package_file(aid, meta, filename, file_path.read_bytes())
-        artifact_store.create_package(meta, content_text)
+        # 先文件后 content.json 再 meta.json（meta 落盘即发布完成，与 create_package 同序）；
+        # 中途失败清掉刚开的半包目录——无 meta 的目录读侧本就当不存在（僵尸行防御），
+        # 不清只会留磁盘孤儿
+        try:
+            artifact_store.write_package_file(aid, meta, filename, file_path.read_bytes())
+            artifact_store.create_package(meta, content_text)
+        except Exception:
+            shutil.rmtree(artifact_store.artifact_dir(aid, meta), ignore_errors=True)
+            raise
         db.upsert_artifact_index(
             {
                 "artifact_id": aid,

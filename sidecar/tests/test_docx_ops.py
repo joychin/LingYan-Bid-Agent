@@ -1576,6 +1576,181 @@ def test_assemble_empty_container_suppressed(env):
     assert any(t.startswith("第一章\u3000技术方案") for t in texts)  # 部分产出容器照常
 
 
+def test_assemble_suppressed_container_reported(env):
+    """空容器抑制的容器标题点名：此前容器名从整本/目录页/报告三处同时消失，
+    其「另附」叶子悬挂在无父标题下——补一行报告交代。"""
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "附件章", "level": 1, "children": [
+                    {"目录名称": "附件：证书", "level": 2, "children": [],
+                     "交付形态": "模板或附件填充", "来源位置": []},
+                ]},
+                {"目录名称": "项目理解", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+            ]}
+        ]
+    })
+    docx_section_create.invoke({"path": "body/项目理解", "title": "项目理解",
+                                "paragraphs": "正文。"})
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    assert "容器章节整体未产出" in r
+    suppressed_line = next(ln for ln in r.splitlines() if "容器章节整体未产出" in ln)
+    assert "附件章" in suppressed_line
+
+
+def test_assemble_no_toc_node_advisory(env):
+    """无「目录」节点：全部一级节点按章编号（旧行为兼容）但现在可见——
+    一行事实提示，供用户判断是否要前置区。"""
+    _seed_dir_artifact(env, _DIR_SINGLE)
+    r = docx_assemble_volume.invoke({})
+    assert "目录树无「目录」节点" in r and "按章编号" in r
+
+
+def test_assemble_cover_variant_advisory(env):
+    """「封面页」等变体不识别为封面（清洗后≠「封面」）：占号+发标题照旧，
+    补事实提示指路改名，不做模糊匹配。"""
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "封面页", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+                {"目录名称": "项目理解", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+            ]}
+        ]
+    })
+    docx_section_create.invoke({"path": "body/封面页", "title": "封面页",
+                                "paragraphs": "封面内容。"})
+    docx_section_create.invoke({"path": "body/项目理解", "title": "项目理解",
+                                "paragraphs": "正文。"})
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    assert "含「封面」但非约定名「封面」" in r
+
+
+def test_assemble_duplicate_leaf_titles_merge_once(env):
+    """同册同名叶子（清洗后同文件）：内容只并入一次——重复并入=整本里同一份
+    内容出现两遍；⚠️ 点名请改目录标题其一。"""
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "项目理解与需求分析", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+                {"目录名称": "项目理解与需求分析 ", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},  # 尾随空格清洗后同名
+            ]}
+        ]
+    })
+    docx_section_create.invoke({"path": "body/项目理解与需求分析",
+                                "title": "项目理解与需求分析",
+                                "paragraphs": "唯一一份正文。"})
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    assert "清洗后同名的节点" in r and "内容只并入一次" in r
+    assert "合并 1 节" in r
+    texts = [_accepted_text(p._p) for p in Document(
+        str(_abs(env, "body/整本-技术部分.docx"))).paragraphs]
+    assert texts.count("唯一一份正文。") == 1
+
+
+def test_assemble_duplicate_volume_names_skips_second(env):
+    """册名清洗后重名：第二册整册跳过（避免节目录与整本文件互覆），⚠️ 点名。"""
+    content = {
+        "response_documents": [
+            {"name": "商务部分", "scope": "", "directory": [
+                {"目录名称": "售后承诺", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []}]},
+            {"name": "商务部分 ", "scope": "", "directory": [  # 尾随空格清洗后同名
+                {"目录名称": "售后承诺", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []}]},
+        ]
+    }
+    _seed_dir_artifact(env, content)
+    docx_section_create.invoke({"path": "body/商务部分/售后承诺", "title": "售后承诺",
+                                "paragraphs": "甲册内容。"})
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    assert "清洗后同名" in r and "本册未合册" in r
+    assert "合并 1 节" in r  # 只有第一册合册
+
+
+def test_assemble_self_volume_named_leaf_guarded(env):
+    """叶子标题清洗后与整本输出同名：上一轮整本产物不当节内容并入（自噬翻倍
+    断路），按缺失处理并单独点名。"""
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "整本-技术部分", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+                {"目录名称": "项目理解", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+            ]}
+        ]
+    })
+    docx_section_create.invoke({"path": "body/项目理解", "title": "项目理解",
+                                "paragraphs": "正文。"})
+    r1 = docx_assemble_volume.invoke({})
+    assert "缺失 1 节未并入" in r1  # 首轮：叶子「整本-技术部分」尚无文件
+    r2 = docx_assemble_volume.invoke({})
+    assert r2.startswith("[已合册]")
+    assert "个节点标题与整本产物文件同名" in r2
+    texts = [_accepted_text(p._p) for p in Document(
+        str(_abs(env, "body/整本-技术部分.docx"))).paragraphs]
+    assert texts.count("正文。") == 1  # 上一轮整本没有整份被并进来
+
+
+def test_assemble_volume_prefix_accounting(env):
+    """「整本-」前缀收窄（2026-09-15 审计）：标题恰以「整本-」开头的合法节文件
+    正常并入；子目录里错放的 整本-*.docx 按孤儿点名；根层整本产物不报孤儿。"""
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "整本-特别篇", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+                {"目录名称": "项目理解与需求分析", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+            ]}
+        ]
+    })
+    docx_section_create.invoke({"path": "body/整本-特别篇", "title": "整本-特别篇",
+                                "paragraphs": "特别篇正文。"})
+    docx_section_create.invoke({"path": "body/项目理解与需求分析",
+                                "title": "项目理解与需求分析", "paragraphs": "普通节正文。"})
+    stray = _abs(env, "body/子目录/整本-错放.docx")
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    Document().save(stray)
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    assert "合并 2 节" in r  # 「整本-特别篇」合法节文件照常并入
+    orphan_seg = r.split("个节文件未并入", 1)[1]
+    assert "body/子目录/整本-错放.docx" in orphan_seg
+    assert "整本-特别篇" not in orphan_seg  # 已并入的节文件不算孤儿
+    r2 = docx_assemble_volume.invoke({})
+    orphan_seg2 = r2.split("个节文件未并入", 1)[1]
+    assert "body/整本-技术部分.docx" not in orphan_seg2  # 根层整本产物不报孤儿
+
+
+def test_assemble_merged_zero_unfilled_reported(env):
+    """全册只有未产出的模板填充叶子：merged==0 报告列出 unfilled 名单，
+    不再误报「目录树无叶子节点」；不产出整本文件。"""
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "附件：资质证书复印件", "level": 1, "children": [],
+                 "交付形态": "模板或附件填充", "来源位置": []},
+            ]}
+        ]
+    })
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]")
+    assert "无已写节文件" in r
+    assert "模板填充类未产出 1 节" in r and "附件：资质证书复印件" in r
+    assert "目录树无叶子节点" not in r
+    assert not _abs(env, "body/整本-技术部分.docx").exists()
+
+
 def test_assemble_migrates_comments_and_warns_inline(env):
     """节内待办批注迁入整本（id 重映射、标记不悬空）；内联占位兜底扫描点名。"""
     _seed_dir_artifact(env, _DIR_SINGLE)
@@ -2754,3 +2929,15 @@ def test_revise_returns_now_text_without_reread(env):
                               ensure_ascii=False)}
     )
     assert "结尾改这里改后。" in r3  # 尾部改动点未被截断裁掉
+
+
+def test_sanitize_name_leading_dot():
+    """清洗去前导点：`.` 开头的文件名会被 workbench/本轮文件按隐藏文件隐掉而
+    账面照算（账实不一致）——正文标题不受影响，仅文件名（2026-09-15 审计）。"""
+    from app.tools.body_contract import sanitize_name
+
+    assert sanitize_name(".NET 架构方案") == "NET 架构方案"
+    assert sanitize_name("..反思与总结") == "反思与总结"
+    assert sanitize_name("///") == "未命名"
+    assert sanitize_name("A/B:方案") == "A B 方案"
+    assert sanitize_name("技术部分") == "技术部分"  # 无前导点照旧

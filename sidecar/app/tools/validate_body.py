@@ -462,14 +462,14 @@ def _validate_body_global(body_dir: Path) -> str:
     不在此判。
     """
     # 节文件收 .docx（现役形态）与 .md（旧任务兼容）；同名并存去重（docx 排序序
-    # 在前=新形态优先）；「整本-」合册产物是派生物不参与比对
+    # 在前=新形态优先）；整本产物恒落 body 根层（合册约定）——只排除根层
+    # 「整本-」文件，子目录里的 整本-*.docx 是写手错放，参与比对（合册侧按孤儿点名）
     seen: set[tuple[Path, str]] = set()
     sections: list[Path] = []
     for q in sorted(list(body_dir.rglob("*.docx")) + list(body_dir.rglob("*.md"))):
-        if (
-            q.name in (body_contract.GUIDE_NAME, body_contract.PROMISE_NAME)
-            or q.name.startswith(body_contract.VOLUME_PREFIX)
-        ):
+        if q.name in (body_contract.GUIDE_NAME, body_contract.PROMISE_NAME):
+            continue
+        if q.parent == body_dir and q.name.startswith(body_contract.VOLUME_PREFIX):
             continue
         key = (q.parent, q.stem)
         if key in seen:

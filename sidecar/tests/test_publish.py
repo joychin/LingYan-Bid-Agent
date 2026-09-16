@@ -353,3 +353,60 @@ def test_publish_volume_book_is_identity_key(env):
     assert m3.get("_unchanged") is True
     vrows = [r for r in db.list_artifact_index() if r["kind"] == "tender.volume"]
     assert len(vrows) == 2
+
+
+def test_publish_volume_update_failure_keeps_old_state(env, monkeypatch):
+    """更新路径中途失败：包保持完整旧态（旧 docx+旧 content.json+旧 seq），
+    重跑收敛新态——不再被内容短路把失败半态固化（2026-09-15 审计）。"""
+    from docx import Document
+
+    src = _make_volume_docx(env, "整本-技术册.docx", "初版正文")
+    m1 = _pub_volume(env, src, "技术册")
+    aid = m1["artifact_id"]
+    old_bytes = artifact_store.package_files(aid, m1)[0].read_bytes()
+    old_content = artifact_store.read_content(aid, m1)
+
+    doc = Document(str(src))
+    doc.add_paragraph("第二版正文")
+    doc.save(src)
+
+    real = artifact_store.replace_current_content
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(artifact_store, "replace_current_content", _boom)
+    with pytest.raises(OSError):
+        _pub_volume(env, src, "技术册", run_id="r_2")
+    monkeypatch.setattr(artifact_store, "replace_current_content", real)
+
+    # 包保持完整旧态
+    row = db.get_artifact_index(aid)
+    assert row["content_seq"] == 1
+    assert artifact_store.package_files(aid, row)[0].read_bytes() == old_bytes
+    assert artifact_store.read_content(aid, row) == old_content
+    assert db.pending_emit("r_2") == []
+
+    # 重跑收敛新态（半态不会命中内容短路）
+    m2 = _pub_volume(env, src, "技术册", run_id="r_3")
+    assert "_unchanged" not in m2
+    assert db.get_artifact_index(aid)["content_seq"] == 2
+    assert artifact_store.package_files(aid, m2)[0].read_bytes() == src.read_bytes()
+    # 无暂存件残留
+    assert list(artifact_store.artifact_dir(aid, m2).glob("incoming-*.part")) == []
+
+
+def test_publish_volume_create_failure_cleans_package_dir(env, monkeypatch):
+    """新建路径中途失败：半包目录清掉（无 meta 的目录读侧本就当不存在，
+    不清只会留磁盘孤儿）。"""
+    src = _make_volume_docx(env, "整本-技术册.docx", "正文")
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(artifact_store, "create_package", _boom)
+    with pytest.raises(OSError):
+        _pub_volume(env, src, "技术册")
+    assert [r for r in db.list_artifact_index() if r["kind"] == "tender.volume"] == []
+    arts = artifact_store.work_artifacts_dir(env["task"]["id"])
+    assert not arts.is_dir() or list(arts.iterdir()) == []

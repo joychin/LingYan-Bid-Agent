@@ -211,8 +211,8 @@ def test_body_guide_sections_and_missing(env):
     _seed_directory(env)
     _write_body(env, "body/写作指引.md", "指引表\n")
     _write_body(env, "body/关键事实与承诺.md", "清单\n")
-    _write_body(env, "body/3.1 项目理解与需求分析.md")
-    _write_body(env, "body/3.2 总体设计方案.md")
+    _make_docx(env, "body/3.1 项目理解与需求分析.docx")
+    _make_docx(env, "body/3.2 总体设计方案.docx")
     r = check_pipeline_state.invoke({})
     assert "[body] 指引已生成；承诺清单已生成；已写 2 节" in r
     assert "[body] 目录节点未写正文：3.3 项目团队配置" in r
@@ -220,18 +220,18 @@ def test_body_guide_sections_and_missing(env):
 
 
 def test_body_extra_file_after_outline_change(env):
-    _write_body(env, "body/旧版遗留节.md")  # 先有旧文件（基于旧目录写的）
+    _make_docx(env, "body/旧版遗留节.docx")  # 先有旧文件（基于旧目录写的）
     _seed_directory(env)  # 后发布新目录（content.json mtime 更新）
     _write_body(env, "body/写作指引.md", "指引表\n")  # 指引晚于目录 → 不报过期
     r = check_pipeline_state.invoke({})
     assert "[body] body/ 文件无对应目录节点（标题不一致或目录已改版）：旧版遗留节" in r
-    assert "目录产物更新晚于正文" in r and "旧版遗留节.md" in r.split("目录产物更新晚于正文")[1]
+    assert "目录产物更新晚于正文" in r and "旧版遗留节.docx" in r.split("目录产物更新晚于正文")[1]
 
 
 def test_body_stale_not_reported_when_written_after_publish(env):
     _seed_directory(env)
     _write_body(env, "body/写作指引.md", "指引表\n")
-    _write_body(env, "body/3.1 项目理解与需求分析.md")
+    _make_docx(env, "body/3.1 项目理解与需求分析.docx")
     r = check_pipeline_state.invoke({})
     assert "目录产物更新晚于正文" not in r
 
@@ -252,8 +252,8 @@ def test_body_multi_volume_layout(env):
     })
     _seed_directory(env, content)
     _write_body(env, "body/写作指引.md", "指引表\n")
-    _write_body(env, "body/技术部分/3.1 项目理解与需求分析.md")
-    _write_body(env, "body/商务部分/6.1 售后服务承诺.md")
+    _make_docx(env, "body/技术部分/3.1 项目理解与需求分析.docx")
+    _make_docx(env, "body/商务部分/6.1 售后服务承诺.docx")
     r = check_pipeline_state.invoke({})
     assert "已写 2 节" in r
     assert "[body] 目录节点未写正文：技术部分/3.2 总体设计方案、技术部分/3.3 项目团队配置" in r
@@ -318,6 +318,57 @@ def test_body_docx_md_coexist_reports_fact(env):
     assert "[body] 同时存在 .docx 与 .md 的节：3.1 项目理解与需求分析" in r
     assert "旧稿残留，以 docx 为准" in r
     assert "已写 1 节" in r
+
+
+def test_body_lone_md_residual_not_counted(env):
+    """孤立 .md（无同名 docx）不计已写、不进对账——合册只并 docx，计入会
+    「check 报已写、合册报缺节」两侧矛盾；降为旧稿残留提示。"""
+    _seed_directory(env)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    _write_body(env, "body/3.1 项目理解与需求分析.md", "旧稿\n")
+    r = check_pipeline_state.invoke({})
+    assert "已写 0 节" in r
+    assert "旧稿 .md 残留" in r and "3.1 项目理解与需求分析" in r
+    assert "[body] 目录节点未写正文：3.1 项目理解与需求分析" in r
+    assert "叶子对账一致" not in r
+
+
+def test_body_nested_file_reported_misplaced(env):
+    """嵌套子目录文件（09-15 事故形态：写手自选章节子目录）不折名进对账——
+    单列「错位」点名且按缺报，不再出现「check 报一致、合册报缺节」两侧矛盾。"""
+    _seed_directory(env)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    _make_docx(env, "body/总体技术方案/3.1 项目理解与需求分析.docx")
+    r = check_pipeline_state.invoke({})
+    assert "嵌套在子目录" in r and "总体技术方案/3.1 项目理解与需求分析" in r
+    assert "[body] 目录节点未写正文：3.1 项目理解与需求分析" in r
+    assert "叶子对账一致" not in r
+
+
+def test_body_multi_volume_nested_misplaced(env):
+    """多册下深层嵌套不再折名成「册名/标题」判一致（此前 parts[0] 混同）。"""
+    content = _dir_content()
+    content["response_documents"].append({
+        "name": "商务部分", "scope": "",
+        "directory": [{"目录名称": "6.1 售后服务承诺", "level": 1, "children": [],
+                       "交付形态": "正文编写", "来源位置": ["SCORE-09"]}],
+    })
+    _seed_directory(env, content)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    _make_docx(env, "body/技术部分/子目录/3.1 项目理解与需求分析.docx")
+    r = check_pipeline_state.invoke({})
+    assert "嵌套在子目录" in r and "技术部分/子目录/3.1 项目理解与需求分析" in r
+    assert "叶子对账一致" not in r
+
+
+def test_body_nested_volume_prefix_file_counted(env):
+    """子目录里的 整本-*.docx（写手错放）不再被裸前缀排除——进对账被点名
+    （此处按嵌套错位报），只有根层的整本产物才豁免。"""
+    _seed_directory(env)
+    _write_body(env, "body/写作指引.md", "指引表\n")
+    _make_docx(env, "body/子目录/整本-错放.docx")
+    r = check_pipeline_state.invoke({})
+    assert "嵌套在子目录" in r and "子目录/整本-错放" in r
 
 
 # ---------- [body] 均衡分波参考 ----------
