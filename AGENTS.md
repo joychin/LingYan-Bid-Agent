@@ -18,10 +18,12 @@
   体系的设计参考材料（自包含，面向新场景重建，非本仓现状的实现说明）；
   `docs/prototypes/` 放 HTML 原型页。改 skill/契约相关工作前值得先翻。
 
-许可：**AGPL-3.0-only**（2026-09-10 定；LICENSE 全文 + 根/frontend/sidecar/src-tauri
-manifest 同步）——`skills/` 方法论与提示词一并受其约束；唯一例外=`humanizer-zh`
-（第三方 MIT，随文件保留署名）。搬入三方代码/提示词前先过许可兼容检查；**运行时
-依赖树不得引入 AGPL 组件**（PyMuPDF→pypdfium2 整体替换即此动因，见 decision-log）。
+许可：**MIT**（2026-09-16 起，此前为 AGPL-3.0-only，沿革见 decision-log；LICENSE 全文 +
+根/frontend/sidecar/src-tauri manifest 同步）——`skills/` 方法论与提示词一并按 MIT
+授权；三方件保留各自许可与署名（`humanizer-zh` 为第三方 MIT，LICENSE 随文件在目录内）。
+搬入三方代码/提示词前先过许可兼容检查：**运行时依赖树不得引入 AGPL/GPL 类强 copyleft**
+——MIT 件一旦链入即被拽回 AGPL、本仓授权当场失效（弱 copyleft〔LGPL/MPL〕个案判断）；
+PyMuPDF→pypdfium2 整体替换即此动因，见 decision-log。
 
 ## 结构与分层（重要边界）
 

@@ -10,7 +10,7 @@
 
 [![Release](https://img.shields.io/github/v/release/joychin/LingYan-Bid-Agent?label=%E4%B8%8B%E8%BD%BD)](https://github.com/joychin/LingYan-Bid-Agent/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue)](https://github.com/joychin/LingYan-Bid-Agent/releases)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-orange)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ## 这是什么
 
@@ -147,4 +147,6 @@ cp sidecar/.env.example sidecar/.env   # 环境变量模板（模型密钥也可
 
 ## License
 
-本项目以 [AGPL-3.0-only](LICENSE) 协议开源，`skills/` 中的方法论与提示词一并受其约束。
+本项目以 [MIT](LICENSE) 协议开源，`skills/` 中的方法论与提示词一并按 MIT 授权。
+
+第三方组件保留各自的许可与署名（例如 `sidecar/app/skills/humanizer-zh/` 为第三方 MIT 作品，其 LICENSE 随文件放在同目录）。

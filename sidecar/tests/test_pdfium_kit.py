@@ -132,7 +132,9 @@ def test_concurrent_render_and_count_deterministic(tmp_path):
 def test_no_pymupdf_imports_in_app():
     """许可守卫（PyMuPDF 替换批·批 3）：app/ 生产代码零 pymupdf/fitz 导入。
 
-    AGPL 依赖不得静默回流（tests/ 的 reportlab 夹具不受此限）。"""
+    AGPL 依赖不得静默回流（tests/ 的 reportlab 夹具不受此限）。本仓 2026-09-16 起为
+    MIT，此守卫由「为未来商用留路」升级为硬约束——链入 AGPL/GPL 会把整体分发拽回
+    copyleft、本仓授权当场失效。"""
     import re as _re
 
     import app as app_pkg

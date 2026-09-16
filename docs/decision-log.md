@@ -2646,3 +2646,20 @@
     品牌改名这类「改名时无法验证、发版时才炸」的项，留给 CI 首验是唯一路径
     （代价=一次 Windows job 白跑 ~8 分钟）。修复已随 v0.2.0 tag 重打验证。
 
+  - **许可切换 AGPL-3.0-only → MIT（2026-09-16，全仓一次性替换）**：动因=放宽下游使用
+    （AGPL 的整体 copyleft 挡住闭源商用与嵌入式集成，而桌面客户端形态下 §13 网络条款
+    本就不咬合，收益≈零成本≈高）；本仓著作权单一（全历史提交同一作者），重许可无第三方
+    同意问题；已发布的 v0.2.0 产物仍按发布时的 AGPL 授权，不追改（版权人重许可向前生效）。
+    落地=LICENSE 全文换 MIT（版权行 `Copyright (c) 2026 LingYan (灵燕智能)`）+四处
+    manifest 的 license 字段（根 package.json、frontend/package.json 及
+    frontend/package-lock.json 根条目、sidecar/pyproject.toml、src-tauri/Cargo.toml）
+    +README 徽章与 License 节+AGENTS.md 许可条目改写。
+    **连带规则变化（关键）**：AGPL 时代的「运行时依赖树不得引入 AGPL」原为「给未来闭源
+    商用留路」，MIT 下升级为**硬约束**——MIT 件链入 AGPL/GPL 会被 copyleft 拽回 AGPL、
+    本仓授权当场失效（弱 copyleft〔LGPL/MPL〕个案判断）；`test_pdfium_kit` 的许可守卫
+    `test_no_pymupdf_imports_in_app` 语义随之加重，docstring 已同步。三方件纪律不变：
+    搬入前过兼容检查、保留原署名（`humanizer-zh` 第三方 MIT 随文件保留 LICENSE）。
+    明确不做：不改本文件与 packaging.md 内历史条目原文（逐字存档原则——「本仓自身 AGPL
+    开源下今天无违规」「为未来闭源商用分发留路」等是当时的动因记录，不追改）；不为历史
+    tag 补 MIT（tag 即历史快照，许可按发布时口径）。
+

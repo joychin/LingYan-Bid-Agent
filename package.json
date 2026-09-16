@@ -1,7 +1,7 @@
 {
   "name": "tender-agent",
   "private": true,
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "scripts": {
     "dev": "tauri dev",
     "tauri": "tauri",
