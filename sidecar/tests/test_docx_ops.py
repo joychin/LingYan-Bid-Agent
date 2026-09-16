@@ -278,6 +278,11 @@ def test_source_inject_whole_file(env):
     r = docx_source_inject.invoke({"source": "招标文件.docx", "dest": section})
     assert r.startswith("[已注入]") and "整份文件" in r, r
     assert "表格 1 张" in r
+    # 返回语不得教写内联占位（2026-09-16 prompt 一致性批）：占位文字
+    # validate_body 判不过，缺值正规出口=Word 批注——旧句「未定值【待补：…】」
+    # 曾让照做的写手自查必挂一次
+    assert "【待补" not in r, r
+    assert "docx_comment_add" in r, r
     chk = Document(str(_abs(env, section)))
     texts = "\n".join(p.text for p in chk.paragraphs)
     assert "第一章 招标公告" in texts and "致：______（招标人名称）" in texts

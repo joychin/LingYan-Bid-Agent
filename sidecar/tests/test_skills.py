@@ -97,6 +97,21 @@ def test_tender_outline_unused_ids_disclosure():
         assert kw in text, f"tender-outline/SKILL.md 缺少未归位披露分支关键词：{kw}"
 
 
+def test_tender_analysis_clarification_channel_is_comment():
+    """tender-analysis 待澄清的下游出口=Word 批注（2026-09-16 prompt 一致性批）。
+
+    旧句「正文内联标注 / 正文内联「【待澄清：…」」教 tender-body 往正文写
+    占位文字——与 tender-body 的「正文禁止占位、validate_body 判不过」矛盾，
+    两个文件都不得回流旧口径。"""
+    skill = (skills_source_dir() / "tender-analysis" / "SKILL.md").read_text(encoding="utf-8")
+    clar = (skills_source_dir() / "tender-analysis" / "references" / "clarifications.md").read_text(
+        encoding="utf-8"
+    )
+    assert "正文内联" not in skill, "tender-analysis/SKILL.md 不得教正文内联标注"
+    assert "正文内联" not in clar, "clarifications.md 不得教正文内联占位"
+    assert "Word 批注" in skill and "Word 批注" in clar, "待澄清出口须指向 Word 批注"
+
+
 def test_tender_body_kickoff_and_material_first():
     """tender-body 开工纪律锚点：两份确认件停轮汇报（2026-09-13 用户拍板弃
     ask_human 门，改为摆要点等用户输入框指示）、素材先行、派发短名+系统自动补全

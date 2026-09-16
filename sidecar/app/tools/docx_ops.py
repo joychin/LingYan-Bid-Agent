@@ -1698,7 +1698,7 @@ def docx_source_inject(source: str, dest: str, lines: str = "") -> str:
 
     用途：格式跟随与格式件节点（投标函/授权书/投标一览表等）——招标规定的格式
     原样拷入目标节文件（格式逐字节保真，不重排不走样），再用 docx_section_revise
-    填空适配（表格空格子 fill、旧值 replace；承诺值出自清单、未定值【待补：…】）。
+    填空适配（表格空格子 fill、旧值 replace；承诺值出自清单、未定值用 docx_comment_add 加批注记待办）。
     仅支持 docx 原件；pdf 等无可拷元素，按该来源的解析文本自行成形。注入内容
     不带修订标记（干净底稿，填空改值才标记）。
     Args:
@@ -1806,7 +1806,8 @@ def docx_source_inject(source: str, dest: str, lines: str = "") -> str:
         f"表格 {n_tbl} 张、图片 {n_img} 张（内容与格式逐字节取自招标原件）"
         + (f"，随迁样式定义 {n_style} 个、编号定义 {n_num} 组" if n_style or n_num else "")
         + "\n下一步：docx_section_read 拿段落序号与表格格坐标 → docx_section_revise 填空"
-        "（表格空格子 fill、旧值 replace；招标方信息保留、我方信息按承诺清单填，未定值【待补：…】）"
+        "（表格空格子 fill、旧值 replace；招标方信息保留、我方信息按承诺清单填，"
+        "未定值用 docx_comment_add 加批注记待办——正文不写占位文字）"
         "→ validate_body 自查。"
     )
 

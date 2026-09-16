@@ -130,6 +130,20 @@ def test_thin_dispatch_enriched_with_all_blocks(env):
         assert tag not in _data_part(out)
 
 
+def test_promise_missing_fallback_points_to_comment_channel(env):
+    """承诺清单缺失的兜底文案走批注出口（2026-09-16 prompt 一致性批）。
+
+    旧句「缺项一律写【待澄清：…】不得编造」教写内联占位——validate_body 判
+    不过，且与同载荷内联方法论的「正文禁止【待补】【待澄清】占位文字」自相
+    矛盾（同一条任务描述里两条相反指令，模型二选一）。"""
+    tid = _seed(env, promise=False)
+    out = build_enriched_description("写 3.1 项目理解", tid)
+    assert out, "派发拼装意外放行"
+    data = _data_part(out)
+    assert "清单文件缺失或为空" in data and "docx_comment_add" in data
+    assert "【待澄清" not in data, "兜底文案不得教写内联占位"
+
+
 def test_multi_section_dispatch_shared_plus_per_section(env):
     """多节派发（2026-09-15 模型自主拆分批）：首行顿号分隔多节名 → 共享块一份 +
     逐节块每节一份；兄弟摘要排除本任务全部节（同任务节互见没必要）。"""

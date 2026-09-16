@@ -80,7 +80,7 @@ grep 的使用纪律（字面匹配逐词调用、批内并行、次数预算、
 ### 第 3 步：汇总澄清
 
 按 `references/clarifications.md` 把各节登记的待澄清项汇总为 `work/analysis/clarifications.md`。
-**不阻塞**：只标注、不用 ask_human 打断；未裁决项留给下游可见（目录节点挂 ⚠、正文内联标注）。
+**不阻塞**：只标注、不用 ask_human 打断；未裁决项留给下游可见（目录节点挂 ⚠；正文侧由 tender-body 落成 Word 批注带回）。
 
 ### 第 4 步：收尾（摆要点、提醒查看，等用户指示再继续）
 

@@ -247,11 +247,13 @@ def test_subagent_specs():
         assert ref in writer["system_prompt"]
     assert "禁止调用 ask_human" in writer["system_prompt"]
     body = specs["tender-body-writer"]
-    # 方法论单一真源=section-writing.md，但 2026-09-12 起由主代理派发时内联
-    # （dispatch_enrich._skill_text），写手 prompt 只留「已随任务描述给出、不要再读」
-    # 的指引——全库该文件此前被 215 次读取、205 次在子代理，每节白付一次往返。
+    # 方法论单一真源=section-writing.md，常态由主代理派发时内联
+    # （dispatch_enrich._skill_text），写手 prompt 留「不要再读」指引——但富描述
+    # 最简拼装路径不内联（09-15 最小块拍板），禁令必须是条件式：段缺失时允许
+    # 开工前自读一次（2026-09-16 prompt 一致性批，防「拿不到又不许读」）。
     assert "section-writing.md" in body["system_prompt"]  # 指出单一真源
     assert "不要再 read_file" in body["system_prompt"] or "不要 read_file" in body["system_prompt"]
+    assert "若该段缺失" in body["system_prompt"]  # 条件式许可在位
     # 素材复用纪律（2026-09-10 收口回归线）：派发已给块清单不再重检索素材库
     assert "直接采用" in body["system_prompt"]
     assert "不再调用 search_references" in body["system_prompt"]
@@ -361,6 +363,22 @@ def test_system_prompt_glossary_and_no_invented_paths():
         "不要发明替代路径凑合执行",
     ):
         assert kw in src, f"主 prompt 缺少词汇表/无机制纪律关键词：{kw}"
+
+
+def test_system_prompt_mechanism_promise_accuracy():
+    """主 prompt 承诺须与机制对齐（2026-09-16 prompt 一致性批）。
+
+    ① 整本标书产物发布明确不设恢复点（publish_file_artifact 拍板），无限定的
+    「覆盖前留恢复点」承诺会被转述给用户——承诺无机制；② humanizer 只润模型
+    自己生成的文字，素材底稿/招标原件保真——重写素材会掉 validate_body 的
+    素材使用率校验。"""
+    import inspect
+
+    from app.agent import build_agent
+
+    src = inspect.getsource(build_agent)
+    for kw in ("整本标书产物是派生文件", "只润模型自己生成的文字"):
+        assert kw in src, f"主 prompt 缺少机制对齐关键词：{kw}"
 
 
 # ---- 瞬时 LLM 错误自动重试（2026-08-27 全量测试 T07 API 流断的修复）----

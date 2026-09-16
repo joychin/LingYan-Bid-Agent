@@ -603,7 +603,10 @@ def build_enriched_description(desc: str, task_id: str) -> str | None:
                 out.extend(ctx_lines)
         promises = _promise_lines(task_id)
         out.append("承诺清单全部值（承诺类数字只能用这里）：")
-        out.extend(promises or ["（清单文件缺失或为空——缺项一律写【待澄清：…】不得编造）"])
+        out.extend(
+            promises
+            or ["（清单文件缺失或为空——缺项一律用 docx_comment_add 加批注（锚定相关段落）带回，不得编造）"]
+        )
         sibs = _sibling_lines(
             task_id, targets[0].content, [t.vol for t in targets], {t.title for t in targets}
         )
