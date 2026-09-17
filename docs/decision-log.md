@@ -2852,3 +2852,13 @@
     引用（现跑本脚本的是 release.yml 的 win/mac job）。findings ②（退出取消后
     3s 内再退强杀）④（Pydantic 422 文案非人话）备案不修。pytest 903 绿、
     ./check.sh 全绿。
+
+  - **set_version.py CI 首跑炸修（2026-09-17 晚间，v0.2.1 tag 首跑暴露）**：
+    批次⑥新脚本 `isinstance(pkgs.get(""), {}).get("version")`——isinstance 第二参
+    传了 dict 字面量（须为类型），运行时必抛 TypeError，win/mac 两 job 同在
+    「从 tag 同步版本号」步 1 分钟内即死。此脚本只有 CI 调用、check.sh 零覆盖，
+    属「发版时才炸」结构性盲区的又一例（v0.2.0 的 WiX 码页同源）。修=判空链条
+    `isinstance(pkgs, dict) and isinstance(pkgs.get(""), dict) and pkgs[""].get("version")`；
+    本地实跑验证（六文件正确落 0.2.1 后还原）。已知无害怪癖备案：json.dumps
+    重排 tauri.conf.json 内联对象格式（CI 内存覆写、不提交，无影响）。tag v0.2.1
+    从 d7c87b4 重指到本修复提交（Release 未建成即失败，无线上内容损失）。

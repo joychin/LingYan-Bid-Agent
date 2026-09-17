@@ -57,7 +57,7 @@ def main() -> None:
             data["version"] = version
             changed = True
         pkgs = data.get("packages", {})
-        if isinstance(pkgs.get(""), {}).get("version"):
+        if isinstance(pkgs, dict) and isinstance(pkgs.get(""), dict) and pkgs[""].get("version"):
             pkgs[""]["version"] = version
             changed = True
         if changed:
