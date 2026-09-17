@@ -283,3 +283,30 @@ def test_reparse_line_drift_warns_only_with_blocks(tmp_path, monkeypatch):
     (mlib.mt_files_dir() / "无块.md").write_text(_body(lines_per=10), encoding="utf-8")
     run_parse(fid2)
     assert db.mt_get_file(fid2)["error"] is None
+
+
+def test_crlf_source_line_numbers_stable(tmp_path, monkeypatch):
+    """CRLF 源（Windows 记事本常态，write_bytes 直写绕过平台转换）：解析产物换行
+    归一为 LF，行号体系全平台一致——修前 \r\n 全链透传 + Windows 写盘二次转换
+    会让行数翻倍、块区间取空（2026-09-17 v0.2.1 win 出包首跑实证，双平台哨兵）。"""
+    import hashlib
+
+    _setup(tmp_path, monkeypatch)
+    body = _body().replace("\n", "\r\n")
+    src = mlib.mt_files_dir() / "记事本方案.md"
+    src.write_bytes(body.encode("utf-8"))
+    fid = db.mt_insert_file(
+        file_name="记事本方案.md", file_hash=hashlib.sha256(body.encode()).hexdigest()
+    )["id"]
+    run_parse(fid)
+    md_path, _, _ = mlib.mt_parse_paths("记事本方案.md")
+    # 断磁盘字节而非 read_text（universal newlines 读回时会把 CR 吃掉、断言空转）
+    assert b"\r" not in md_path.read_bytes()  # 归一闸门（修前 mac/win 磁盘均红）
+    # 重解析行数不漂移（win 首跑即败在 118→59 的行数翻倍）
+    run_parse(fid)
+    f = db.mt_get_file(fid)
+    assert f["parse_status"] == "ready" and f["error"] is None
+    # 行号取段不空：第一章区间建块能取到内容
+    ch1 = mlib.read_outline(fid)[0]
+    b = mlib.create_block(fid, "章一块", "", [[ch1["start_line"], ch1["end_line"]]])
+    assert db.mt_get_block(b["id"])["chars"] > 0

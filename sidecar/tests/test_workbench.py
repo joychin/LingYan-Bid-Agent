@@ -4,7 +4,7 @@
 （restorepoints/ 保留 3 个，旧单一 .bak 收编）。
 """
 
-
+import os
 
 from app import artifact_store
 from tests.util import create_task
@@ -38,9 +38,10 @@ def test_list_filters_and_flags(client):
     assert files["analysis/disqualification.md"]["editable"] is True
     assert files["analysis/disqualification.md"]["revised"] is False
     assert "mtime" in files["analysis/structure.md"] and "size" in files["analysis/structure.md"]
-    # abs_path：面板右键「打开文件夹」用（绝对路径，落在任务 work/ 下）
+    # abs_path：面板右键「打开文件夹」用（绝对路径，落在任务 work/ 下）；
+    # 分隔符随平台（os.sep）——写死 "/" 在 Windows 上假红（v0.2.1 win 首跑实证）
     assert files["analysis/structure.md"]["abs_path"].endswith(
-        f"workspace/{tid}/work/analysis/structure.md"
+        f"workspace{os.sep}{tid}{os.sep}work{os.sep}analysis{os.sep}structure.md"
     )
 
 

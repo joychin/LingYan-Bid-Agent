@@ -1,5 +1,7 @@
 """/api/files（§16 任务级文件区）：任务必填 / 白名单 / 覆盖 / 列表 / 删除 / 文件名清洗。"""
 
+import os
+
 from app import artifact_store
 from tests.util import create_task, upload_file
 
@@ -24,8 +26,11 @@ def test_upload_list_delete(client):
     entries = r.json()["files"]
     names = [f["name"] for f in entries]
     assert names == ["招标文件.docx"]
-    # abs_path：面板右键「打开文件夹」用（绝对路径，落在任务 sources/ 下）
-    assert entries[0]["abs_path"].endswith(f"workspace/{tid}/sources/招标文件.docx")
+    # abs_path：面板右键「打开文件夹」用（绝对路径，落在任务 sources/ 下）；
+    # 分隔符随平台（os.sep）——写死 "/" 在 Windows 上假红（v0.2.1 win 首跑实证）
+    assert entries[0]["abs_path"].endswith(
+        f"workspace{os.sep}{tid}{os.sep}sources{os.sep}招标文件.docx"
+    )
 
     # 删除
     r = client.delete("/api/files/招标文件.docx", params={"task_id": tid})

@@ -2888,3 +2888,22 @@
     三跑 win 实证 set_version 在 PYTHONUTF8 下已过。剩余未知=903 pytest 在
     Windows runner 的表现（CJK 字体与路径差异，若红属真实平台信号）。tag v0.2.1
     第三次重指（三跑已取消止损）。
+
+  - **Windows 首跑真实平台信号落地：CRLF 全链腐蚀修（2026-09-17 晚间，v0.2.1
+    四跑暴露）**：四跑 win 死在 check.sh 的 pytest——6 例失败、两族根因（mac 同
+    套 903 例全绿，铁证为平台差异而非测试问题）。**族一=产品 bug（CRLF）**：
+    `read_text_auto` 按 bytes 解码不归一换行，Windows 记事本类 CRLF 源的 \r\n
+    全链透传；`write_atomic` 的 write_text 在 Windows 默认把 LF 翻 CRLF——归一
+    缺失 + 写侧转换叠加成 CRCRLF 腐蚀，读回行数翻倍（test_reparse 118→59 实证）、
+    块区间取空（test_validate_body「取不到内容」）、区间图片计数错位。行号体系
+    （outline 行号/素材块区间/图片计数）按 LF 计，CRLF 源在 Windows 用户侧是常态
+    （记事本默认 CRLF）——素材库/知识库对这类文件会整体错位。修=单一闸门：
+    `ParseResult.__post_init__` 构造即归一（CRLF/CR→LF，本地引擎与 baidu/vlm
+    云端无差别覆盖，引擎实现零改动）+ `write_atomic` 落盘钉死 LF（newline="\n"）。
+    哨兵测试断**磁盘字节**而非 read_text（universal newlines 读回会吃掉 CR、
+    断言空转的坑当场踩过）——修前 mac/win 双红、修后双绿。**族二=测试可移植性**
+    ：三处 `endswith("正斜杠路径")` 断言（files/artifacts/workbench 的 abs_path
+    与产物 path）在 Windows 假红——产品返回 os.sep 原生路径是对的（前端拿去开
+    文件夹），改断言用 os.sep 拼。pytest 904 绿（+1 哨兵）、ruff 干净。tag v0.2.1
+    第四次重指。配额累计：v0.2.1 五跑（首跑/二跑/三跑取消/四跑/五跑）≈ 剩余配额
+    仍足（Free 2000 分/月）。

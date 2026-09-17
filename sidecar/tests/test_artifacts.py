@@ -1,5 +1,7 @@
 """类型化 Artifact：/api/contracts、/api/artifacts 列表与内容端点。"""
 
+import os
+
 from app import artifact_store, db, publish
 
 KEY = "tender.directory/tender-response-docs@1"
@@ -61,9 +63,10 @@ def test_artifacts_list_and_content(client):
     assert a["schema_version"] == 1
     assert a["editable"] is True
     assert a["source"] == {"thread_id": conv["id"], "run_id": "r_1"}
-    # 文件归任务：包路径在 <task>/work/artifacts/ 下
+    # 文件归任务：包路径在 <task>/work/artifacts/ 下；分隔符随平台（os.sep，
+    # 写死 "/" 在 Windows 上假红——v0.2.1 win 首跑实证）
     assert a["path"].endswith(
-        f"{task['id']}/work/artifacts/{aid}/content.json"
+        f"{task['id']}{os.sep}work{os.sep}artifacts{os.sep}{aid}{os.sep}content.json"
     )
 
     r = client.get(f"/api/artifacts/{aid}/content")

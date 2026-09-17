@@ -18,12 +18,25 @@ from typing import Callable
 __all__ = ["ParseResult", "convert", "register", "sha256_file", "supported_exts", "outline_with_lines", "count_nodes"]
 
 
+def _normalize_md(md: str) -> str:
+    """CRLF/CR → LF：行号体系（outline 行号/素材块区间/图片计数）按 LF 计。
+    Windows 记事本类 CRLF 源或云端 OCR 带 CR 字符的返回若不归一，行号会整体
+    错位（2026-09-17 v0.2.1 win 出包首跑实证：解析行数翻倍 118→59、块区间取空）。"""
+    return md.replace("\r\n", "\n").replace("\r", "\n")
+
+
 @dataclass
 class ParseResult:
-    """统一转换契约：md 全文 + info 元信息（conversion/pages/tables/…，形状即 meta.json 子集）。"""
+    """统一转换契约：md 全文 + info 元信息（conversion/pages/tables/…，形状即 meta.json 子集）。
+
+    md **构造即换行归一**（CRLF/CR → LF，见 _normalize_md）——本地引擎与云端
+    （baidu/vlm）无差别过同一道闸，全平台行号一致；引擎实现不必自行处理。"""
 
     md: str
     info: dict
+
+    def __post_init__(self) -> None:
+        self.md = _normalize_md(self.md)
 
 
 # ext（含点、小写）→ convert(path) -> ParseResult
@@ -71,7 +84,10 @@ def write_atomic(path: Path, text: str) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
-    tmp.write_text(text, encoding="utf-8")
+    # newline 固定 LF（2026-09-17）：Windows 上 write_text 默认把 LF 翻成
+    # CRLF——归一后的 md 若残留 CRLF 会被二次翻成 CR+CRLF（腐蚀），读回行数
+    # 翻倍。产物落盘恒 LF，与平台无关。
+    tmp.write_text(text, encoding="utf-8", newline="\n")
     tmp.replace(path)
 
 
