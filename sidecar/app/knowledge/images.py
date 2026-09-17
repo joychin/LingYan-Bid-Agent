@@ -178,7 +178,7 @@ def _render_pdf_pages(src: Path, img_dir: Path) -> tuple[int, int]:
 
 
 def extract_images(src: Path, file_name: str) -> tuple[int, int]:
-    """源文件 → 抽图落盘 parse/<stem>/images/（幂等：每次全量重抽覆盖）。
+    """源文件 → 抽图落盘 parse/<文件名（含扩展名）>/images/（幂等：每次全量重抽覆盖）。
 
     → (写入张数, 跳过张数)。与素材/检索零关系，仅供内容页查看。
     PDF 走整页渲染（文件名即页码），docx 走内嵌图抽取。

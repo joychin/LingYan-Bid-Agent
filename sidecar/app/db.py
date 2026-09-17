@@ -111,7 +111,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS kb_segments USING fts5(
   body, item_id UNINDEXED, section_path UNINDEXED, material_id UNINDEXED,
   line_start UNINDEXED, line_end UNINDEXED, page_start UNINDEXED);
 -- 写作素材库（2026-09-04 v2 手工构建，与知识库彻底分离）：素材文件 + 用户勾选建的块
--- （块=多行号区间集合+用户备注；真值在 materials/parse/<stem>/blocks.json，本表可重建；
+-- （块=多行号区间集合+用户备注；真值在 materials/parse/<文件名（含扩展名）>/blocks.json，本表可重建；
 -- 块检索段复用 kb_segments，item_id=素材文件 id mt_ 前缀与知识库天然隔离）
 CREATE TABLE IF NOT EXISTS mt_files(
   id TEXT PRIMARY KEY,

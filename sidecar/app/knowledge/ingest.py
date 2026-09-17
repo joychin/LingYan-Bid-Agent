@@ -451,3 +451,27 @@ def rebuild_kb_index() -> int:
         if it["parse_status"] == "ready":
             reindex_item(it["id"])
     return len(items)
+
+
+def migrate_parse_dir_layout() -> dict:
+    """KB 解析目录旧布局（parse/<stem>/）一次性迁移到 parse/<文件名>/（幂等）。
+
+    须在 rebuild_kb_index / autocheck_sweep 之前跑（两者按新路径读 md）；
+    共享 images/ 在碰撞组拷贝给各方（历史互清无法事后归属，谁都不丢）。
+    """
+    names = [it["file_name"] for it in db.kb_list_items()]
+    stats = store.migrate_parse_dirs(
+        store.kb_parse_root(),
+        names,
+        (".md", ".outline.json", ".meta.json", ".materials.json"),
+        ("images",),
+    )
+    if stats["conflicts"]:
+        logger.warning(
+            "知识库同名不同扩展文件共享解析目录，已拆分（共享 images 已拷贝各方，"
+            "内容可能混有对方文档图，可重新触发解析重抽）：%s",
+            "、".join(stats["conflicts"]),
+        )
+    if stats["renamed"] or stats["split"]:
+        logger.info("知识库解析目录迁移：%s", stats)
+    return stats

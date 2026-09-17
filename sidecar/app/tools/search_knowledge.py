@@ -33,7 +33,7 @@ _SNIPPET_CHARS = 300
 def _kb_image_hint(file_name: str) -> str:
     """命中条目的可用图提示（证书贴正文的入口指引；无图返回空串）。
 
-    图片产物在 knowledge/parse/<stem>/images/（每文档一目录、无 DB 记录，listdir
+    图片产物在 knowledge/parse/<文件名（含扩展名）>/images/（每文档一目录、无 DB 记录，listdir
     即清单）；PDF 是**整页渲染图，文件名即页码**（img_007.png=第 7 页，空白页跳过），
     docx 是内嵌图（文件序号即顺序）。
     """
@@ -251,9 +251,9 @@ def search_company_assets(query: str, doc_type: str | None = None) -> str:
                 "lines": [h.get("line_start"), h.get("line_end")],
                 "page": h.get("page_start"), "review": item["review_status"], "freshness": _fresh(item),
             })
-        md_rel = Path("knowledge/parse") / Path(hits_out[0][2]["file_name"]).stem
+        md_rel = Path("knowledge/parse") / hits_out[0][2]["file_name"]
         out.append(
-            "精读指引：用 read_file 读 `knowledge/parse/<文件名去扩展名>/<原文件名>.md` 的对应行号区段"
+            "精读指引：用 read_file 读 `knowledge/parse/<文件名（含扩展名）>/<原文件名>.md` 的对应行号区段"
             f"（如 {md_rel}/…），原件在 `knowledge/files/` 下。"
         )
         out.append(_evidence_line(ev))
@@ -369,7 +369,7 @@ def search_references(query: str) -> str:
                 + "\n".join(skel_blocks)
             )
         out.append(
-            "精读指引：用 read_file 读 `materials/parse/<文件名去扩展名>/<原文件名>.md` 的对应行号区间"
+            "精读指引：用 read_file 读 `materials/parse/<文件名（含扩展名）>/<原文件名>.md` 的对应行号区间"
             "（挑选本节要用的章节区间）。写正文节时，docx 原件的块用 docx_material_inject"
             " 按块 id 注入再定向修订（表格/图片/格式零转写）——整块适用则不传 lines，"
             "只用块内部分章节时传 lines 行号区间（须在块勾选范围内）；非 docx 原件才按文本参考改写。"

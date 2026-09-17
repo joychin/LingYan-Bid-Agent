@@ -2017,7 +2017,7 @@ def docx_image_insert(dest: str, image: str, after: str = "", page: int = 1) -> 
     Args:
         dest: 目标节文件（须已用 docx_section_create 创建）
         image: 图片路径（工作区相对，三类来源）：①知识库图片
-               knowledge/parse/<文件stem>/images/img_001.png——search_company_assets
+               knowledge/parse/<文件名（含扩展名）>/images/img_001.png——search_company_assets
                命中行会给出路径；PDF 是整页渲染图、文件名即页码（img_007.png=第 7 页，
                空白页跳过），docx 是文档内嵌图；
                ②当前任务上传图 sources/<文件名>（可带任务前缀）；

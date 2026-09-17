@@ -137,8 +137,18 @@ async def lifespan(_app: FastAPI):
     if stale_mt:
         logger.warning("启动时标记 %d 条崩溃残留的素材文件为 failed", stale_mt)
     from .knowledge.autocheck import autocheck_sweep
+    from .knowledge.ingest import migrate_parse_dir_layout as kb_migrate
     from .knowledge.ingest import rebuild_kb_index
+    from .knowledge.materials_lib import migrate_parse_dir_layout as mt_migrate
 
+    # 解析目录键迁移（2026-09-17 stem→文件名全名）：须在 autocheck/rebuild 之前
+    # （两者按新路径读 md）；幂等，失败不阻断启动（旧布局的前缀产物仍可读，最坏
+    # 退化=碰撞组维持共享现状，下次启动重试）
+    try:
+        kb_migrate()
+        mt_migrate()
+    except Exception:
+        logger.exception("解析目录布局迁移失败（下次启动重试）")
     # 存量待确认条目补跑锚点回文核对（在检索段全量重建之前，改库即被重建收口）
     autocheck_sweep()
     rebuild_kb_index()

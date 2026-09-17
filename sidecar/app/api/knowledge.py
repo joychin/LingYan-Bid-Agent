@@ -257,7 +257,7 @@ async def list_item_images(kid: str):
 
 @router.get("/kb/items/{kid}/images/{name}")
 async def get_material_image(kid: str, name: str):
-    """图片素材文件流（路径限制在 parse/<stem>/images/ 内，防穿越）。
+    """图片素材文件流（路径限制在 parse/<文件名（含扩展名）>/images/ 内，防穿越）。
 
     存量 TIFF/BMP 服务端转 PNG（浏览器不解 TIFF；转码按 mtime 入缓存，
     重抽取同名覆盖后自动失效）。"""

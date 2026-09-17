@@ -1,10 +1,10 @@
 """写作素材库域（v2 手工构建，2026-09-04）：素材块 = 用户勾选的章节区间集合 + 备注。
 
 与知识库彻底分离：自己的文件（materials/files/）、自己的解析产物
-（materials/parse/<stem>/md+outline）、自己的块真值（blocks.json）。流程 =
-上传 → 后台解析（纯机械，不做抽取/图片）→ 用户在目录树勾选 → 建块（多区间）
-→ 备注。零 LLM——块的价值判断归用户，程序只做机械（行号夹紧/嵌套区间去
-重叠/内容切片/检索段落盘）。
+（materials/parse/<文件名（含扩展名）>/md+outline，2026-09-17 起）、自己的块真值
+（blocks.json）。流程 = 上传 → 后台解析（纯机械，不做抽取/图片）→ 用户在目录树勾选
+→ 建块（多区间）→ 备注。零 LLM——块的价值判断归用户，程序只做机械（行号夹紧/
+嵌套区间去重叠/内容切片/检索段落盘）。
 
 块检索段复用 kb_segments（item_id=素材文件 id mt_ 前缀；事实检索按 kb_items
 映射过滤天然隔离）。块 id 只在一个 blocks.json 生命周期内稳定，删块=引用失效。
@@ -39,7 +39,10 @@ def mt_files_dir() -> Path:
 
 
 def mt_parse_dir(file_name: str) -> Path:
-    return cfg.materials_dir() / "parse" / Path(file_name).stem
+    """解析产物目录：materials/parse/<文件名（含扩展名）>/（2026-09-17 前用 stem，
+    同名不同扩展两文件会共享 blocks.json/element_map.json 互相污染——旧布局由
+    migrate_parse_dir_layout 一次性迁移）。"""
+    return cfg.materials_dir() / "parse" / file_name
 
 
 def mt_parse_paths(file_name: str) -> tuple[Path, Path, Path]:
@@ -77,6 +80,47 @@ def read_element_map(file_name: str) -> list[list[int]] | None:
 
 def ensure_dirs() -> None:
     mt_files_dir().mkdir(parents=True, exist_ok=True)
+
+
+def migrate_parse_dir_layout() -> dict:
+    """素材库解析目录旧布局（parse/<stem>/）一次性迁移到 parse/<文件名>/（幂等）。
+
+    碰撞组拆分时 blocks.json 拷贝给各方（共享期已被双向污染，无法事后归属，
+    谁都不丢、日志点名，用户可各自删掉外来块）；element_map.json 是**单文档
+    产物**（记录 md 行号→该 docx body 元素索引），拷贝错主会让元素级注入拷错
+    行——按文件内记录的 file_name 归属校验，错主的拷贝直接删除（read_element_map
+    返回 None，注入侧自动落「补跑解析」路径）。
+    """
+    from .store import migrate_parse_dirs
+
+    names = [f["file_name"] for f in db.mt_list_files()]
+    stats = migrate_parse_dirs(
+        cfg.materials_dir() / "parse",
+        names,
+        (".md", ".outline.json"),
+        ("blocks.json", "element_map.json"),
+    )
+    # element_map 归属校验：新布局下每个目录只应持有自己文档的 map
+    for name in names:
+        p = mt_parse_dir(name) / "element_map.json"
+        if not p.is_file():
+            continue
+        try:
+            recorded = (json.loads(p.read_text(encoding="utf-8")) or {}).get("file_name")
+        except (OSError, ValueError):
+            continue
+        if recorded and recorded != name:
+            p.unlink(missing_ok=True)
+            logger.warning("素材库 element_map 归属不符已移除（%s ← %s），元素级注入将走补跑解析", name, recorded)
+    if stats["conflicts"]:
+        logger.warning(
+            "素材库同名不同扩展文件共享解析目录，已拆分（blocks.json 已拷贝各方，"
+            "内容可能混有对方文件的块，请检查删除外来块）：%s",
+            "、".join(stats["conflicts"]),
+        )
+    if stats["renamed"] or stats["split"]:
+        logger.info("素材库解析目录迁移：%s", stats)
+    return stats
 
 
 def unique_file_path(file_name: str) -> Path:

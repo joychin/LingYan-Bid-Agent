@@ -2119,13 +2119,13 @@ def test_assemble_keeps_mismatched_own_heading(env):
 
 
 def _kb_image(file_name: str = "ISO27001证书.pdf") -> str:
-    """知识库抽取图：造进 knowledge/parse/<stem>/images/，返回工作区相对路径。"""
+    """知识库抽取图：造进 knowledge/parse/<文件名>/images/，返回工作区相对路径。"""
     from app.knowledge import store as kb_store
 
     img_dir = kb_store.kb_images_dir(file_name)
     img_dir.mkdir(parents=True, exist_ok=True)
     _tiny_png(img_dir / "img_001.png")
-    return f"knowledge/parse/{Path(file_name).stem}/images/img_001.png"
+    return f"knowledge/parse/{file_name}/images/img_001.png"
 
 
 def test_image_insert_after_paragraph(env):
@@ -2214,7 +2214,7 @@ def test_image_insert_webp_transcoded(env):
     Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(img_dir / "img_001.webp", format="WEBP")
 
     rel = _make_section("技术部分/系统界面.docx")
-    r = docx_image_insert.invoke({"dest": rel, "image": "knowledge/parse/产品手册/images/img_001.webp"})
+    r = docx_image_insert.invoke({"dest": rel, "image": "knowledge/parse/产品手册.pdf/images/img_001.webp"})
     assert r.startswith("[已插图]") and "webp 已转 png" in r, r
 
     doc = Document(str(_abs(env, rel)))
@@ -2229,14 +2229,14 @@ def test_image_insert_rejects(env):
     rel = _make_section("技术部分/附图.docx")
     assert docx_image_insert.invoke({"dest": rel, "image": "/etc/passwd"}).startswith("[插图失败]")
     assert "不存在" in docx_image_insert.invoke(
-        {"dest": rel, "image": "knowledge/parse/无此文件/images/img_001.png"})
+        {"dest": rel, "image": "knowledge/parse/无此文件.pdf/images/img_001.png"})
     # 坏 webp：解码失败人话报错（完好 webp 走转码分支，见 test_image_insert_webp_transcoded）
     from app.knowledge import store as kb_store
 
     webp_dir = kb_store.kb_images_dir("证书.webp")
     webp_dir.mkdir(parents=True, exist_ok=True)
     (webp_dir / "img_001.webp").write_bytes(b"fake-webp")
-    out = docx_image_insert.invoke({"dest": rel, "image": "knowledge/parse/证书/images/img_001.webp"})
+    out = docx_image_insert.invoke({"dest": rel, "image": "knowledge/parse/证书.webp/images/img_001.webp"})
     assert out.startswith("[插图失败]") and "webp" in out
     # docx 原件不作图源
     _tender_source(env)

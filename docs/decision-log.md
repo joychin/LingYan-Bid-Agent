@@ -2677,4 +2677,27 @@
     的任意深度口径断言）。拒绝文案同步扩写（指向 search_company_assets/search_references
     与界面管理入口）。
 
+  - **KB/素材库解析目录键改全名 + 一次性迁移（2026-09-17，最佳实践审计批次②）**：
+    审计发现 `kb_parse_dir`/`mt_parse_dir` 用 `Path(file_name).stem` 做目录名——
+    `证书.pdf` 与 `证书.docx` 共享 `parse/证书/`。KB 侧：images/ 共享（extract_images
+    每次先清空重抽）→ 后入库者清空前者的图，错图路径经 `_kb_image_hint` 喂给模型插进
+    交付稿；delete rmtree 整目录毁掉另一条的全部产物（DB 查重只按 hash，同名不同扩展
+    合法共存）。素材库更糟：`blocks.json`/`element_map.json` 连文件名前缀都没有——
+    两文件的块数据双向污染（read_blocks→改→write 回同一文件）。store.py 旧注释
+    「同名不同扩展各自成目录不互踩」与实现相反（错误注释，已纠正）。修法=目录键 stem →
+    **file_name 全名**（与任务侧 work/parse/<文件名>/ 同口径，纯函数派生、人可读）；
+    一次性迁移挂 lifespan（幂等，须在 autocheck/rebuild 之前——两者按新路径读 md）。
+    迁移策略与原计划有一处升级：碰撞组不做「输家标回重解析态」，而是**逐文件拆分**——
+    带全名前缀的产物（md/outline/meta/materials.json）本就共存于共享目录，按文件归位
+    后双方完整恢复、无需重解析；共享件拷贝给各方（KB images/、MT blocks.json——历史
+    污染无法事后归属，谁都不丢、日志点名、用户自行清理外来块）；element_map.json 是
+    单文档产物且文件内记录了归属 file_name，按记录校验、错主拷贝直接删除
+    （read_element_map→None，注入侧自动落「补跑解析」既有路径）。md 缺失时
+    rebuild_kb_index 是静默空检索段（不标 failed），故迁移必须搬目录而不是指望索引
+    重建自愈。连带更新全部 stem 布局提示串（search_knowledge 两处精读指引**含真实
+    路径构造代码**、docx_ops 图源说明、images/api 注释、db 表注释——这些文案进模型
+    上下文，指错路径模型就读不到文件）。测试 +6：同名隔离（KB 删一留一/MT 块互不
+    污染）、单组 rename 幂等、碰撞组拆分+共享件拷贝、element_map 归属、新布局跳过；
+    test_docx_ops 五处硬编码旧布局路径串同步修正。
+
 
