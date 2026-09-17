@@ -111,7 +111,7 @@ cp sidecar/.env.example sidecar/.env   # 环境变量模板（模型密钥也可
 
 ## 技术栈
 
-- **桌面壳**：Tauri 2（Rust），负责窗口、钥匙串、拉起并守护 sidecar；
+- **桌面壳**：Tauri 2（Rust），负责窗口、拉起并守护 sidecar；
 - **前端**：React 19 + TypeScript + Vite + Tailwind v4；
 - **后端 sidecar**：Python 3.12，FastAPI + DeepAgents/LangGraph + SQLite（FTS5 全文检索）；
 - **方法论与提示词**：`sidecar/app/skills/` 下的 SKILL.md 与参考文档，属于仓库的一部分，可以单独阅读和改写。
@@ -121,7 +121,7 @@ cp sidecar/.env.example sidecar/.env   # 环境变量模板（模型密钥也可
 ## 安全与隐私
 
 - **本地优先**：文件和工作区保存在你的电脑上（macOS 数据目录 `~/Library/Application Support/lingyan.ddmdj.com`）；
-- **模型自己选、自己配**（BYOK）：使用哪家模型服务由你决定，密钥存在本机钥匙串；
+- **模型自己选、自己配**（BYOK）：使用哪家模型服务由你决定，密钥存在本机应用数据库（`app.db`，明文落盘，威胁模型与 `.env` 文件等同；不出现在任何云端）；
 - **联网范围可控**：只有调用你启用的模型服务时需要联网，除此之外不额外上传资料。
 
 ## 常见问题

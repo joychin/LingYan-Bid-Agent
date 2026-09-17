@@ -1,0 +1,57 @@
+# 全栈质量门禁（2026-09-17 批次⑥）：push(main) + PR 跑一遍本地同款检查。
+#
+# 与 release.yml 的分工：本 workflow 只做检查（ubuntu 1× 配额，~6-8 分钟），
+# 不出产物；release 仍是 tag 触发、构建前前置同一 ./check.sh。
+# 背景：此前 CI 只在打 tag 时触发且不跑任何测试——main 上未打 tag 的提交零机器
+# 校验，tag 直接产出未经验证的安装包（Rust 单测在全仓任何路径都不会被执行）。
+#
+# 动作全部固定到 commit SHA（防 tag 被上游重打点的供应链缺口）。
+name: 全栈检查
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: sidecar + frontend + rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: 安装 Rust（锁 1.98.0——release 可重现性；本地开发用 rustup 默认 stable，MSRV 由 Cargo.toml rust-version 把守）
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装 uv（Python 依赖由 check.sh 内 uv sync 就位）
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: 安装根依赖（@tauri-apps/cli）
+        run: npm ci
+
+      - name: 安装前端依赖（check.sh frontend 段需要）
+        working-directory: frontend
+        run: npm ci
+
+      - name: 全栈检查（版本一致性 + ruff/pytest + oxlint/tsc/vitest/build + cargo check/clippy/test）
+        run: ./check.sh

@@ -2775,3 +2775,31 @@
     runtime 全量误报），逐条 off 收敛——exhaustive-deps 暂不开（存量违规多，
     留待后续批次）。验证：oxlint 0 error（30 warn，较原先 65 还少——
     no-underscore-dangle 关闭）+ tsc + vitest 318 + build 全绿。
+
+  - **质量门禁与版本一致性批（2026-09-17，最佳实践审计批次⑥）**：五件——
+    ①**check.yml（新增）**：push(main)+PR 触发，ubuntu 单 job 跑完整 ./check.sh
+    （版本一致性+ruff/pytest+oxlint/tsc/vitest/build+cargo check/clippy/test）。
+    此前 CI 唯一触发是 tag 且只打包不验证——main 上未打 tag 的提交零机器校验，
+    「已红的 main 可直接出包」。②**release.yml 加固**：新增 tag 前置 check job
+    （与两平台 build 并行、release 等三者全绿——检查失败白跑 ~8 分钟 build，好过
+    在 macOS 10× 计费上跑完整检查）；版本同步从「只覆写 tauri.conf.json 一处」
+    扩为 **scripts/set_version.py 覆写全部五处 + package-lock 两处**（发版零人工
+    同步；README 指引 Intel Mac 自建包自报 0.1.0、更新红点永不消失的根因即旧口径）；
+    全部 action 固定 commit SHA（checkout/setup-node/upload/download/rust-cache/
+    gh-release/dtolnay）；build/release job 补 permissions 与 timeout；release 产物
+    附 SHA256SUMS（未签名产物的最低完整性凭据）。③**check.sh 加固**：四处裸 cd
+    加 `|| exit 1`（cd 失败后续步骤在错误目录跑会产生假通过）；`run()` 的
+    echo "\n" 改 printf（bash 内建 echo 不转义）；check_rust 加 `cargo test`
+    ——Rust 14 个单测（崩溃分类/数据目录迁移）此前在全仓任何路径都不会被执行。
+    ④**工具链锁定（口径调整）**：原计划加 rust-toolchain.toml，实测本机 rustup
+    对「按版本命名的工具链」解析失败（本机只有 stable 别名、按版本命名要现场
+    下载）会卡死本地 cargo——改为只在 CI 侧锁 dtolnay action 的 toolchain=1.98.0
+    （release 可重现性由 CI 出包保证），本地继续 rustup 默认 + Cargo.toml 的
+    rust-version=1.85 MSRV 把守。build_sidecar.sh 的 pyinstaller 安装改幂等
+    `uv pip install`（原「可执行文件存在才跳过」会让长期复用的 .build-venv*
+    残留旧版本）。⑤**文档口径**：README 技术栈/隐私节与 .env.example 仍写
+    「密钥存钥匙串/Tauri 从钥匙串读取后注入」——2026-08-29 起 Key 真值已是 app.db
+    明文（与 .env 威胁模型等同），开源仓库读者会得到错误的威胁模型，改为现行
+    事实；frontend/package-lock 根版本漂移（0.0.0→0.1.0）随 npm install 修复。
+    验证：./check.sh 全绿（五处版本一致/ruff/pytest 900/oxlint 0 error/tsc/
+    vitest 318/build/cargo check+test 14+clippy）。

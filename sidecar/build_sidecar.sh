@@ -103,11 +103,11 @@ case "$OS" in windows) export SIDECAR_WINDOWED=1 ;; *) export SIDECAR_WINDOWED=0
 # （uv sync 默认精确同步会先删掉它；想彻底重建删 .build-venv* 重跑）
 echo "==> build venv（$VENV_DIR, CPython ${PY_REQ}, --frozen）"
 UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --python "$PY_REQ" --frozen --no-dev --inexact
-if [ ! -x "${VENV_BIN}/pyinstaller" ] && [ ! -x "${VENV_BIN}/pyinstaller.exe" ]; then
-  echo "==> 安装锁版 PyInstaller 到 build venv"
-  PY_BIN="${VENV_BIN}/python"; [ "$OS" = "windows" ] && PY_BIN="${PY_BIN}.exe"
-  uv pip install --python "$PY_BIN" "pyinstaller==6.14.1"
-fi
+# 幂等装锁版 PyInstaller（2026-09-17 批次⑥）：原「可执行文件存在才跳过」会让
+# 长期复用的 .build-venv* 里残留旧版本；uv pip 对已满足的锁版是秒级 no-op
+echo "==> 锁版 PyInstaller（6.14.1，幂等）"
+PY_BIN="${VENV_BIN}/python"; [ "$OS" = "windows" ] && PY_BIN="${PY_BIN}.exe"
+uv pip install --python "$PY_BIN" "pyinstaller==6.14.1"
 
 echo "==> PyInstaller one-file → src-tauri/binaries/${SIDECAR_NAME}"
 "${VENV_BIN}/pyinstaller" \
