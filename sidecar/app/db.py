@@ -152,7 +152,12 @@ CREATE INDEX IF NOT EXISTS idx_mt_blocks_file ON mt_blocks(file_id);
 
 def _conn() -> sqlite3.Connection:
     app_db_path().parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(app_db_path()), isolation_level=None, check_same_thread=False)
+    # timeout（= busy_timeout）：WAL 下写冲突默认立即抛 database is locked——
+    # 后台线程（KB ingest/prune）与请求线程偶发同点写时给 3s 排队窗口（用户不可见
+    # plumbing；2026-09-17 批次④，亦是测试偶发锁 flake 的止血）
+    conn = sqlite3.connect(
+        str(app_db_path()), isolation_level=None, check_same_thread=False, timeout=3.0
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")

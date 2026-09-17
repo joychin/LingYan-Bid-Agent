@@ -10,8 +10,10 @@ LiteLLM 部署冷却 / Netflix concurrency-limits）：429/超时是**背压信�
 做此事（429 原样透传给用户）。
 
 算法（进程内 per-profile，纯运行态）：
-- acquire：在飞调用数 ≥ limit 时阻塞等待（不超时——持有者受 180s HTTP 超时与流
-  耗尽约束，许可不会永久占用）；
+- acquire：在飞调用数 ≥ limit 时等待——**有界**（2026-09-17 改：等待预算 300s，
+  超限抛 AcquireTimeout 归瞬时错误走断点重试；等待期每秒轮询取消闭包，取消
+  检查点补进模型调用前的排队段。原「无界等待、持有者受 180s HTTP 超时约束」
+  对流式不成立——180s 是单次读超时，网关持续吐 chunk 就能长期占住许可）；
 - release(hard)（429）：limit 减半、下限 1——服务方明确说「太多了」，强信号；
 - release(soft)（请求超时）：limit −1、下限 1——弱信号（过载的常见表现，但也可能
   是慢生成，故只减一档）；
@@ -44,14 +46,35 @@ LangChain 原生 rate_limiter 钩子只有 acquire 没有 release（框架不知
 import logging
 import threading
 import time
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
+
+
+class AcquireTimeout(Exception):
+    """acquire 等待超预算（2026-09-17）：闸长期收缩且在飞许可不归还时的有界失败。
+
+    归类瞬时错误——_run_agent_stream 断点重试循环接手（重试重新进 acquire，
+    预算重置；重试耗尽落 llm_unavailable），不再无限期挂死。"""
+
+
+class AcquireCancelled(Exception):
+    """acquire 等待期用户取消（2026-09-17）：取消检查点补进模型调用前的等待段。
+
+    语义同流事件边界的协作取消——调用方（_run_agent_stream）按 cancelled 收尾。"""
+
 
 # release 语义（outcome 取值）
 OK = "ok"            # 调用成功：连续计数 +1，满 _GROW_AFTER_SUCCESSES 次回升 +1
 HARD = "hard"        # 429：limit 减半（下限 1）——服务方明确拒绝并发
 SOFT = "soft"        # 请求超时：limit −1（下限 1）——过载弱信号
 NEUTRAL = "neutral"  # 其余异常：只归还许可，不调闸
+
+# acquire 等待预算（秒）与轮询粒度（秒）。预算须显著大于最慢许可持有期（流式
+# 调用可持许可数分钟），只兜「闸收到 1 且在飞许可因异常路径未归还」的病态场景；
+# 轮询粒度=取消检查点间隔（cancel_check 每轮询一次）。
+_ACQUIRE_BUDGET_S = 300.0
+_ACQUIRE_POLL_S = 1.0
 
 # 连续成功多少次后 limit +1：探测频率的节流阀——太勤则贴着真实容量反复撞 429
 # （AIMD 固有振荡），太懒则容量恢复后爬升慢；8 ≈ 一次「确认容量有余」的样本量
@@ -92,10 +115,29 @@ class AIMDLimiter:
         with self._cond:
             return self._inflight
 
-    def acquire(self) -> None:
+    def acquire(
+        self,
+        cancel_check: Callable[[], bool] | None = None,
+        budget_s: float = _ACQUIRE_BUDGET_S,
+    ) -> None:
+        """有界等待取许可（2026-09-17 由无界 wait 改）。
+
+        - cancel_check：取消探测闭包（None=非 run 态/测试直构），每轮询一次——
+          原实现无界阻塞且全链取消检查点只在流事件边界，闸收缩到 1 时排在闸后
+          的模型调用会无限期等待，「停止」在最需要它的窄网关场景失效；
+        - budget_s：等待预算，超限抛 AcquireTimeout（归类瞬时错误走断点重试）。
+        """
+        deadline = self._clock() + budget_s
         with self._cond:
             while self._inflight >= self._limit:
-                self._cond.wait()
+                if cancel_check is not None and cancel_check():
+                    raise AcquireCancelled("模型调用排队等待许可时被取消（用户停止）")
+                if self._clock() >= deadline:
+                    raise AcquireTimeout(
+                        f"并发闸等待许可超预算 {budget_s:.0f}s（limit={self._limit}，"
+                        "在飞许可未归还），按瞬时错误重试"
+                    )
+                self._cond.wait(timeout=min(_ACQUIRE_POLL_S, max(0.0, deadline - self._clock())))
             self._inflight += 1
     def release(self, outcome: str = NEUTRAL) -> None:
         with self._cond:
@@ -132,8 +174,8 @@ class AIMDLimiter:
 class NoopLimiter:
     """空闸：wrapper 缺省/测试直构时完全透传（不做任何配速）。"""
 
-    def acquire(self) -> None:
-        pass
+    def acquire(self, cancel_check: Callable[[], bool] | None = None, budget_s: float = _ACQUIRE_BUDGET_S) -> None:
+        pass  # 签名对齐 AIMDLimiter（调用方统一传参）
 
     def release(self, outcome: str = NEUTRAL) -> None:
         pass

@@ -240,7 +240,11 @@ async def continue_run(rid: str):
         raise HTTPException(status_code=409, detail="该任务之后已有新的对话内容，请重新执行")
     if db.active_run_exists(run["conversation_id"]):
         raise HTTPException(status_code=409, detail="该会话已有进行中的任务")
-    if not agent.checkpoint_exists(run["conversation_id"]):
+    # get_tuple 会反序列化该 thread 最新 checkpoint（全量消息历史，长会话 MB 级），
+    # 挪出事件循环（与 /snapshot 同纪律），防 continue 探针阻塞 SSE 心跳
+    if not await asyncio.get_running_loop().run_in_executor(
+        None, agent.checkpoint_exists, run["conversation_id"]
+    ):
         raise HTTPException(status_code=409, detail="断点数据缺失，请重新执行")
     # 模型探活预检（2026-09-15 路径可靠性批）：在抢占前先确认模型服务可用——
     # r_eedd621716b5 两次续跑撞 402 各 1 秒即死、报错看不出是欠费，用户空点两轮。

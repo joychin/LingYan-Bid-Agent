@@ -2720,3 +2720,34 @@
     panic 只杀 supervisor 线程：state 卡 Starting、last_failure 为空、splash 永不
     收尾、诊断报告无失败原因；现在分别走 spawn_failed 与 boot_timeout 既有分类。
     cargo test 14 绿（含新增 2 例）。
+
+  - **sidecar 启动链与运行时韧性批（2026-09-17，最佳实践审计批次④）**：六件——
+    ①**lifespan 瘦身**：原 yield 前串行跑 autocheck_sweep（逐条读 md 核锚点）+
+    rebuild_kb_index（逐条重读 md + jieba 分词），成本随库体积线性涨，而 lifespan
+    完成前 uvicorn 不 listen、Rust 探活窗口超时即杀——越该清理的库越大的机器越
+    起不来。挪到 yield 前注册的后台任务（bg.spawn_background + to_thread），
+    healthz 秒级可达；KB 检索段晚几秒就绪只影响检索命中、不影响条目可见性。
+    其余启动步骤逐项 try/except 降级（单个坏 meta.json 不再让整个 sidecar 起不来）。
+    ②**VACUUM 出启动关键路径**：prune_agent_db 加 allow_vacuum 参数，启动只删行
+    +折叠 WAL；大库（>300MB）的 VACUUM 由后台任务做——先探体积（小库即退，测试
+    环境零空等）再等 2 分钟避开冷启动高峰，且有活跃 run 就跳过（探测+跳过，不排队）。
+    收尾时 lifespan 取消残留后台任务（await 落定，不留 pending）。③**saver 连接
+    timeout=120**：防 VACUUM 持写锁期新 run 首次 checkpoint 写 5s 即抛 locked 打死
+    run（放宽为排队等待，用户不可见 plumbing）。④**AIMD acquire 有界等待+取消轮询**：
+    原 Condition.wait() 无界且全链取消检查点只在流事件边界——闸被 429 收缩到 1 时，
+    排队的模型调用无限期等待，「停止」在最需要它的窄网关场景失效（模块头「持有者受
+    180s HTTP 超时约束」对流式不成立：180s 是单次读超时）。改 1s 轮询取消闭包
+    （rid 经 runctx，contextvars 已随 ToolNode 传播）+300s 总预算；超时抛
+    AcquireTimeout、取消抛 AcquireCancelled，均归瞬时错误——断点重试循环接手
+    （重试重进 acquire 预算重置；取消在 cancel 已置位时抛出，循环按 cancelled 收尾）。
+    NoopLimiter 签名对齐。⑤**flake 止血**：conftest 的 client fixture 改手工
+    enter/exit，teardown 先排空 bg._tasks 再退 TestClient——KB/素材入库线程不再
+    带着旧临时 DATA_DIR 的连接跨测试（偶发 database is locked 的结构性根源）；
+    db._conn 加 timeout=3.0（WAL 写冲突从立即抛锁改 3s 排队）。连带暴露并修掉
+    一个既有测试坏味道：设置动作 fire-and-forget 的 models.dev 刷新（离线 8s
+    超时）此前裸 create_task 无人等、随 TestClient 退出被弃掉才没拖慢套件——
+    现在 conftest 打桩 no-op（刷新本体在 test_model_registry 有独立覆盖）。
+    ⑥小修一组：settings.py 的裸 create_task 收编进 bg.spawn_background 唯一入口
+    （强引用防 GC + 异常记日志）；continue 端点的 checkpoint_exists（get_tuple
+    反序列化整份 checkpoint 历史，长会话 MB 级）挪 run_in_executor（与 /snapshot
+    同纪律）。测试 +4（取消立即抛/预算超时/排队唤醒/异常归类），全量 900 绿×5。

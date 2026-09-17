@@ -13,8 +13,8 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from .. import bg, model_registry
 from .. import config as cfg
-from .. import model_registry
 from ..agent import rebuild_agent
 from ..model_ping import ping as _ping_model_sync
 
@@ -26,9 +26,11 @@ def _kick_registry_refresh() -> None:
 
     fire-and-forget：不阻塞端点、失败静默（model_registry 内部有 TTL 守卫与
     旧缓存保留）；run 路径零联网的铁律不受影响——只有设置动作会走到这里。
+    走 bg.spawn_background 唯一入口（强引用防 GC 中途回收 + 异常记日志）——
+    裸 create_task 只持弱引用，任务可能连同 finally 清理一起被收走。
     """
     try:
-        asyncio.create_task(asyncio.to_thread(model_registry.maybe_refresh))
+        bg.spawn_background(asyncio.to_thread(model_registry.maybe_refresh))
     except RuntimeError:
         pass  # 无事件循环的边缘调用环境：放弃刷新，缓存下次再补
 

@@ -51,8 +51,14 @@ VACUUM_THRESHOLD = 300 * 1024 * 1024
 _DELETE_BATCH = 900
 
 
-def prune_agent_db() -> dict:
-    """清理 agent.db 的历史 checkpoint（幂等，启动时调用）。返回统计 dict。"""
+def prune_agent_db(allow_vacuum: bool = True) -> dict:
+    """清理 agent.db 的历史 checkpoint（幂等，启动时调用）。返回统计 dict。
+
+    allow_vacuum=False（2026-09-17）：只删行 + 折叠 WAL、跳过 VACUUM——大库
+    VACUUM 全库重写可达分钟级，而 lifespan 完成前 uvicorn 不 listen，Rust 探活
+    窗口超时即杀（库越大越起不来、VACUUM 被打断下次还重做）。VACUUM 由 main.py
+    的后台延迟任务（启动 2 分钟后且无活跃 run）重跑本函数（默认参数）时执行。
+    """
     stats: dict = {"threads_pruned": 0, "rows_deleted": 0, "bytes_freed": 0,
                    "threads_skipped": 0, "vacuumed": False}
     path = cfg.agent_db_path()
@@ -76,7 +82,7 @@ def prune_agent_db() -> dict:
         # P6：折叠 WAL（把 -wal 并回主文件，删行收益先兑现一半）
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         size = path.stat().st_size + _wal_size(path)
-        if size > VACUUM_THRESHOLD and not db.list_active_runs():
+        if allow_vacuum and size > VACUUM_THRESHOLD and not db.list_active_runs():
             t0 = time.monotonic()
             conn.execute("VACUUM")
             # WAL 模式下 VACUUM 先落 -wal，折叠回主文件后体积才真实收缩
@@ -92,6 +98,14 @@ def prune_agent_db() -> dict:
                     stats["threads_pruned"], stats["rows_deleted"],
                     stats["bytes_freed"] / 1048576)
     return stats
+
+
+def vacuum_needed() -> bool:
+    """主文件+WAL 是否超过 VACUUM 门槛（后台延迟任务的预检：小库直接免 120s 空等）。"""
+    path = cfg.agent_db_path()
+    if not path.is_file():
+        return False
+    return path.stat().st_size + _wal_size(path) > VACUUM_THRESHOLD
 
 
 def _wal_size(path) -> int:

@@ -103,6 +103,10 @@ _LLM_TRANSIENT_MARKERS = (
 
 def _is_llm_transient(exc: BaseException) -> bool:
     """异常是否为可断点重试的瞬时 LLM/网络错误（否则按永久错误直接失败）。"""
+    # 并发闸等待的有界失败/取消（2026-09-17）：超时重进 acquire（预算重置）；
+    # 取消仅在 cancel 已置位时抛出，重试循环随后即按 cancelled 收尾
+    if isinstance(exc, (llm_throttle.AcquireTimeout, llm_throttle.AcquireCancelled)):
+        return True
     if isinstance(exc, _LLM_RETRYABLE_ERRORS):
         return True
     if isinstance(exc, httpx.RemoteProtocolError):
@@ -739,9 +743,14 @@ def _get_saver():
     if _saver is None:
         with _saver_init_lock:
             if _saver is None:
-                _saver_conn = sqlite3.connect(str(cfg.agent_db_path()), check_same_thread=False)
                 # langgraph-checkpoint-sqlite 3.x：from_conn_string 是上下文管理器（会随 with 关闭连接）。
                 # sidecar 常驻进程需要连接全程存活，故自持连接、直接构造 SqliteSaver（内部自带线程锁）。
+                # timeout=120（2026-09-17）：后台 VACUUM 持写锁期间新 run 的首次
+                # checkpoint 写默认 5s 即抛 locked 打死 run——放宽到 120s 让它排队
+                # 等 VACUUM 收尾（用户不可见 plumbing，SQLite 繁忙等待语义）
+                _saver_conn = sqlite3.connect(
+                    str(cfg.agent_db_path()), check_same_thread=False, timeout=120.0
+                )
                 _saver = SqliteSaver(_saver_conn)
     return _saver
 
@@ -1181,7 +1190,14 @@ class _NoThinkingRetryCompletions:
         # 恰一人成功，Event 先查后设有竞态窗口）。429/超时按背压调闸（hard/
         # soft）、其余异常只归还（neutral）、成功 ok；流式许可持有到流耗尽/
         # 提前关闭——流式 create 立即返回，此刻归还是把闸门架空。
-        self._limiter.acquire()
+        # 等待有界 + 取消轮询（2026-09-17）：闸收缩到 1 时排队调用原会无界等待
+        # （全链取消检查点只在流事件边界）——点「停止」在最需要它的窄网关场景
+        # 失效；rid 经 runctx 取（contextvars 已随 ToolNode 线程传播），非 run 态
+        # （titler 等独立实例不走本 wrapper 的闸）无取消闭包。
+        _rid = runctx.current_run()
+        self._limiter.acquire(
+            cancel_check=(lambda: _cancel_requested(_rid)) if _rid is not None else None
+        )
         once = threading.Lock()
 
         def _release(outcome: str) -> None:
@@ -2223,8 +2239,17 @@ def _seed_resume_trace(rid: str) -> tuple[list[dict], list]:
 
 
 # 活跃 run 的协作式取消事件（rid → Event）：POST /runs/{rid}/cancel 置位，
-# worker 线程在下一个流事件边界退出（见 _run_agent_stream）
+# worker 线程在下一个流事件边界退出（见 _run_agent_stream）；
+# AIMD acquire 等待期也轮询它（2026-09-17，_cancel_requested）
 CANCEL_EVENTS: dict[str, threading.Event] = {}
+
+
+def _cancel_requested(rid: str | None) -> bool:
+    """协作取消事件是否已置位（闸等待段轮询用；rid 空=非 run 态恒 False）。"""
+    if rid is None:
+        return False
+    ev = CANCEL_EVENTS.get(rid)
+    return ev is not None and ev.is_set()
 
 # 运行中过程快照：只在当前 sidecar 进程内用于 SSE 断线/页面重挂对账。
 # 终态仍以 app.db 的 run_traces 为历史真值，快照不伪造消息、不轮询 agent.db。

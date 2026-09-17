@@ -6,6 +6,8 @@
 
 import threading
 
+import pytest
+
 from app import llm_throttle
 
 
@@ -199,3 +201,51 @@ def test_noop_limiter_passthrough():
     noop = llm_throttle.NoopLimiter()
     noop.acquire()  # 不阻塞不计数
     noop.release(llm_throttle.HARD)  # 不抛不调信号
+
+
+# ---------- acquire 有界等待 + 取消轮询（2026-09-17 批次④） ----------
+
+
+def test_acquire_cancel_check_raises():
+    """等待期取消置位 → AcquireCancelled（原实现无界 wait，取消检查点只在流事件
+    边界——闸收缩到 1 时点「停止」形同虚设）。首轮即在等待前探测，立即抛出。"""
+    lim = _limiter(ceiling=1)
+    lim.acquire()  # 占满唯一许可
+    with pytest.raises(llm_throttle.AcquireCancelled, match="取消"):
+        lim.acquire(cancel_check=lambda: True)
+
+
+def test_acquire_timeout_after_budget():
+    """许可长期不归还 + 预算耗尽 → AcquireTimeout（归类瞬时错误走断点重试，
+    不再无限期挂死）。假时钟由旁路线程推进（acquire 在 wait 里睡真实 1s 轮询）。"""
+    import time as _time
+
+    clock = _Clock()
+    lim = _limiter(ceiling=1, clock=clock)
+    lim.acquire()
+
+    def _tick():
+        _time.sleep(0.05)
+        clock.advance(301.0)
+
+    threading.Thread(target=_tick, daemon=True).start()
+    with pytest.raises(llm_throttle.AcquireTimeout):
+        lim.acquire(cancel_check=lambda: False, budget_s=300.0)
+
+
+def test_acquire_waits_then_succeeds_on_release():
+    """正常排队语义不变：等待期取消未置位、他人归还许可 → 照常取得。"""
+    lim = _limiter(ceiling=1)
+    lim.acquire()
+    threading.Timer(0.05, lambda: lim.release(llm_throttle.OK)).start()
+    lim.acquire(cancel_check=lambda: False, budget_s=5.0)
+    assert lim.inflight == 1  # 归还者在等待者取得前已把在飞数降回 0
+
+
+def test_acquire_errors_classified_transient():
+    """两类闸等待失败都归瞬时错误：超时重进 acquire（预算重置）、取消由重试循环
+    按 cancelled 收尾（只在 cancel 已置位时抛出）。"""
+    from app.agent import _is_llm_transient
+
+    assert _is_llm_transient(llm_throttle.AcquireTimeout("闸等待超预算"))
+    assert _is_llm_transient(llm_throttle.AcquireCancelled())
