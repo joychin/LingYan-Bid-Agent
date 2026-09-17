@@ -15,7 +15,19 @@ from pathlib import Path
 
 SIDECAR = Path(__file__).resolve().parent.parent
 ROOT = SIDECAR.parent
-JSON2TS = ROOT / "frontend" / "node_modules" / ".bin" / "json2ts"
+
+
+def _resolve_bin(dir_: Path, name: str) -> Path:
+    """跨平台找可执行 shim：Windows 的 console-script 落 .exe、npm .bin 落
+    .cmd shim（扩展名探测优先，unix 无这些形态自然落到无扩展名 sh shim）——
+    2026-09-17 v0.2.1 五跑实证：写死无扩展名在 Windows 上必找不到。"""
+    for cand in (dir_ / f"{name}.exe", dir_ / f"{name}.cmd", dir_ / name):
+        if cand.exists():
+            return cand
+    return dir_ / name
+
+
+JSON2TS = _resolve_bin(ROOT / "frontend" / "node_modules" / ".bin", "json2ts")
 
 GENERATIONS = [
     ("app.contracts.events", ROOT / "frontend/src/api/events.gen.ts"),
@@ -26,7 +38,7 @@ GENERATIONS = [
 def main() -> None:
     if not JSON2TS.exists():
         sys.exit("json2ts 不存在：先在 frontend 下 npm install（devDep json-schema-to-typescript）")
-    pydantic2ts = Path(sys.executable).parent / "pydantic2ts"
+    pydantic2ts = _resolve_bin(Path(sys.executable).parent, "pydantic2ts")
     if not pydantic2ts.exists():
         sys.exit("pydantic2ts 不在当前 venv：用 uv run 执行本脚本")
     for module, output in GENERATIONS:

@@ -2907,3 +2907,14 @@
     文件夹），改断言用 os.sep 拼。pytest 904 绿（+1 哨兵）、ruff 干净。tag v0.2.1
     第四次重指。配额累计：v0.2.1 五跑（首跑/二跑/三跑取消/四跑/五跑）≈ 剩余配额
     仍足（Free 2000 分/月）。
+
+  - **契约生成器 Windows shim 解析修（2026-09-17 深夜，v0.2.1 五跑暴露）**：五跑
+    win 的 check.sh 只剩一面红旗——gen_ts_types.py 找 venv 里的 pydantic2ts 用
+    写死的无扩展名路径，Windows 的 console-script 落 `pydantic2ts.exe`、npm
+    .bin 落 `json2ts.cmd` shim，探测必失败（「pydantic2ts 不在当前 venv」）。
+    修=`_resolve_bin` 扩展名探测（.exe/.cmd 优先、无扩展名兜底，unix 形态自然
+    落回 sh shim）+ 单测钉四种形态。**五跑的里程碑藏在失败里：904 pytest 在
+    Windows 全绿（6m43s）**——CRLF 批的产品修复被平台实证；win 上 ruff/
+    oxlint/tsc/vitest 318/build/cargo check+test+clippy 全过，契约步之后已无
+    任何未验证环节（tauri build 有 v0.2.0 先例）。pytest 905 绿（+1）。tag
+    v0.2.1 第五次重指。
