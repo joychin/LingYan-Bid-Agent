@@ -23,6 +23,11 @@ sources/、_meta/、archive、skills），绕过 schema 校验、content_seq、�
   恢复点）仍拒。FilesystemBackend.write 自带 parent mkdir，无需服务端预建；
 - formal/、threads/ 是 2026-08-31 前旧布局的遗留段名，同样拒写（防文档注入诱导
   模型把内容写进孤儿产物包；不做数据兼容，只堵误写）；
+- knowledge/、materials/（2026-09-17 补段）：两库是跨任务共享的用户原件与手工
+  素材（唯一副本、无恢复点），与 sources/ 同为证据形态，只经上传/管理界面维护；
+  检索工具会把 knowledge/parse/<名>/… 的 md 路径主动喂进上下文，招标文件文本属
+  不可信输入——段级拒写堵「注入诱导 delete_file 删用户原件」。文本读照常放行
+  （search_knowledge 的精读指引依赖 read_file 读 md）；
 - 产物包恒对文件工具只读，写入一律走 publish_artifact 管线（单一当前版本）；
 - skills/ 拦写的额外理由：技能目录每次启动从 app/skills/ 同步覆盖，模型写入
   会被静默冲掉，属于必丢数据的路径。
@@ -38,15 +43,20 @@ from deepagents.backends.protocol import DeleteResult, EditResult, ReadResult, W
 from deepagents.backends.utils import perform_string_replacement
 
 _WRITE_DENY_NOTE = (
-    "该路径属于产物包保护区（来源/产物包/谱系/归档/技能目录），"
+    "该路径属于保护区（来源/产物包/谱系/归档/技能目录/知识库/素材库），"
     "不能用文件工具直接写入：产物请通过 read_artifact 读取、publish_artifact 发布"
     "（发布草稿写到 <任务目录>/_meta/staging/，该目录可写）；"
+    "知识库/素材库内容请用 search_company_assets / search_references 检索引用，"
+    "原件与块只能由用户在界面上传和管理；"
     "普通工作文件请写入当前任务 work/ 下的过程目录（parse/analysis/outline/body）。"
 )
 
 # 拒写的目录段（workspace 根下任意深度命中即拒：sources/_meta/archive/skills +
-# 旧布局遗留 formal/threads）。_meta 的 staging 子目录豁免（见 _is_protected）。
-_DENY_SEGMENTS = frozenset({"sources", "_meta", "archive", "skills", "formal", "threads"})
+# 全局共享库 knowledge/materials + 旧布局遗留 formal/threads）。
+# _meta 的 staging 子目录豁免（见 _is_protected）。
+_DENY_SEGMENTS = frozenset(
+    {"sources", "_meta", "archive", "skills", "knowledge", "materials", "formal", "threads"}
+)
 
 # 二进制/图片读拦截（2026-09-13 事故批）。read_file 对非文本文件会把**整个文件
 # base64 内联进消息**——无分页、无截断，一张扫描件 ≈ 百万 token，单次读即可把
@@ -122,7 +132,8 @@ def _binary_read_error(file_path: str) -> str | None:
 def _is_protected(rel_parts: tuple[str, ...]) -> bool:
     """判断相对 workspace 的路径段是否在写保护黑名单。
 
-    - sources/...、archive/...、skills/...、formal/...、threads/...：段级命中即拒
+    - sources/...、archive/...、skills/...、knowledge/...、materials/...、
+      formal/...、threads/...：段级命中即拒
     - _meta/...：谱系拒，**_meta/staging/... 豁免**（两步发布流的模型草稿区）
     - work/artifacts/<aid>/...：产物包目录拒（work 下的过程文件不拦）
     """

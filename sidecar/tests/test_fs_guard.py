@@ -1,10 +1,11 @@
 """GuardedBackend 写路径黑名单（P0.3 → 2026-08-31 两态重构）+ 二进制读拦截（2026-09-13）
-+ 文件变更串行/原子落盘（2026-09-13 并发编辑事故批）。
++ 文件变更串行/原子落盘（2026-09-13 并发编辑事故批）+ 共享库拒写（2026-09-17）。
 
 边界：拦写（write/edit/delete）与拦二进制/图片读（read 按扩展名），文本读与
 ls/grep/glob 放开；work/ 下过程文件（parse/analysis/outline/body）正常可写；产物包
 （work/artifacts/）、来源（sources/）、谱系（_meta/，**staging/ 草稿区豁免**——两步
-发布流的模型写入点）、归档、技能目录、旧布局遗留段（formal/threads）拦写。
+发布流的模型写入点）、归档、技能目录、全局共享库（knowledge/materials——用户原件
+唯一副本，只拦写不拦读）、旧布局遗留段（formal/threads）拦写。
 """
 
 import pytest
@@ -61,6 +62,42 @@ def test_write_rejects_archive_and_skills(backend):
     assert be.write("skills/tender-analysis/SKILL.md", "hacked").error
     # 深层 skills 路径段命中同样拒
     assert be.write("skills/tender-outline/references/r1.md", "x").error
+
+
+def test_write_rejects_knowledge_and_materials(backend):
+    """两库拒写（2026-09-17 补段）：用户原件唯一副本、无恢复点，与 sources 同级证据。
+
+    攻击面=检索工具把 knowledge/parse/<名>/… 的 md 路径主动喂进模型上下文，
+    招标文本一句注入即可诱导 delete_file 删原件；write/edit/delete 三路全拒。
+    """
+    be, task, _ = backend
+    # 知识库：原件、解析产物、抽取图全拒
+    assert be.write("knowledge/files/营业执照.pdf", "fake").error
+    assert be.write("knowledge/parse/营业执照/营业执照.pdf.md", "篡改").error
+    assert be.delete("knowledge/files/资质证书.docx").error
+    assert be.edit("knowledge/parse/资质证书/资质证书.docx.md", "a", "b").error
+    assert be.delete("knowledge/parse/证书(存档)/images/img_001.png").error
+    # 素材库：原件、blocks.json（块真值）、element_map 全拒
+    assert be.write("materials/files/历史标书.docx", "fake").error
+    assert be.delete("materials/parse/历史标书/blocks.json").error
+    assert be.edit("materials/parse/历史标书/element_map.json", "a", "b").error
+
+
+def test_read_knowledge_parse_md_not_blocked(backend):
+    """两库只拦写不拦读：search_knowledge 的精读指引依赖 read_file 读 md（回归哨兵）。"""
+    be, task, _ = backend
+    from app import config as cfg
+
+    p = cfg.workspace_dir() / "knowledge" / "parse" / "证书(存档)" / "证书(存档).pdf.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# 证书内容\n正文", encoding="utf-8")
+    r = be.read("knowledge/parse/证书(存档)/证书(存档).pdf.md")
+    assert not r.error and "证书内容" in (r.file_data or {}).get("content", "")
+    q = cfg.workspace_dir() / "materials" / "parse" / "历史标书" / "历史标书.docx.md"
+    q.parent.mkdir(parents=True, exist_ok=True)
+    q.write_text("# 素材正文", encoding="utf-8")
+    r2 = be.read("materials/parse/历史标书/历史标书.docx.md")
+    assert not r2.error
 
 
 def test_write_allows_work_process_files(backend):
@@ -151,6 +188,16 @@ def test_protect_predicate_direct():
     # 旧布局遗留段防御性拒写
     assert fs_guard._is_protected(("t1", "formal", "art_x", "manifest.json"))
     assert fs_guard._is_protected(("t1", "threads", "c1", "art_x", "manifest.json"))
+    # 全局共享库拒写（2026-09-17 补段）
+    assert fs_guard._is_protected(("knowledge", "files", "营业执照.pdf"))
+    assert fs_guard._is_protected(("knowledge", "parse", "证书", "images", "img_001.png"))
+    assert fs_guard._is_protected(("materials", "files", "历史标书.docx"))
+    assert fs_guard._is_protected(("materials", "parse", "历史标书", "blocks.json"))
+    # 段匹配任意深度：work 下名为 knowledge/materials 的子目录同样拦（与
+    # sources/archive 同口径——宁可误拦返回人话错误，不给注入留缝）；
+    # 近名不误伤：只精确匹配段名
+    assert fs_guard._is_protected(("t1", "work", "knowledge", "x.md"))
+    assert not fs_guard._is_protected(("t1", "work", "knowledge_base", "x.md"))
     # work 下过程文件不拦（artifacts 段前是 work 才拦）
     assert not fs_guard._is_protected(("t1", "work", "analysis", "x.md"))
     assert not fs_guard._is_protected(("t1", "work", "parse", "a.pdf", "a.pdf.md"))

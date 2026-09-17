@@ -2663,3 +2663,18 @@
     开源下今天无违规」「为未来闭源商用分发留路」等是当时的动因记录，不追改）；不为历史
     tag 补 MIT（tag 即历史快照，许可按发布时口径）。
 
+  - **fs_guard 共享库拒写补段（2026-09-17，最佳实践审计批次①）**：审计发现
+    `_DENY_SEGMENTS` 漏了 workspace 根下的 `knowledge/` 与 `materials/` 两个全局共享库
+    ——GuardedBackend 是文件工具唯一写闸（path_resolve 只做读侧导航、docx_ops containment
+    只管图源读），两库物理在 workspace 内故完全放行。攻击面=检索工具的精读指引把
+    `knowledge/parse/<名>/…` 的 md 路径主动喂进模型上下文，而招标文本属不可信输入，
+    一句注入即可诱导 `delete_file knowledge/files/XX.pdf` 删用户原件（唯一副本、无恢复点、
+    无备份，与受保护的 sources/ 同为证据形态却待遇不同）。复核确认**无任何合法 LLM 写入
+    流程**（两库全走上传 API/程序侧 ingest），故补段零功能损失；**文本读照常放行**
+    （search_knowledge 精读指引依赖 read_file 读 md，拦读会打断检索闭环）。测试照
+    test_fs_guard 既有先例补三面：三写路径拒（含 blocks.json/element_map/images）、
+    md 读放行回归哨兵、predicate 直测（含「work 下 knowledge 子目录也被段匹配拦」
+    的任意深度口径断言）。拒绝文案同步扩写（指向 search_company_assets/search_references
+    与界面管理入口）。
+
+
