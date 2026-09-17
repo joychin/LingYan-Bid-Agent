@@ -1,12 +1,19 @@
 # 出客户端安装包（Windows + macOS，首个平台真机跑通后把坑补记回 docs/packaging.md）
 #
-# 触发：推送 v* tag 时构建一次（PR / 普通 push 的检查走 check.yml，不在此重复）。
+# 触发：推送 v* tag 时构建一次（PR / 普通 push 不跑，省配额）。
 #
 # 2026-09-17 批次⑥加固：①tag 构建前置 ./check.sh（版本一致性+ruff/pytest+
 # oxlint/tsc/vitest/build+cargo check/clippy/test——此前 tag 只打包不验证）；
 # ②版本号从 tag 覆写**全部五处**（scripts/set_version.py，此前只写 tauri.conf.json
 # 一处、其余四处靠人肉同步）；③动作固定 commit SHA；④job 加 permissions 与
 # timeout；⑤Release 附 SHA256SUMS。
+#
+# 2026-09-17 晚间回撤（用户拍板）：批次⑥曾加 push(main)/PR 触发的 check.yml
+# （ubuntu 跑全套检查）——首跑即红：6 个 PDF 文本抽取测试在 Linux 构建的 pdfium
+# 上抽不出非嵌入中文字体（STSong-Light）的文本，而**本产品只发布 macOS/Windows、
+# 不支持 Linux**，在一个不发布的平台上设门禁只会产假红。拍板=不要每-push 门禁
+# （平时靠本地 ./check.sh），检查只保留在 tag 出包路径、前置进 win/mac 两个
+# 构建 job（原独立 ubuntu check job 一并移除）。
 # 结构（三段式，防两平台并发上传撞「创建 Release」）：
 #   ① build-windows / build-macos 并行：各自 冻结侧车（尾部自动跑 10 项冒烟门）
 #      → tauri build → 产物传 workflow artifact
@@ -81,7 +88,12 @@ jobs:
             v[0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "✗ tag 格式须为 vX.Y.Z（实际：${VERSION}）" >&2; exit 1 ;;
           esac
-          python3 scripts/set_version.py "${VERSION}"
+          PY="$(command -v python3 || command -v python)"
+          "$PY" scripts/set_version.py "${VERSION}"
+
+      - name: 出包前全栈检查（./check.sh：版本一致性 + ruff/pytest + oxlint/tsc/vitest/build + cargo 三件）
+        shell: bash
+        run: ./check.sh
 
       - name: 冻结 sidecar + 自动冒烟门（10 项）
         shell: bash
@@ -149,7 +161,11 @@ jobs:
             v[0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "✗ tag 格式须为 vX.Y.Z（实际：${VERSION}）" >&2; exit 1 ;;
           esac
-          python3 scripts/set_version.py "${VERSION}"
+          PY="$(command -v python3 || command -v python)"
+          "$PY" scripts/set_version.py "${VERSION}"
+
+      - name: 出包前全栈检查（./check.sh：版本一致性 + ruff/pytest + oxlint/tsc/vitest/build + cargo 三件）
+        run: ./check.sh
 
       - name: 冻结 sidecar + 自动冒烟门（10 项）
         run: bash sidecar/build_sidecar.sh
@@ -164,59 +180,9 @@ jobs:
           path: src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
-  # 出包前的质量门（2026-09-17 批次⑥）：check.yml 只覆盖 main/PR，tag 直接触发
-  # 的是本 workflow——「已红的 main 不能直接出包」由此守住。独立 ubuntu job 跑
-  # 完整 ./check.sh（版本一致性+ruff/pytest+oxlint/tsc/vitest/build+cargo 三件），
-  # 两平台 build 与它并行、release 等三者全绿（检查失败时 build 白跑 ~8 分钟是
-  # 接受的代价，省掉 macOS 10× 计费上跑完整检查的更贵方案）
-  check:
-    name: 出包前全栈检查
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: 安装 Node 22
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            frontend/package-lock.json
-
-      - name: 安装 Rust（锁 1.98.0——release 可重现性；本地开发用 rustup 默认 stable，MSRV 由 Cargo.toml rust-version 把守）
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: 1.98.0
-
-      - uses: swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-        with:
-          workspaces: src-tauri
-
-      - name: 安装 uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: 安装根依赖（@tauri-apps/cli）
-        run: npm ci
-
-      - name: 安装前端依赖（check.sh frontend 段需要）
-        working-directory: frontend
-        run: npm ci
-
-      - name: 从 tag 同步版本号（五处；check_versions 要求五处一致后才过检查）
-        run: python3 scripts/set_version.py "${{ github.ref_name }}"
-
-      - name: 全栈检查
-        run: ./check.sh
-
   release:
     name: 挂 Release（两平台产物 + changelog）
-    needs: [check, build-windows, build-macos]
+    needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

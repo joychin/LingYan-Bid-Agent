@@ -22,7 +22,8 @@ check_versions() {
   # tauri.conf.json 的版本经 vite 注入设置页 __APP_VERSION__ 与版本检查比较
   # （2026-09-15 起；此前读 package.json 导致脱节即用户可见的错版号）。
   echo "\n==> 版本号一致性（tauri.conf / Cargo.toml / package.json / pyproject / main.py）"
-  if ! python3 - <<'EOF'
+  PY="$(command -v python3 || command -v python)"
+  if ! "$PY" - <<'EOF'
 import json, re, sys
 
 def toml_ver(path: str) -> str:

@@ -2819,3 +2819,19 @@
     await file.read() 一次读入任意大小上传（对比 files/kb 端点已有的 1MB 分块 +
     MAX_UPLOAD_BYTES 守卫）——本机页面可一枪把 sidecar 打 OOM；复用同一上传体积
     真值分块读。测试 +1（三端点负例：类型错/超长/缺字段全 422），全量 901 绿。
+
+  - **CI 门禁平台回撤（2026-09-17 晚间，批次⑥返工·用户拍板）**：批次⑥加的
+    check.yml（push main/PR 触发、ubuntu 跑全套）**首跑即红并被否**——6 个 PDF
+    文本抽取测试（test_parse_document 5 例 + test_pdf_text 1 例）在 Linux 构建的
+    pdfium 上抽不出非嵌入 CID 中文字体（夹具 STSong-Light，ToUnicode 齐全、
+    macOS 同套件 901 全绿）。诊断：pdfium 对非嵌入字体做系统字体替换，ubuntu
+    runner 无 CJK 字体；而**本产品只发布 macOS/Windows、不支持 Linux**——在
+    不发布的平台上设门禁只会产假红（「平台特有的行为只能在真实目标平台上验证」
+    与 WiX 码页教训同源）。用户拍板=**不要每-push 门禁**（平时靠本地 ./check.sh，
+    不花 CI 配额），检查只保留在 tag 出包路径：删除 check.yml，release.yml 的
+    独立 ubuntu check job 撤掉，./check.sh 前置进 win/mac 两个构建 job（版本
+    同步之后、冻结之前）。顺带两处跨平台加固：check_versions 与 set_version
+    调用点的 python3 改为 python3→python 回退解析（windows git-bash 不保证
+    python3 别名）；json2ts 依赖已在 frontend devDeps（build job 的 npm ci 就位）。
+    已知风险备案：pytest 全套此前从未在 Windows 上跑过，下次 tag 的 win job 若
+    因平台差异再红属真实信号（win runner 有中文字体，PDF 抽取类大概率过）。
