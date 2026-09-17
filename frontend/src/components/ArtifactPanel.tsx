@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, FileText, X } from 'lucide-react'
 import type { Artifact, FileItem, Task, WorkbenchFile } from '@/api/client'
+import { ErrorCard } from '@/components/ErrorCard'
 import {
   fetchWorkbenchRaw,
   getWorkbenchContent,
@@ -110,10 +111,25 @@ export function ArtifactPanel({
   /** 跳素材库主视图（写作指引缺素材→检索建块闭环）；缺省不渲染入口 */
   onOpenLibrary?: () => void
 }) {
-  const { data: taskArtifacts = [], isLoading: loadingTask } = useTaskArtifacts(currentTask?.id ?? null)
+  const {
+    data: taskArtifacts = [],
+    isLoading: loadingTask,
+    isError: artifactsError,
+    refetch: refetchArtifacts,
+  } = useTaskArtifacts(currentTask?.id ?? null)
   const { data: convArtifacts = [] } = useConversationArtifacts(currentConvId)
-  const { data: workbench = [], isLoading: loadingWorkbench } = useWorkbench(currentTask?.id ?? null)
-  const { data: sourceFiles = [], isLoading: loadingFiles } = useFiles(currentTask?.id ?? null)
+  const {
+    data: workbench = [],
+    isLoading: loadingWorkbench,
+    isError: workbenchError,
+    refetch: refetchWorkbench,
+  } = useWorkbench(currentTask?.id ?? null)
+  const {
+    data: sourceFiles = [],
+    isLoading: loadingFiles,
+    isError: filesError,
+    refetch: refetchFiles,
+  } = useFiles(currentTask?.id ?? null)
   const [width, setWidth] = useState(DEFAULT_W)
   const [wsWidth, setWsWidth] = useState(() => clampWsW(wsStoredW()))
   const [dragging, setDragging] = useState(false)
@@ -384,6 +400,14 @@ export function ArtifactPanel({
   }
 
   const loading = loadingTask || loadingWorkbench || loadingFiles
+  // 失败 ≠ 空态（2026-09-17 批次⑤）：任一清单拉取失败给可重试错误卡，不伪装成
+  // 「任务还没有文件」——那会诱导用户以为产出丢了
+  const listError = artifactsError || workbenchError || filesError
+  const refetchLists = () => {
+    void refetchArtifacts()
+    void refetchWorkbench()
+    void refetchFiles()
+  }
 
   return (
     <div
@@ -443,6 +467,15 @@ export function ArtifactPanel({
               <div className="ap-empty flex items-center gap-1.5">
                 <Loader variant="classic" size="sm" tone="muted" />
                 加载中…
+              </div>
+            ) : listError ? (
+              <div className="ap-empty">
+                <ErrorCard
+                  message="文件清单加载失败，已生成的文件不会丢。"
+                  code={null}
+                  retryText="重试"
+                  onRetry={refetchLists}
+                />
               </div>
             ) : taskArtifacts.length === 0 && workbench.length === 0 && sourceFiles.length === 0 ? (
               <p className="ap-empty">

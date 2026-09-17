@@ -2751,3 +2751,27 @@
     （强引用防 GC + 异常记日志）；continue 端点的 checkpoint_exists（get_tuple
     反序列化整份 checkpoint 历史，长会话 MB 级）挪 run_in_executor（与 /snapshot
     同纪律）。测试 +4（取消立即抛/预算超时/排队唤醒/异常归类），全量 900 绿×5。
+
+  - **前端错误态与防线批（2026-09-17，最佳实践审计批次⑤）**：五件——①**失败 ≠ 空态
+    补齐五视图**：HomeView（「开始第一个投标任务」）/Sidebar（「还没有任务」）/
+    ArtifactPanel（「任务还没有文件」）/KnowledgeView（「没有符合条件的资料」）/
+    MaterialsLibraryView（「还没有文件」，该视图连 loading 分支都没有、加载中也闪
+    空文案）此前都只解构 `{data=[]}` 不消费 isError——接口挂了伪装成空数据，
+    诱导用户重复建任务/重传文件。统一补 isError 分支 + 空态条件排除 isError
+    （useMessages/ChatView 既有先例的推广），ErrorCard 从 ChatView 提为共享组件。
+    ②**ErrorBoundary 分区**：原只有根级（整窗报废、未提交草稿全丢）+ ChatView
+    消息区两层；主区视图分派（kb/library/templates/home）逐视图包 compact 层
+    （resetKey=视图名）、ArtifactPanel 用任务 id、SettingsModal 用 settingsOpen。
+    compact 卡文案参数化（原硬编码「消息」）。产物/KB 是外部 JSON 直进渲染层的
+    高危区，现在一条坏数据只降级当前视图占位卡。③**QueryClient 全局 retry: 1**：
+    默认 retry 3 × 15s 超时 ≈ 67s 骨架屏才进错误态；sidecar 重启是高频场景，
+    对齐 useMessages 口径（≈31s 可见可重试）。④**SettingsModal 条件 hook 修复**：
+    `if (!open) return null` 原在 useState 之前（rules-of-hooks 违规，开/关两次
+    渲染 hook 调用数不同——再有人在其后加 hook 即崩），移到全部 hooks 之后，
+    状态语义不变。⑤**oxlint 开 react 插件**：react-hooks/rules-of-hooks=error
+    （实测当前全仓仅 SettingsModal 3 处红，随④修零，已用故意违规文件验证规则
+    真在报）；react 插件会拖入 React Compiler 风格检查（refs/purity/
+    set-state-in-effect 等 57 处既有代码误报 + react-in-jsx-scope 对 automatic
+    runtime 全量误报），逐条 off 收敛——exhaustive-deps 暂不开（存量违规多，
+    留待后续批次）。验证：oxlint 0 error（30 warn，较原先 65 还少——
+    no-underscore-dangle 关闭）+ tsc + vitest 318 + build 全绿。

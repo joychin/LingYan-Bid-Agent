@@ -112,7 +112,7 @@ export function Sidebar({
   collapsed,
 }: SidebarProps) {
   const { data: conversations = [], isLoading } = useConversations()
-  const { data: tasks = [] } = useTasks()
+  const { data: tasks = [], isError: tasksError, refetch: refetchTasks } = useTasks()
   const createConv = useCreateConversation()
   const renameConv = useRenameConversation()
   const deleteConv = useDeleteConversation()
@@ -333,7 +333,16 @@ export function Sidebar({
               加载中…
             </div>
           )}
-          {!isLoading && tasks.length === 0 && (
+          {!isLoading && tasksError && (
+            // 失败 ≠ 空态：拉取失败可重试，不伪装成「还没有任务」诱使用户新建
+            <div className="px-3 py-2 text-xs text-error">
+              任务列表加载失败
+              <button type="button" className="ml-2 hover:underline" onClick={() => void refetchTasks()}>
+                重试
+              </button>
+            </div>
+          )}
+          {!isLoading && !tasksError && tasks.length === 0 && (
             <p className="px-3 py-2 text-xs text-muted-foreground">还没有任务，点「新建任务」开始</p>
           )}
           {groupByTask(tasks, conversations).map((g) => {

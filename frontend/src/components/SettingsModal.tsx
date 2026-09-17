@@ -41,12 +41,9 @@ const SECTIONS: { id: SectionId; title: string; icon: typeof Sparkles }[] = [
 ]
 
 export function SettingsModal({ open, onClose, initialSection }: SettingsModalProps) {
-  // open gate 必须有：ModalShell 无 open 概念，丢了它设置窗会常驻渲染（关闭回调
-  // 全部生效但 UI 永不卸载）——旧 ui/dialog.tsx 的同款门控在双栏重构时弄丢过一次
-  if (!open) return null
   const [section, setSection] = useState<SectionId>(initialSection ?? 'models')
-  // 每次打开都按 initialSection 落位：组件常驻挂载（open gate 只是不渲染），
-  // useState 初值只在首次生效，重开时要靠这个 effect 重新对齐
+  // 每次打开都按 initialSection 落位：useState 初值只在首次生效，重开时靠这个
+  // effect 重新对齐
   useEffect(() => {
     if (open) setSection(initialSection ?? 'models')
     // initialSection 在 App 打开设置前就已定格，入列仅为闭合 lint 依赖
@@ -56,6 +53,13 @@ export function SettingsModal({ open, onClose, initialSection }: SettingsModalPr
     queryFn: getSettings,
     enabled: open,
   })
+
+  // open gate 必须有：ModalShell 无 open 概念，丢了它设置窗会常驻渲染（关闭回调
+  // 全部生效但 UI 永不卸载）——旧 ui/dialog.tsx 的同款门控在双栏重构时弄丢过一次。
+  // **必须放在全部 hooks 之后**（2026-09-17 批次⑤）：条件早退在 useState 之前是
+  // rules-of-hooks 违规（开/关两次渲染的 hook 调用数不同），日后再在下方加 hook
+  // 即崩；oxlint react-hooks/rules-of-hooks 已开、随本批修零
+  if (!open) return null
 
   // 能力状态条：按配置现算，配置齐备时不显示（提示不是门禁）。
   // 识别路由 = 文档解析（百度云）→ 图片识别模型（VLM）→ 降级，两条能力互补：

@@ -2,10 +2,13 @@ import { Component, type ErrorInfo, type ReactNode } from 'react'
 
 interface Props {
   children: ReactNode
-  /** 局部边界（如消息列表）：兜底渲染为紧凑占位卡而非整页错误页，隔离故障区 */
+  /** 局部边界（如消息列表/主区视图）：兜底渲染为紧凑占位卡而非整页错误页，隔离故障区 */
   compact?: boolean
   /** 变化即重置错误态（数据换血后重新渲染 children） */
   resetKey?: string | null
+  /** compact 卡的标题/说明（缺省沿用消息列表先例文案；复用到其他区域时传自己的） */
+  compactTitle?: string
+  compactDetail?: string
 }
 
 interface State {
@@ -63,8 +66,12 @@ export class ErrorBoundary extends Component<Props, State> {
             fontSize: 13,
           }}
         >
-          <div style={{ fontSize: 14, fontWeight: 600 }}>部分消息渲染失败</div>
-          <div style={{ opacity: 0.7 }}>这条消息的数据有问题，其他界面不受影响。</div>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>
+            {this.props.compactTitle ?? '部分消息渲染失败'}
+          </div>
+          <div style={{ opacity: 0.7 }}>
+            {this.props.compactDetail ?? '这条消息的数据有问题，其他界面不受影响。'}
+          </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
             <button
               onClick={() => this.setState({ error: null })}

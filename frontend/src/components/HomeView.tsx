@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { DragEvent } from 'react'
 import { ArrowRight, FolderOpen, Plus, Search, Upload } from 'lucide-react'
+import { ErrorCard } from '@/components/ErrorCard'
 import { Button } from '@/components/ui/button'
 import { useActiveRuns } from '@/hooks/useActiveRuns'
 import { useConversations } from '@/hooks/useConversations'
@@ -38,7 +39,7 @@ export function HomeView({
   /** 在该任务新建会话并进入（行 hover「＋」，与侧栏任务文件夹同款语义） */
   onNewConversation: (taskId: string) => void
 }) {
-  const { data: tasks = [] } = useTasks()
+  const { data: tasks = [], isError, error, refetch } = useTasks()
   const { data: conversations = [] } = useConversations()
   const { data: activeRuns = [] } = useActiveRuns()
 
@@ -157,7 +158,18 @@ export function HomeView({
 
         {creating && createForm}
 
-        {tasks.length === 0 ? (
+        {/* 失败 ≠ 空态：任务拉取失败给可重试错误卡，不伪装成「开始第一个投标任务」
+            引导用户重复建任务（useMessages/ChatView 同款约定） */}
+        {isError ? (
+          <div className="py-8">
+            <ErrorCard
+              message={`任务列表加载失败：${error instanceof Error ? error.message : String(error)}`}
+              code={null}
+              retryText="重试"
+              onRetry={() => void refetch()}
+            />
+          </div>
+        ) : tasks.length === 0 ? (
           <button type="button" className="home-empty" onClick={() => setCreating(true)}>
             <Plus />
             <span className="main">开始第一个投标任务</span>

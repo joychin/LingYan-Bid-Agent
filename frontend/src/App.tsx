@@ -230,12 +230,21 @@ export default function App() {
         <SidecarBanner />
         {/* 退出拦截：还有任务在跑时关窗/cmd+Q 先弹确认（2026-09-12）；浏览器模式自禁用 */}
         <ExitGuard />
+        {/* 视图级局部边界（2026-09-17 批次⑤）：主区渲染异常只降级当前视图的占位卡
+            （resetKey 换视图即重置），不再冒泡到根边界整窗报废——产物/KB 是外部
+            JSON 直进渲染层的区域，恰是最可能抛错的地方 */}
         {activeView === 'kb' ? (
-          <KnowledgeView onGoLibrary={() => setActiveView('library')} />
+          <ErrorBoundary compact resetKey="kb" compactTitle="知识库渲染出错" compactDetail="这份界面数据有问题，重试渲染或重新加载；其他界面不受影响。">
+            <KnowledgeView onGoLibrary={() => setActiveView('library')} />
+          </ErrorBoundary>
         ) : activeView === 'library' ? (
-          <MaterialsLibraryView onGoKnowledge={() => setActiveView('kb')} />
+          <ErrorBoundary compact resetKey="library" compactTitle="素材库渲染出错" compactDetail="这份界面数据有问题，重试渲染或重新加载；其他界面不受影响。">
+            <MaterialsLibraryView onGoKnowledge={() => setActiveView('kb')} />
+          </ErrorBoundary>
         ) : activeView === 'templates' ? (
-          <TemplatesView />
+          <ErrorBoundary compact resetKey="templates" compactTitle="版式库渲染出错" compactDetail="这份界面数据有问题，重试渲染或重新加载；其他界面不受影响。">
+            <TemplatesView />
+          </ErrorBoundary>
         ) : viewConvId ? (
           <>
             {/* viewConv 可能晚一拍（建会话后 conversations 失效重拉未回）：按选中 id
@@ -259,11 +268,13 @@ export default function App() {
             />
           </>
         ) : (
-          <HomeView
-            onOpenTask={(taskId) => void handleOpenTask(taskId)}
-            onCreateTask={handleCreateTask}
-            onNewConversation={(taskId) => void handleNewConversationInTask(taskId)}
-          />
+          <ErrorBoundary compact resetKey="home" compactTitle="任务首页渲染出错" compactDetail="这份界面数据有问题，重试渲染或重新加载；其他界面不受影响。">
+            <HomeView
+              onOpenTask={(taskId) => void handleOpenTask(taskId)}
+              onCreateTask={handleCreateTask}
+              onNewConversation={(taskId) => void handleNewConversationInTask(taskId)}
+            />
+          </ErrorBoundary>
         )}
       </main>
       {/* 产物面板是对话工作台的一部分：知识库视图/无会话上下文（草稿态）不渲染
@@ -278,6 +289,7 @@ export default function App() {
         <div className={cn('ap-slot', artifactsCollapsed && 'collapsed')} aria-hidden />
       )}
       {activeView === 'chat' && currentTask && (
+        <ErrorBoundary compact resetKey={currentTask.id} compactTitle="产物面板渲染出错" compactDetail="这份界面数据有问题，重试渲染或重新加载；聊天不受影响。">
         <ArtifactPanel
           currentConvId={viewConvId}
           currentTask={currentTask}
@@ -298,6 +310,7 @@ export default function App() {
             setSourceFile(null)
           }}
         />
+        </ErrorBoundary>
       )}
       {/* 左右面板固定开关（用户定稿 2026-08-29，对齐 ZCode 手感）：钉在窗口顶角，
           位置不随面板开合变化，面板从其下方滑入滑出，按钮只换图标（图标即状态）。
@@ -320,11 +333,13 @@ export default function App() {
           {artifactsCollapsed ? <PanelRightOpen /> : <PanelRightClose />}
         </button>
       )}
-      <SettingsModal
-        open={settingsOpen}
-        initialSection={settingsSection}
-        onClose={() => setSettingsOpen(false)}
-      />
+      <ErrorBoundary compact resetKey={settingsOpen ? settingsSection ?? 'models' : 'closed'} compactTitle="设置窗口渲染出错" compactDetail="这份配置数据有问题，重试渲染或重新加载；关闭窗口后其他界面不受影响。">
+        <SettingsModal
+          open={settingsOpen}
+          initialSection={settingsSection}
+          onClose={() => setSettingsOpen(false)}
+        />
+      </ErrorBoundary>
     </div>
     </ErrorBoundary>
   )

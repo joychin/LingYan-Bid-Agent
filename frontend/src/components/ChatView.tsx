@@ -4,6 +4,7 @@ import { getSettings } from '@/api/client'
 import { ArrowDown, CirclePause, Paperclip } from 'lucide-react'
 import { UploadDropzone } from '@/components/UploadDropzone'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { ErrorCard } from '@/components/ErrorCard'
 import { ChatMessage, DeepThinking, type InterruptAction } from '@/components/ChatMessage'
 import { MemoMarkdown, markdownComponents } from '@/components/ai/MemoMarkdown'
 import { Loader } from '@/components/ai/Loader'
@@ -1021,72 +1022,10 @@ const MessageList = memo(function MessageList({
  *  非程序自身原因的中断（2026-09-12）附一行安抚提示：产出落文件系统（唯一真值），
  *  重开由管线对账跳过已完成部分——长任务用户最大的恐惧是「全部重来」，这层兜底
  *  必须说给人听。internal/无 code 不加（程序自己崩了，没有可承诺的兜底）。 */
-const ERROR_RECOVERY_HINT = '中断前已完成的产出都已保存，重新执行会基于现有成果继续，不会从零开始。'
-
 /** 「从断点继续」覆盖的错误定性（与 sidecar db.RESUMABLE_ERROR_CODES 对齐）：
  *  服务重启中断 / 模型服务不稳重试耗尽 / Key 失效欠费（修好配置回来续）。
  *  cancelled 尊重停止意图、internal 续跑大概率原地再错——都不提供。 */
 const RESUMABLE_ERROR_CODES: ReadonlyArray<string> = ['interrupted', 'llm_unavailable', 'llm_auth']
-
-function ErrorCard({
-  message,
-  code,
-  retryText,
-  onRetry,
-  onOpenSettings,
-  onContinue,
-}: {
-  message: string
-  code: string | null
-  retryText: string
-  onRetry: () => void
-  /** llm_auth 的「去设置」入口（ChatView 已有设置窗开关回调；可缺省=浏览器无入口场景） */
-  onOpenSettings?: () => void
-  /** 「从断点继续」（2026-09-12）：code 可续且调用方提供入口时显示为主按钮——
-   *  从 checkpoint 续跑，不重发消息、已完成的工作不重跑 */
-  onContinue?: () => void
-}) {
-  const cancelled = code === 'cancelled' || code === 'interrupted'
-  const showHint =
-    code === 'cancelled' || code === 'interrupted' || code === 'llm_unavailable' || code === 'llm_auth'
-  const [headline, ...detailLines] = message.split('\n')
-  return (
-    <div
-      className={
-        cancelled
-          ? 'rounded-lg border border-line bg-secondary px-3 py-2 text-sm text-muted-foreground'
-          : 'rounded-lg border border-error/50 bg-error/5 px-3 py-2 text-sm text-error'
-      }
-    >
-      {headline}
-      {detailLines.length > 0 && (
-        <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
-          {detailLines.map((line, i) => (
-            <div key={i}>{line}</div>
-          ))}
-        </div>
-      )}
-      {showHint && <div className="mt-1 text-xs leading-relaxed text-muted-foreground">{ERROR_RECOVERY_HINT}</div>}
-      <span className="ml-2 inline-flex gap-2">
-        {code === 'llm_auth' && onOpenSettings && (
-          <button type="button" className="hover:underline" onClick={onOpenSettings}>
-            去设置
-          </button>
-        )}
-        {onContinue && (
-          <button type="button" className="font-medium hover:underline" onClick={onContinue}>
-            从断点继续
-          </button>
-        )}
-        {retryText.trim() && (
-          <button type="button" className="hover:underline" onClick={onRetry}>
-            {cancelled ? '重新执行' : '重试'}
-          </button>
-        )}
-      </span>
-    </div>
-  )
-}
 
 function MessageSkeletons() {
   return (

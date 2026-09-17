@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Search, TriangleAlert, Upload } from 'lucide-react'
+import { ErrorCard } from '@/components/ErrorCard'
 import { Button } from '@/components/ui/button'
 import { ModalShell } from '@/components/ui/ModalShell'
 import { uploadKbFile } from '@/api/client'
@@ -27,7 +28,7 @@ interface UploadState {
 type PendingNav = { type: 'tab'; to: DetailTab } | { type: 'select'; id: string }
 
 export function KnowledgeView({ onGoLibrary }: { onGoLibrary?: () => void }) {
-  const { data, isLoading } = useKbItems()
+  const { data, isLoading, isError, error, refetch } = useKbItems()
   const items = data?.items ?? []
   const { data: typeInfo } = useKbTypes()
   const types = typeInfo?.types ?? []
@@ -247,7 +248,19 @@ export function KnowledgeView({ onGoLibrary }: { onGoLibrary?: () => void }) {
               </button>
             )
           })}
+          {isError && (
+            // 失败 ≠ 空态：拉取失败可重试，不伪装成「没有符合条件的资料」
+            <div className="kb-empty">
+              <ErrorCard
+                message={`资料列表加载失败：${error instanceof Error ? error.message : String(error)}`}
+                code={null}
+                retryText="重试"
+                onRetry={() => void refetch()}
+              />
+            </div>
+          )}
           {filtered.length === 0 &&
+            !isError &&
             (isLoading ? (
               <div className="kb-empty">
                 <span className="inline-flex items-center gap-1.5">
@@ -282,7 +295,7 @@ export function KnowledgeView({ onGoLibrary }: { onGoLibrary?: () => void }) {
             onBeforeDelete={() => setSelectedId(null)}
             onDirtyChange={setInfoDirty}
           />
-        ) : items.length === 0 && !isLoading ? (
+        ) : items.length === 0 && !isLoading && !isError ? (
           <KbHeroEmpty
             onUpload={() => fileInputRef.current?.click()}
             onGoLibrary={onGoLibrary}

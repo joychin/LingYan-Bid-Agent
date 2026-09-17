@@ -30,6 +30,10 @@ const queryClient = new QueryClient({
     queries: {
       refetchOnWindowFocus: false,
       staleTime: 1000,
+      // 全局快速失败（2026-09-17 批次⑤）：默认 retry 3 × 15s 请求超时 ≈ 67s 骨架屏
+      // 才进错误态（useMessages 先例注释同口径）；sidecar 重启是高频场景，1 次重试
+      // ≈ 31s 内给出可见可重试的错误卡。个别查询仍可自行覆写
+      retry: 1,
     },
   },
 })

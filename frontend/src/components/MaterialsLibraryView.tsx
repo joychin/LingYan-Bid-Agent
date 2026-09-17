@@ -18,6 +18,7 @@ import type { MtBlock, MtFile, MtOutlineNode } from '@/api/client'
 import { fetchMtFileBlob, reparseMtFile, uploadMtFile } from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { ModalShell } from '@/components/ui/ModalShell'
+import { ErrorCard } from '@/components/ErrorCard'
 import { Loader } from '@/components/ai/Loader'
 import { OriginalView, originalPreviewable, type OriginalSource } from '@/components/preview/OriginalView'
 import {
@@ -314,7 +315,12 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
   const { toast } = useToast()
 
   const debouncedQ = useDebounced(blockQ, 300).trim()
-  const { data: filesData } = useMtFiles()
+  const {
+    data: filesData,
+    isPending: filesLoading,
+    isError: filesError,
+    refetch: refetchFiles,
+  } = useMtFiles()
   const { data: allBlocksData } = useMtBlocks()
   const { data: searchBlocksData, isFetching: searching } = useMtBlocks(debouncedQ || undefined)
   const { data: outlineData } = useMtOutline(mode === 'picker' ? pickerFileId : null)
@@ -715,7 +721,26 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
           </div>
         )
       })}
-      {shownFiles.length === 0 && !uploading && (
+      {filesLoading && shownFiles.length === 0 && !uploading && (
+        <div className="kb-empty">
+          <span className="inline-flex items-center gap-1.5">
+            <Loader variant="classic" size="sm" tone="muted" />
+            加载中…
+          </span>
+        </div>
+      )}
+      {filesError && shownFiles.length === 0 && !uploading && (
+        // 失败 ≠ 空态（此前连 loading 分支都没有，加载中也闪「还没有文件」）
+        <div className="kb-empty">
+          <ErrorCard
+            message="素材文件列表加载失败，已上传的文件不会丢。"
+            code={null}
+            retryText="重试"
+            onRetry={() => void refetchFiles()}
+          />
+        </div>
+      )}
+      {shownFiles.length === 0 && !uploading && !filesLoading && !filesError && (
         <div className="kb-empty">
           {fileQ.trim()
             ? '没有匹配的文件——换个关键词'
