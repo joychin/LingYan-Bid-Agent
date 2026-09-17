@@ -2835,3 +2835,20 @@
     python3 别名）；json2ts 依赖已在 frontend devDeps（build job 的 npm ci 就位）。
     已知风险备案：pytest 全套此前从未在 Windows 上跑过，下次 tag 的 win job 若
     因平台差异再红属真实信号（win runner 有中文字体，PDF 抽取类大概率过）。
+
+  - **七提交复审收尾两修（2026-09-17 晚间，findings ①③）**：对已推送的审计七批
+    做整体 review，四 findings 中用户拍板修 ①③。①**migrate_parse_dirs 碰撞组
+    收尾 rmtree 双守卫**：a) 无扩展名文件名恰与兄弟文件 stem 相同时（如库里同时
+    有 `证书` 与 `证书.pdf`），无扩展名成员的「新目录」就是旧目录本身，原实现
+    循环后无条件 rmtree(old) 会删掉它自己的产物——当前上传边界已拒无扩展名
+    （KB 白名单/MT 仅 .docx），仅远古遗留数据可达，守卫=该成员原地保留、旧目录
+    不删（每次启动重跑碰撞组 no-op 后保留，无害）；b) `_move_into` 的 rename
+    失败原被 `except OSError: pass` 静默吞掉，随后 rmtree 会把没搬走的产物连带
+    删掉——改记日志返回 False，任一搬移失败即保留整组旧目录下次启动重试（幂等
+    收敛，单文件组 rename 失败仍走异常上抛 lifespan 降级）。测试 +2（无扩展名
+    成员产物保留/搬移失败保旧目录+恢复后收敛）。②check.sh 批次⑥只转了 run()
+    一处的 echo→printf，残留 7 处 echo（6 处带字面 `\n` 前缀+1 处错误行）全部
+    补转 printf，注释统一「勿新增 echo」；顺带修正头部注释里已删除的 check.yml
+    引用（现跑本脚本的是 release.yml 的 win/mac job）。findings ②（退出取消后
+    3s 内再退强杀）④（Pydantic 422 文案非人话）备案不修。pytest 903 绿、
+    ./check.sh 全绿。

@@ -18,10 +18,13 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
 from ..config import knowledge_dir
+
+logger = logging.getLogger(__name__)
 
 
 def kb_files_dir() -> Path:
@@ -49,7 +52,9 @@ def migrate_parse_dirs(
     - 碰撞组：逐文件拆分——各方的 `<文件名><suffix>` 产物移进各自新目录；
       共享件（shared_entries：文件与子目录都支持）**拷贝给每一方**——共享期的
       内容污染是历史损伤、无法事后区分归属，拷贝=谁都不丢，各方独立后由用户
-      自行清理（迁移日志按 stem 点名），最后删除旧目录；
+      自行清理（迁移日志按 stem 点名），最后删除旧目录。删旧目录有两条例外
+      （2026-09-17 复审收尾）：无扩展名成员的新目录就是旧目录本身（stem==文件名）
+      时原地保留不删；任一搬移失败时整组保留下次启动重试（幂等收敛）；
     - 已是新布局（parse/<文件名>/ 存在）或从未解析的条目自然跳过，重跑无副作用。
 
     只动磁盘不动 DB（路径全部是 file_name 的纯函数，DB 无绝对路径引用）。
@@ -74,14 +79,25 @@ def migrate_parse_dirs(
             continue
         if stem == names[0] and len(names) == 1:
             continue  # 无扩展名文件：新旧同名，无需动
-        # 碰撞组（或 stem 恰与另一文件全名相同的边缘形态）：逐文件拆分
+        # 碰撞组（或 stem 恰与另一文件全名相同的边缘形态）：逐文件拆分。
+        # 收尾 rmtree 双守卫（2026-09-17 复审收尾）：a) 无扩展名成员的新目录就是
+        # old 本身（stem==文件名，上传边界已拒此形态、仅远古遗留数据可达），删 old
+        # 即删它自己的产物——原地保留；b) 任一搬移失败（_move_into 返回 False）
+        # 保留整个旧目录下次启动重试（幂等收敛），防「吞异常+随后 rmtree」把没
+        # 搬走的产物连带删掉。
+        keeps_old = False
+        moved_all = True
         for name in names:
             new = parse_root / name
+            if new == old:
+                keeps_old = True
+                stats["split"] += 1
+                continue  # 无扩展名成员：自身产物本就在最终位置
             new.mkdir(parents=True, exist_ok=True)
             for suffix in prefixed_suffixes:
                 src = old / f"{name}{suffix}"
                 if src.is_file():
-                    _move_into(src, new / src.name)
+                    moved_all &= _move_into(src, new / src.name)
             for entry in shared_entries:
                 src = old / entry
                 dst = new / entry
@@ -91,18 +107,24 @@ def migrate_parse_dirs(
                     shutil.copy2(src, dst)
             stats["split"] += 1
         stats["conflicts"].append(stem)
-        shutil.rmtree(old, ignore_errors=True)
+        if not moved_all:
+            logger.warning("解析目录迁移有产物搬移失败，旧目录保留待下次启动重试：%s", old)
+        if moved_all and not keeps_old:
+            shutil.rmtree(old, ignore_errors=True)
     return stats
 
 
-def _move_into(src: Path, dst: Path) -> None:
-    """同盘移动（rename；目标已存在时跳过保新）。"""
+def _move_into(src: Path, dst: Path) -> bool:
+    """同盘移动（rename；目标已存在时跳过保新）。失败记日志返回 False——调用方
+    据此保留旧目录整体下次重试，防「吞异常+随后 rmtree」删掉没搬走的产物。"""
     if dst.exists():
-        return
+        return True
     try:
         src.rename(dst)
+        return True
     except OSError:
-        pass
+        logger.warning("解析目录迁移搬移失败（%s → %s），保留旧目录待重试", src, dst)
+        return False
 
 
 def kb_parse_dir(file_name: str) -> Path:

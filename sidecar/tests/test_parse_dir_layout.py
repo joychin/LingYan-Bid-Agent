@@ -8,6 +8,7 @@
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -167,3 +168,65 @@ def test_migrate_new_layout_untouched(env):
     stats = ingest.migrate_parse_dir_layout()
     assert stats["renamed"] == 0 and stats["split"] == 0
     assert md.read_text(encoding="utf-8") == "# 已是新布局"
+
+
+# ---------- 收尾 rmtree 双守卫（2026-09-17 复审收尾） ----------
+
+
+def test_migrate_collision_with_extensionless_keeps_own_dir(env):
+    """无扩展名文件名恰与兄弟 stem 相同（上传边界已拒此形态，仅远古遗留可达）：
+    其新目录=旧目录本身，守卫后原地保留，不被收尾 rmtree 误删自己的产物。"""
+    a, b = "证书.pdf", "证书"
+    _kb_seed(a, "a")
+    _kb_seed(b, "b")
+    old = store.kb_parse_root() / "证书"
+    old.mkdir(parents=True)
+    (old / f"{a}.md").write_text(f"# {a}", encoding="utf-8")
+    (old / f"{b}.md").write_text(f"# {b}", encoding="utf-8")  # 无扩展名成员自己的产物
+    img = old / "images"
+    img.mkdir()
+    (img / "img_001.png").write_bytes(b"png")
+    stats = ingest.migrate_parse_dir_layout()
+    assert stats["conflicts"] == ["证书"]
+    # pdf 成员照常拆分出去（md + 共享 images 拷贝）
+    md_a, _, _, _ = store.kb_parse_paths(a)
+    assert md_a.read_text(encoding="utf-8") == f"# {a}"
+    assert (store.kb_images_dir(a) / "img_001.png").is_file()
+    # 无扩展名成员：自己的产物原地保留（rmtree 守卫点）
+    md_b, _, _, _ = store.kb_parse_paths(b)
+    assert md_b.read_text(encoding="utf-8") == f"# {b}"
+    # 幂等：重跑不误动（旧目录=无扩展名成员的最终目录，每次重跑都走碰撞组
+    # no-op 拆分后保留——split 计数非零是预期，数据无损才是断言点）
+    ingest.migrate_parse_dir_layout()
+    assert md_a.read_text(encoding="utf-8") == f"# {a}"
+    assert md_b.read_text(encoding="utf-8") == f"# {b}"
+
+
+def test_migrate_move_failure_keeps_old_dir(env, monkeypatch):
+    """搬移失败不删旧目录（原实现 _move_into 吞异常 + 随后 rmtree 会删掉没搬走的
+    产物）：rename 注入失败 → 整组保留；恢复后重跑幂等收敛。"""
+    a, b = "证书.pdf", "证书.docx"
+    _kb_seed(a, "a")
+    _kb_seed(b, "b")
+    _old_kb_layout("证书", [a, b])
+    real_rename = Path.rename
+
+    def flaky_rename(self, target):
+        if self.name == f"{a}.md":
+            raise OSError("injected rename failure")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky_rename)
+    stats = ingest.migrate_parse_dir_layout()
+    assert stats["conflicts"] == ["证书"]
+    # 失败方产物留在旧目录（未被 rmtree 连带删掉），成功方照常归位
+    old = store.kb_parse_root() / "证书"
+    assert (old / f"{a}.md").read_text(encoding="utf-8") == f"# {a}"
+    md_b, _, _, _ = store.kb_parse_paths(b)
+    assert md_b.read_text(encoding="utf-8") == f"# {b}"
+    # 恢复 rename 后重跑：残留产物归位、旧目录收走（幂等收敛）
+    monkeypatch.setattr(Path, "rename", real_rename)
+    ingest.migrate_parse_dir_layout()
+    md_a, _, _, _ = store.kb_parse_paths(a)
+    assert md_a.read_text(encoding="utf-8") == f"# {a}"
+    assert not old.exists()

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # 灵燕智能 一键全栈检查：sidecar(Python) + frontend(TS) + src-tauri(Rust)。
-# 提交前 / 改动后快速回归用；CI（.github/workflows/check.yml）跑的就是本脚本。
+# 提交前 / 改动后快速回归用；tag 出包路径（release.yml 的 win/mac job 前置）跑的就是本脚本。
 #
 # 用法：
 #   ./check.sh            # 全部
@@ -12,7 +12,8 @@
 set -u
 cd "$(dirname "$0")" || exit 1
 
-# printf 而非 echo：bash 内建 echo 原样打印 "\n" 字面量（不转义）
+# printf 而非 echo：bash 内建 echo 原样打印 "\n" 字面量（不转义）——全部输出点
+# 统一 printf，勿新增 echo（2026-09-17 复审收尾补齐 7 处残留）
 run() { printf '\n==> %s\n' "$*"; "$@"; }
 fail=0
 step() { run "$@" || fail=1; }
@@ -21,7 +22,7 @@ check_versions() {
   # 版本号一致性守卫：五处必须同步（tauri.conf.json 由 CI 从 tag 覆写，其余手动）。
   # tauri.conf.json 的版本经 vite 注入设置页 __APP_VERSION__ 与版本检查比较
   # （2026-09-15 起；此前读 package.json 导致脱节即用户可见的错版号）。
-  echo "\n==> 版本号一致性（tauri.conf / Cargo.toml / package.json / pyproject / main.py）"
+  printf '\n==> %s\n' '版本号一致性（tauri.conf / Cargo.toml / package.json / pyproject / main.py）'
   PY="$(command -v python3 || command -v python)"
   if ! "$PY" - <<'EOF'
 import json, re, sys
@@ -61,11 +62,11 @@ check_sidecar() {
   # 忘了跑 scripts/gen_ts_types.py 在此挂掉）。生成失败必须显式失败并打印报错——
   # 静默跳过会让这条防线恰好在最需要它的环境（新 clone/缺依赖）失效；成功路径静音。
   if ! gen_out="$(uv run python scripts/gen_ts_types.py 2>&1)"; then
-    echo "\n==> 契约 TS 类型生成失败（缺 pydantic2ts/json2ts 依赖或生成器异常）："
+    printf '\n==> %s\n' '契约 TS 类型生成失败（缺 pydantic2ts/json2ts 依赖或生成器异常）：'
     printf '%s\n' "$gen_out"
     fail=1
   elif ! git diff --exit-code -- ../frontend/src/api/events.gen.ts ../frontend/src/api/dto.gen.ts >/dev/null; then
-    echo "\n==> 契约 TS 类型与 pydantic 模型不同步（sidecar/scripts/gen_ts_types.py 后提交）"
+    printf '\n==> %s\n' '契约 TS 类型与 pydantic 模型不同步（sidecar/scripts/gen_ts_types.py 后提交）'
     fail=1
   fi
   cd .. || exit 1
@@ -79,7 +80,7 @@ check_frontend() {
   if [ "$(node -p "require('./package.json').scripts.test !== undefined")" = "true" ]; then
     step npm run test
   else
-    echo "\n==> vitest 未配置，跳过"
+    printf '\n==> %s\n' 'vitest 未配置，跳过'
   fi
   step npm run build
   cd .. || exit 1
@@ -101,11 +102,11 @@ case "$target" in
   frontend) check_frontend ;;
   rust)     check_rust ;;
   all)      check_versions; check_sidecar; check_frontend; check_rust ;;
-  *) echo "未知目标: $target（sidecar|frontend|rust|all）"; exit 2 ;;
+  *) printf '未知目标: %s（sidecar|frontend|rust|all）\n' "$target"; exit 2 ;;
 esac
 
 if [ "$fail" -ne 0 ]; then
-  echo "\n✗ 检查未全部通过"
+  printf '\n✗ 检查未全部通过\n'
   exit 1
 fi
-echo "\n✓ 全部通过"
+printf '\n✓ 全部通过\n'
