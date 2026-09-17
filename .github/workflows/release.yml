@@ -66,6 +66,7 @@ jobs:
         with:
           toolchain: 1.98.0
           targets: x86_64-pc-windows-msvc
+          components: clippy # check.sh 跑 cargo clippy；锁版工具链默认不带该组件（v0.2.1 三跑实证）
 
       - uses: swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
@@ -95,13 +96,17 @@ jobs:
           PY="$(command -v python3 || command -v python)"
           "$PY" scripts/set_version.py "${VERSION}"
 
-      - name: 出包前全栈检查（./check.sh：版本一致性 + ruff/pytest + oxlint/tsc/vitest/build + cargo 三件）
-        shell: bash
-        run: ./check.sh
-
+      # 顺序（2026-09-17 v0.2.1 三跑修正）：冻结必须在 check 之前——tauri 的 build
+      # script 连 cargo check 都校验 externalBin（binaries/tender-agent-sidecar-<triple>），
+      # fresh checkout 的 binaries/ 是空的（gitignore、由冻结步生成），check 前置会让
+      # cargo 段必挂；本地全绿是历史构建残留的假象。
       - name: 冻结 sidecar + 自动冒烟门（10 项）
         shell: bash
         run: bash sidecar/build_sidecar.sh
+
+      - name: 出包前全栈检查（./check.sh：版本一致性 + ruff/pytest + oxlint/tsc/vitest/build + cargo 三件）
+        shell: bash
+        run: ./check.sh
 
       - name: Tauri 构建（前端 build + Rust release + nsis/msi）
         shell: bash
@@ -143,6 +148,7 @@ jobs:
         with:
           toolchain: 1.98.0
           targets: aarch64-apple-darwin
+          components: clippy # check.sh 跑 cargo clippy；锁版工具链默认不带该组件（v0.2.1 三跑实证）
 
       - uses: swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
@@ -170,11 +176,12 @@ jobs:
           PY="$(command -v python3 || command -v python)"
           "$PY" scripts/set_version.py "${VERSION}"
 
-      - name: 出包前全栈检查（./check.sh：版本一致性 + ruff/pytest + oxlint/tsc/vitest/build + cargo 三件）
-        run: ./check.sh
-
+      # 顺序同 win job：冻结在 check 之前（externalBin 是 cargo check 的硬依赖）
       - name: 冻结 sidecar + 自动冒烟门（10 项）
         run: bash sidecar/build_sidecar.sh
+
+      - name: 出包前全栈检查（./check.sh：版本一致性 + ruff/pytest + oxlint/tsc/vitest/build + cargo 三件）
+        run: ./check.sh
 
       - name: Tauri 构建（前端 build + Rust release + dmg）
         run: npx tauri build

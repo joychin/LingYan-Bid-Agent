@@ -2871,3 +2871,20 @@
     `PYTHONUTF8: "1"`（一次覆盖 set_version/check.sh 全部 Python 调用；mac 默认
     已 UTF-8 属防御性对齐）。tag v0.2.1 二次重指。配额提醒：一次 tag≈350 分钟
     （Free 2000/月），v0.2.1 已烧 3 次。
+
+  - **check.sh 在 build job 内的顺序修正 + clippy 组件（2026-09-17 晚间，v0.2.1
+    三跑暴露）**：二跑 mac 走到 check.sh cargo 段死于两条——①`resource path
+    'binaries/tender-agent-sidecar-<triple>' doesn't exist`：tauri 的 build script
+    连 cargo check 都校验 externalBin 资源存在，fresh checkout 的 binaries/ 是
+    空的（gitignore、由冻结步生成）。**根因=5b1da63 把 check 前置到「冻结之前」
+    的顺序 bug**，本地 check.sh 全绿是 binaries/ 历史构建残留的假象（本地跑 check
+    前先跑过 build:sidecar 才绿——环境依赖型绿灯，review 未审出）。修=步骤重排
+    「冻结 → check → tauri build」，代价=check 红时浪费冻结的几分钟，换来顺序
+    与依赖一致（否决「check 前造占位 binaries」：冻结失败时占位文件会被 tauri
+    build 静默打进安装包，空 sidecar 是灾难性静默失败）。②锁版工具链（dtolnay
+    toolchain: 1.98.0）默认不带 clippy 组件，check.sh 的 `cargo clippy` 必挂——
+    dtolnay 步骤加 `components: clippy`。附带好消息（二跑 mac 实证）：903 pytest
+    与前端四件在 mac runner 全过——Linux 假红确证为平台字体问题而非测试问题；
+    三跑 win 实证 set_version 在 PYTHONUTF8 下已过。剩余未知=903 pytest 在
+    Windows runner 的表现（CJK 字体与路径差异，若红属真实平台信号）。tag v0.2.1
+    第三次重指（三跑已取消止损）。
