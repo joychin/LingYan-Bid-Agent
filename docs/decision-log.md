@@ -2862,3 +2862,12 @@
     本地实跑验证（六文件正确落 0.2.1 后还原）。已知无害怪癖备案：json.dumps
     重排 tauri.conf.json 内联对象格式（CI 内存覆写、不提交，无影响）。tag v0.2.1
     从 d7c87b4 重指到本修复提交（Release 未建成即失败，无线上内容损失）。
+
+  - **Windows git-bash Python stdout=cp1252 全局修（2026-09-17 晚间，v0.2.1 二跑
+    暴露）**：isinstance 修复后 win job 在 set_version.py 最后一行**中文 print**
+    撞 UnicodeEncodeError（git-bash 下无控制台的 Python stdout 编码随 locale=cp1252，
+    与 WiX 码页 1252 同族）。此雷是全局的——check.sh heredoc 里的 check_versions
+    中文 print 在 win job 同样会炸。修=release.yml 两 build job 注入
+    `PYTHONUTF8: "1"`（一次覆盖 set_version/check.sh 全部 Python 调用；mac 默认
+    已 UTF-8 属防御性对齐）。tag v0.2.1 二次重指。配额提醒：一次 tag≈350 分钟
+    （Free 2000/月），v0.2.1 已烧 3 次。

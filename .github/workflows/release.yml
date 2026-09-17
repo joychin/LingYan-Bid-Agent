@@ -43,6 +43,10 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    env:
+      # git-bash 下 Python stdout 编码=cp1252，脚本/check.sh 的中文 print 直接
+      # UnicodeEncodeError（2026-09-17 v0.2.1 首跑实证；WiX 码页 1252 同族）
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -118,6 +122,8 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    env:
+      PYTHONUTF8: "1" # 与 win job 同口径（mac 默认已 UTF-8，防御性对齐）
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
