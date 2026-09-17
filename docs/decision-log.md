@@ -2803,3 +2803,19 @@
     事实；frontend/package-lock 根版本漂移（0.0.0→0.1.0）随 npm install 修复。
     验证：./check.sh 全绿（五处版本一致/ruff/pytest 900/oxlint 0 error/tsc/
     vitest 318/build/cargo check+test 14+clippy）。
+
+  - **仓库卫生与 API 边界批（2026-09-17，最佳实践审计批次⑦）**：三件——①**仓库
+    卫生**：gui-test-screenshots 下 20 张调试截图移出版本库（git rm --cached，
+    本地保留；同目录此前一半入库一半被 ignore 的混乱先例终结）；删 frontend/sidecar
+    游离软链（无脚本引用、git status 恒脏）；删死代码 components/ai/{FileUpload,
+    Tool,Source}.tsx（prompt-kit 参考件全仓零 import，其中 ai/FileUpload 与生产
+    用的 context/FileUpload 同名易误引）；MaterialsLibraryView 局部 useDebounced
+    提为共享 hook（KnowledgeView 手写同款 effect 换用）。②**API 边界 Pydantic 化
+    三端点**：PUT /materials/blocks/{bid}（传 {"title":123} 原在 .strip() 处
+    AttributeError 打穿 500）、PUT /kb/items/{kid}/metadata（人工侧 statement/
+    fields 此前无长度上限——超长文本原样进检索段与每次列表响应；fields 非 str
+    值原被静默丢弃，改 422 人话）、POST /workbench/restore（缺字段原静默空串
+    走到 409/404 假象）。③**render 回执端点分块读+上限**：POST /render/figure 的
+    await file.read() 一次读入任意大小上传（对比 files/kb 端点已有的 1MB 分块 +
+    MAX_UPLOAD_BYTES 守卫）——本机页面可一枪把 sidecar 打 OOM；复用同一上传体积
+    真值分块读。测试 +1（三端点负例：类型错/超长/缺字段全 422），全量 901 绿。

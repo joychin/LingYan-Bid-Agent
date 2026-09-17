@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Search, TriangleAlert, Upload } from 'lucide-react'
 import { ErrorCard } from '@/components/ErrorCard'
+import { useDebounced } from '@/hooks/useDebounced'
 import { Button } from '@/components/ui/button'
 import { ModalShell } from '@/components/ui/ModalShell'
 import { uploadKbFile } from '@/api/client'
@@ -37,7 +38,8 @@ export function KnowledgeView({ onGoLibrary }: { onGoLibrary?: () => void }) {
   const [filter, setFilter] = useState<'all' | 'pending'>('all')
   const [typeFilter, setTypeFilter] = useState<string>('all')
   const [query, setQuery] = useState('')
-  const [debounced, setDebounced] = useState('')
+  // 搜索防抖：输入即时回显，过滤 300ms 后生效（含说明/问题的过滤较重）
+  const debounced = useDebounced(query, 300)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [tab, setTab] = useState<DetailTab>('content')
   const [infoDirty, setInfoDirty] = useState(false)
@@ -46,12 +48,6 @@ export function KnowledgeView({ onGoLibrary }: { onGoLibrary?: () => void }) {
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const uploadIdRef = useRef(0)
-
-  // 搜索防抖：输入即时回显，过滤 300ms 后生效（含说明/问题的过滤较重）
-  useEffect(() => {
-    const t = window.setTimeout(() => setDebounced(query), 300)
-    return () => window.clearTimeout(t)
-  }, [query])
 
   const pending = items.filter((it) => it.review_status === 'pending_review')
   const typeCodes = new Set(types.map((t) => t.code))

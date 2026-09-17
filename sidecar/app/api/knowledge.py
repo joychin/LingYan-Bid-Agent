@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel, Field
 
 from .. import db
 from ..config import MAX_UPLOAD_BYTES
@@ -31,6 +32,18 @@ from ..knowledge.types import (
 from ..parse.image import IMAGE_EXTS
 
 router = APIRouter()
+
+
+class MetadataBody(BaseModel):
+    """人工确认保存的边界校验（2026-09-17 批次⑦，裸 dict 改 Pydantic）：
+    类型错误/超长在边界 422 人话拒绝（原实现非 str 值被静默丢弃、非 dict 静默
+    空对象——错数据静默落库比报错更难排查）。"""
+
+    doc_type: str = Field(min_length=1, max_length=64)
+    statement: str | None = Field(default=None, max_length=2000)
+    questions: list[str] | None = None
+    fields: dict[str, str] | None = Field(default=None)
+    extra: dict[str, str] | None = Field(default=None)
 
 KB_ALLOWED_EXTENSIONS = {".docx", ".pdf", ".txt", ".md", ".doc"} | IMAGE_EXTS
 _CHUNK = 1024 * 1024
@@ -292,25 +305,23 @@ def _convert_unfriendly_image(path_str: str, mtime_ns: int) -> bytes:
 
 
 @router.put("/kb/items/{kid}/metadata")
-async def confirm_metadata(kid: str, body: dict):
+async def confirm_metadata(kid: str, body: MetadataBody):
     """确认保存：body = {doc_type, statement?, questions?, fields?, extra?} → business_metadata +
     confirmed + 重建检索段（人工字段与说明可检索）。改到 auto 类且就绪且无素材
     时自动补拆。"""
     item = db.kb_get_item(kid)
     if not item:
         raise HTTPException(status_code=404, detail="条目不存在")
-    doc_type = body.get("doc_type")
+    doc_type = body.doc_type
     if not get_type(doc_type):
         raise HTTPException(status_code=422, detail=f"未知类型：{doc_type}（须为预置类型 code）")
-    fields_raw = body.get("fields") or {}
-    if not isinstance(fields_raw, dict):
-        raise HTTPException(status_code=422, detail="fields 须为对象")
-    fields = {k: {"value": v} for k, v in fields_raw.items() if isinstance(v, str) and v.strip()}
-    extra_raw = body.get("extra") or {}
-    extra = {k: {"value": v} for k, v in extra_raw.items() if isinstance(v, str) and v.strip()} if isinstance(extra_raw, dict) else {}
-    statement = body.get("statement")
+    # 人工侧长度上限（2026-09-17 批次⑦）：LLM 抽取侧有 500/800 字上限，人工确认
+    # 此前无界——超长文本会原样进检索段与每次列表响应
+    fields = {k: {"value": v} for k, v in (body.fields or {}).items() if v.strip()}
+    extra = {k: {"value": v} for k, v in (body.extra or {}).items() if v.strip()}
+    statement = body.statement
     # 检索问题：可选字符串数组；去空去重，≤10 条、单条 ≤40 字（留空/缺省=沿用建议版）
-    questions_raw = body.get("questions")
+    questions_raw = body.questions
     if questions_raw is not None and not isinstance(questions_raw, list):
         raise HTTPException(status_code=422, detail="questions 须为字符串数组")
     questions: list[str] = []

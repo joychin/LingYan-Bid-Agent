@@ -18,6 +18,7 @@ import type { MtBlock, MtFile, MtOutlineNode } from '@/api/client'
 import { fetchMtFileBlob, reparseMtFile, uploadMtFile } from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { ModalShell } from '@/components/ui/ModalShell'
+import { useDebounced } from '@/hooks/useDebounced'
 import { ErrorCard } from '@/components/ErrorCard'
 import { Loader } from '@/components/ai/Loader'
 import { OriginalView, originalPreviewable, type OriginalSource } from '@/components/preview/OriginalView'
@@ -41,16 +42,6 @@ function rangesStr(ranges: number[][] | undefined): string {
   return (ranges ?? [])
     .map(([s, e]) => (e && e !== s ? `L${s}-L${e}` : `L${s}`))
     .join('、')
-}
-
-/** 搜索防抖（300ms——每次击键打后端 FTS 太密）。 */
-function useDebounced<T>(value: T, ms: number): T {
-  const [v, setV] = useState(value)
-  useEffect(() => {
-    const t = window.setTimeout(() => setV(value), ms)
-    return () => window.clearTimeout(t)
-  }, [value, ms])
-  return v
 }
 
 // ===== 目录树纯函数（勾选/折叠共用 key=start_line） =====

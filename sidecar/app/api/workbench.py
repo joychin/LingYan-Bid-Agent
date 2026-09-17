@@ -20,12 +20,20 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import artifact_store, db, path_resolve
 from ..artifact_store import RESTORE_KEEP
 
 router = APIRouter()
+
+
+class RestoreBody(BaseModel):
+    """恢复上一版的边界校验（2026-09-17 批次⑦）：裸 dict 的 .get 缺字段会静默
+    空串——必填在边界 422 人话拒绝。"""
+
+    task_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
 
 # 恢复点栈深度（单一真值=artifact_store.RESTORE_KEEP，与 docx 节编辑/产物恢复点同源）
 _RESTORE_KEEP = RESTORE_KEEP
@@ -317,11 +325,11 @@ async def write_content(body: WorkbenchWrite):
 
 
 @router.post("/workbench/restore")
-async def restore_backup(body: dict):
+async def restore_backup(body: RestoreBody):
     """恢复上一版：当前内容先入恢复点栈，再写回最近恢复点（与产物 restore 同构，
     可再次恢复=撤销恢复；栈深 _RESTORE_KEEP）。"""
-    task_id = body.get("task_id", "")
-    path = body.get("path", "")
+    task_id = body.task_id
+    path = body.path
     _require_task(task_id)
     target = _resolve(task_id, path)
     if not target.is_file():

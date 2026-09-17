@@ -519,3 +519,58 @@ def test_check_result_passthrough_and_human_confirm_marker(client):
     data = ok.json()
     assert data["review_status"] == "confirmed"
     assert data["business"].get("confirmed_by") is None  # 人工语义：无 auto 标记
+
+
+def test_boundary_validation_rejects_bad_types_and_lengths(client):
+    """边界校验（2026-09-17 批次⑦）：裸 dict 端点 Pydantic 化后的负例——类型错/
+    超长在边界 422 人话拒绝，不再静默丢弃（fields 非 str 值）或打穿 500
+    （块备注传数字在 .strip() 处 AttributeError）。"""
+    from tests.util import create_task
+
+    # 素材块改备注传数字 → 422（原 500）
+    task = create_task(client)
+    up = client.post(
+        "/api/materials/files",
+        files={"file": ("边界校验.docx", _docx_bytes(), "application/octet-stream")},
+    )
+    assert up.status_code == 201, up.text
+    fid = up.json()["id"]
+    # 解析收敛（后台任务跨请求执行，与 test_materials_files_api_flow 同款）
+    import time as _time
+
+    deadline = _time.time() + 5
+    while _time.time() < deadline:
+        outline = client.get(f"/api/materials/files/{fid}/outline").json()
+        if outline["parse_status"] in ("ready", "failed"):
+            break
+        _time.sleep(0.05)
+    assert outline["parse_status"] == "ready", outline
+    block = client.post(
+        f"/api/materials/files/{fid}/blocks", json={"title": "t", "note": "", "ranges": [[1, 2]]}
+    )
+    assert block.status_code == 201, block.text
+    bid = block.json()["id"]
+    assert client.put(f"/api/materials/blocks/{bid}", json={"note": 123}).status_code == 422
+    assert client.put(f"/api/materials/blocks/{bid}", json={"title": "x" * 121}).status_code == 422
+
+    # KB 人工确认：statement 超长 → 422；fields 非字符串值 → 422（原静默丢弃）
+    r = client.post(
+        "/api/kb/files",
+        files={"file": ("边界说明.txt", "公司主营软件开发与信息系统集成服务。".encode(), "text/plain")},
+    )
+    assert r.status_code == 201, r.text
+    kid = r.json()["id"]
+    bad = client.put(
+        f"/api/kb/items/{kid}/metadata",
+        json={"doc_type": "company_intro", "statement": "长" * 2001},
+    )
+    assert bad.status_code == 422
+    bad2 = client.put(
+        f"/api/kb/items/{kid}/metadata",
+        json={"doc_type": "company_intro", "fields": {"valid_until": 20280630}},
+    )
+    assert bad2.status_code == 422
+
+    # workbench 恢复缺 path → 422（原静默空串走到 409/404 假象）
+    tid = task["task"]["id"]
+    assert client.post("/api/workbench/restore", json={"task_id": tid}).status_code == 422

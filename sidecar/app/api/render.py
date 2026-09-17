@@ -15,8 +15,14 @@ pending(多会话并发 run 无串扰)。
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from .. import render_queue
+from ..config import MAX_UPLOAD_BYTES
 
 router = APIRouter()
+
+# 回执图的分块读上限（2026-09-17 批次⑦）：单张渲染 PNG 几百 KB 量级，但上传端点
+# 不设防时 await file.read() 会把任意大小一次读进内存——本机页面可一枪把 sidecar
+# 打 OOM（run 正在跑时整轮报废）。复用上传体积单一真值 + 1MB 分块
+_CHUNK = 1024 * 1024
 
 
 @router.get("/render/pending")
@@ -29,7 +35,17 @@ async def render_figure(
     request_id: str = Form(...),
     file: UploadFile | None = File(None),
 ) -> dict:
-    data = await file.read() if file is not None else b""
+    data = b""
+    if file is not None:
+        buf = bytearray()
+        while True:
+            chunk = await file.read(_CHUNK)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if len(buf) > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail=f"渲染图超过 {MAX_UPLOAD_BYTES // 1048576}MB 上限")
+        data = bytes(buf)
     if not render_queue.fulfill(request_id, data or None):
         raise HTTPException(status_code=404, detail="渲染请求不存在或已回执(过期即失效)")
     return {"ok": True}

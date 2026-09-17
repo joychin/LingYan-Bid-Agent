@@ -11,12 +11,23 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from .. import db
 from ..config import MAX_UPLOAD_BYTES
 from ..knowledge import materials_lib as mlib
 
 router = APIRouter()
+
+
+class BlockUpdateBody(BaseModel):
+    """块标题/备注的边界校验（2026-09-17 批次⑦）：裸 dict 时代传 {"title": 123}
+    会在 mlib.update_block 的 title.strip() 处 AttributeError 打穿 500——「错误一律
+    人话」的接口约定在边界就挡掉；长度上限与 mlib 落盘截断同口径。"""
+
+    title: str | None = Field(default=None, max_length=120)
+    note: str | None = Field(default=None, max_length=2000)
+
 
 # 素材库只收 .docx：素材块的价值锚点是「原文可整体拷贝注入新标书」——只有 docx
 # 解析才产出 element_map（元素级映射，图表/编号/格式可随块注入），其余格式只能
@@ -233,9 +244,9 @@ async def create_block(fid: str, body: dict):
 
 
 @router.put("/materials/blocks/{bid}")
-async def update_block(bid: str, body: dict):
-    """改标题/备注：{title?, note?}。"""
-    block = mlib.update_block(bid, body.get("title"), body.get("note"))
+async def update_block(bid: str, body: BlockUpdateBody):
+    """改标题/备注：{title?, note?}（缺省=不改）。"""
+    block = mlib.update_block(bid, body.title, body.note)
     if not block:
         raise HTTPException(status_code=404, detail="素材块不存在")
     return block
