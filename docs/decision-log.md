@@ -2701,3 +2701,22 @@
     test_docx_ops 五处硬编码旧布局路径串同步修正。
 
 
+
+  - **Rust 壳三修：async command / 退出兜底 / supervisor panic 收敛（2026-09-17，
+    最佳实践审计批次③）**：①`get_sidecar_info`/`check_latest_version`/
+    `export_diagnostics` 改 async fn——Tauri 2 的同步 command 跑**主线程**（wry 的
+    IPC 回调），而 get_sidecar_info 内部 thread::sleep(200ms) 轮询最长 20s、
+    check_latest_version 用 reqwest::blocking 5s 网络等待，且前端每个 HTTP 请求
+    都先走 get_sidecar_info——崩溃重启窗口内 4s 一次的健康轮询会把主线程反复按住
+    （整窗卡死）。旧代码注释「sync 命令跑在 Tauri 线程池，不卡 UI 线程」与事实相反，
+    已删。async command 走 tokio 线程池；为此加 tokio(time) 直接依赖（tauri 本就
+    依赖 tokio，零树增量）。②退出拦截兜底：ExitRequested prevent 后只依赖前端
+    ExitGuard 应答 confirm_exit，React 崩溃/白屏时退出被无条件拦死→用户只能强杀
+    →恰是 RunEvent::Exit 不执行、sidecar 孤儿、agent.db 残留连接的场景。修法=
+    3 秒内第二次退出请求直接放行（macOS「再按一次强制退出」惯例；放行仍走正常
+    退出链杀 sidecar 树，只是跳过确认弹窗），判据抽 `is_repeat_exit_request` 纯函数
+    +2 单测（窗口边界含/超窗重新拦截）。③sidecar.rs 两处 `.expect`（pick_free_port
+    的 bind/local_addr、wait_healthy 的 client 构建）收敛为 Result/优雅失败——
+    panic 只杀 supervisor 线程：state 卡 Starting、last_failure 为空、splash 永不
+    收尾、诊断报告无失败原因；现在分别走 spawn_failed 与 boot_timeout 既有分类。
+    cargo test 14 绿（含新增 2 例）。

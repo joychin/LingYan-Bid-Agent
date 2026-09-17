@@ -14,8 +14,12 @@ use sidecar::{FailureInfo, SidecarInfo, SidecarManager, SidecarState};
 ///
 /// 注意：state 以 `Arc<SidecarManager>` 注册（supervisor 线程 + commands + 退出钩子共享同一实例），
 /// 命令签名必须用 `State<Arc<SidecarManager>>`，否则 Tauri 报「state not managed」。
+///
+/// **必须 async**（2026-09-17）：Tauri 2 的同步 command 跑在主线程（wry 的 IPC 回调），
+/// 本命令最长轮询等待 20s——前端每个 HTTP 请求都要先走它，崩溃重启窗口内 4s 一次的
+/// 健康轮询会把主线程反复按住（整窗卡死/转菊花）；async command 走 tokio 线程池。
 #[tauri::command]
-fn get_sidecar_info(state: State<'_, Arc<SidecarManager>>) -> Result<SidecarInfo, String> {
+async fn get_sidecar_info(state: State<'_, Arc<SidecarManager>>) -> Result<SidecarInfo, String> {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         // 失败态且无手动重启请求时立即报错：熔断后 info 为 None，不提前退出的话
@@ -31,7 +35,7 @@ fn get_sidecar_info(state: State<'_, Arc<SidecarManager>>) -> Result<SidecarInfo
         if Instant::now() >= deadline {
             return Err("sidecar 尚未就绪".into());
         }
-        std::thread::sleep(Duration::from_millis(200));
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -88,8 +92,11 @@ fn newest_log_in_dir(dir: &Path) -> Option<PathBuf> {
 
 /// 导出诊断报告（单个 txt，零新依赖）：应用/环境信息 + 最近失败原因 +
 /// Rust 壳日志尾部 + sidecar 日志尾部 + 启动 stderr 留档。返回路径供前端 reveal。
+///
+/// async（2026-09-17）：同步 command 跑主线程，这里要读 3×200KB 日志文件，
+/// 不该占住 wry 事件循环（async command 走线程池）。
 #[tauri::command]
-fn export_diagnostics(
+async fn export_diagnostics(
     app: AppHandle,
     state: State<'_, Arc<SidecarManager>>,
     timestamp: String,
@@ -186,6 +193,41 @@ fn confirm_exit(app: AppHandle, state: State<'_, Arc<SidecarManager>>) {
     app.exit(0);
 }
 
+/// 退出拦截的强制放行窗口（2026-09-17 兜底）：拦截后该窗口内的第二次退出请求
+/// 直接放行（macOS「再按一次强制退出」惯例）。防的是前端崩溃/白屏时 ExitGuard
+/// 无人应答 confirm_exit——退出被无条件拦死，用户只能强杀进程，而强杀恰好是
+/// RunEvent::Exit 不执行、sidecar 变孤儿、agent.db 被残留连接持有的场景。
+/// 强制放行仍走正常退出链（RunEvent::Exit 会杀 sidecar 进程树），只是跳过
+/// 「运行中任务？」的确认弹窗。
+const EXIT_FORCE_WINDOW: Duration = Duration::from_secs(3);
+
+/// 是否为窗口内的重复退出请求（纯函数，便于单测）。
+fn is_repeat_exit_request(last: Option<Instant>, now: Instant) -> bool {
+    last.is_some_and(|t| now.duration_since(t) <= EXIT_FORCE_WINDOW)
+}
+
+#[cfg(test)]
+mod exit_guard_tests {
+    use super::*;
+
+    #[test]
+    fn repeat_exit_within_window_forces_pass() {
+        let t0 = Instant::now();
+        assert!(!is_repeat_exit_request(None, t0)); // 首次：正常拦截转发前端
+        assert!(is_repeat_exit_request(Some(t0), t0 + Duration::from_secs(1)));
+        assert!(is_repeat_exit_request(Some(t0), t0 + EXIT_FORCE_WINDOW)); // 边界含
+    }
+
+    #[test]
+    fn exit_after_window_intercepts_again() {
+        let t0 = Instant::now();
+        assert!(!is_repeat_exit_request(
+            Some(t0),
+            t0 + EXIT_FORCE_WINDOW + Duration::from_millis(1)
+        )); // 超窗：重新拦截（弹窗可能还开着，用户再按一次才视为强制）
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 版本检查 + 更新提示（2026-09-15）：清单 = 官网 version.json（自建更新源，
 // schema 见 docs/packaging.md）。更新源三层取值：环境变量 UPDATE_MANIFEST_URL >
@@ -278,16 +320,19 @@ struct LatestReleaseInfo {
     changes: Vec<String>,
 }
 
-/// 查官网 version.json（5s 超时；sync 命令跑在 Tauri 线程池，不卡 UI 线程）。
-/// 清单是远端内容，字段全部清洗（版本/链接校验、文本截断），不合法即整次判失败，
-/// 返回人话错误——前端把它当「检查失败」展示，细节进日志。
+/// 查官网 version.json（5s 超时）。清单是远端内容，字段全部清洗（版本/链接校验、
+/// 文本截断），不合法即整次判失败，返回人话错误——前端把它当「检查失败」展示，细节进日志。
+///
+/// async + 异步 reqwest（2026-09-17）：同步 command 跑主线程，reqwest::blocking
+/// 的 5s 网络等待会把 wry 事件循环按住（旧注释「sync 命令跑在 Tauri 线程池」
+/// 与 Tauri 2 事实相反——只有 async command 才走线程池）。
 #[tauri::command]
-fn check_latest_version() -> Result<LatestReleaseInfo, String> {
+async fn check_latest_version() -> Result<LatestReleaseInfo, String> {
     let Some(manifest_url) = resolve_manifest_url() else {
         return Err("更新源尚未配置".into());
     };
     log::info!("检查更新：GET {manifest_url}");
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .user_agent("tender-agent-updater")
         .build()
@@ -295,11 +340,12 @@ fn check_latest_version() -> Result<LatestReleaseInfo, String> {
     let resp = client
         .get(&manifest_url)
         .send()
+        .await
         .map_err(|_| "检查更新失败，可能是网络原因".to_string())?;
     if !resp.status().is_success() {
         return Err(format!("更新服务器返回 {}", resp.status()));
     }
-    let manifest: UpdateManifest = resp.json().map_err(|_| "更新信息格式不正确".to_string())?;
+    let manifest: UpdateManifest = resp.json().await.map_err(|_| "更新信息格式不正确".to_string())?;
     let version = normalize_version(&manifest.version).ok_or("更新信息版本号不合法")?;
     let url = manifest.url.trim().to_string();
     if !valid_https_url(&url) {
@@ -449,16 +495,27 @@ pub fn run() {
         // 拦下也无人能应答 confirm_exit——必须在 prevent 之前查窗口，拿不到就放行，
         // 否则 app 变无窗口僵尸进程、Exit 不触发 sidecar 也不停。
         RunEvent::ExitRequested { api, .. } => {
-            let allow = app_handle
-                .try_state::<Arc<SidecarManager>>()
+            let mgr = app_handle.try_state::<Arc<SidecarManager>>();
+            let allow = mgr
+                .as_ref()
                 .map(|s| s.allow_exit.load(Ordering::SeqCst))
                 .unwrap_or(true);
             if allow {
                 return;
             }
+            let Some(s) = mgr else {
+                return;
+            };
             let Some(w) = app_handle.get_webview_window("main") else {
                 return;
             };
+            // 兜底（2026-09-17）：短窗内第二次退出请求直接放行——前端确认通道失效
+            // （React 崩溃/白屏/listener 未装上）时，无此兜底的退出只能靠强杀进程
+            if is_repeat_exit_request(*s.last_exit_request.lock().unwrap(), Instant::now()) {
+                log::warn!("3 秒内第二次退出请求，强制放行退出（前端确认通道可能已失效）");
+                return;
+            }
+            *s.last_exit_request.lock().unwrap() = Some(Instant::now());
             api.prevent_exit();
             let _ = w.emit("app:exit-requested", ());
         }

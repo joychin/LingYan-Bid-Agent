@@ -280,11 +280,17 @@ pub(crate) struct SidecarManager {
     /// 运行中任务的退出拦截（2026-09-12）——cmd+Q/应用菜单退出先拦下转发前端确认，
     /// 确认后由 confirm_exit 命令置位本标志再真正退出。
     pub allow_exit: AtomicBool,
+    /// 最近一次被拦下的退出请求时刻（2026-09-17 兜底）：3 秒内第二次退出请求直接
+    /// 放行——前端崩溃/白屏时 ExitGuard 无人应答 confirm_exit，退出会被无条件拦死
+    /// （用户只能强杀 → sidecar 孤儿 + agent.db 残留连接）。
+    pub last_exit_request: Mutex<Option<Instant>>,
 }
 
-fn pick_free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0 failed");
-    listener.local_addr().expect("local_addr").port()
+fn pick_free_port() -> std::io::Result<u16> {
+    // 失败上抛走 spawn_failed 既有分类（此前 .expect 会直接 panic 杀掉 supervisor
+    // 线程：state 卡 Starting、splash 永不收尾、无红条无诊断）
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
 }
 
 /// stderr 重定向到启动留档文件（每次 spawn 截断重写）；文件创建失败回退 null，
@@ -359,7 +365,7 @@ fn spawn_sidecar(
     mode: &LaunchMode,
     nonce: &str,
 ) -> std::io::Result<(SidecarHandle, u16, String)> {
-    let port = pick_free_port();
+    let port = pick_free_port()?;
     let token = Uuid::new_v4().to_string();
 
     let handle = match mode {
@@ -625,10 +631,15 @@ fn kill_orphan_graceful(pid: u32) {
 }
 
 fn wait_healthy(port: u16, nonce: &str, attempts: u32) -> bool {
-    let client = reqwest::blocking::Client::builder()
+    // client 构建失败（极罕见）按探活失败处理走既有 boot_timeout 分类——
+    // 此处 .expect 会 panic 杀掉 supervisor 线程（state 卡 Starting、无红条）
+    let Ok(client) = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(1))
         .build()
-        .expect("reqwest client");
+    else {
+        log::error!("healthz client 构建失败，按探活失败处理（port={port}）");
+        return false;
+    };
     for _ in 0..attempts {
         match client.get(format!("http://127.0.0.1:{port}/api/healthz")).send() {
             // 校验 nonce 与本次 spawn 一致，避免把端口被占时其他本地服务误判为 sidecar
