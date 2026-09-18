@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import re
 import threading
 import types
 
@@ -237,6 +238,11 @@ def test_subagent_specs():
     for spec in specs.values():
         assert spec["interrupt_on"] == {}
         assert spec["system_prompt"].strip()
+        # 沿革日期不得进子代理提示词（2026-09-18 清洗批防回流）：prompt 是执行
+        # 指令不是变更记录，「自 X 日起」从句把已删概念塞回模型语境还漏内部时间线
+        assert not re.search(r"20\d\d-\d\d", spec["system_prompt"]), (
+            "子代理 system_prompt 含沿革日期（变更史归 decision-log，不进 prompt）"
+        )
         # 路径罗盘 + 路径自愈必须随子代理挂载（子代理不继承主代理中间件，
         # 漏挂=子代理开局探测继续吃 path_not_found 红错，2026-09-08 修复回归线）
         mws = spec.get("middleware") or []

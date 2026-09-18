@@ -277,3 +277,31 @@ def test_tender_body_contract_names_anchored():
         assert token in combined, (
             f"tender-body 技能文档缺契约名「{token}」——body_contract 常量改名须同步教学文本"
         )
+
+
+def test_skill_files_no_changelog_dates():
+    """skill 正文禁沿革日期（2026-09-18 清洗批防回流）。
+
+    给模型的文本是执行指令、不是变更记录——「自 X 日起／此前／不再」类从句把
+    已删除的旧机制塞回模型语境，还把内部批次时间线漏给用户（问「这种语句合适吗」
+    的原案：SKILL 里「派发分组自 2026-09-15 起……程序不再给出分好波的参考」，
+    「分好波的参考」是模型从未见过的已删概念）。白名单只留两类：**证据型**
+    （日期挂一次实测后果，硬规则挂具体后果模型执行更准）与**事实型**（世界里
+    的时间点，内容非元信息）。新日期出现=沿革从句回流：删日期从句、留规则本身，
+    不要加白名单；沿革的合法居所是 decision-log 与测试 docstring。
+    """
+    allowed = (
+        ("tender-body/SKILL.md", "2026-09-08 实测：整本自写=0 图"),
+        ("tender-body/references/section-writing.md", "（2026-09-08 实测："),
+        ("tender-body/references/section-writing.md", "教训（2026-09-06 实测）"),
+        ("tender-body/references/guide-format.md", "有效期至 2027-11-08"),
+        ("tender-analysis/references/requirements-submission.md", "递交截止：2026-09-10"),
+    )
+    for md in sorted(skills_source_dir().rglob("*.md")):
+        rel = md.relative_to(skills_source_dir()).as_posix()
+        for i, line in enumerate(md.read_text(encoding="utf-8").splitlines(), 1):
+            if not re.search(r"20\d\d-\d\d-\d\d", line):
+                continue
+            assert any(rel == a_rel and a_kw in line for a_rel, a_kw in allowed), (
+                f"{rel}:{i} 出现白名单外的日期（沿革从句回流）：{line.strip()[:80]}"
+            )

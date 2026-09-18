@@ -2136,7 +2136,7 @@ def _sanitize_html(html: str) -> str:
 @tool
 @_tool_guard("原型")
 def docx_html_figure(dest: str, html: str, after: str = "", caption: str = "") -> str:
-    """把界面原型渲染成图片插入正文节 docx（webview 光栅化，2026-09-14 批二）。
+    """把界面原型渲染成图片插入正文节 docx（webview 光栅化）。
 
     用途：系统界面/功能页的原型图——模型只写 HTML，渲染由应用自带的前端 webview
     完成（隐藏 iframe + html2canvas，本机离线、零外部依赖）。适用于「方案节要展示
@@ -2564,7 +2564,7 @@ def _flow_to_mermaid(parsed: dict) -> str:
 @tool
 @_tool_guard("图示")
 def docx_diagram_insert(dest: str, kind: str, spec: str, after: str = "", caption: str = "") -> str:
-    """在正文节插入程序生成的图示（表格拼装 + webview 渲染，2026-09-14 表格通道批）
+    """在正文节插入程序生成的图示（表格拼装 + webview 渲染）
     ——评委按图找要点比按段落找快，方案节的详实度工具。
 
     适用：实施进度（kind=gantt）、项目组织/团队层级/系统与数据分层架构
@@ -2577,7 +2577,7 @@ def docx_diagram_insert(dest: str, kind: str, spec: str, after: str = "", captio
     Args:
         dest: 目标节文件（相对任务 work/，须已用 docx_section_create 创建）
         kind: layered（分层/组织架构）| gantt（甘特）| radial（中心辐射）|
-              flow（分支回环流程图，2026-09-14 批三）
+              flow（分支回环流程图）
         spec: 各 kind 的 JSON 拓扑——
               layered: {"layers":[{"title":"主数据域","items":["公司","组织","职位","人员"]}, …]}
                        （组织架构=逐层 1..n 项的 layered）
