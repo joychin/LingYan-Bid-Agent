@@ -36,6 +36,14 @@ htmlcov/
 
 # ─── 本地运行时数据（SQLite / workspace / 产物目录，绝不入库）─
 sidecar/data/
+# 演示录制换出的真实数据备份（demo/record_env.sh，绝不入库）
+sidecar/data.real/
+
+# ─── 演示录制数据包（demo/）──────────────────────────────
+# 灌好的演示数据目录与脚本运行时状态文件（生成脚本/虚构文档 assets/ 保留入库可复用）
+demo/demo-data/
+demo/.real-data.manifest
+demo/.tauri.conf.json.orig
 
 # ─── src-tauri/：Tauri 2 / Rust（Cargo.lock 保留入库）─────
 src-tauri/target/
