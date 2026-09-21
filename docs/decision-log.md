@@ -105,6 +105,10 @@
 - L2138-2147 前端内存修复批（2026-09-13，行业实践对齐，零契约改动）：3GB 级内存占用的六处收口。
 - L2148-2177 产物查看/编辑重做（2026-09-04，方案真值 `docs/artifact-view-edit-redesign.md`）：
 - L2224-2236 提问卡原位替换输入框（2026-09-09，用户拍板方向 A，文生图 mockup 定稿）：
+- L2979-3006 *挑章节改右侧抽屉（2026-09-21，用户拍板；覆盖层→抽屉同日二改）：动因=「新建素材
+  后右侧两栏被挤压」（三层布局逐层吃宽）+ mac 红绿灯与居中卡片相撞（灯簇系统层绘制无解，
+  抽屉左缝 96px 让位）；mode 拆 pickerOpen + DrawerShell + ESC 双层守卫 + 草稿保留 +
+  fileQ/treeQ 拆分；连带修创建后详情落旧块竞态与 Origin 白名单缺 [::1] 两既有 bug。
 
 ### 六、打包、平台与依赖
 
@@ -2971,3 +2975,32 @@
     ——顺带实证现用 Key 已有 CDN 刷新权限）；探针对象 10/10 删除复核 404。
     分工边界不动：version.json 与 download/index.html 仍手工维护（要人写用户
     语言的更新说明），sync-release.js 全量同步降级为补漏/回溯备用工具。
+
+  - **挑章节改右侧抽屉（2026-09-21，用户拍板；覆盖层→抽屉同日二改）：动因=用户实测「新建素材
+    后右侧两栏被挤压」。根因=三层布局逐层吃宽：应用侧栏 264 + 文件栏 264 + 块栏 324 固定，
+    详情区才 flex:1；详情区内部树 46%/预览 54% 二次切分——挑章节态中栏只剩空态提示白占
+    324px，小窗口下树标题截成「第…」。被否方案：①挑章节态自动收起中栏（+324px 改动最小
+    但治标）②树/预览拖拽分隔条（总宽不足时拖了也无效）。第一版按用户拍板做近全屏覆盖层
+    （ModalShell `calc(100vh-48px)` 居中卡），实机即撞 **mac 红绿灯**：Overlay 标题栏灯簇
+    （trafficLightPosition x13,y27，实测占 x 13-73 / y 18-32）系统层绘制、永远浮在 webview
+    内容之上，居中卡片盖到左上角即视觉重叠、无解——用户遂拍板改**右侧抽屉**。实施：
+    `mode: 'block'|'picker'` 拆出 `pickerOpen`（面板开关与详情内容解耦，详情区恒渲染块详情，
+    DetailMode 类型删除）；新建 `ui/DrawerShell`（与 ModalShell 对称：遮罩+ESC+全高面板，
+    右滑 `drawer-slide-in` 0.22s 动画；**左缝 96px**——灯簇右缘 73px 完全露出，先例=产物
+    面板全屏态让位 78px；遮罩保留挡底层交互但**不点关**——误点即关会丢勾选）；**ESC 双层
+    兜底**=抽屉 onClose 守卫 `creating`（确认弹窗与抽屉都在 window 上听 Escape，一次按键
+    两边都触发，守卫保证先关确认弹窗）；**草稿保留**=enterPicker 仅换文件时重置勾选/展开/
+    标题/备注（误关可无损重开，submitBlock 成功后照旧清空）；**fileQ 双职责拆分**（此前文件
+    列表搜索与章节树过滤共用一个 fileQ——抽屉盖住文件列表后树过滤就没入口了）：独立
+    `treeQ` + 抽屉树列顶部搜索框；树宽 46%→`clamp(340px,38%,620px)`（抽屉基数变大后 46%
+    会让树过宽挤占正文预览）。Windows 无 overlay 标题栏本无灯簇冲突，左缝统一不做平台
+    分支（缝隙露底层内容本就是抽屉「叠在页面上」的设计语言）。
+    **连带修两个既有 bug（验证时撞见，新旧实现行为一致非本次引入）**：①创建后详情落旧块——
+    submitBlock 的 `setBlockId(新id)` 时 React Query invalidate 尚未回流，「选中块失效」
+    effect 在旧 visibleBlocks 上找不到新块、误判失效拉回首块；修=先 `await invalidate`
+    再 setBlockId。②sidecar Origin 守卫白名单缺 `[::1]`：Vite 固定绑 IPv6（strictPort），
+    以 `http://[::1]:5173` 打开页面时 Origin 不在 `localhost|127.0.0.1|tauri.localhost`
+    正则内 → POST 全被 403（同源 GET 无 Origin 头所以只有状态变更请求撞）；修=
+    `CORS_ORIGIN_REGEX`/`_ALLOWED_ORIGIN_RE` 补 `\[::1\]` + test_main_hardening 加用例。
+    验证=check.sh frontend 全绿 + Playwright 实测（抽屉几何 x=96 避灯簇/勾选级联/ESC 分层
+    关闭/草稿保留/创建后详情落新块/删除回退）。

@@ -1,7 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowLeft,
   ChevronDown,
   Copy,
   FileText,
@@ -13,11 +12,13 @@ import {
   Search,
   Trash2,
   Upload,
+  X,
 } from 'lucide-react'
 import type { MtBlock, MtFile, MtOutlineNode } from '@/api/client'
 import { fetchMtFileBlob, reparseMtFile, uploadMtFile } from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { ModalShell } from '@/components/ui/ModalShell'
+import { DrawerShell } from '@/components/ui/DrawerShell'
 import { useDebounced } from '@/hooks/useDebounced'
 import { ErrorCard } from '@/components/ErrorCard'
 import { Loader } from '@/components/ai/Loader'
@@ -274,15 +275,15 @@ function extOf(name: string): string {
 
 // ===== 主视图 =====
 
-type DetailMode = 'block' | 'picker'
 type SortKey = 'range' | 'chars' | 'used'
 
 export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => void }) {
   const [scope, setScope] = useState<'all' | string>('all')
   const [blockId, setBlockId] = useState<string | null>(null)
-  const [mode, setMode] = useState<DetailMode>('block')
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerFileId, setPickerFileId] = useState<string | null>(null)
   const [fileQ, setFileQ] = useState('')
+  const [treeQ, setTreeQ] = useState('')
   const [blockQ, setBlockQ] = useState('')
   const [sort, setSort] = useState<SortKey>('range')
   const [checked, setChecked] = useState<Set<string>>(new Set())
@@ -314,10 +315,10 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
   } = useMtFiles()
   const { data: allBlocksData } = useMtBlocks()
   const { data: searchBlocksData, isFetching: searching } = useMtBlocks(debouncedQ || undefined)
-  const { data: outlineData } = useMtOutline(mode === 'picker' ? pickerFileId : null)
+  const { data: outlineData } = useMtOutline(pickerOpen ? pickerFileId : null)
   const { data: blockContent, isPending: contentLoading, isError: contentError } = useMtBlockContent(
-    mode === 'block' ? blockId : null,
-    mode === 'block' && Boolean(blockId),
+    blockId,
+    Boolean(blockId),
   )
 
   const files = filesData?.files ?? []
@@ -345,16 +346,15 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
 
   // 选中块失效（删除/换范围）→ 落到首个可见块
   useEffect(() => {
-    if (mode !== 'block') return
     if (blockId && visibleBlocks.some((b) => b.id === blockId)) return
     setBlockId(visibleBlocks[0]?.id ?? null)
-  }, [mode, blockId, visibleBlocks])
+  }, [blockId, visibleBlocks])
 
-  const block = mode === 'block' ? allBlocks.find((b) => b.id === blockId) ?? null : null
-  // 「原件」预览源：块详情=块所属文件 / 挑章节=当前文件——都是整份文件的版式（非仅区间）
+  const block = allBlocks.find((b) => b.id === blockId) ?? null
+  // 「原件」预览源：挑章节=当前文件 / 块详情=块所属文件——都是整份文件的版式（非仅区间）
   const originalSource = useMemo<OriginalSource | null>(() => {
-    const fid = mode === 'picker' ? pickerFileId : block?.file_id
-    const fname = mode === 'picker' ? pickerFile?.file_name : fileId2Name.get(block?.file_id ?? '')
+    const fid = pickerOpen ? pickerFileId : block?.file_id
+    const fname = pickerOpen ? pickerFile?.file_name : fileId2Name.get(block?.file_id ?? '')
     if (!fid || !fname) return null
     const ext = extOf(fname)
     if (!originalPreviewable(ext)) return null
@@ -365,10 +365,10 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
       queryKey: ['mt', 'raw', fid],
       failHint: '版式渲染失败——完整原件请在数据目录的 materials/files/ 下打开',
     }
-  }, [mode, pickerFileId, pickerFile, block, fileId2Name])
-  // 中栏「新建素材」可用性：选定文件且解析完成（挑章节模式中置灰防误重置勾选）
+  }, [pickerOpen, pickerFileId, pickerFile, block, fileId2Name])
+  // 中栏「新建素材」可用性：选定文件且解析完成（挑章节覆盖层开着时置灰防误重置勾选）
   const canNewBlock =
-    scope !== 'all' && mode !== 'picker' && activeFile?.parse_status === 'ready'
+    scope !== 'all' && !pickerOpen && activeFile?.parse_status === 'ready'
 
   // ===== 挑章节 =====
   const outline = useMemo(() => outlineData?.outline ?? [], [outlineData])
@@ -376,21 +376,21 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
     () => allBlocks.filter((b) => b.file_id === pickerFileId),
     [allBlocks, pickerFileId],
   )
-  // 树过滤（保祖先链；过滤态强制全展开）
+  // 树过滤（保祖先链；过滤态强制全展开）——独立于文件列表搜索（fileQ）
   const filtered = useMemo(
-    () => (fileQ.trim() ? filterOutline(outline, fileQ) : { nodes: outline, hits: 0 }),
-    [outline, fileQ],
+    () => (treeQ.trim() ? filterOutline(outline, treeQ) : { nodes: outline, hits: 0 }),
+    [outline, treeQ],
   )
 
   // outline 到达后初始化折叠态与预览节点（每个文件只做一次，后续归用户）
   useEffect(() => {
-    if (mode !== 'picker' || !pickerFileId || outline.length === 0) return
+    if (!pickerOpen || !pickerFileId || outline.length === 0) return
     if (expandedInit.current === pickerFileId) return
     expandedInit.current = pickerFileId
     setExpanded(topKeys(outline))
     const first = outline[0]
     if (first.start_line != null && first.end_line != null) setPreviewKey(nodeKey(first, 0, 0))
-  }, [mode, pickerFileId, outline])
+  }, [pickerOpen, pickerFileId, outline])
 
   const toggleNode = (n: MtOutlineNode) => {
     // 级联勾选：勾父级=子树全部加入；取消=子树全部移除（子级可单独再摘出）
@@ -444,7 +444,7 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
     data: pvContent,
     isPending: pvLoading,
     isError: pvError,
-  } = useMtFileContent(mode === 'picker' ? pickerFileId : null, pvStart, pvEnd)
+  } = useMtFileContent(pickerOpen ? pickerFileId : null, pvStart, pvEnd)
 
   // 建块前的重复探测（提示不阻断——裁决归用户）
   const dup = useMemo(() => overlappingBlocks(checkedRanges, pickerBlocks), [checkedRanges, pickerBlocks])
@@ -479,7 +479,7 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
       onSuccess: () => {
         if (scope === f.id) setScope('all')
         if (pickerFileId === f.id) {
-          setMode('block')
+          setPickerOpen(false)
           setPickerFileId(null)
         }
       },
@@ -502,15 +502,20 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
   }
 
   const enterPicker = (f: MtFile) => {
+    // 换文件才重置勾选/草稿；误关覆盖层后重开同文件保留现场
+    const switching = pickerFileId !== f.id
     setScope(f.id)
     setPickerFileId(f.id)
-    setChecked(new Set())
-    setExpanded(new Set())
-    setPreviewKey(null)
-    expandedInit.current = null
-    setTitle('')
-    setNote('')
-    setMode('picker')
+    if (switching) {
+      setChecked(new Set())
+      setExpanded(new Set())
+      setPreviewKey(null)
+      expandedInit.current = null
+      setTitle('')
+      setNote('')
+      setTreeQ('')
+    }
+    setPickerOpen(true)
   }
 
   const submitBlock = async () => {
@@ -522,14 +527,18 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
         fileId: pickerFileId,
         body: { title: title.trim() || fallbackTitle, note: note.trim(), ranges: checkedRanges },
       })
+      // 等列表回流再选中新块——若先 setBlockId，「选中块失效」effect 会在旧列表上
+      // 找不到新块，误判失效拉回首块（既有竞态，创建后详情显示旧块）
+      await qc.invalidateQueries({ queryKey: ['mt'] })
       toast('素材块已创建', 'success')
       setCreating(false)
       setChecked(new Set())
       setTitle('')
       setNote('')
+      setTreeQ('')
       setScope(pickerFileId)
       setBlockId(created.id)
-      setMode('block')
+      setPickerOpen(false)
       setPickerFileId(null)
     } catch (e) {
       toast(e instanceof Error ? e.message : '创建失败', 'error')
@@ -596,11 +605,8 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
       {!fileQ.trim() && (
         <button
           type="button"
-          className={cn('mtw-file-item', 'mtw-file-item--all', scope === 'all' && mode === 'block' && 'mtw-file-item--active')}
-          onClick={() => {
-            setScope('all')
-            setMode('block')
-          }}
+          className={cn('mtw-file-item', 'mtw-file-item--all', scope === 'all' && 'mtw-file-item--active')}
+          onClick={() => setScope('all')}
         >
           <Layers className="mtw-file-ico" />
           <span className="mtw-file-body">
@@ -628,10 +634,7 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
           <div
             key={f.id}
             className={cn('mtw-file-item', scope === f.id && 'mtw-file-item--active')}
-            onClick={() => {
-              setScope(f.id)
-              setMode('block')
-            }}
+            onClick={() => setScope(f.id)}
             role="button"
           >
             <FileText className="mtw-file-ico" />
@@ -761,11 +764,8 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
           <button
             key={b.id}
             type="button"
-            className={cn('mtw-block-item', mode === 'block' && blockId === b.id && 'mtw-block-item--active')}
-            onClick={() => {
-              setBlockId(b.id)
-              setMode('block')
-            }}
+            className={cn('mtw-block-item', blockId === b.id && 'mtw-block-item--active')}
+            onClick={() => setBlockId(b.id)}
           >
             <span className="mtw-b-title" title={b.title}>{b.title}</span>
             <span className="mtw-b-meta">
@@ -920,14 +920,14 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
     return (
       <div className="mtw-picker">
         <div className="mtw-picker-head">
-          <button type="button" className="mtw-icon-btn" title="返回素材块" onClick={() => setMode('block')}>
-            <ArrowLeft />
+          <button type="button" className="mtw-icon-btn" aria-label="关闭挑章节" title="关闭" onClick={() => setPickerOpen(false)}>
+            <X />
           </button>
           <span className="mtw-picker-name" title={pickerFile?.file_name ?? ''}>
             挑章节 · {pickerFile?.file_name ?? ''}
           </span>
           <span className="mtw-picker-meta">{pickerFile?.block_count ?? 0} 个已有素材块</span>
-          {!fileQ.trim() && outline.length > 0 && (
+          {!treeQ.trim() && outline.length > 0 && (
             <span className="mtw-treeops">
               <button type="button" className="mtw-text-btn" onClick={() => setExpanded(collectParentKeys(outline))}>
                 全部展开
@@ -945,7 +945,7 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
               <>
                 <Loader variant="classic" size="sm" tone="muted" /> 正在解析目录…
               </>
-            ) : fileQ.trim() ? (
+            ) : treeQ.trim() ? (
               '没有匹配的章节标题——换个关键词'
             ) : (
               (outlineData?.error ?? '该文件没有识别到目录结构，无法挑章节')
@@ -955,7 +955,16 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
           <>
             <div className="mtw-picker-main">
               <div className="mtw-picker-tree">
-                {fileQ.trim() && (
+                <div className="mtw-search mtw-tree-search">
+                  <Search className="h-3.5 w-3.5" />
+                  <input
+                    value={treeQ}
+                    onChange={(e) => setTreeQ(e.target.value)}
+                    placeholder="搜索章节标题"
+                    aria-label="搜索章节标题"
+                  />
+                </div>
+                {treeQ.trim() && (
                   <p className="mtw-filterinfo">匹配 {filtered.hits} 个章节（已全展开）</p>
                 )}
                 <OutlineTree
@@ -1118,10 +1127,22 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
         <div className="mtw-scroll">{renderBlockList}</div>
       </section>
 
-      {/* 右栏：详情 / 挑章节 */}
+      {/* 右栏：素材块详情（挑章节是覆盖层，不再占详情区） */}
       <section className="mtw-detail">
-        {mode === 'picker' ? renderPicker() : renderDetailBlock()}
+        {renderDetailBlock()}
       </section>
+
+      {pickerOpen && pickerFile && (
+        <DrawerShell
+          /* ESC 双层兜底：确认弹窗与抽屉都在 window 上听 Escape，一次按键两边都触发
+             ——抽屉让位，先关确认弹窗，第二次 ESC 才关抽屉 */
+          onClose={() => {
+            if (!creating) setPickerOpen(false)
+          }}
+        >
+          {renderPicker()}
+        </DrawerShell>
+      )}
 
       {creating && pickerFile && (
         <ModalShell onClose={() => setCreating(false)} cardClassName="w-[min(92vw,560px)]">

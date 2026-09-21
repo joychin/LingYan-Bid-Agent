@@ -4276,12 +4276,26 @@
   display: flex;
 }
 .mtw-picker-tree {
-  width: 46%;
+  /* 覆盖层基数大：46% 比例会让树过宽挤占正文预览，改为带下限/上限的弹性宽 */
+  width: clamp(340px, 38%, 620px);
   flex: none;
   min-height: 0;
   overflow-y: auto;
   padding: 8px 8px 16px;
   border-right: 1px solid var(--Color-border-default);
+}
+/* 树列顶部的章节标题过滤框（覆盖 .mtw-search 的栏间 margin，全宽贴树列内边距） */
+.mtw-tree-search {
+  margin: 2px 0 8px;
+}
+/* 右侧抽屉滑入（DrawerShell，挑章节等模态工作面）：打开一次性动画，关闭随卸载不另做 */
+@keyframes drawer-slide-in {
+  from {
+    transform: translateX(100%);
+  }
+}
+.drawer-slide-in {
+  animation: drawer-slide-in 0.22s cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 .mtw-filterinfo {
   margin: 0 0 6px;

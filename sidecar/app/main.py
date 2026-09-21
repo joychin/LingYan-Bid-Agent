@@ -72,15 +72,16 @@ CORS_ORIGINS = [
     "http://tauri.localhost",
     "tauri://localhost",
 ]
-# 本地开发兜底：放行任意 localhost/127.0.0.1 端口（Vite 直连、端口回退等），
+# 本地开发兜底：放行任意 localhost/127.0.0.1/[::1] 端口（Vite 直连、端口回退等），
 # 避免浏览器模式因为 origin 不在白名单而整段拦截 /api 与 SSE。
-CORS_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+# [::1] 必须带上：Vite 固定 host [::1]（strictPort），以 IPv6 地址打开页面时 Origin 即 http://[::1]:5173。
+CORS_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
 
 # Origin 守卫（浏览器模式 CSRF 面）：跨站页面对 127.0.0.1 的「简单请求」POST
 # （text/plain 免预检）可盲打 /api 状态变更端点。规则：带 Origin 且不在本机
 # 白名单 → 403；无 Origin（TestClient/curl/Tauri webview 非浏览器 fetch）放行。
 # 生产 Tauri 模式本就有 Bearer token，这里是浏览器开发模式的兜底闸。
-_ALLOWED_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?$")
+_ALLOWED_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\]|tauri\.localhost)(:\d+)?$")
 _ALLOWED_ORIGIN_EXACT = frozenset(CORS_ORIGINS)
 
 

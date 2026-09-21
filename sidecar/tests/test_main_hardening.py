@@ -25,10 +25,12 @@ def test_origin_guard_blocks_foreign_origin(client):
 def test_origin_guard_allows_local_and_absent(client):
     # 无 Origin（TestClient/curl）放行
     assert client.get("/api/healthz").status_code == 200
-    # 本机白名单：Vite 端口 / 127.0.0.1 任意端口 / Tauri webview 两种 origin 形态
+    # 本机白名单：Vite 端口 / 127.0.0.1 任意端口 / Vite IPv6（host 固定 [::1] 时
+    # 页面 Origin 即 http://[::1]:5173）/ Tauri webview 两种 origin 形态
     for origin in (
         "http://localhost:5173",
         "http://127.0.0.1:8765",
+        "http://[::1]:5173",
         "http://tauri.localhost",
         "tauri://localhost",
     ):
