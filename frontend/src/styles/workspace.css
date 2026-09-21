@@ -2638,9 +2638,10 @@
 .kb-file-name {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 100%;
+  line-height: 1.4;
+  /* 列向 flex + flex-start 下省略号失效（子项按内容撑宽），长文件名换行不横向溢出 */
+  overflow-wrap: anywhere;
 }
 .kb-empty {
   padding: 24px 16px;
