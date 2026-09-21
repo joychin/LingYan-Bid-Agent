@@ -345,20 +345,26 @@ async function main() {
     return;
   }
 
-  /* ---------- 上传：版本化归档 + 稳定别名 + latest.json ---------- */
-
+  /* ---------- 上传：版本化归档 + 稳定别名 + latest.json ----------
+   * 并发上传（v0.2.3 首跑教训：GitHub runner→北京 OSS 单流实测 <100KB/s，串行 246MB
+   * 要 40+ 分钟，把 release job 的 timeout 掐死在半路）。同一文件的两个 key 串行
+   * （复用同一份 body 缓冲），不同安装包之间并行；PUT 包 withRetry（5xx/429 退避），
+   * 单 key 重试失败抛错整个脚本红——覆盖写幂等，重跑即续。 */
   const base = publicBase(cfg);
-  const verified = [];
-  for (const p of plan) {
+  const verified = await Promise.all(plan.map(async (p) => {
     const body = fs.readFileSync(p.file.abs);
-    await putObject(cfg, p.versionedKey, body, contentTypeOf(p.file.name), VERSIONED_CACHE);
-    await putObject(cfg, p.aliasKey, body, contentTypeOf(p.file.name), VOLATILE_CACHE);
-    verified.push({
+    const t0 = Date.now();
+    await withRetry(() => putObject(cfg, p.versionedKey, body, contentTypeOf(p.file.name), VERSIONED_CACHE),
+      `上传 ${p.versionedKey}`);
+    await withRetry(() => putObject(cfg, p.aliasKey, body, contentTypeOf(p.file.name), VOLATILE_CACHE),
+      `上传 ${p.aliasKey}`);
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+    console.log(`  ✓ ${p.file.name}  ${fmtSize(p.file.size)}（版本化 + 别名，${secs}s）`);
+    return {
       ...p,
       sha256: await sha256File(p.file.abs),
-    });
-    console.log(`  ✓ ${p.file.name}  ${fmtSize(p.file.size)}（版本化 + 别名）`);
-  }
+    };
+  }));
   if (sums) {
     await putObject(cfg, `${tagDir}/SHA256SUMS`, fs.readFileSync(sums.abs),
       contentTypeOf('SHA256SUMS'), VERSIONED_CACHE);

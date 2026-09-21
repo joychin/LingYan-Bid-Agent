@@ -206,7 +206,10 @@ jobs:
     name: 挂 Release（两平台产物 + changelog）
     needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # timeout 放宽到 45min：v0.2.3 首跑实证 OSS 直传是大头——runner→北京 OSS 跨洋
+    # 单流实测 <100KB/s，246MB 并发上传也要 10min+，15min 上限把上传掐死在半路
+    # （首跑 job 结论 cancelled，GitHub Release 已建成、只挂了 OSS 镜像步）。
+    timeout-minutes: 45
     permissions:
       contents: write # softprops/action-gh-release 需向 Release 附加文件
 
