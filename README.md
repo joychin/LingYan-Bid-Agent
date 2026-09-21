@@ -14,8 +14,7 @@ Files stay on your machine, and you choose and configure the model service it ca
 
 官网：<https://ddmdj.com>
 
-<!-- TODO: 发布前补一张 Banner（1200×630，官网 assets/og-image.png 可直接复用），
-     以及 4 张真实客户端截图到 docs/screenshots/，插到「界面速览」表格下方。 -->
+![灵燕智能：从招标文件到整本响应文件](docs/screenshots/highlight.gif)
 
 ## 这是什么
 
@@ -62,14 +61,43 @@ Files stay on your machine, and you choose and configure the model service it ca
 - **知识库**：管理营业执照、资质证书、业绩案例、人员材料等证明文件，随时定位到手；
 - **版式库**：沉淀单位常用的 Word 版式和标书格式，交付时直接套用。
 
+素材不是整份文件丢进去——在历史标书的目录树上勾选章节区间，连同备注一起沉淀成素材块，写作时按章节直接调用：
+
+![写作素材库：目录树勾选章节区间，沉淀成可复用素材块](docs/screenshots/10-materials-picker.png)
+
 ## 界面速览
 
-| 界面 | 说明 |
-|------|------|
-| 原文出处 | 关键要求高亮标注，点击可跳回招标原文位置 |
-| 评分目录 | 按评分办法组织响应目录，自动走查遗漏（如「应急预案」尚未响应） |
-| 关键节点确认 | 补遗改期、承诺条款等大事暂停等你决定，确认前不改正文 |
-| 待补材料 | 资料不足时列清单提示待补，不编造成既成事实 |
+以下截图来自一次完整运行（演示项目与数据均为虚构）。一个任务就是一个投标项目——会话、解析稿、目录、成稿和原始招标文件都收在同一个任务里。
+
+![首页：任务即房间，会话从任务中诞生](docs/screenshots/01-home.png)
+
+**读原文** —— 多份来源文件（主文件、补遗、答疑）一起解析，提取资质要求、评分办法、废标项与时间节点；「无效 / 否决 / 作废」这类废标风险词会自动反查原文，命中位置逐条可见：
+
+![读原文：分析运行中，任务清单与废标词反查](docs/screenshots/02-analysis-running.png)
+
+**搭结构** —— 投标目录编辑器：每一节都挂着写作依据（必答 / 要求 / 评分 / 格式件），待澄清事项显式标出，不静默带过：
+
+![搭结构：投标目录编辑器，逐节标注依据](docs/screenshots/03-outline-editor.png)
+
+**写正文** —— 多节并发起草：写作子代理并行推进，每个节写到哪一步、用了哪些资料，过程全程可见：
+
+![写正文：子代理并发写作](docs/screenshots/04-dispatch.png)
+
+**成稿** —— 整本合册发布前先过机器校验：下例中 33 个节全部通过校验、39 项承诺全部落进正文、节间无内容重叠：
+
+![成稿完成：校验汇总](docs/screenshots/05-delivery-done.png)
+
+**整本预览** —— 封面、报价表、流程图都是正式 Word 排版，全部在本地浏览器内渲染，文件不出本机：
+
+<p align="center">
+  <img src="docs/screenshots/06-volume-cover.png" width="32%" alt="整本预览：封面">
+  <img src="docs/screenshots/07-volume-table.png" width="32%" alt="整本预览：报价表">
+  <img src="docs/screenshots/08-volume-flowchart.png" width="32%" alt="整本预览：流程图">
+</p>
+
+**收尾** —— 缺料、待澄清的事项以 Word 批注落在正文对应位置，收尾时按批注逐条点名补料，交付前逐条解决：
+
+![收尾：按批注逐条点名补料](docs/screenshots/09-wrapup.png)
 
 ## 快速开始
 

@@ -81,7 +81,6 @@ Thumbs.db
 *.swo
 *~
 gui-test-screenshots/
-docs/screenshots/
 docs/prototypes/
 kb-test/
 kb_test_material/
