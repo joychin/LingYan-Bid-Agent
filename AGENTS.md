@@ -480,7 +480,11 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
     **客户端版本检查+更新提示一期**（2026-09-15，Rust 两命令 `check_latest_version`/
     `open_download_page` + 前端 `lib/updateCheck.ts`，详情与更新源三层取值见
     docs/packaging.md §9）：应用内自动更新是二期、与签名公证绑定。**发版除推 tag 外
-    必做一步=更新官网 `version.json`**（漏更=客户端不提示新版）。
+    必做一步=更新官网 `version.json`**（漏更=客户端不提示新版）。**安装包 CI 直传
+    OSS**（2026-09-20 起）：release job 尾步把安装包写进阿里云 OSS `dl/`（版本化归档
+    +稳定别名+latest.json+刷 CDN，官网下载直链；Secrets `OSS_ACCESS_KEY_ID`/
+    `OSS_ACCESS_KEY_SECRET`，实现在 `scripts/upload_release_oss.cjs`；官网仓
+    sync-release.js 全量同步降级为备用）。
   - 已装插件仅三枚官方 plumbing：`tauri-plugin-single-instance`（须第一个注册——GUI 双开会撞
     agent.db 单库 checkpoint，二次启动聚焦已有窗口，不做互斥协调）+ `tauri-plugin-window-state`
     （记住窗口大小/位置）+ `tauri-plugin-shell`（2026-09-07 打包分发：bundled 模式经

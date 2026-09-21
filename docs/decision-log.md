@@ -112,6 +112,7 @@
 - L2547-2592 打包分发（2026-09-07 已实施，取代原「生产分发限制」备注）：PyInstaller one-file 冻结
 - L2593-2594 ~~钥匙串用 macOS `security` CLI 子进程~~（2026-08-29 已移除：Key 改存 app.db，见铁则 2；
 - L2595-2623 客户端版本检查+更新提示一期（2026-09-15，Rust 壳+前端，零新依赖；含版本号同源修复）：
+- L2953-2972 安装包 CI 直传阿里云 OSS（2026-09-20，官网下载直链自动化；release job 尾步，取代手工 sync-release）：
 
 ---
 
@@ -2949,3 +2950,24 @@
     oxlint/tsc/vitest 318/build/cargo check+test+clippy 全过，契约步之后已无
     任何未验证环节（tauri build 有 v0.2.0 先例）。pytest 905 绿（+1）。tag
     v0.2.1 第五次重指。
+
+  - **安装包 CI 直传阿里云 OSS（2026-09-20，官网下载直链自动化）**：此前安装包
+    到官网靠手工链路——出包后在本机跑官网仓 `tools/sync-release.js`（GitHub
+    Release 下载→SHA256 校验→传 OSS `dl/`→刷 CDN），漏跑则官网下载按钮拿不到
+    新版。改为 release.yml 的 release job 尾步直传：新脚本
+    `scripts/upload_release_oss.cjs`（零依赖 Node；OSS V1 签名与 CDN POP 刷新
+    逐字拷自官网仓 deploy-oss.js，对象布局与 sync-release.js 逐项一致：
+    `dl/<tag>/` 版本化归档+SHA256SUMS、`dl/<去版本号名>` 稳定别名〔官网按钮
+    直链，覆盖写+no-cache〕、`dl/latest.json` 清单）。被否方案=CI 里 checkout
+    官网仓跑 sync-release.js（要先把 ~190MB 安装包从 GitHub 回下载一遍再上传，
+    纯浪费）与 ossutil 二进制（alicdn 下载 URL 随版本漂移、arm64 形态存疑）。
+    凭据=仓库 Secrets `OSS_ACCESS_KEY_ID`/`OSS_ACCESS_KEY_SECRET`（建议 RAM
+    子账号只授该 bucket 读写+CDN 刷新；桶/地域/CDN 域名官网下载页本就公开，
+    明文写在 workflow env）。失败语义显式化：上传或刷 CDN 失败=job 红（Release
+    已建成，覆盖写幂等、重跑即愈；刷 CDN 报错内置三条出路），凭据缺失=红并指路
+    Settings→Secrets。本地实测三层：dry-run HEAD 验签名（当场抓出移植 bug——
+    虚拟主机式请求 hostname 漏拼 bucket 前缀，OSS 回 400）；一次性前缀
+    `_ci_probe_*` 全流程探针（PUT×9、latest.json 回读、CDN 刷 18 地址全过
+    ——顺带实证现用 Key 已有 CDN 刷新权限）；探针对象 10/10 删除复核 404。
+    分工边界不动：version.json 与 download/index.html 仍手工维护（要人写用户
+    语言的更新说明），sync-release.js 全量同步降级为补漏/回溯备用工具。

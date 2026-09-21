@@ -235,6 +235,29 @@ Word 修订与批注作者）与 `identifier` 全部去掉了旧名。
   这是详细内容第二层）；`highlights` / `publishedAt` 仅展示。
 - 字段可加不可删：客户端忽略未知字段，旧客户端向前兼容。
 
+### 安装包分发：CI 自动同步 OSS（2026-09-20 起）
+
+release.yml 的 release job 在 GitHub Release 发布后，尾步把**同一批产物**直传
+阿里云 OSS（`scripts/upload_release_oss.cjs`；签名/CDN 刷新实现与官网仓
+`tools/deploy-oss.js` 同源，对象布局与 `tools/sync-release.js` 逐项一致，
+官网按钮直链不需要动）：
+
+- `dl/<tag>/<文件名>`：版本化归档（内容不可变、长缓存）+ `dl/<tag>/SHA256SUMS`；
+- `dl/<去版本号名>`：稳定别名（`LingYan_0.2.2_x64-setup.exe` →
+  `LingYan_x64-setup.exe`），官网下载按钮指向这里，每次发版覆盖（no-cache）；
+- `dl/latest.json`：元数据清单（版本、大小、SHA256、别名/版本化两种地址）；
+- 写完按 CDN 域名刷新缓存——本站 CDN 对可缓存对象强制 30 天 TTL 且忽略
+  Cache-Control，别名覆盖后不刷 = 用户最长一个月拿到旧安装包。
+
+仓库 Secrets 需配 `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET`（建议 RAM
+子账号、只授该 bucket 读写与 CDN 刷新；未配则该步红并指路设置位置，Release
+本身不受影响）。失败修好凭据后整 job 重跑即可——上传是覆盖写，重跑幂等。
+
+官网侧的手工步骤随之收窄（详见官网仓 tools 注释）：发版后只剩 ① 更新
+`release/version.json` ② `node tools/sync-release.js --page-only`（只刷下载页
+的版本行与安装包清单）③ `node tools/deploy-oss.js` 发布页面。
+`sync-release.js` 全量同步降级为补漏 / 回溯旧版本的备用工具（重跑无害）。
+
 ### 更新源三层取值（开发者可配、用户不可见）
 
 按序取：环境变量 `UPDATE_MANIFEST_URL`（开发/测试，可指本地静态服务器）>

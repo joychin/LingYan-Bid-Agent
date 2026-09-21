@@ -18,6 +18,15 @@
 #   ① build-windows / build-macos 并行：各自 冻结侧车（尾部自动跑 10 项冒烟门）
 #      → tauri build → 产物传 workflow artifact
 #   ② release：两平台全绿后统一建 Release、挂全部产物 + changelog 概要
+#      → 尾步把同一批产物直传阿里云 OSS（官网下载直链，2026-09-20 起取代官网仓
+#      tools/sync-release.js 的手工全量同步）：dl/<tag>/ 版本化归档 + dl/<去版本号名>
+#      稳定别名 + dl/latest.json 清单 + CDN 刷新。凭据走仓库 Secrets
+#      OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET（未配则本步红、Release 不受影响）；
+#      桶/地域/CDN 域名是官网下载页本来就公开的信息，直接写在 env。上传是覆盖写，
+#      失败修好凭据后整 job 重跑幂等。version.json 与 download/index.html 仍是手工
+#      维护（要人写用户语言的更新说明）。
+#      实现在 scripts/upload_release_oss.cjs（签名/CDN 刷新与官网仓 tools/deploy-oss.js
+#      同源，对象布局与 sync-release.js 逐项一致）。
 #
 # 配额账（重要）：macOS runner 按 10× 计费——一次 tag ≈ Windows 25min×2 + macOS
 # 30min×10 = ~350 配额分钟；Free plan 2000 分钟/月 ≈ 5 次发版，谨慎打 tag。
@@ -213,7 +222,9 @@ jobs:
 
       - name: 生成 changelog 概要（上一个 tag 至今的 commit 列表）
         run: |
-          git fetch --tags --quiet
+          # v0.2.2 首跑实证：这步 fetch 会偶发失败并因 bash -e 拖死整个 Release job；
+          # tag 本身已随 checkout(fetch-depth:0) 到位，fetch 只是补远端增量，失败不致命。
+          git fetch --tags --force --quiet || true
           PREV_TAG="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
           if [ -n "$PREV_TAG" ]; then
             git log --pretty=format:"- %s" "${PREV_TAG}..${GITHUB_REF_NAME}" > CHANGELOG_CI.md
@@ -260,3 +271,20 @@ jobs:
           files: |
             dist/**
             dist/SHA256SUMS
+
+      # 放在 Release 发布之后：GitHub Release 是权威通道，OSS 是官网下载直链镜像。
+      # 失败语义（脚本内置）：OSS 上传失败 = 本 job 红（Release 已建成，修好凭据重跑
+      # 即可，覆盖写幂等）；CDN 刷新失败同样红但报错里给三条出路——重跑 / 控制台手工刷
+      # / 临时 OSS_CDN_REFRESH=false（包已在 OSS，只差缓存）。ubuntu runner 自带 node，
+      # 零依赖脚本不需要 setup-node。
+      - name: 同步安装包到阿里云 OSS（官网下载直链）
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          OSS_BUCKET: ddmdjhome
+          OSS_ENDPOINT: oss-cn-beijing.aliyuncs.com
+          OSS_PREFIX: dl
+          OSS_CDN_DOMAIN: ddmdj.com,www.ddmdj.com
+          RELEASE_PUBLISHED_AT: ${{ github.event.head_commit.timestamp }}
+        run: |
+          node scripts/upload_release_oss.cjs --dist dist --tag "${{ github.ref_name }}" --repo "${{ github.repository }}"
