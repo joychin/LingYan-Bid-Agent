@@ -4,6 +4,7 @@
  * 纯装配层；信息语义在子组件。
  */
 import { useEffect, useMemo, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import type { KbItem, KbTypePayload } from '@/api/client'
 import { useKbContent, useKbItemImages } from '@/hooks/useKnowledge'
 import { useToast } from '@/context/Toast'
@@ -33,6 +34,7 @@ export function ItemDetail({
 }) {
   const { data: content, isLoading: contentLoading } = useKbContent(item.id)
   const { data: imagesData } = useKbItemImages(item.id)
+  const qc = useQueryClient()
   const { toast } = useToast()
   const busy =
     item.parse_status === 'pending' ||
@@ -43,8 +45,16 @@ export function ItemDetail({
   // 识别跑完给个明确反馈——确认版优先展示，此前主视图纹丝不动，只能猜成没成
   const wasBusyRef = useRef(busy)
   useEffect(() => {
-    if (wasBusyRef.current && !busy && item.extract_status === 'done') {
-      toast(diff ? `识别完成：${diffSummary(diff, types)}` : '识别完成', 'info')
+    if (wasBusyRef.current && !busy) {
+      // 解析/抽取落定：失效该条目 content/images 缓存——解析进行中打开详情会把
+      // 空文本缓存住，items 轮询收敛后旧空值永不刷新（「文本」视图显示无文本内容
+      // 直到手刷页面，2026-09-23 自动化测试 X6）。parse 落定改 content、extract
+      // 不改，统一失效只多一次 304 级 refetch，换时序鲁棒
+      void qc.invalidateQueries({ queryKey: ['kb', 'content', item.id] })
+      void qc.invalidateQueries({ queryKey: ['kb', 'images', item.id] })
+      if (item.extract_status === 'done') {
+        toast(diff ? `识别完成：${diffSummary(diff, types)}` : '识别完成', 'info')
+      }
     }
     wasBusyRef.current = busy
   }, [busy]) // eslint-disable-line react-hooks/exhaustive-deps

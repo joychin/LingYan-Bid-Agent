@@ -12,8 +12,10 @@ app_settings 键：
 - baidu_ocr：{api_key, secret_key}（JSON）
 
 env 兜底（只读，向后兼容 .env / 旧安装）：LLM_API_KEY 作用于 default profile、
-MODEL_KEYS JSON、BAIDU_OCR_API_KEY/SECRET_KEY；LLM_BASE_URL/LLM_MODEL 覆盖
-default profile 的地址/模型名。旧 settings.json（双角色/扁平/新形状）在 db 为空时
+MODEL_KEYS JSON、BAIDU_OCR_API_KEY/SECRET_KEY；LLM_BASE_URL/LLM_MODEL 只覆盖内置
+default profile 的地址/模型名（_apply_env_override；db 里用户配置的默认 profile
+不受 env 影响——薄壳 llm_base_url/llm_model 同构 db 优先，2026-09-23 N3）。
+旧 settings.json（双角色/扁平/新形状）在 db 为空时
 一次性导入（不含 key——旧机制里 key 从不落 settings.json）。
 """
 
@@ -317,19 +319,20 @@ def llm_api_key() -> str | None:
 
 
 def llm_base_url() -> str:
-    v = os.environ.get("LLM_BASE_URL")
-    if v:
-        return v
+    # db 优先、env 兜底（与 model_key 同构）：env 优先时 .env 的 LLM_BASE_URL 会与
+    # db 里 default profile 的 key 配错对——lfans 的 key 打 deepseek 官方网关 401
+    # （titler 自动命名全灭，2026-09-23 自动化测试 N3）；三值必须同源于一个 profile
     p = get_profile(default_model_id())
-    return p.base_url if p and p.base_url else _DEFAULT_BASE_URL
+    if p and p.base_url:
+        return p.base_url
+    return os.environ.get("LLM_BASE_URL") or _DEFAULT_BASE_URL
 
 
 def llm_model() -> str:
-    v = os.environ.get("LLM_MODEL")
-    if v:
-        return v
     p = get_profile(default_model_id())
-    return p.model if p and p.model else _DEFAULT_MODEL
+    if p and p.model:
+        return p.model
+    return os.environ.get("LLM_MODEL") or _DEFAULT_MODEL
 
 
 def resolve_vision() -> ModelProfile | None:

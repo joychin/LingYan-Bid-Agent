@@ -108,9 +108,28 @@ def test_profiles_empty_with_env_override(tmp_path, monkeypatch):
     assert config.llm_base_url() == "https://gateway.example/v1"
 
 
-def test_llm_shell_env_override_default_profile(tmp_path, monkeypatch):
+def test_llm_shell_db_default_profile_wins_over_env(tmp_path, monkeypatch):
+    """薄壳与 model_key 同构：db 优先、env 兜底（2026-09-23 N3 修复）。
+
+    旧语义 env 优先曾致 key/base_url 不同源——.env 的 LLM_BASE_URL（deepseek 官方）
+    配 db default profile 的 key（lfans）打错网关 401，titler 自动命名全灭。
+    主对话 agent 装配本就走 profile 三元组，薄壳对齐后三值恒同源。
+    """
     _init(tmp_path, monkeypatch)
     config.save_models([config.ModelProfile(id="m1", name="A", base_url="https://a/v1", model="a-1")], "m1")
+    config.set_model_key("m1", "sk-a")
+    monkeypatch.setenv("LLM_BASE_URL", "https://env.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "env-model")
+    # db default profile 三值整体生效，env 不再覆盖（与主对话装配同源）
+    assert config.llm_base_url() == "https://a/v1"
+    assert config.llm_model() == "a-1"
+    assert config.llm_api_key() == "sk-a"
+
+
+def test_llm_shell_env_fallback_when_profile_field_missing(tmp_path, monkeypatch):
+    """db default profile 字段缺失时薄壳回落 env（env 仍是兜底而非死值）。"""
+    _init(tmp_path, monkeypatch)
+    config.save_models([config.ModelProfile(id="m1", name="A", base_url="", model="")], "m1")
     monkeypatch.setenv("LLM_BASE_URL", "https://env.example/v1")
     monkeypatch.setenv("LLM_MODEL", "env-model")
     assert config.llm_base_url() == "https://env.example/v1"

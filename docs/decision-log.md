@@ -29,6 +29,9 @@
 - L2237-2252 ask_human 参数泄漏自愈（2026-09-10，两轮实测两形态）：deepseek-v4-flash
 - L2476-2483 *updates 只翻译真实执行节点（2026-09-08）：工具事件（tool.called/tool.result）
 - L2502-2507 前缀缓存铁律（2026-09-06 30M token 事故的教训）：进 system/请求前缀的任何内容
+- L3036-3050 自动命名 titler 401 修复（2026-09-23，自动化测试 N3）：薄壳 base_url/model
+  env 优先与 key 的 db 优先不对称——lfans key 打 deepseek 官方网关必 401；修=薄壳与
+  model_key 同构 db 优先，env 只兜底内置 default。
 
 ### 二、任务与 Artifact 系统
 
@@ -109,6 +112,10 @@
   后右侧两栏被挤压」（三层布局逐层吃宽）+ mac 红绿灯与居中卡片相撞（灯簇系统层绘制无解，
   抽屉左缝 96px 让位）；mode 拆 pickerOpen + DrawerShell + ESC 双层守卫 + 草稿保留 +
   fileQ/treeQ 拆分；连带修创建后详情落旧块竞态与 Origin 白名单缺 [::1] 两既有 bug。
+- L3051-3061 宽面板覆盖聊天输入区修复（2026-09-23，自动化测试 N2）：wide 态浮层 864px 而
+  grid 占位恒 300px，输入区右半被盖视觉+交互双失；修=占位与浮层同宽一行。
+- L3062-3073 知识库「文本」视图缓存空值修复（2026-09-23 X6，2026-09-14 备案转正）：busy
+  期间缓存空 content 无人失效；修=ItemDetail busy 翻转 effect 顺带失效 content/images。
 
 ### 六、打包、平台与依赖
 
@@ -3004,3 +3011,39 @@
     `CORS_ORIGIN_REGEX`/`_ALLOWED_ORIGIN_RE` 补 `\[::1\]` + test_main_hardening 加用例。
     验证=check.sh frontend 全绿 + Playwright 实测（抽屉几何 x=96 避灯簇/勾选级联/ESC 分层
     关闭/草稿保留/创建后详情落新块/删除回退）。
+
+  - **自动命名 titler 401 修复——LLM 薄壳 base_url/model 改 db 优先（2026-09-23，自动化
+    测试 N3）：** 症状=会话自动命名全灭（openai 401 'Authentication Fails ****deb6'），同窗口
+    主对话链路完全正常。根因=配置解析不对称：model_key() 是 db 优先 env 兜底，薄壳
+    llm_base_url()/llm_model() 却是 env 优先——dev browser 模式 .env 带
+    LLM_BASE_URL=api.deepseek.com 时，titler 拿 db 里 default profile（lfans）的 key 打
+    deepseek 官方网关，key 与网关不同源必 401；主对话不受影响，因 agent 装配直用 profile
+    三元组（profile 层 _apply_env_override 只覆盖内置 "default" id，从不碰用户 profile）。
+    修=薄壳两函数与 model_key 同构（db default profile 优先、env 兜底），三值恒同源；
+    调用方仅 titler 与启动日志。测试翻转：test_llm_shell_env_override_default_profile 锁的
+    「env 覆盖 db 默认 profile」旧语义正是病灶源头，改写为 db 三值整体生效 + 新增 profile
+    字段缺失回落 env 用例；空配置 env 生效路径（test_profiles_empty_with_env_override）
+    不受影响——profile 层的 env 覆盖保留，它只服务内置 default。验证=test_config 13 绿 +
+    实机翻转：修复前 titler 401 三连（日志 09:54/09:55/10:50），修复重启后同环境自动命名
+    成功（「咨询投标相关服务介绍」）且新进程零失败。
+
+  - **宽面板覆盖聊天输入区修复——ap-slot 占位与浮层同宽（2026-09-23，自动化测试 N2）：**
+    症状=打开工作区/预览文件（.ap-shell.wide，wsWidth 默认视口 60%≈864px）后，发送钮被面板
+    子树拦截点击（Playwright 报 subtree intercepts pointer events），实拍确认输入区右半
+    （发送钮/模型/思考胶囊）被浮层盖住、视觉+交互双失。根因=grid 占位恒 300px（wsOpen 时
+    根 div width=undefined），宽面板 absolute 锚右缘向左溢出盖住聊天列约 564px——「覆盖式
+    展开」（v3 全屏档删除时的拍板）的占位没跟着宽。修=ap-slot 根节点 wsOpen 时
+    width=wsWidth（一行），聊天列含 composer 整体让位、恒可见可点；宽态拖动/窗口重夹逻辑
+    原样生效（wsWidth state 双向消费）。明确不做：wide 阴影收窄（box-shadow 不拦截指针，
+    分层感保留）。验证=vitest 345 绿 + Playwright 复现翻转：修复前 elementFromPoint(发送钮
+    中心) 命中 docx 预览层，修复后真实点击成功发出消息，实拍面板与聊天区并排、输入区完整。
+
+  - **知识库「文本」视图缓存空值修复——落定即失效（2026-09-23，自动化测试 X6；2026-09-14
+    备案转正）：** 症状=上传后在解析/整理中点开条目详情，「文本」视图恒显「无文本内容/可点
+    重新识别重试」，items 列表 5s 轮询收敛后也不刷新，手刷页面即好（2026-09-14 pymupdf
+    替换批走查已备案、一直未修）。根因=useKbContent/useKbItemImages 既无 staleTime 也无
+    轮询，busy 期间缓存到空 content 后再无人失效。修=ItemDetail 既有「识别完成 toast」的
+    busy 翻转 effect 顺带失效 ['kb','content',id] 与 ['kb','images',id]（parse 落定改
+    content、extract 不改，统一失效只多一次廉价 refetch 换时序鲁棒；不另起 hook——翻转
+    时机与 toast 同源，少一处状态）。验证=vitest 345 绿 + 实机：40 章长文档上传后在
+    「整理中…」窗口点开详情，落定后正文自动渲染（第 1/2/3 章…），全程不刷新页面。

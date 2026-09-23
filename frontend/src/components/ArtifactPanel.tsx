@@ -414,7 +414,10 @@ export function ArtifactPanel({
   return (
     <div
       className={cn('ap-slot', collapsed && 'collapsed', dragging && 'dragging')}
-      style={collapsed ? undefined : { width: wsOpen ? undefined : width }}
+      // 占位与浮层同宽（含工作区覆盖态）：占位仍是 300 时宽面板向左盖住聊天区右侧
+      // 564px——发送钮/模型胶囊被浮层拦截不可点也不可见（2026-09-23 自动化测试 N2）。
+      // 占位同步后聊天列（含输入区）整体让位，宽态拖动/窗口重夹逻辑原样生效
+      style={collapsed ? undefined : { width: wsOpen ? wsWidth : width }}
     >
         <aside
           className={cn('ap-shell', wsOpen && 'wide', collapsed && 'collapsed', dragging && 'dragging')}
