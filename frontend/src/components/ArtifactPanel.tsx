@@ -37,12 +37,15 @@ const MAX_W = 560
  * 上限动态计算给聊天区留 ≥360px（2026-09-09 用户明令：面板不设固定最大宽度）。
  * 默认宽按视口比例（60%）——小窗口自动少占聊天区、大屏不用手动拖宽；
  * 拖过的宽度存 localStorage，启动读回时同样过上限夹取（换小窗口打开不爆）。
- * 窗口缩放时实时重夹（resize 监听），否则先拖宽后缩窗面板会盖满聊天区。 */
+ * 窗口缩放时实时重夹（resize 监听），否则先拖宽后缩窗面板会盖满聊天区。
+ * 上限与窄态 navMaxW 同口径（侧栏按 264 估）：占位同宽修复（2026-09-23 N2）把
+ * 覆盖式变真实让位后，只留 360 不扣侧栏会把聊天挤到 ~96px；默认值同样过 clamp，
+ * 保证任何窗口下默认态聊天区 ≥360（视口 <1264 时 640 下限顶住、聊天收窄但完整可用）。 */
 const WS_MIN_W = 640
 const WS_WIDTH_KEY = 'tender-agent.ws-width'
-const wsMaxW = () => Math.max(WS_MIN_W, window.innerWidth - 360)
-const wsDefaultW = () => Math.max(WS_MIN_W, Math.round(window.innerWidth * 0.6))
+const wsMaxW = () => Math.max(WS_MIN_W, window.innerWidth - 264 - 360)
 const clampWsW = (w: number) => Math.max(WS_MIN_W, Math.min(wsMaxW(), w))
+const wsDefaultW = () => clampWsW(Math.round(window.innerWidth * 0.6))
 const wsStoredW = (): number => {
   const raw = Number(localStorage.getItem(WS_WIDTH_KEY))
   return Number.isFinite(raw) && raw >= WS_MIN_W ? raw : wsDefaultW()
