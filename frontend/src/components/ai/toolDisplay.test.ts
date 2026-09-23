@@ -84,16 +84,23 @@ describe('formatStepResult（工具结果人话化 2026-09-23 B2/B3）', () => {
     ).toBe('· sources/云澜市-招标文件.docx\n· sources/补遗.docx')
   })
 
+  it('ls 空列表→「无文件」；残缺 repr（events 截断剁尾）→原样展示不转写', () => {
+    expect(formatStepResult('ls', '[]')).toBe('无文件')
+    // 截断形态：尾引号/右括号被剁 + 「已截断」后缀——转写会丢截断提示，必须回退原文
+    const truncated = "['/t_fc25424b8fe2/sources/云澜市-招标文件.do\n……（已截断，完整输出共 8321 字符）"
+    expect(formatStepResult('ls', truncated)).toBe(truncated)
+  })
+
   it('ls 无引号条目（截断文案/其他形态）回退原文', () => {
     const raw = 'No files found'
     expect(formatStepResult('ls', raw)).toBe(raw)
   })
 
   it('write_file 英文回执 → 中文并剥任务 id；Created 也认', () => {
-    expect(formatStepResult('write_file', 'Updated file /t_abc123/work/analysis/structure.md')).toBe(
+    expect(formatStepResult('write_file', 'Updated file /t_abc123def456/work/analysis/structure.md')).toBe(
       '已写入 · work/analysis/structure.md',
     )
-    expect(formatStepResult('write_file', 'Created file /t_abc123/work/outline/fragments/商务.md')).toBe(
+    expect(formatStepResult('write_file', 'Created file /t_abc123def456/work/outline/fragments/商务.md')).toBe(
       '已创建 · work/outline/fragments/商务.md',
     )
   })

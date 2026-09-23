@@ -4,7 +4,7 @@ import { Loader } from '@/components/ai/Loader'
 import { MemoMarkdown } from '@/components/ai/MemoMarkdown'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai/Reasoning'
 import { TextShimmer } from '@/components/ai/TextShimmer'
-import { subagentStepTitle, toolDisplayName } from '@/components/ai/toolDisplay'
+import { formatStepResult, subagentStepTitle, toolDisplayName } from '@/components/ai/toolDisplay'
 import { SkillBatch } from '@/components/ai/ToolStepRow'
 import { TraceLiveContext, TRACE_LIVE_TEXT_CAP } from '@/components/ai/traceLive'
 import { segmentToolSteps } from '@/components/ai/traceGroups'
@@ -62,7 +62,11 @@ function ChildStep({ step }: { step: ToolStep }) {
               <p className="whitespace-pre-wrap break-all text-muted-foreground/60">{step.error}</p>
             </div>
           ) : step.summary ? (
-            <p className="art-result line-clamp-6 whitespace-pre-wrap break-all">{step.summary}</p>
+            /* 结果同 ToolStepRow 走人话化转写（子代理同样调 ls/写入文件/检查任务状态，
+               裸 Python repr 不该只在主线程转写） */
+            <p className="art-result line-clamp-6 whitespace-pre-wrap break-all">
+              {formatStepResult(step.tool, step.summary)}
+            </p>
           ) : isRunning ? (
             // div 而非 p：Loader 点点是 div，p 内嵌 div 触发 React DOM 嵌套告警（2026-09-23 B6）
             <div className="flex items-center gap-1.5 text-muted-foreground/60">

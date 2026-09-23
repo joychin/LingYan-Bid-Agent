@@ -120,15 +120,20 @@ export function skillStepTitle(info: { label: string; file: string }): string {
  *  「加载技能 ×3」共用，防两处文案漂移）。 */
 export const SKILL_LOAD_LABEL = '加载技能'
 
-/** 内部任务 id 路径前缀（`/t_xxx/…`）：虚拟根寻址对用户无意义，显示层剥掉。 */
+/** 内部任务 id 路径前缀（`/t_xxx/…`，12 位十六进制）：虚拟根寻址对用户无意义，
+ *  显示层剥掉。位数下限 8 防误伤恰好叫 t_ab 之类的普通段名。 */
 function stripTaskId(path: string): string {
-  return path.replace(/^\/t_[0-9a-f]+\//, '')
+  return path.replace(/^\/t_[0-9a-f]{8,}\//, '')
 }
 
 /** ls 结果（deepagents `_format_file_paths` 的 Python repr）→ 文件清单。
- *  引号内取路径（中文文件名不含单引号），取不到回退原文。 */
+ *  只转完整的 `[…]` 形态——events 层 4000 字符截断会剁掉尾引号/右括号并追加
+ *  「已截断」说明，残缺形态转写会静默丢截断提示与残路径，原样展示更诚实。 */
 function formatLsResult(summary: string): string {
-  const paths = [...summary.matchAll(/'([^']+)'/g)].map((m) => m[1])
+  const trimmed = summary.trim()
+  if (trimmed === '[]') return '无文件'
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) return summary
+  const paths = [...trimmed.matchAll(/'([^']+)'/g)].map((m) => m[1])
   if (paths.length === 0) return summary
   return paths.map((p) => `· ${stripTaskId(p)}`).join('\n')
 }
