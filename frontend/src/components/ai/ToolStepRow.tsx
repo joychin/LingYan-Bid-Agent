@@ -3,7 +3,7 @@ import type { ToolStep } from '@/api/sse'
 import { Brain, ChevronDown } from 'lucide-react'
 import { MemoMarkdown } from '@/components/ai/MemoMarkdown'
 import { TextShimmer } from '@/components/ai/TextShimmer'
-import { SKILL_LOAD_LABEL, stepArgLabel, toolDisplayName, toolIcon } from '@/components/ai/toolDisplay'
+import { SKILL_LOAD_LABEL, formatStepResult, stepArgLabel, toolDisplayName, toolIcon } from '@/components/ai/toolDisplay'
 import { useAutoCollapse } from '@/hooks/useAutoCollapse'
 import { humanizeError } from '@/lib/errorText'
 import { mdRemarkPlugins } from '@/lib/markdown'
@@ -120,7 +120,9 @@ export const ToolStepRow = memo(function ToolStepRow({
               <p className="art-result break-all text-xs text-muted-foreground/70">{step.error}</p>
             </div>
           ) : step.summary ? (
-            <div className="art-result max-h-72 overflow-y-auto pr-1">{step.summary}</div>
+            <div className="art-result max-h-72 overflow-y-auto pr-1">
+              {formatStepResult(step.tool, step.summary)}
+            </div>
           ) : null}
         </div>
       </CollapsibleContent>

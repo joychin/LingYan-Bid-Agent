@@ -1123,6 +1123,13 @@ export function MaterialsLibraryView({ onGoKnowledge }: { onGoKnowledge?: () => 
             <Plus className="h-3.5 w-3.5" />
             新建素材
           </Button>
+          {/* 禁用原因常驻可见（2026-09-23 A3a）：只藏在 hover title 里，用户看到的就是
+              一个按不动的灰按钮 */}
+          {!canNewBlock && !pickerOpen && (
+            <span className="shrink-0 text-xs text-muted-foreground">
+              {scope === 'all' ? '先在左侧选择一份文件' : '文件解析完成后可新建'}
+            </span>
+          )}
         </div>
         <div className="mtw-scroll">{renderBlockList}</div>
       </section>

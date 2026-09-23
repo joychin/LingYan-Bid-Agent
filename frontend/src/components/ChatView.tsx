@@ -794,7 +794,8 @@ function RunMessage({
             {/* 活卡语境标记：内部步骤树的子代理思考恒走尾部封顶（run 期内存爬升
                 主因之一是陆续完成的子代理卡整段思考常驻 DOM），历史过程区不受影响 */}
             <TraceLiveContext.Provider value={true}>
-              {pauseNarration.trim() && (
+              {/* 暂停正文升为冻结气泡（确认门要对着它裁决），未暂停才在过程区留旁白行 */}
+              {!paused && pauseNarration.trim() && (
                 <NarrationLine text={capStreamingText(pauseNarration, undefined, '正文').text} />
               )}
               {traceSyncIssue && (
@@ -821,7 +822,18 @@ function RunMessage({
           </ReasoningContent>
         </Reasoning>
       )}
-      {!paused && (
+      {paused ? (
+        // 暂停冻结正文（2026-09-23 A1 修复）：确认门提问卡说「概况如上」，正文必须
+        // 真的在上方可见——冻结展示 pauseNarration（同流式尾窗封顶），无光标无转圈
+        pauseNarration.trim() && (
+          <div className="bubble">
+            <MemoMarkdown
+              text={capStreamingText(pauseNarration, undefined, '正文').text}
+              components={markdownComponents}
+            />
+          </div>
+        )
+      ) : (
         <div className="bubble">
           {shownText ? (
             <>

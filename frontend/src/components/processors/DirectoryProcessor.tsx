@@ -10,7 +10,7 @@
  * 运行期 _id 仅用于树寻址，序列化时剥离、不落盘。
  */
 
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
@@ -134,7 +134,20 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
   const seqRef = useRef(artifact.content_seq)
   const confirmedSigRef = useRef('') // 用户已放行的结构基线（进编辑态重置；确认一次前移一次）
   const pendingSigRef = useRef('') // 触发确认条时的待确认签名
+  // 确认条引导（2026-09-23 A2）：点「完成编辑」被拦时闪烁确认条——此前只有 3s toast，
+  // 用户看着按钮毫无反应
+  const structBannerRef = useRef<HTMLDivElement>(null)
+  const [structPulse, setStructPulse] = useState(false)
   docsRef.current = docs
+
+  // 结构回基线=确认条过期（用户撤销了结构性修改）：自动撤条——否则「完成编辑」
+  // 会被一条不再适用的确认条永久拦住（2026-09-21 诊断 P1 的过期挂起形态）
+  useEffect(() => {
+    if (!structConfirm || !docs) return
+    if (structureSignature(docs.response_documents ?? []) === confirmedSigRef.current) {
+      setStructConfirm(false)
+    }
+  }, [docs, structConfirm])
 
   const auto = useAutoSave({
     save: async (force) => {
@@ -217,6 +230,9 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
     }
     if (structConfirm) {
       toast('有结构性修改待确认：请先在确认条选择「继续保存」或「返回修改」', 'error')
+      setStructPulse(true)
+      structBannerRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      window.setTimeout(() => setStructPulse(false), 1600)
       return
     }
     if (auto.state === 'dirty' && !(await auto.saveNow())) return
@@ -342,29 +358,34 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
         </div>
       )}
       {editing && structConfirm && (
-        <Banner
-          tone="warn"
-          action={
-            <span className="flex shrink-0 gap-1">
-              <button
-                type="button"
-                onClick={() => setStructConfirm(false)}
-                className="rounded border border-warning/60 px-2 py-0.5 hover:bg-warning/15"
-              >
-                返回修改
-              </button>
-              <button
-                type="button"
-                onClick={confirmStructuralSave}
-                className="rounded border border-warning/60 bg-warning px-2 py-0.5 font-medium text-warning-foreground hover:opacity-90"
-              >
-                继续保存
-              </button>
-            </span>
-          }
+        <div
+          ref={structBannerRef}
+          className={structPulse ? 'struct-confirm-pulse rounded-md' : undefined}
         >
-          检测到结构性修改（新增/删除/移动节点）——保存后，后续 AI 将以新目录为准继续工作（生成正文等）。纯改名不会触发本提示。
-        </Banner>
+          <Banner
+            tone="warn"
+            action={
+              <span className="flex shrink-0 gap-1">
+                <button
+                  type="button"
+                  onClick={() => setStructConfirm(false)}
+                  className="rounded border border-warning/60 px-2 py-0.5 hover:bg-warning/15"
+                >
+                  返回修改
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmStructuralSave}
+                  className="rounded border border-warning/60 bg-warning px-2 py-0.5 font-medium text-warning-foreground hover:opacity-90"
+                >
+                  继续保存
+                </button>
+              </span>
+            }
+          >
+            检测到结构性修改（新增/删除/移动节点）——保存后，后续 AI 将以新目录为准继续工作（生成正文等）。纯改名不会触发本提示。
+          </Banner>
+        </div>
       )}
       {auto.state === 'conflict' && (
         <Banner
@@ -393,7 +414,12 @@ export function DirectoryProcessor({ artifact, content }: ProcessorProps) {
       )}
       {!editing && data.warning && <Banner tone="warn">{data.warning}</Banner>}
       {!editing && (unused.length > 0 || dangling.length > 0) && (
-        <SourceCheckBanner unused={unused} dangling={dangling} />
+        <SourceCheckBanner
+          unused={unused}
+          dangling={dangling}
+          registry={data.registry ?? {}}
+          onTrace={setTraceId}
+        />
       )}
 
       {data.meta && Object.keys(data.meta).length > 0 && (
@@ -525,8 +551,20 @@ function ScopeText({ text }: { text?: string }) {
   )
 }
 
-/** 来源核对横幅：完整度信号保留，主文案说人话；内部编号清单默认收起（查看编号展开）。 */
-function SourceCheckBanner({ unused, dangling }: { unused: string[]; dangling: string[] }) {
+/** 来源核对横幅：完整度信号保留，主文案说人话。展开不只给内部编号（2026-09-23 C1：
+ *  「有 4 项要求未安排」却只看到 REQ-31 这种编号，用户无从判断要不要补）——逐行列
+ *  要求原文与出处（registry 就在同一产物里），点编号打开原文上下文弹窗。 */
+function SourceCheckBanner({
+  unused,
+  dangling,
+  registry,
+  onTrace,
+}: {
+  unused: string[]
+  dangling: string[]
+  registry: NonNullable<DirectoryData['registry']>
+  onTrace: (id: string) => void
+}) {
   const [showIds, setShowIds] = useState(false)
   return (
     <Banner
@@ -537,14 +575,37 @@ function SourceCheckBanner({ unused, dangling }: { unused: string[]; dangling: s
           onClick={() => setShowIds((v) => !v)}
           className="shrink-0 rounded border border-warning/60 px-2 py-0.5 hover:bg-warning/15"
         >
-          {showIds ? '收起编号' : '查看编号'}
+          {showIds ? '收起详情' : '查看详情'}
         </button>
       }
     >
       {unused.length > 0 && `有 ${unused.length} 项招标要求还没安排进目录章节`}
       {unused.length > 0 && dangling.length > 0 && '；'}
       {dangling.length > 0 && `目录里引用了 ${dangling.length} 个不存在的来源编号`}
-      {showIds && <span className="mt-1 block break-all">（{[...unused, ...dangling].join('、')}）</span>}
+      {showIds && (
+        <ul className="mt-1.5 block space-y-1">
+          {[...unused, ...dangling].map((id) => {
+            const entry = registry[id]
+            return (
+              <li key={id} className="flex flex-wrap items-baseline gap-x-1.5">
+                <button
+                  type="button"
+                  onClick={() => onTrace(id)}
+                  title={entry ? '查看原文出处上下文' : '来源登记表缺此项，无法追溯'}
+                  className="cursor-pointer break-all font-mono text-xs text-warning hover:underline"
+                >
+                  {id}
+                </button>
+                {entry?.text && <span className="text-xs">· {entry.text}</span>}
+                {entry?.['出处'] && (
+                  <span className="text-xs text-muted-foreground">（{entry['出处']}）</span>
+                )}
+                {!entry && <span className="text-xs text-muted-foreground">（登记表缺此项）</span>}
+              </li>
+            )
+          })}
+        </ul>
+      )}
     </Banner>
   )
 }

@@ -1151,6 +1151,9 @@
   font-size: 12.5px;
   color: var(--Color-text-secondary);
   line-height: 1.5;
+  /* 结果转写（ls 文件清单/pipeline 段落）带换行；原始输出里的换行也如实保留 */
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .todo {
@@ -2681,6 +2684,19 @@
 }
 .kb-dot--error {
   background: var(--Color-danger, #ef4444);
+}
+
+/* 待确认点+字胶囊（2026-09-23 C4）：色点无字含义靠猜，需处理的态给文字 */
+.kb-wait-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px 1px 5px;
+  border-radius: 9999px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--Color-warning);
+  background: color-mix(in srgb, var(--Color-warning) 12%, var(--Color-bg-canvas));
 }
 
 /* 右区 */
@@ -5004,4 +5020,14 @@
   stroke: currentColor;
   fill: none;
   stroke-width: 1.7;
+}
+
+/* ── 目录编辑结构确认条引导闪烁（2026-09-23 A2）：「完成编辑」被确认条拦截时
+     把视线引到确认条——此前唯一反馈是右下角 3s toast，按钮看起来像失灵 ── */
+@keyframes struct-confirm-flash {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--Color-warning) 45%, transparent); }
+}
+.struct-confirm-pulse {
+  animation: struct-confirm-flash 0.45s ease-in-out 3;
 }

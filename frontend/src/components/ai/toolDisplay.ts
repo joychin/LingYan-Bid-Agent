@@ -92,15 +92,91 @@ export function skillFileInfo(
   return { skill, label: SKILL_LABELS[skill] ?? skill, file: m[2] }
 }
 
-/** 技能读取的步骤行标题：SKILL.md（技能正文）只报技能名，附属参考文件附文件名主干。 */
+/** 技能读取的步骤行标题：SKILL.md（技能正文）只报技能名，附属参考文件附段名
+ *  （段名有中文映射——2026-09-23 C2：中文界面不再夹杂 structure/response-guidelines
+ *  这类内部文件名；未收录段名回退原名，不丢信息）。 */
+const SKILL_SECTION_LABELS: Record<string, string> = {
+  SKILL: '技能说明',
+  structure: '结构事实',
+  'requirements-qualification': '资格要求',
+  'requirements-submission': '递交要求',
+  'requirements-business': '商务技术要求',
+  'requirements-format': '格式要求',
+  disqualification: '废标条款',
+  evaluation: '评分标准',
+  clarifications: '待澄清',
+  'response-guidelines': '回复规范',
+  'evidence-rules': '证据规则',
+}
+
 export function skillStepTitle(info: { label: string; file: string }): string {
   const stem = (info.file.replace(/\.md$/, '').split('/').pop() ?? '').trim()
-  return !stem || stem.toLowerCase() === 'skill' ? info.label : `${info.label} · ${stem}`
+  if (!stem || stem.toLowerCase() === 'skill') return info.label
+  const section = SKILL_SECTION_LABELS[stem] ?? stem
+  return `${info.label} · ${section}`
 }
 
 /** 技能加载动作的措辞单源（步骤行标题「加载技能：投标分析」与折叠组头
  *  「加载技能 ×3」共用，防两处文案漂移）。 */
 export const SKILL_LOAD_LABEL = '加载技能'
+
+/** 内部任务 id 路径前缀（`/t_xxx/…`）：虚拟根寻址对用户无意义，显示层剥掉。 */
+function stripTaskId(path: string): string {
+  return path.replace(/^\/t_[0-9a-f]+\//, '')
+}
+
+/** ls 结果（deepagents `_format_file_paths` 的 Python repr）→ 文件清单。
+ *  引号内取路径（中文文件名不含单引号），取不到回退原文。 */
+function formatLsResult(summary: string): string {
+  const paths = [...summary.matchAll(/'([^']+)'/g)].map((m) => m[1])
+  if (paths.length === 0) return summary
+  return paths.map((p) => `· ${stripTaskId(p)}`).join('\n')
+}
+
+/** write_file/edit_file 英文回执（`Updated file /t_x/…`）→ 中文 + 剥任务 id。 */
+function formatUpdatedFile(summary: string): string {
+  const m = /^(Updated|Created) file (\S+)$/.exec(summary.trim())
+  if (!m) return summary
+  return `${m[1] === 'Created' ? '已创建' : '已写入'} · ${stripTaskId(m[2])}`
+}
+
+/** check_pipeline_state 的段标 → 中文（输出格式是模型消费的稳定契约，4 个 SKILL.md
+ *  逐字依赖，sidecar 不动——这里只做显示层转写；首行「[pipeline 状态]（…裁决）」
+ *  是写给模型的裁读指引，不给人看，剥掉）。 */
+const PIPELINE_SECTION_LABELS: Record<string, string> = {
+  sources: '来源',
+  candidates: '候选文件',
+  untracked: '未纳入',
+  parse: '解析',
+  analysis: '分析',
+  body: '正文',
+  freshness: '新鲜度',
+}
+
+function formatPipelineResult(summary: string): string {
+  const out: string[] = []
+  for (const line of summary.split('\n')) {
+    if (line.startsWith('[pipeline 状态]')) continue
+    const m = /^\[(\w+)\]\s?(.*)$/.exec(line)
+    if (m) {
+      const label = PIPELINE_SECTION_LABELS[m[1]] ?? m[1]
+      out.push(`【${label}】${stripTaskId(m[2])}`)
+    } else if (line.trim()) {
+      out.push(stripTaskId(line))
+    }
+  }
+  return out.length > 0 ? out.join('\n') : summary
+}
+
+/** 工具步骤结果人话化（2026-09-23 B2/B3）：trace 展开区直出的工具原文按工具转写。
+ *  纯展示层（不碰工具真实返回），匹配不上原样返回。 */
+export function formatStepResult(tool: string, summary: string): string {
+  if (!summary) return summary
+  if (tool === 'ls') return formatLsResult(summary)
+  if (tool === 'write_file' || tool === 'edit_file') return formatUpdatedFile(summary)
+  if (tool === 'check_pipeline_state') return formatPipelineResult(summary)
+  return summary
+}
 
 export function toolDisplayName(tool: string, args?: Record<string, unknown>): string {
   // 只有 read_file 走技能识别（write/edit 的 file_path 指向技能目录会被 fs_guard 拒绝）

@@ -186,11 +186,12 @@ async def update_artifact_content(aid: str, body: ContentUpdate):
                 status_code=409,
                 detail=f"内容已被其他修改更新（当前版本号 {row['content_seq']}），请选择拉取最新或保留你的版本",
             )
-        if body.force:
-            # 顶掉的是外部写入的新版本 → 留恢复点（用户可反悔）
-            prev = artifact_store.read_content_resolved(aid, row)
-            if prev is not None:
-                artifact_store.save_restore_point(aid, row, row["content_seq"], prev)
+        # 覆盖前一律留恢复点（2026-09-23 A4）：此前仅 force 覆盖留底——正常编辑保存
+        # 从不留底，restore_available 恒 false、「恢复上一版」永不出现。滚动上限由
+        # artifact_store 维持（3 个），正常编辑也不会撑爆磁盘。
+        prev = artifact_store.read_content_resolved(aid, row)
+        if prev is not None:
+            artifact_store.save_restore_point(aid, row, row["content_seq"], prev)
         artifact_store.replace_current_content(aid, row, content_text)
         new_seq = row["content_seq"] + 1
         updated_at = _now()

@@ -237,6 +237,8 @@ export function ArtifactPanel({
     return [
       { label: '打开', action: () => onOpen(a.artifact_id) },
       ...(isTauri() ? [{ label: '打开文件夹', action: () => reveal(a.path) }] : []),
+      // 磁盘绝对路径（与「打开文件夹」同源）——定位产物包用
+      { label: '复制路径', action: () => void copyText(a.path, '路径') },
       ...(a.restore_available ? [{ label: '恢复上一版', action: () => void restorePrev(a.artifact_id) }] : []),
     ]
   }

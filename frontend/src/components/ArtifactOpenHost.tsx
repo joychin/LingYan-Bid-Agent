@@ -59,10 +59,11 @@ export function ArtifactOpenHost({
       </div>
       <div className="ap-ws-body">
         {isLoading ? (
-          <p className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
+          // div 而非 p：ClassicLoader 是 div，p 内嵌 div 触发 React DOM 嵌套告警（2026-09-23 B6 同款漏网）
+          <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
             <Loader variant="classic" size="sm" tone="muted" />
             加载产物内容…
-          </p>
+          </div>
         ) : isError || !data ? (
           <p className="py-4 text-center text-sm text-red-600">
             加载失败：{error instanceof Error ? error.message : String(error)}

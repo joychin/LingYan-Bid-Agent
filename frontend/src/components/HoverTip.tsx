@@ -150,12 +150,16 @@ export function HoverTip() {
     }
     const onScroll = () => hide()
     const onBlur = () => hide()
+    // 右键弹菜单时收掉 tooltip（2026-09-23 B5）：光标没离开行、mouseout 不触发，
+    // 高 z-index 的 tooltip 会压住右键菜单第一项
+    const onContextMenu = () => hide()
 
     window.addEventListener('mouseover', onMouseOver)
     window.addEventListener('mouseout', onMouseOut)
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('scroll', onScroll, true)
     window.addEventListener('blur', onBlur)
+    window.addEventListener('contextmenu', onContextMenu)
     return () => {
       window.clearTimeout(showTimer)
       restoreTitle()
@@ -164,6 +168,7 @@ export function HoverTip() {
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('scroll', onScroll, true)
       window.removeEventListener('blur', onBlur)
+      window.removeEventListener('contextmenu', onContextMenu)
     }
   }, [])
 

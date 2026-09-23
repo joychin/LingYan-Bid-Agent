@@ -1252,15 +1252,24 @@ function ModelDialog({
                 placeholder={keyOnFile ? '已配置，输入新值可更换' : '输入你的 API Key'}
                 className="pr-9"
               />
-              <button
-                type="button"
-                onClick={() => setShowKey(!showKey)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                aria-label={showKey ? '隐藏 Key' : '显示 Key'}
-              >
-                {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
+              {/* 眼睛只在框里有内容时出现（2026-09-23 A3b）：Key 只写不读，已保存的
+                  不回显——空框上配「显示」按钮是个按了没东西的假动作 */}
+              {key.trim() && (
+                <button
+                  type="button"
+                  onClick={() => setShowKey(!showKey)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  aria-label={showKey ? '隐藏 Key' : '显示 Key'}
+                >
+                  {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              )}
             </div>
+            {!key.trim() && keyOnFile && (
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                已保存的 Key 不回显（只写不读）；输入新值可覆盖更换
+              </p>
+            )}
             {!key.trim() && keySource && (
               <p className="text-xs leading-relaxed text-muted-foreground">
                 留空将复用「{keySource.name}」已保存的 Key（同一接口地址）

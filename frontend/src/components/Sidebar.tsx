@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   BookOpen,
+  CirclePause,
   Folder,
   LayoutTemplate,
   Library,
@@ -720,13 +721,16 @@ function ConvItem({
       />
     )
   }
-  // 左槽指示：占用中 loader 优先；否则未读圆点。
-  // HITL 等裁决（waiting_input）= 会话级「等待确认」胶囊（右缘），左槽 loader 继续转
-  const indicator = runStatus ? (
-    <Loader variant="classic" size="xs" tone="muted" />
-  ) : unread ? (
-    <span className="unread-dot" />
-  ) : undefined
+  // 左槽指示：running 转圈；waiting_input 是在等用户（不忙），静态暂停符——
+  // 转圈+「等待确认」并存会读成「系统在忙」（2026-09-23 C3）；否则未读圆点。
+  const indicator =
+    runStatus === 'running' ? (
+      <Loader variant="classic" size="xs" tone="muted" />
+    ) : runStatus === 'waiting_input' ? (
+      <CirclePause className="h-3 w-3 text-muted-foreground" aria-label="等待确认" />
+    ) : unread ? (
+      <span className="unread-dot" />
+    ) : undefined
   const badge =
     runStatus === 'waiting_input' ? <span className="wait-pill">等待确认</span> : undefined
   return (

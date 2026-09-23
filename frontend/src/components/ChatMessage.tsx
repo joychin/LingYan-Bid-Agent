@@ -110,6 +110,9 @@ export function DeepThinking({
       </ReasoningTrigger>
       <ReasoningContent contentClassName="border-l-2 border-line pl-3">
         <div ref={scrollRef} className="max-h-72 overflow-y-auto pr-1 text-[13px] leading-relaxed">
+          {/* 过程稿免责一行（2026-09-23 B4）：思考是模型内心戏原样记录（中英混杂、
+              未定稿自言自语），先声明预期再展示，避免被当成正式内容 */}
+          <p className="pb-1 text-xs text-muted-foreground/60">模型过程草稿，非最终内容</p>
           <MemoMarkdown text={display} />
         </div>
       </ReasoningContent>
@@ -179,7 +182,8 @@ export function AssistantMessage({
             {message.traceSteps ? ` · ${message.traceSteps} 步` : ''}
           </ReasoningTrigger>
           <ReasoningContent contentClassName="mt-2 space-y-2">
-            {isMarked && body.trim() && <NarrationLine text={body} />}
+            {/* 标记消息（暂停/中断半截）正文升为消息气泡（2026-09-23 A1 修复：
+                确认门「概况如上」要真的看得到），过程区不再重复一行旁白 */}
             {pauseNarration?.trim() && <NarrationLine text={pauseNarration} />}
             {open && traceQuery.isPending && (
               <div className="flex items-center gap-1.5 py-0.5 text-[13px] text-muted-foreground/70">
@@ -210,7 +214,7 @@ export function AssistantMessage({
           </ReasoningContent>
         </Reasoning>
       )}
-      {!isMarked && (
+      {body.trim() && (
         <div className="bubble">
           <MemoMarkdown text={body} components={markdownComponents} />
         </div>

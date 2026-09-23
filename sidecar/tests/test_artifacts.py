@@ -107,12 +107,24 @@ def test_put_content_flow_no_lease(client):
     assert r.json()["content_seq"] == 2
     assert "用户改后" in client.get(f"/api/artifacts/{aid}/content").text
 
-    # 再保存一次（seq 2 → 3）
-    r = client.put(f"/api/artifacts/{aid}/content", json={"content": updated, "base_content_seq": 2})
-    assert r.status_code == 200 and r.json()["content_seq"] == 3
+    # 正常（非 force）保存同样留恢复点（2026-09-23 A4：此前只有 force 留底，
+    # 纯编辑流里 restore_available 恒 false、「恢复上一版」永不出现）
+    assert client.get("/api/artifacts").json()["artifacts"][0]["restore_available"] is True
+    rr = client.post(f"/api/artifacts/{aid}/restore")
+    assert rr.status_code == 200
+    assert "用户改后" not in client.get(f"/api/artifacts/{aid}/content").text  # 回到发布版
+    # 恢复本身也留底：再恢复一次回到「用户改后」（seq 随每次写入递增，用 meta 对齐基线）
+    assert client.post(f"/api/artifacts/{aid}/restore").status_code == 200
+    assert "用户改后" in client.get(f"/api/artifacts/{aid}/content").text
+    seq = client.get(f"/api/artifacts/{aid}/meta").json()["content_seq"]
+
+    # 再保存一次（seq → seq+1）
+    r = client.put(f"/api/artifacts/{aid}/content", json={"content": updated, "base_content_seq": seq})
+    assert r.status_code == 200
+    seq = r.json()["content_seq"]
 
     # 基于旧 seq 保存 → 409 探测信号（客户端据此弹「拉取最新/保留我的」）
-    r = client.put(f"/api/artifacts/{aid}/content", json={"content": updated, "base_content_seq": 2})
+    r = client.put(f"/api/artifacts/{aid}/content", json={"content": updated, "base_content_seq": seq - 1})
     assert r.status_code == 409
 
     # force：用户裁决保留自己的版本，无条件覆盖，被顶掉的版本留恢复点
@@ -122,18 +134,19 @@ def test_put_content_flow_no_lease(client):
         f"/api/artifacts/{aid}/content",
         json={"content": mine, "base_content_seq": 1, "force": True},
     )
-    assert r.status_code == 200 and r.json()["content_seq"] == 4
+    assert r.status_code == 200
     assert "我的版本" in client.get(f"/api/artifacts/{aid}/content").text
+    final_seq = r.json()["content_seq"]
 
     # 列表带 content_seq 与 restore_available
     a = client.get("/api/artifacts").json()["artifacts"][0]
-    assert a["content_seq"] == 4
+    assert a["content_seq"] == final_seq
     assert a["restore_available"] is True
 
     # schema 破坏始终拒绝（force 也不豁免）
     r = client.put(
         f"/api/artifacts/{aid}/content",
-        json={"content": {"foo": 1}, "base_content_seq": 4, "force": True},
+        json={"content": {"foo": 1}, "base_content_seq": final_seq, "force": True},
     )
     assert r.status_code == 422
 

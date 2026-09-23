@@ -64,10 +64,11 @@ function ChildStep({ step }: { step: ToolStep }) {
           ) : step.summary ? (
             <p className="art-result line-clamp-6 whitespace-pre-wrap break-all">{step.summary}</p>
           ) : isRunning ? (
-            <p className="flex items-center gap-1.5 text-muted-foreground/60">
+            // div 而非 p：Loader 点点是 div，p 内嵌 div 触发 React DOM 嵌套告警（2026-09-23 B6）
+            <div className="flex items-center gap-1.5 text-muted-foreground/60">
               <Loader variant="dots" size="xs" />
               执行中
-            </p>
+            </div>
           ) : null}
         </div>
       </CollapsibleContent>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   TOOL_DISPLAY,
+  formatStepResult,
   skillFileInfo,
   skillStepTitle,
   stepArgLabel,
@@ -51,11 +52,78 @@ describe('skillFileInfo（技能读取判据）', () => {
 })
 
 describe('skillStepTitle', () => {
-  it('SKILL.md 只报技能名，参考文件附文件名主干（不裸露 references/ 路径）', () => {
+  it('SKILL.md 只报技能名，参考文件附段名（不裸露 references/ 路径）', () => {
     expect(skillStepTitle({ label: '投标分析', file: 'SKILL.md' })).toBe('投标分析')
     expect(skillStepTitle({ label: '正文写作', file: 'references/section-writing.md' })).toBe(
       '正文写作 · section-writing',
     )
+  })
+
+  it('已收录段名转中文，未收录回退原名（2026-09-23 C2：中文界面不夹内部文件名）', () => {
+    expect(skillStepTitle({ label: '投标分析', file: 'disqualification.md' })).toBe('投标分析 · 废标条款')
+    expect(skillStepTitle({ label: '共享规范', file: 'response-guidelines.md' })).toBe('共享规范 · 回复规范')
+    expect(skillStepTitle({ label: '投标分析', file: 'requirements-qualification.md' })).toBe(
+      '投标分析 · 资格要求',
+    )
+    expect(skillStepTitle({ label: '投标分析', file: 'requirements-business.md' })).toBe(
+      '投标分析 · 商务技术要求',
+    )
+    expect(skillStepTitle({ label: '正文写作', file: 'references/section-writing.md' })).toBe(
+      '正文写作 · section-writing',
+    )
+  })
+})
+
+describe('formatStepResult（工具结果人话化 2026-09-23 B2/B3）', () => {
+  it('ls 的 Python repr 列表 → 文件清单（剥任务 id 前缀、逐行列出）', () => {
+    expect(
+      formatStepResult(
+        'ls',
+        "['/t_fc25424b8fe2/sources/云澜市-招标文件.docx', '/t_fc25424b8fe2/sources/补遗.docx']",
+      ),
+    ).toBe('· sources/云澜市-招标文件.docx\n· sources/补遗.docx')
+  })
+
+  it('ls 无引号条目（截断文案/其他形态）回退原文', () => {
+    const raw = 'No files found'
+    expect(formatStepResult('ls', raw)).toBe(raw)
+  })
+
+  it('write_file 英文回执 → 中文并剥任务 id；Created 也认', () => {
+    expect(formatStepResult('write_file', 'Updated file /t_abc123/work/analysis/structure.md')).toBe(
+      '已写入 · work/analysis/structure.md',
+    )
+    expect(formatStepResult('write_file', 'Created file /t_abc123/work/outline/fragments/商务.md')).toBe(
+      '已创建 · work/outline/fragments/商务.md',
+    )
+  })
+
+  it('write_file 其他输出（含 diff 等多行形态）原样返回', () => {
+    const raw = 'some other output\nline2'
+    expect(formatStepResult('write_file', raw)).toBe(raw)
+  })
+
+  it('check_pipeline_state：剥模型向首行、段标转中文、剥任务 id；段序保留', () => {
+    const raw = [
+      '[pipeline 状态]（事实汇总，如何继续由技能规则裁决）',
+      '[sources] 未确认（来源确认单不存在）',
+      '[parse] /t_ab12cd34/work/parse/a.docx.md：三件齐备',
+      '[body] 无目录产物（需先 tender-outline 生成）',
+    ].join('\n')
+    expect(formatStepResult('check_pipeline_state', raw)).toBe(
+      [
+        '【来源】未确认（来源确认单不存在）',
+        '【解析】work/parse/a.docx.md：三件齐备',
+        '【正文】无目录产物（需先 tender-outline 生成）',
+      ].join('\n'),
+    )
+  })
+
+  it('check_pipeline_state 无段标的形态回退原文；未覆盖工具原样透传', () => {
+    const raw = '纯文本输出'
+    expect(formatStepResult('check_pipeline_state', raw)).toBe(raw)
+    expect(formatStepResult('read_file', raw)).toBe(raw)
+    expect(formatStepResult('ls', '')).toBe('')
   })
 })
 

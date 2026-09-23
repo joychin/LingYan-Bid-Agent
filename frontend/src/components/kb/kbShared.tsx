@@ -16,11 +16,18 @@ export function isBusy(item: KbItem): boolean {
   )
 }
 
-/** 状态点：解析/整理中转圈 / 待确认橙 / 已确认绿 / 失败红。 */
+/** 状态点：解析/整理中转圈 / 待确认橙（带文字——色点无字含义靠猜，2026-09-23 C4）/
+ *  已确认绿（多数态保持安静）/ 失败红。 */
 export function StatusDot({ item }: { item: KbItem }) {
   if (isBusy(item)) return <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
-  if (item.parse_status === 'failed') return <span className="kb-dot kb-dot--error" title={item.error ?? ''} />
-  if (item.review_status === 'pending_review') return <span className="kb-dot kb-dot--warn" title="待确认" />
+  if (item.parse_status === 'failed')
+    return <span className="kb-dot kb-dot--error" title={item.error ?? '解析失败'} />
+  if (item.review_status === 'pending_review')
+    return (
+      <span className="kb-wait-pill" title="AI 识别建议待人工核对">
+        <span className="kb-dot kb-dot--warn" />待确认
+      </span>
+    )
   return <span className="kb-dot kb-dot--ok" title="已确认" />
 }
 
