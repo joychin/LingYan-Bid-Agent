@@ -509,15 +509,20 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
     `hooks/useThrottledValue`（state 存精确值、只节流渲染层），贴底滚动走 rAF 合并。
     memo 白名单制：`ChatMessage`/`RunTrace`/`SubagentCard`/`MessageList` 的比较器/引用
     稳定性依赖 props 全部为值或稳定引用，**新增 prop 必须同步进比较器**（漏了 = UI 不更新）。
-  - **连续 grep 批次折叠组（2026-09-06）**：RunTrace 显示层把相邻 grep（废标反查词表
-    20 连发）收进 `GrepBatch` 折叠组——「检索 ×N · 命中 H/N」组头 + 词表 chips 折叠态
-    常驻（命中正常色/未命中置灰；命中判定=done 且 summary 非空且 ≠ deepagents
-    'No matches found' 固定文案，提示非门禁）；**旁白/思考非空 = 新轮首个调用即断组**
-    （组数诚实对应模型轮次、旁白常驻组头不被折叠吞掉）；≥2 才成组、单个（自扩词反查）
-    维持普通步骤行；展开后逐个渲染 `ToolStepRow`（参数+结果原样可审计，组首行
-    `embedded` 抑制已上提组头的旁白/思考）。分段纯函数 `traceGroups.ts` + vitest；
-    数据/SSE 契约/runReducer 零改动，活跑与历史 trace 同构生效（勿扩到 read_file——
-    逐章推进感有信息量；子代理 ChildStep 未接）。
+  - **过程面折叠组（grep 批次 2026-09-06；旁白组 2026-09-22）**：RunTrace 显示层分段纯函数
+    `traceGroups.ts` + vitest。`GrepBatch`=相邻 grep（废标反查词表 20 连发）收进「检索 ×N ·
+    命中 H/N」组头 + 词表 chips 折叠态常驻（命中正常色/未命中置灰；命中判定=done 且
+    summary 非空且 ≠ deepagents 'No matches found' 固定文案，提示非门禁）；`PhaseBatch`=
+    模型一句过程旁白领起的普通工具调用收成一张卡（组头=旁白首句截断 40 字+步数+失败计数，
+    「阶段」语义非轮次；WorkBuddy「收集资料」卡对标）。开组/断组：**非空旁白（text）开旁白
+    组并断机械组；思考（reasoning）只在机械组断组**（「组数=轮次」诚实语义保留在机械组，
+    旁白组内思考随行渲染不吞）；**机械折叠（grep/技能加载）优先于旁白组**——词表 chips 是
+    废标审计特性，带旁白的 grep 仍走 grep 批、旁白常驻其组头；task/ask_human 关一切组。
+    各组 ≥2 才成组、单个降级普通步骤行；展开后逐个渲染 `ToolStepRow`（参数+结果原样可审计，
+    `embedded` 抑制已上提的旁白/思考）；活跑 useAutoCollapse 聚合状态（组内有 running 步
+    默认展开、全完成自动收起；历史 trace 步骤恒终态=天然默认收起）。数据/SSE 契约/
+    runReducer 零改动，活跑与历史 trace 同构生效（无旁白的 read_file 维持平铺——逐章推进感
+    有信息量；子代理 children 步骤永无旁白，ChildStep 不接分组）。
   - UI 全手写、**零 radix/cva**：`components/ui/` 是 shadcn 风格基础件
     （button/dialog/input/collapsible/hover-card），`collapsible.tsx` 支持透传 data-*。
     `components/ai/` 是从 prompt-kit 移植的 AI 组件（Loader/TextShimmer/PromptSuggestion/

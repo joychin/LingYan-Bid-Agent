@@ -31,7 +31,7 @@ function plainRead(path = 't_x/work/parse/a.docx.md', over: Partial<ToolStep> = 
 /** 段落形状速记：组带数量、单步骤只带工具名，便于整列断言 */
 function shape(segments: TraceSegment[]): string[] {
   return segments.map((s) =>
-    s.kind === 'ask' || s.kind === 'grep' || s.kind === 'skill'
+    s.kind === 'ask' || s.kind === 'grep' || s.kind === 'skill' || s.kind === 'phase'
       ? `${s.kind}(${s.steps.length})`
       : `${s.kind}:${s.step.tool}`,
   )
@@ -188,5 +188,80 @@ describe('segmentToolSteps · 技能加载组', () => {
       'tool:read_file',
       'tool:read_file',
     ])
+  })
+})
+
+describe('segmentToolSteps · 旁白分组', () => {
+  it('旁白开组：混合普通工具（read/write_todos/llm_retry/检索类）空 text 随组', () => {
+    const steps = [
+      plainRead('work/outline.json', { text: '我先看 outline.json 定位第 3 节行号。' }),
+      plainRead('work/parse/a.docx.md'),
+      step('write_todos'),
+      step('llm_retry'),
+      step('search_references'),
+    ]
+    expect(shape(segmentToolSteps(steps))).toEqual(['phase(5)'])
+  })
+
+  it('机械折叠优先：grep 出现关旁白组并自成批（词表 chips 审计特性不让位）', () => {
+    const steps = [
+      step('ls', { text: '先摸一下任务目录结构。' }),
+      step('write_file'),
+      grep('无效'),
+      grep('否决'),
+    ]
+    expect(shape(segmentToolSteps(steps))).toEqual(['phase(2)', 'grep(2)'])
+  })
+
+  it('带旁白的 grep 仍走 grep 批（旁白常驻组头，行为不变）', () => {
+    expect(shape(segmentToolSteps([grep('无效', { text: '开始废标条款反查' }), grep('否决')]))).toEqual(
+      ['grep(2)'],
+    )
+  })
+
+  it('中段新旁白开新组', () => {
+    const steps = [
+      plainRead('a.md', { text: '第一段：确认目录。' }),
+      plainRead('b.md'),
+      plainRead('c.md', { text: '换第二段：核对评分。' }),
+      plainRead('d.md'),
+    ]
+    expect(shape(segmentToolSteps(steps))).toEqual(['phase(2)', 'phase(2)'])
+  })
+
+  it('组内思考不拆组（只有旁白开组，reasoning 随行渲染）', () => {
+    const steps = [
+      plainRead('a.md', { text: '开始分析。' }),
+      step('write_todos', { reasoning: '先列个清单' }),
+      plainRead('b.md'),
+    ]
+    expect(shape(segmentToolSteps(steps))).toEqual(['phase(3)'])
+  })
+
+  it('task 关组并透传，其后无旁白的步骤维持普通行', () => {
+    const steps = [plainRead('a.md', { text: '开始。' }), plainRead('b.md'), step('task'), plainRead('c.md')]
+    expect(shape(segmentToolSteps(steps))).toEqual(['phase(2)', 'task:task', 'tool:read_file'])
+  })
+
+  it('ask_human 关组收问答组', () => {
+    const steps = [plainRead('a.md', { text: '开始。' }), plainRead('b.md'), step('ask_human'), plainRead('c.md')]
+    expect(shape(segmentToolSteps(steps))).toEqual(['phase(2)', 'ask(1)', 'tool:read_file'])
+  })
+
+  it('技能读出现关旁白组（含恰 1 步降级为普通行）', () => {
+    const steps = [plainRead('a.md', { text: '开始。' }), skillRead('b/SKILL.md'), skillRead('c/SKILL.md')]
+    expect(shape(segmentToolSteps(steps))).toEqual(['tool:read_file', 'skill(2)'])
+  })
+
+  it('恰 1 步旁白组降级：一句旁白只带一个动作维持普通步骤行', () => {
+    expect(shape(segmentToolSteps([plainRead('a.md', { text: '只查一处。' }), grep('无效')]))).toEqual([
+      'tool:read_file',
+      'tool:grep',
+    ])
+  })
+
+  it('无旁白 read 连读维持平铺（逐章推进感拍板防线）', () => {
+    const steps = Array.from({ length: 6 }, (_, i) => plainRead(`work/f${i}.md`))
+    expect(shape(segmentToolSteps(steps))).toEqual(Array.from({ length: 6 }, () => 'tool:read_file'))
   })
 })
