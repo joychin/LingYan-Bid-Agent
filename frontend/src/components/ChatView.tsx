@@ -157,6 +157,14 @@ export function ChatView({
     setThinking(level)
     localStorage.setItem(LS_THINKING, level)
   }, [])
+  // 强制贴底：发送 / HITL 提交 / 断点续跑 = 用户明确要看新内容，不受「上滚让位」
+  // 拦截，发起瞬间直接回底。useCallback 稳定引用——wizardNav/doSend/interruptAction
+  // 的 memo 依赖数组都收它，须声明在这些使用者之前
+  const jumpToBottom = useCallback(() => {
+    atBottom.current = true
+    setShowJump(false)
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
+  }, [])
   // 模型选中（多模型 profile）：按会话粘性——会话里选过就一直用，新会话/无记录时
   // 用上次使用（无则 undefined=服务器 default）。ChatView 持有同 thinking 先例
   const [model, setModel] = useState<string | undefined>(() => {
@@ -350,13 +358,14 @@ export function ChatView({
             : { type: 'approve' as const }
         })
         // 成功续跑才 acknowledge：失败（网络/非 409）时草稿与 chips 原样保留，可重新提交
+        jumpToBottom()
         const resumed = await decide(decisions)
         if (fileNote && resumed) acknowledgeUploads(freshFiles.map((f) => f.id))
         return
       }
       setStepIndex(stepIndex + 1)
     },
-    [interrupt, stepIndex, stepDrafts, freshFiles, decide, toast, acknowledgeUploads],
+    [interrupt, stepIndex, stepDrafts, freshFiles, decide, toast, acknowledgeUploads, jumpToBottom],
   )
 
   // memo 化 MessageList 的前提：三个 prop 引用都必须稳定（流式 token 期间 messages
@@ -422,10 +431,11 @@ export function ChatView({
   const doSend = useCallback(
     async (text: string) => {
       if (!convId || running) return
+      jumpToBottom()
       // 失败向上抛：useRun 已置错误卡，InputComposer 据此保留输入与新上传 chips
       await send(text, thinking, model)
     },
-    [convId, running, send, thinking, model],
+    [convId, running, send, thinking, model, jumpToBottom],
   )
 
   // 历史中断回合的一键续接入口（2026-09-12）：错误卡是内存态、刷新即消失，转录里
@@ -458,7 +468,7 @@ export function ChatView({
       run.error_code &&
       RESUMABLE_ERROR_CODES.includes(run.error_code)
     ) {
-      return { label: '从断点继续', onRun: () => void continueRun(run.id) }
+      return { label: '从断点继续', onRun: () => { jumpToBottom(); void continueRun(run.id) } }
     }
     const text = lastInstruction || lastInstructionText(messages)
     if (!text.trim()) return null
@@ -473,10 +483,14 @@ export function ChatView({
     lastInstruction,
     doSend,
     continueRun,
+    jumpToBottom,
   ])
 
   // 流式自动贴底；用户上滚则停止贴底。rAF 合并同帧多次触发：scrollHeight 读取
-  // 强制同步布局，一帧最多一次（token 突发时不再逐 token 打断合成器）
+  // 强制同步布局，一帧最多一次（token 突发时不再逐 token 打断合成器）。
+  // ⚠️ scrollTo 必须保持瞬时（勿加 behavior:'smooth'）：滚动动画期间连续触发的
+  // scroll 事件会被 handleScroll 误判为用户脱离底部，贴底当场断掉；各发起入口的
+  // 强制贴底（jumpToBottom）也依赖瞬时滚动即时落位。
   useEffect(() => {
     if (!atBottom.current) return
     const raf = requestAnimationFrame(() => {
@@ -492,12 +506,6 @@ export function ChatView({
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
     atBottom.current = nearBottom
     setShowJump(!nearBottom)
-  }
-
-  const jumpToBottom = () => {
-    atBottom.current = true
-    setShowJump(false)
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }
 
   return (
@@ -569,7 +577,10 @@ export function ChatView({
                   onOpenSettings={onOpenSettings}
                   onContinue={
                     runId && errorCode && RESUMABLE_ERROR_CODES.includes(errorCode)
-                      ? () => void continueRun(runId)
+                      ? () => {
+                          jumpToBottom()
+                          void continueRun(runId)
+                        }
                       : undefined
                   }
                 />
@@ -625,7 +636,10 @@ export function ChatView({
                 ) : (
                   <InterruptCard
                     requests={interrupt.requests}
-                    onDecide={(d) => void decide(d)}
+                    onDecide={(d) => {
+                      jumpToBottom()
+                      void decide(d)
+                    }}
                     onOpenWorkbench={onOpenWorkbench}
                     onAbandon={() => void cancel()}
                   />
