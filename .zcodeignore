@@ -1,0 +1,114 @@
+# 灵燕智能 monorepo — 按工程技术栈分层的 .gitignore
+# 依赖锁文件一律入库（package-lock.json / uv.lock / Cargo.lock），不要忽略。
+
+# ─── 根目录 / npm 编排 ────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+lerna-debug.log*
+
+# ─── frontend/：React 19 + Vite + TypeScript + Tailwind ──
+dist/
+dist-ssr/
+build/
+*.local
+*.tsbuildinfo
+.vite/
+coverage/
+
+# ─── sidecar/：Python 3.12 + uv + FastAPI + pytest ───────
+.venv/
+# PyInstaller 冻结用的独立构建环境（uv 管的 python-build-standalone，见 build_sidecar.sh；
+# .build-venv=本机平台，.build-venv-<arch>=同 OS 跨架构构建用）
+.build-venv*/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/
+
+# ─── 本地运行时数据（SQLite / workspace / 产物目录，绝不入库）─
+sidecar/data/
+# 演示录制换出的真实数据备份（demo/record_env.sh，绝不入库）
+sidecar/data.real/
+
+# ─── 演示录制数据包（demo/）──────────────────────────────
+# 灌好的演示数据目录与脚本运行时状态文件（生成脚本/虚构文档 assets/ 保留入库可复用）
+demo/demo-data/
+demo/.real-data.manifest
+demo/.tauri.conf.json.orig
+
+# ─── src-tauri/：Tauri 2 / Rust（Cargo.lock 保留入库）─────
+src-tauri/target/
+src-tauri/gen/
+# PyInstaller 冻结产物（build_sidecar.sh 生成，tauri externalBin 捆绑，构建期存在即可）
+src-tauri/binaries/
+
+# ─── 环境变量 / 密钥（.env.example 保留模板）──────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ─── 日志 / 测试工具缓存 ──────────────────────────────────
+*.log
+logs/
+.playwright-mcp/
+
+# ─── 回复风格测量快照（measure_reply_style.py 的落盘产物）──
+sidecar/scripts/reply_style_*.json
+
+# ─── 根目录散落的调试截图（真实图片资产应放 frontend/ 内）──
+/*.png
+
+# ─── 操作系统 / 编辑器 / 工具会话目录 ──────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.zcode/
+*.swp
+*.swo
+*~
+gui-test-screenshots/
+docs/screenshots/
+docs/prototypes/
+kb-test/
+kb_test_material/
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+bower_components/
+jspm_packages/
+site-packages/
+venv/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

@@ -84,3 +84,7 @@ gui-test-screenshots/
 docs/prototypes/
 kb-test/
 kb_test_material/
+# 本地测试/工具产物目录（视频插件会话目录、根目录 out/ 产物；AGENTS.md 备案的本地目录族）
+/out/
+/.v2c/
+/.video_agent/

@@ -35,6 +35,13 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
 
 （产品官网已迁出本仓，独立工程维护；原 `website/` 静态页见 git 历史 6643b4f。）
 
+其余顶层目录：`demo/`（演示录制脱敏数据包，全虚构主体「星灵创科/云澜市」；
+`record_env.sh on|off` 用整目录换出/还原 `sidecar/data/` 的方式切真实态与演示态、
+配方在 `demo/README.md`——**演示态里别干真活**，演示态期间的写入随 off 一并销毁；
+`seed_demo.py` 灌库一次、可反复 on 复录）；`scripts/`（`set_version.py` 版本号覆写、
+`upload_release_oss.cjs` 发版 OSS 直传）。`kb-test/`、`gui-test-screenshots/`、`out/`
+等是 gitignore 的本地测试/产物目录，不属仓库结构。
+
 三条铁律：
 
 1. **Rust 不含任何业务逻辑。**
@@ -475,8 +482,10 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
     macOS universal=两个 triple 产物放 binaries/ + `tauri build --target
     universal-apple-darwin`（x86_64 半边可在 arm 机 Rosetta 构建）；Linux /tmp noexec
     需 `--runtime-tmpdir`。签名/公证/CI/自动更新器=后续门未做。
-    **版本号唯一真源=`src-tauri/tauri.conf.json`**（CI 从 tag 同步；前端 `__APP_VERSION__`
-    由 vite 从它注入，2026-09-15 前读 package.json 的恒 0.0.0——check.sh 有五处一致性守卫）。
+    **版本号唯一真源=`src-tauri/tauri.conf.json`**（release job 在构建机内由
+    `scripts/set_version.py` 从 tag 覆写，CI 不回写仓库；前端 `__APP_VERSION__` 由 vite
+    从它注入——check.sh 有五处一致性守卫。**本地 dev/自建包恒显示 0.1.0=设计内非 bug**，
+    更新红点永不消失也是同源；本地要改显示须手动跑 set_version 再还原，别去「修」它）。
     **客户端版本检查+更新提示一期**（2026-09-15，Rust 两命令 `check_latest_version`/
     `open_download_page` + 前端 `lib/updateCheck.ts`，详情与更新源三层取值见
     docs/packaging.md §9）：应用内自动更新是二期、与签名公证绑定。**发版除推 tag 外
