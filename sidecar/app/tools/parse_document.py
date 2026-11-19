@@ -26,6 +26,7 @@ outline 记录每个标题的行号区间（大文件按区段精读的定位索
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,45 @@ from ..parse.image import IMAGE_EXTS
 
 _MIN_TEXT_CHARS = 100  # 低于此值视为转换失败（扫描件/损坏文件）
 _CLOUD_ONLY_EXTS = {".doc"}  # 本地注册表不收、云端文档解析专属的格式
+
+
+def _artifacts_digest(md_path: Path, outline_path: Path) -> str | None:
+    """产物（md+outline 字节）摘要——产物侧完整性登记，与源文件 sha256 分开记账。"""
+    h = hashlib.sha256()
+    for p in (md_path, outline_path):
+        if not p.is_file():
+            return None
+        h.update(p.name.encode("utf-8"))
+        h.update(p.read_bytes())
+    return h.hexdigest()
+
+
+def _outline_max_end(nodes: list) -> int:
+    mx = 0
+    for n in nodes:
+        try:
+            mx = max(mx, int(n.get("end_line", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+        mx = max(mx, _outline_max_end(n.get("children") or []))
+    return mx
+
+
+def _artifacts_stale(md_path: Path, outline_path: Path, old: dict) -> str | None:
+    """产物对账：哈希与登记一致 + outline 行号不越界。返回 None=可沿用，否则返回
+    重建缘由（产品内 parse/ 前后端只读，此处防的是绕过产品的文件系统直改与
+    手工恢复的残缺产物——行号错位会让 copy/inject 静默拷错区间）。"""
+    registered = old.get("artifacts_sha256")
+    if not registered or registered != (_artifacts_digest(md_path, outline_path) or ""):
+        return "解析产物与登记不一致（可能被外部改动）"
+    try:
+        outline = json.loads(outline_path.read_text(encoding="utf-8"))
+    except ValueError:
+        return "outline.json 损坏"
+    n_lines = len(md_path.read_text(encoding="utf-8", errors="replace").splitlines())
+    if _outline_max_end(outline) > n_lines:
+        return f"outline 行号越界（> md 实际 {n_lines} 行）"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -132,23 +172,28 @@ def parse_document(path: str) -> str:
         outline_path = out_dir / f"{src.name}.outline.json"
         meta_path = out_dir / f"{src.name}.meta.json"
 
-        # 幂等：同 hash 且产物齐备则跳过
+        # 幂等：同 hash + 产物齐备 + 产物与登记一致（产物侧哈希 + outline 行号不越界）
+        # 才跳过（2026-11-19 加固：源文件不变但产物被外部改动时行号会错位，copy/inject
+        # 静默拷错区间——行号是证据链的寻址基准；不一致时重建并注明缘由）
         if meta_path.is_file() and md_path.is_file() and outline_path.is_file():
             try:
                 old = json.loads(meta_path.read_text(encoding="utf-8"))
             except ValueError:
                 old = {}
             if old.get("sha256") == digest:
-                rel = out_dir.relative_to(workspace_dir())
-                return "\n".join(
-                    _summary_lines(
-                        f"[解析跳过] {src.name} 内容未变化（sha256 一致），沿用已有产物：{rel}/",
-                        src.name,
-                        rel,
-                        old,
-                        usage_hint=False,
+                stale_reason = _artifacts_stale(md_path, outline_path, old)
+                if stale_reason is None:
+                    rel = out_dir.relative_to(workspace_dir())
+                    return "\n".join(
+                        _summary_lines(
+                            f"[解析跳过] {src.name} 内容未变化（sha256 一致），沿用已有产物：{rel}/",
+                            src.name,
+                            rel,
+                            old,
+                            usage_hint=False,
+                        )
                     )
-                )
+                print(f"[解析重建] {src.name} {stale_reason}——源文件未变，重新解析并恢复产物")
 
         # 解析路由：图片/.doc 走云端文档解析（未配置则明确拒绝）；其余走本地注册表，
         # PDF 文本层过薄（扫描件）时若有云端配置则整本替换解析（幂等检查已在前面，
@@ -204,12 +249,14 @@ def parse_document(path: str) -> str:
 
         out_dir.mkdir(parents=True, exist_ok=True)
         # 三件套原子写（md → outline → meta，meta 最后写=提交标记）：中断不留
-        # 截断产物，幂等检查（三件齐 + sha 一致）看到的要么是完整旧轮要么是完整新轮
+        # 截断产物，幂等检查（三件齐 + sha 一致 + 产物哈希一致）看到的要么是完整
+        # 旧轮要么是完整新轮
         write_atomic(md_path, md_text)
         write_atomic(outline_path, json.dumps(outline, ensure_ascii=False, indent=2))
         meta = {
             "source": src.name,
             "sha256": digest,
+            "artifacts_sha256": _artifacts_digest(md_path, outline_path) or "",
             "bytes": src.stat().st_size,
             "conversion": info["conversion"],
             "chars": len(md_text),

@@ -17,15 +17,19 @@
   为 P 段号、表格行为 T{t}R{r}（与 docx_section_read 视图互查），md 节仍为 L 行号
   （旧任务兼容：md 无批注能力，内联占位维持清点不判不过）
 - 全局（section="body"）：承诺清单（关键事实与承诺.md 的「事项｜值」表）每个值
-  是否落进任意正文节——去空白归一化子串匹配，未落正文点名（该节未写/值被改写）；
-  节间两两查重（归一化 shingle 交集/较小方 ≥50% 点名——同一素材进多节或原文
-  照搬，独立于承诺清单跑）；「整本-」合册产物不参与（派生产物）；反向「正文
-  出现与清单不一致的值」属语义审阅，不在此判
+  是否落进任意正文节——去空白归一化子串匹配，未落正文点名（该节未写或值被改写）；
+  承诺旧值残留（_meta/承诺快照.json diff——清单值变更后旧值仍在正文的点名）；
+  节间两两查重（剔样板+按册分组+封面退出后，shingle 交集/较小方 ≥50% 点名——
+  同一素材进多节或原文照搬，独立于承诺清单跑）；「整本-」合册产物不参与
+  （派生产物）；「正文出现与清单无关的值」属语义审阅，不在此判
 """
 
 from __future__ import annotations
 
+import json
+import math
 import re
+from collections import Counter
 from pathlib import Path, PurePosixPath
 
 from docx import Document
@@ -467,35 +471,63 @@ def _figure_plan_reconcile(doc, p: Path, body_root: Path) -> list[str]:
 def _section_dup_warnings(body_dir: Path, sections: list[Path], finals: list[str]) -> list[str]:
     """节间两两查重：同一素材块进多节、或一节原文照搬另一节（2026-09-08 实测：
     同一 625 段素材块全文进了「总体建设方案」与「系统集成方案」两节）。
-    重叠率 = 归一化 shingle 交集 / 较小方；短节（<5 shingle，承诺行级别）跳过；
-    提示不是门禁——收尾前逐对裁决（拆块或改写）。"""
-    sigs: list[tuple[str, set[str]]] = []
-    for q, text in zip(sections, finals, strict=True):
-        sh = _shingles(_normalize(text))
-        if len(sh) < 5:
-            continue
-        sigs.append((q.relative_to(body_dir).with_suffix("").as_posix(), sh))
+
+    三道防误报闸（2026-11-19，真实项目复盘：15 份格式件因共享落款/格式套语
+    互报 24 处「重叠」全是误报——校验误报三次后人就不再信校验）：
+    ① 样板剔除：出现在 ≥max(3, ⌈节数/3⌉) 节的 10 字 shingle 视为落款/格式
+       套语，从各节特征中剥掉（落款类样板常只覆盖半数节——多册中格式件有、
+       技术节没有；⌈n/3⌉ 档实测误报趋零且真重叠保留：真拷贝对几乎总是恰好
+       两节共享，与样板阈值之间留有判别空间）；
+    ② 长度门槛：剔样板后有效特征 <30 的节对（短格式件）不参与——防「短节
+       被长节包含」拉高比率；
+    ③ 按册分组 + 封面/目录退出比对：多册一级目录各自成组、跨册不比（跨册
+       同名材料是目录阶段已裁量的边界）；封面按册仅一份且模板性强（多册封面
+       拷同一份招标样例区间），互比必高重叠。
+    重叠率 = 剔样板后 shingle 交集 / 较小方；提示不是门禁——收尾前逐对裁决。"""
+    pool = [
+        (q, text)
+        for q, text in zip(sections, finals, strict=True)
+        if q.stem not in ("封面", "目录")
+    ]
+    if len(pool) < 2:
+        return []
+    counts: Counter[str] = Counter()
+    for _, text in pool:
+        counts.update(_shingles(_normalize(text)))
+    boiler_floor = max(3, math.ceil(len(pool) / 3))
+    boiler = {s for s, c in counts.items() if c >= boiler_floor}
+    groups: dict[str, list[tuple[str, set[str]]]] = {}
+    for q, text in pool:
+        sh = _shingles(_normalize(text)) - boiler
+        rel = q.relative_to(body_dir)
+        gname = rel.parts[0] if len(rel.parts) > 1 else "."
+        groups.setdefault(gname, []).append((rel.with_suffix("").as_posix(), sh))
     warns: list[str] = []
-    for i in range(len(sigs)):
-        for j in range(i + 1, len(sigs)):
-            (na, sa), (nb, sb) = sigs[i], sigs[j]
-            ratio = len(sa & sb) / min(len(sa), len(sb))
-            if ratio >= _DUP_RATIO:
-                warns.append(
-                    f"节间疑似重复：「{na}」与「{nb}」内容重叠约 {ratio:.0%}——"
-                    "同一素材进多节或原文照搬；对照写作指引素材列，拆块或改写"
-                )
+    for sigs in groups.values():
+        for i in range(len(sigs)):
+            for j in range(i + 1, len(sigs)):
+                (na, sa), (nb, sb) = sigs[i], sigs[j]
+                if min(len(sa), len(sb)) < 30:
+                    continue
+                ratio = len(sa & sb) / min(len(sa), len(sb))
+                if ratio >= _DUP_RATIO:
+                    warns.append(
+                        f"节间疑似重复：「{na}」与「{nb}」内容重叠约 {ratio:.0%}——"
+                        "同一素材进多节或原文照搬；对照写作指引素材列，拆块或改写"
+                    )
     return warns
 
 
 def _validate_body_global(body_dir: Path) -> str:
-    """全局收尾比对：承诺清单的每个值是否落进了正文（单向：清单→正文）+ 节间查重。
+    """全局收尾比对：承诺清单的每个值是否落进了正文（清单→正文）+ 承诺旧值残留
+    （快照 diff：清单值变更后旧值仍在正文的自动点名）+ 节间查重（样板剔除/按册
+    分组，见 _section_dup_warnings）。
 
     匹配 = 去空白归一化后的子串（「90 天」↔「90天」视为一致）；未在任何正文节
     出现的值点名提示（该节未写或值被改写，核对后补落正文或修正清单）。节间查重
     独立于承诺清单（清单缺失/格式不对也照跑——两节大面积重叠才是它要抓的事）。
-    全部为提示级——提示不是门禁；反向「正文出现与清单不一致的值」属语义审阅，
-    不在此判。
+    全部为提示级——提示不是门禁；旧值残留只比对快照里消失的值（机械可判定），
+    「正文出现与清单无关的值」仍属语义审阅，不在此判。
     """
     # 节文件收 .docx（现役形态）与 .md（旧任务兼容）；同名并存去重（docx 排序序
     # 在前=新形态优先）；整本产物恒落 body 根层（合册约定）——只排除根层
@@ -564,20 +596,50 @@ def _validate_body_global(body_dir: Path) -> str:
         else:
             texts = [re.sub(r"\s+", "", t) for t in finals]
             placed = 0
+            unplaced = 0
+            current_vals: set[str] = set()
             for lineno, item, val in rows:
                 key = re.sub(r"\s+", "", val)
                 if len(key) < 2:
                     continue
+                current_vals.add(key)
                 if any(key in t for t in texts):
                     placed += 1
                 else:
+                    unplaced += 1
                     warn_lines.append(
                         f"关键事实与承诺.md:{lineno} 「{item}={val}」未在任何正文出现"
                         "——该节未写或值被改写，核对后补落正文或修正清单"
                     )
+            # 承诺快照（2026-11-19）：清单值变更时旧值自动纳入残留检测——「清单
+            # 改 28→20 人、正文还写着 28 人」这类事实漂移，旧值靠人记得传名单才查
+            # 得到（2026-11 真实项目：团队 28→20→21 人联动 22 处正文，逐处人工）。
+            # 快照落任务 _meta/（程序内部态，UI 不展示）；首跑建档无旧值可比。
+            snap_path = body_dir.parent.parent / "_meta" / "承诺快照.json"
+            prev_vals: set[str] | None = None
+            try:
+                if snap_path.is_file():
+                    prev_vals = set(json.loads(snap_path.read_text(encoding="utf-8")))
+            except Exception:
+                prev_vals = None
+            if prev_vals:
+                for old in sorted(prev_vals - current_vals):
+                    for q, text in zip(sections, finals, strict=True):
+                        if old in re.sub(r"\s+", "", text):
+                            warn_lines.append(
+                                f"承诺旧值残留：「{old}」仍在正文 "
+                                f"{q.relative_to(body_dir).with_suffix('')}——承诺清单已更新，该处未同步"
+                            )
+            try:
+                snap_path.parent.mkdir(parents=True, exist_ok=True)
+                snap_path.write_text(
+                    json.dumps(sorted(current_vals), ensure_ascii=False), encoding="utf-8"
+                )
+            except Exception:
+                pass  # 快照写失败不阻塞校验（下次重建档）
             promise_summary = (
                 f"，承诺 {len(rows)} 项比对，{placed} 项已落正文"
-                + (f"，{len(warn_lines)} 项未落正文" if warn_lines else "")
+                + (f"，{unplaced} 项未落正文" if unplaced else "")
             )
     warn_lines.extend(dup_warns)
     if broken:

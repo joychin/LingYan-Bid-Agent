@@ -569,3 +569,20 @@ def test_write_atomic_replaces_and_cleans_tmp(tmp_path):
     write_atomic(p, "v2-longer-content")
     assert p.read_text(encoding="utf-8") == "v2-longer-content"
     assert list(p.parent.glob("*.tmp")) == []
+
+
+def test_artifacts_tamper_triggers_rebuild(ws, capsys):
+    """产物完整性对账（2026-11-19）：源文件不变但 md 被外部改动时，幂等不再
+    静默沿用坏产物——重建并注明缘由（行号是 copy/inject 的寻址基准，错位会
+    静默拷错区间）；恢复后再跑回到幂等跳过。"""
+    _make_docx(ws / "招标文件.docx")
+    assert parse_document.invoke({"path": "招标文件.docx"}).startswith("[解析成功]")
+    base = _out_parse(ws) / "招标文件.docx"
+    md = base / "招标文件.docx.md"
+    md.write_text(md.read_text(encoding="utf-8") + "\n外部编辑痕迹", encoding="utf-8")
+    capsys.readouterr()
+    r = parse_document.invoke({"path": "招标文件.docx"})
+    assert r.startswith("[解析成功]")  # 重建而非跳过
+    assert "解析重建" in capsys.readouterr().out
+    assert "外部编辑痕迹" not in md.read_text(encoding="utf-8")  # 产物已恢复
+    assert parse_document.invoke({"path": "招标文件.docx"}).startswith("[解析跳过]")

@@ -3342,3 +3342,38 @@ def test_sanitize_name_leading_dot():
     assert sanitize_name("///") == "未命名"
     assert sanitize_name("A/B:方案") == "A B 方案"
     assert sanitize_name("技术部分") == "技术部分"  # 无前导点照旧
+
+
+def test_image_exif_orientation_normalized():
+    """EXIF 方向归一（2026-11-19）：手机竖拍证件照（Orientation 5-8）原字节直插
+    会横躺进文档——插入前 exif_transpose 转正并消标记；无 EXIF 原样返回。"""
+    import io
+
+    from PIL import Image as PILImage
+
+    from app.tools.docx_ops import _exif_normalized
+
+    img = PILImage.new("RGB", (400, 200), (200, 30, 30))
+    exif = img.getexif()
+    exif[274] = 6  # 顺时针 90°
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", exif=exif)
+    fixed = _exif_normalized(buf.getvalue(), ".jpg")
+    with PILImage.open(io.BytesIO(fixed)) as im:
+        assert im.size == (200, 400)  # 已按 orientation 转置
+        assert im.getexif().get(274) in (None, 1)  # 方向标记已消
+    plain = io.BytesIO()
+    img.save(plain, format="JPEG")
+    assert _exif_normalized(plain.getvalue(), ".jpg") == plain.getvalue()
+
+
+def test_gantt_unit_header_follows_spec():
+    """甘特横轴单位（2026-11-19）：unit 可配（周/日/月…），表头缩写跟随单位——
+    30 天工期按日排不再头顶硬编码的 W1。"""
+    from app.tools.docx_ops import _grid_gantt
+
+    tasks = [{"name": "开发", "start": 1, "end": 2}]
+    grid_w, _ = _grid_gantt(tasks, 2, [], "周")
+    grid_m, _ = _grid_gantt(tasks, 2, [], "月")
+    assert [c["text"] for c in grid_w[0]] == ["任务", "W1", "W2"]
+    assert [c["text"] for c in grid_m[0]] == ["任务", "M1", "M2"]

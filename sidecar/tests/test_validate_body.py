@@ -769,3 +769,62 @@ def test_guide_old_five_columns_still_valid(env):
     )
     r = validate_body.invoke({"section": "body/写作指引.md"})
     assert r.startswith("[校验通过]") or "图示" not in r
+
+
+def test_global_dup_boilerplate_stripped_true_pair_kept(env):
+    """样板剔除+真对保留（2026-11-19，真实项目复盘：15 份格式件因共享落款互报
+    24 处「重叠」全是误报）：出现于 ≥max(3, ⌈节数/3⌉) 节的 shingle 视为落款/
+    格式套语剥掉；恰好两节共享的独有正文照报。"""
+    boiler = (
+        "投标人（盖章）：星灵科技有限公司  法定代表人或授权代表（签字）：　　　　"
+        "  日期：　　年　　月　　日  地址：星洲大道88号  电话：010-8888 6666"
+    ) * 2
+    for i in range(1, 4):
+        _write_body(env, f"body/格式{i}节.md", f"{boiler}\n\n第{i}节独有内容。")
+    shared_unique = (
+        "本方案针对招标文件第五章采购需求逐条响应，覆盖门户、受理、监察、交换、"
+        "认证五个子系统的运维保障与功能升级，形成巡检告警处置复盘的闭环管理，"
+    ) * 4
+    _write_body(env, "body/真对甲.md", f"甲引言。\n{shared_unique}")
+    _write_body(env, "body/真对乙.md", f"乙引言。\n{shared_unique}")
+    r = validate_body.invoke({"section": "body"})
+    assert "「真对乙」与「真对甲」内容重叠" in r  # 池内按文件名排序，乙序在前
+    assert "格式1节」与「格式2节" not in r
+
+
+def test_global_dup_cross_volume_and_cover_not_compared(env):
+    """按册分组+封面退出比对（2026-11-19）：跨册同名材料是目录阶段裁量的边界、
+    不互比；封面按册仅一份且模板性强（多册拷同一份招标样例），退出节间比对。"""
+    cover_text = "某项目投标文件\n星灵科技有限公司\n二〇二六年十一月"
+    _write_body(env, "body/商务册/封面.md", cover_text)
+    _write_body(env, "body/技术册/封面.md", cover_text)
+    cross = "跨册同文的授权声明内容，用于验证分册分组语义边界。" * 8
+    _write_body(env, "body/商务册/授权书.md", cross)
+    _write_body(env, "body/技术册/授权书.md", cross)
+    r = validate_body.invoke({"section": "body"})
+    assert "节间疑似重复" not in r
+    pair = (
+        "商务册内部两节共享了大段完全相同的实施方案内容，覆盖组织架构、"
+        "进度计划、质量保证与风险管理四部分，应当被节间查重点名并拆改。"
+    ) * 4
+    _write_body(env, "body/商务册/实施一.md", pair)
+    _write_body(env, "body/商务册/实施二.md", pair)
+    r2 = validate_body.invoke({"section": "body"})
+    assert "「商务册/实施一」与「商务册/实施二」内容重叠" in r2
+    assert "封面」与「" not in r2 and "与「商务册/封面」" not in r2
+
+
+def test_global_promise_snapshot_flags_stale_old_value(env):
+    """承诺快照（2026-11-19）：清单值变更后旧值仍残留正文的自动点名——「清单改
+    28→20 人、正文还写 28 人」的事实漂移，旧值检测从「人记得传名单」变机械。"""
+    _write_body(env, "body/关键事实与承诺.md",
+                "| 事项 | 值 | 说明 |\n|---|---|---|\n| 团队规模 | 28 人 | 拍板 |\n")
+    _write_body(env, "body/3.1 团队.md", "项目团队共 28 人，其中驻场 4 名。\n")
+    r1 = validate_body.invoke({"section": "body"})  # 首跑建档（_meta/承诺快照.json）
+    assert "承诺旧值残留" not in r1
+    _write_body(env, "body/关键事实与承诺.md",
+                "| 事项 | 值 | 说明 |\n|---|---|---|\n| 团队规模 | 20 人 | 拍板 |\n")
+    _write_body(env, "body/3.2 口径.md", "团队规模按 20 人口径配置岗位。\n")
+    r2 = validate_body.invoke({"section": "body"})
+    assert "承诺旧值残留：「28人」仍在正文 3.1 团队" in r2
+    assert "项未落正文" not in r2  # 20 人已落正文；旧值残留不计入未落数（独立计数）

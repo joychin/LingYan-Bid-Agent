@@ -2006,6 +2006,27 @@ def _place_after_anchor(doc: Document, p_el, after: str, label: str) -> tuple[st
     return None, "节末"
 
 
+def _exif_normalized(data: bytes, suffix: str) -> bytes:
+    """EXIF 方向归一（2026-11-19）：手机竖拍证件照常带 Orientation 5-8，python-docx
+    原字节直插会横躺进文档；Pillow exif_transpose 转正后按原格式回写。
+    无 EXIF/无方向标签/Pillow 缺失时原样返回（PDF 渲染 PNG 无此问题）。"""
+    if suffix not in (".jpg", ".jpeg"):
+        return data
+    try:
+        from PIL import Image, ImageOps
+
+        im = Image.open(BytesIO(data))
+        exif = im.getexif() if hasattr(im, "getexif") else None
+        if not exif or exif.get(274) in (None, 1):  # 274 = Orientation
+            return data
+        fixed = ImageOps.exif_transpose(im)
+        buf = BytesIO()
+        fixed.save(buf, format="JPEG")
+        return buf.getvalue()
+    except Exception:
+        return data
+
+
 @tool
 @_tool_guard("插图")
 def docx_image_insert(dest: str, image: str, after: str = "", page: int = 1) -> str:
@@ -2074,17 +2095,18 @@ def docx_image_insert(dest: str, image: str, after: str = "", page: int = 1) -> 
             tmp_png.unlink(missing_ok=True)
         src_label = f"{image} 第 {page} 页（按页渲染）"
     elif suffix in (".png", ".jpg", ".jpeg", ".bmp", ".gif"):
-        data = src.read_bytes()
+        data = _exif_normalized(src.read_bytes(), suffix)
         src_label = image
     elif suffix == ".webp":
         # python-docx 不认 webp（docx.image 只有 png/jpg/bmp/gif/tiff 解析器），
         # Pillow 解码后转 PNG 再插——知识库上传白名单收 webp（IMAGE_EXTS），此处
         # 不接会把「收得进、插不进」的矛盾留给用户（2026-09-14 复核批）。
         # 坏文件（半截/伪造后缀）按人话报错，不裸抛类型名（_tool_guard 兜底是英文）
-        from PIL import Image
+        from PIL import Image, ImageOps
 
         try:
             with Image.open(src) as im:
+                im = ImageOps.exif_transpose(im)
                 buf = BytesIO()
                 im.convert("RGBA").save(buf, format="PNG")
         except Exception:
@@ -2321,13 +2343,15 @@ def _grid_layered(layers: list[dict]) -> tuple[list[list[dict]], list[float]]:
     return grid, [0.18, 0.205, 0.205, 0.205, 0.205]
 
 
-def _grid_gantt(tasks: list[dict], weeks: int, milestones: list[dict]):
-    """甘特网格：任务行×周列，区间格填色即时间条（空文本+底纹），里程碑行 ◆。
-    周列窄格是形态本身——列数上限不适用，由 weeks ≤36 上限管横向溢出。"""
+def _grid_gantt(tasks: list[dict], weeks: int, milestones: list[dict], unit: str = "周"):
+    """甘特网格：任务行×周期列（unit 缺省 周，可 日/月 等——表头缩写跟随单位），
+    区间格填色即时间条（空文本+底纹），里程碑行 ◆。
+    周期窄格是形态本身——列数上限不适用，由总期数 ≤36 上限管横向溢出。"""
+    abbrev = {"周": "W", "日": "D", "天": "D", "月": "M", "季": "Q"}.get(unit, unit[:1].upper() or "W")
     head_cell = {"bold": True, "fill": _DIAG_HEAD_FILL, "center": True}
     grid: list[list[dict]] = [
         [{"text": "任务", **head_cell}]
-        + [{"text": f"W{w}", **head_cell} for w in range(1, weeks + 1)]
+        + [{"text": f"{abbrev}{w}", **head_cell} for w in range(1, weeks + 1)]
     ]
     for t in tasks:
         row = [{"text": t["name"]}]
@@ -2414,15 +2438,17 @@ def _parse_diagram_spec(kind: str, spec: str) -> tuple[dict | list | None, str |
         return norm, None
 
     if kind == "gantt":
+        unit = _cell_str(data.get("unit")).strip() or "周"
         tasks = data.get("tasks")
         if not isinstance(tasks, list) or not tasks:
             return None, (
-                "gantt 须带 tasks：[{\"name\":\"需求调研\",\"start\":1,\"end\":4}, …]（周号从 1 起）"
+                "gantt 须带 tasks：[{\"name\":\"需求调研\",\"start\":1,\"end\":4}, …]"
+                "（序号从 1 起，单位随 unit——默认 周，可 日/月 等）"
             )
         try:
             weeks = int(data.get("weeks") or 0)
         except (TypeError, ValueError):
-            return None, "weeks 须为整数（周数，可省略——按任务最晚结束周推定）"
+            return None, "weeks 须为整数（总期数，可省略——按任务最晚结束推定）"
         norm_tasks: list[dict] = []
         for i, t in enumerate(tasks, 1):
             if not isinstance(t, dict):
@@ -2433,15 +2459,15 @@ def _parse_diagram_spec(kind: str, spec: str) -> tuple[dict | list | None, str |
             try:
                 start, end = int(t.get("start")), int(t.get("end"))
             except (TypeError, ValueError):
-                return None, f"tasks 第 {i} 项 start/end 须为整数（周号从 1 起）"
+                return None, f"tasks 第 {i} 项 start/end 须为整数（序号从 1 起，单位随 unit）"
             if start < 1 or end < start:
                 return None, f"tasks 第 {i} 项区间非法（须 1 ≤ start ≤ end）"
             norm_tasks.append({"name": name, "start": start, "end": end})
             weeks = max(weeks, end)
         if weeks > 36:
             return None, (
-                f"总周数 {weeks} 超上限（≤36）——长周期请以月为单位聚合"
-                '（如 {"name":"需求调研","start":1,"end":2} 的 start/end 按月计）'
+                f"总期数 {weeks} 超上限（≤36）——长周期请换大单位聚合"
+                '（如 unit:"月" 后 start/end/week 按月计，表头随之显示 M1/M2/…）'
             )
         milestones_raw = data.get("milestones") or []
         if not isinstance(milestones_raw, list):
@@ -2456,11 +2482,11 @@ def _parse_diagram_spec(kind: str, spec: str) -> tuple[dict | list | None, str |
             try:
                 week = int(m.get("week"))
             except (TypeError, ValueError):
-                return None, f"milestones 第 {i} 项 week 须为整数"
+                return None, f"milestones 第 {i} 项 week 须为整数（序号，单位随 unit）"
             if not 1 <= week <= weeks:
-                return None, f"milestones 第 {i} 项 week={week} 超出总周数 {weeks}"
+                return None, f"milestones 第 {i} 项 week={week} 超出总期数 {weeks}"
             norm_ms.append({"week": week, "label": label})
-        return {"tasks": norm_tasks, "weeks": weeks, "milestones": norm_ms}, None
+        return {"tasks": norm_tasks, "weeks": weeks, "milestones": norm_ms, "unit": unit}, None
 
     # kind == "radial"（调用方已把关 kind 取值）
     center = _cell_str(data.get("center")).strip()
@@ -2635,7 +2661,9 @@ def docx_diagram_insert(dest: str, kind: str, spec: str, after: str = "", captio
             tbl = _grid_table(doc, grid, ratios)
             stat = f"{len(parsed)} 层"
         elif kind == "gantt":
-            grid, ratios = _grid_gantt(parsed["tasks"], parsed["weeks"], parsed["milestones"])
+            grid, ratios = _grid_gantt(
+                parsed["tasks"], parsed["weeks"], parsed["milestones"], parsed.get("unit", "周")
+            )
             tbl = _grid_table(doc, grid, ratios)
             stat = f"{len(parsed['tasks'])} 项任务×{parsed['weeks']} 周"
         else:
