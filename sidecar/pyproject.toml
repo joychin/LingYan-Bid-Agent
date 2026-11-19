@@ -3,7 +3,7 @@ name = "tender-agent-sidecar"
 version = "0.1.0"
 description = "灵燕智能 local-first sidecar: FastAPI + DeepAgents + SQLite"
 license = "MIT"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.15"  # 上界防 runner uv 漂移到最新 Python（3.15 无 ormsgpack 预编译 wheel，pyo3-ffi 拒建——v0.2.4 首跑实证）
 dependencies = [
     "deepagents==0.7.7",
     "langchain-openai",
