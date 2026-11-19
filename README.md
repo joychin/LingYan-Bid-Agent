@@ -24,6 +24,8 @@ Files stay on your machine, and you choose and configure the model service it ca
 - 写作不凭感觉——每一节都围绕评分项组织，关键内容标注招标原文出处；
 - 交付不再是聊天框里的零散文字——产出带封面、目录、页码的标准 Word，AI 改动留修订痕迹，缺材料的地方标批注。
 
+同一套投标方法论另有独立发布的技能包版本 [tender-writing-suite](https://github.com/joychin/tender-writing-suite)，可在 WorkBuddy 等支持 Agent Skills 的工作台里直接使用，见[下文](#技能包版本tender-writing-suite)。
+
 ## 为什么做这个
 
 写过标书的人都懂：
@@ -168,6 +170,14 @@ cp sidecar/.env.example sidecar/.env   # 环境变量模板（模型密钥也可
 灵燕智能用于**辅助**整理、起草和审阅投标材料。最终内容、承诺及投标责任，仍需由提交者审核并承担。
 
 我们不承诺中标结果，也不提供不经人工审核就能直接提交的终稿。
+
+## 技能包版本：tender-writing-suite
+
+本仓库的投标方法论另有一个独立发布的技能包版本——[joychin/tender-writing-suite](https://github.com/joychin/tender-writing-suite)。
+
+它把「招标文件解析 → 要点与废标审计 → 目录规划 → 写作指引与承诺清单 → 逐节正文 → 机器校验 → 自动编号合册」整条流水线打包成可安装的 Agent Skill，供 [WorkBuddy](https://www.workbuddy.ai) / SkillHub 等支持 Agent Skills 的 AI 工作台使用，不需要安装本仓库的桌面客户端。如果你只想在现有的 AI 工作台里跑这套标书流程，用技能包版本即可。
+
+技能包独立发布与授权，与本仓库的 MIT 开源相互独立。
 
 ## 参与贡献
 
