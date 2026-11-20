@@ -177,6 +177,8 @@ cp sidecar/.env.example sidecar/.env   # 环境变量模板（模型密钥也可
 
 它把「招标文件解析 → 要点与废标审计 → 目录规划 → 写作指引与承诺清单 → 逐节正文 → 机器校验 → 自动编号合册」整条流水线打包成可安装的 Agent Skill，供 [WorkBuddy](https://www.workbuddy.ai) / SkillHub 等支持 Agent Skills 的 AI 工作台使用，不需要安装本仓库的桌面客户端。如果你只想在现有的 AI 工作台里跑这套标书流程，用技能包版本即可。
 
+已在 WorkBuddy 技能市场上架，[一键安装直达](https://www.workbuddy.cn/share/asset?shareCode=JIslyfswS7FcXXlxfaUoSe&sig=VUHyOC5MWRmHVi7Z)。
+
 技能包独立发布与授权，与本仓库的 MIT 开源相互独立。
 
 ## 参与贡献
