@@ -32,7 +32,8 @@ docx 翻译成文本世界（读视图/编号寻址），写入全由程序机�
   覆盖正文与表格单元格段落）
 - docx_assemble_volume：整本合册——按投标目录树序把各节 docx 合并成每册
   一个整本文件（容器节点发章标题——按树序自动编号（第X章/1.1，格式取目录
-  产物 numbering 字段）、一级章前分页、页脚页码；模板填充类叶子
+  产物 numbering 字段）、一级章前分页、正文页脚页码（封面/目录不编，正文自
+  1 起分节重起）；模板填充类叶子
   产出节文件即按树序并入、未产出按附件对待不占整本位；「目录」节点机械
   生成目录页（Word 目录域+缓存清单，2026-09-14 批）且目录前前置页不占章号、
   空容器章标题抑制；**整本=交付态**：
@@ -69,6 +70,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from docx import Document
+from docx.enum.section import WD_SECTION
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement, parse_xml
@@ -963,6 +965,47 @@ def _new_document() -> Document:
     if tpl.is_file():
         return _blank_from(tpl)
     return Document()
+
+
+# CT_SectPr 元素序中 pgNumType 之后的成员（ECMA-376 顺序；手工插 pgNumType 用——
+# python-docx 未建模该元素，无 API）
+_PGNUMTYPE_SUCCESSORS = (
+    "w:cols", "w:formProt", "w:vAlign", "w:noEndnote", "w:titlePg",
+    "w:textDirection", "w:bidi", "w:rtlGutter", "w:docGrid",
+    "w:printerSettings", "w:sectPrChange",
+)
+
+
+def _start_body_paging_section(doc: Document) -> None:
+    """正文分节（2026-11-20 拍板：封面/前置/目录不编页码，正文第一页=第 1 页）。
+
+    在文档当前末尾插「下一页」分节符：前置整节摘净页眉页脚引用（封面溢出到
+    第 2 页也不带页码——治「首页不同」只豁免字面第一页的局限），正文节重挂
+    版式 default 页眉/页脚并 pgNumType 自 1 重起。python-docx add_section 的
+    缺省恰与目标相反——克隆留在前节（带页脚引用）、新末节被剥引用靠继承，
+    而继承链上前节一旦摘净两节页脚皆空，故显式挪引用：分节前存 default 类
+    引用，分节后前置节全摘、正文节重挂（first/even 变体一并不挂——第一页
+    语义已由分节承担，正文首页不套用版式的首页变体页脚）。"""
+    default_refs = [
+        deepcopy(ref)
+        for ref in doc.sections[-1]._sectPr.xpath("w:headerReference|w:footerReference")
+        if ref.get(qn("w:type")) == "default"
+    ]
+    doc.add_section(WD_SECTION.NEW_PAGE)
+    front_sect = doc.sections[0]._sectPr  # 克隆节=前置节：页眉页脚全摘、页码不编
+    for ref in front_sect.xpath("w:headerReference|w:footerReference"):
+        front_sect.remove(ref)
+    body_sect = doc.sections[-1]._sectPr  # 哨兵节=正文节（引用已被库剥净）：重挂
+    for i, ref in enumerate(default_refs):
+        body_sect.insert(i, ref)  # headerReference/footerReference 居 CT_SectPr 序首
+    pgnum = parse_xml(f'<w:pgNumType {nsdecls("w")} w:start="1"/>')
+    for tag in _PGNUMTYPE_SUCCESSORS:
+        succ = body_sect.find(qn(tag))
+        if succ is not None:
+            succ.addprevious(pgnum)
+            break
+    else:
+        body_sect.append(pgnum)
 
 
 def _body_style(doc: Document):
@@ -3058,10 +3101,16 @@ def _insert_mechanical_toc(out: Document, anchor, entries: list[tuple[str, str, 
         for el in reversed(els):
             anchor.addnext(el)
     else:
-        sect = out.element.body.find(qn("w:sectPr"))
+        # 无锚=目录节点居树首（无封面无前置）：插到文档最前。不能按 body 末级
+        # sectPr 插——分节后那属正文节，会把目录页落到正文节里（带页码且挤掉
+        # 正文首页）；分节符段落此刻即首个内容元素，addprevious 恰落在它之前
+        first = next(
+            (el for el in out.element.body.iterchildren() if el.tag != qn("w:sectPr")),
+            None,
+        )
         for el in els:
-            if sect is not None:
-                sect.addprevious(el)
+            if first is not None:
+                first.addprevious(el)
             else:
                 out.element.body.append(el)
     return len(entries)
@@ -3305,7 +3354,7 @@ def docx_assemble_volume() -> str:
 
     用途：全部节完成后调用，产出 work/body/整本-<册名>.docx。容器章由本工具发
     标题（层级随树深，Word 可自动生成目录）、叶子节内容元素级拷入（图片/表格
-    原样保留）、一级章前分页、页脚页码；模板填充类叶子（目录标非正文）**产出
+    原样保留）、一级章前分页、正文页脚页码（封面/目录不编，正文自 1 起）；模板填充类叶子（目录标非正文）**产出
     节文件即按树序并入**（拷原件填空的格式件本就是标书组成部分）、未产出的按
     附件对待不占整本位（返回行点名）。章节编号按树序自动生成（第一章/1.1；
     格式取目录产物的 numbering 字段，缺省第X章+1.1；封面不占序，目录产物里
@@ -3321,8 +3370,10 @@ def docx_assemble_volume() -> str:
     自动目录只剩章节骨架，视觉样式不变；「目录」节并入后与实收章节机械对账，
     不符（列了没有的/漏了实有的）点名提醒。
     树首节点为「封面」时（tender-outline 的结构约定）整本首页即封面页：跳过册名
-    大标题与封面节点自身标题、开「首页不同」（封面页不带页眉页脚，页码从封面
-    后一页起显示）。缺失的正文节文件逐个点名，不中断其余节。**整本是派生产物**：改内容
+    大标题与封面节点自身标题。**页码分节（2026-11-20 拍板）**：树含「封面」或
+    「目录」节点时正文自成一节——封面/前置/目录整节不带页眉页脚、页码不编，
+    正文节重挂版式页脚、页码自 1 重起（行业惯例：标书正文第一页=第 1 页）；
+    两者皆无的旧目录产物不分节，全册页码从首页编起。缺失的正文节文件逐个点名，不中断其余节。**整本是派生产物**：改内容
     回节文件层改（或让模型改）再重新调用本工具覆盖合册，直接手改整本会被下次
     合册覆盖。**合册成功即自动发布为整本标书产物**（每册一条；docx 内容未变不
     重复发布）。
@@ -3367,8 +3418,8 @@ def docx_assemble_volume() -> str:
         numberer = _HeadingNumberer(numberer_scheme)  # 各册从首章重起
         self_numbered: list[str] = []  # 节点名自带编号（合册再编号会双重，探测点名）
         # 封面=树首一级叶子且清洗后标题为「封面」（tender-outline 的结构约定）：
-        # 整本首页即封面页——跳过册名大标题（封面自带册名）与节点自身标题，
-        # 开「首页不同」让封面页不带页眉页脚；无封面时行为与旧版逐字节一致。
+        # 整本首页即封面页——跳过册名大标题（封面自带册名）与节点自身标题；
+        # 封面页不带页眉页脚由页码分节承担（见 front_end_idx），无封面时行为与旧版一致。
         has_cover = (
             bool(nodes)
             and nodes[0][0] == 1
@@ -3401,10 +3452,19 @@ def docx_assemble_volume() -> str:
                 "编制说明等前置页会占章号——如需前置区请在目录里加「目录」节点）"
             )
         empty_ids = _empty_containers(doc.get("directory") or [], wroot, vol_dir)
-        out = _new_document()  # 模板自带 A4 版面/页边距/页脚页码，无需再手拼
-        if has_cover:
-            out.sections[0].different_first_page_header_footer = True
+        # 页码分节锚（2026-11-20 拍板：封面/前置/目录不编页码，正文第一页=第1页）：
+        # 锚后首个节点发射前插分节符，其后全部内容落正文节（页码自 1 重起）；
+        # 无封面无目录的旧目录产物不分节（全册页码从首页编，行为与旧版一致）
+        if toc_node_idx is not None:
+            front_end_idx: int | None = toc_node_idx
+        elif has_cover:
+            front_end_idx = 0
         else:
+            front_end_idx = None
+        body_section_started = False
+        suppress_first_break = False  # 分节符已换页：正文首个一级章不再叠段前分页
+        out = _new_document()  # 模板自带 A4 版面/页边距/页脚页码，无需再手拼
+        if not has_cover:
             out.add_heading(vol, 0)
         merged = n_img = n_comment = n_cap = n_sub = 0
         cap_counters: dict = {}  # (表|图, 章) → 章内序——图注/表题全局重编号
@@ -3441,6 +3501,14 @@ def docx_assemble_volume() -> str:
                     toc_entries.append(("", f"{title}（另附）", depth))
                     continue  # 模板填充未产出：按附件对待（壳节漏建的兜底），不占整本位
                 # 已产出（拷原件+填空/附件壳节）：按树序并入整本，与正文叶子同路
+            if front_end_idx is not None and idx > front_end_idx and not body_section_started:
+                # 正文分节点：发射正文首个节点前插分节符——前置整节（封面/前置/
+                # 目录）至此封笔，其后标题与拷入内容全部落正文节。前置零内容
+                # （如封面缺节文件又无前置页）不分节——空前置节会多出一张空白页
+                body_section_started = True
+                if any(el.tag != qn("w:sectPr") for el in out.element.body.iterchildren()):
+                    _start_body_paging_section(out)
+                    suppress_first_break = True
             if has_cover and idx == 0:
                 # 封面节点不发「封面」标题行（节文件内容即整页），但占一级位：
                 # seen_chapter 置位让第一章拿到分页、封面独占首页；编号不占序
@@ -3456,9 +3524,12 @@ def docx_assemble_volume() -> str:
                     issued_titles.append(title)
                     toc_entries.append((prefix, title, depth))
                 if depth == 1:
-                    if seen_chapter:
+                    # 分节符已换页的正文首章不再叠段前分页（Word 对页首段落不重复
+                    # 分页，但渲染器可能双重换页出空白页）
+                    if seen_chapter and not suppress_first_break:
                         h.paragraph_format.page_break_before = True
                     seen_chapter = True
+                suppress_first_break = False  # 只豁免分节后的首个标题
             if is_container:
                 continue
             src_path = wroot / rel_src
@@ -3538,6 +3609,10 @@ def docx_assemble_volume() -> str:
                 )
             n_comment += _merge_missing_comments(src, out, copied)
             merged += 1
+        if has_cover and not body_section_started:
+            # 退化树（封面后零正文节点，无处插分节）：回落「首页不同」保封面页
+            # 不带页眉页脚——整节机制只在确有正文时分节
+            out.sections[0].different_first_page_header_footer = True
         if merged == 0:
             notes: list[str] = []
             if missing:
@@ -3580,6 +3655,8 @@ def docx_assemble_volume() -> str:
         # （publish_file_artifact 成功分支 note kind=artifact）——工作台整本行已隐藏，
         # 不再 note kind=file 防打开隐藏行；发布失败=不自动开，chips 仍是手动出口
         bits = f"{vol}：合并 {merged} 节 → work/{rel}"
+        if body_section_started:
+            bits += "（封面/目录不编页码，正文自第 1 页起编）"
         if n_img:
             bits += f"（含图片 {n_img} 张）"
         if n_comment:

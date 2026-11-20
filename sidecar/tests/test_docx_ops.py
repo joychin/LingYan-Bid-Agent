@@ -1277,8 +1277,9 @@ def test_revise_insert_with_style(env):
 
 def test_assemble_cover_node(env):
     """封面=树首一级叶子（名「封面」）：整本首页即封面页——无册名 Title、
-    无「封面」标题行（节文件标题段照旧剥）、封面行挂 Tender Cover、开
-    「首页不同」（封面页无页眉页脚）、第一章分页让封面独占一页。"""
+    无「封面」标题行（节文件标题段照旧剥）、封面行挂 Tender Cover；页码
+    分节（2026-11-20 拍板）：封面整节不编页码、正文分节自 1 重起，第一章
+    由分节符换页、不再叠段前分页。"""
     _seed_dir_artifact(env, _DIR_COVER)
     docx_section_create.invoke({"path": "body/封面", "title": "封面"})
     docx_section_revise.invoke({"path": "body/封面", "edits": json.dumps([
@@ -1303,9 +1304,38 @@ def test_assemble_cover_node(env):
     assert "封面" not in texts  # 封面节点自身标题不发、节文件标题段被剥
     # 封面不占编号序：第一个内容章仍是「第一章」
     chapter = next(p for t, p in zip(texts, paras) if t == "第一章\u3000技术方案")
-    assert chapter.paragraph_format.page_break_before is True  # 封面独占首页
+    assert chapter.paragraph_format.page_break_before is not True  # 分节符已换页，不叠段前分页
+    # 页码分节：前置节（封面）摘净页眉页脚、无 titlePg；正文节重挂版式页脚+页码自 1 重起
+    assert len(chk.sections) == 2
+    front_sect = chk.sections[0]._sectPr
+    assert not front_sect.xpath("w:headerReference|w:footerReference")
+    assert front_sect.find(qn("w:titlePg")) is None
+    body_sect = chk.sections[-1]._sectPr
+    pgnum = body_sect.find(qn("w:pgNumType"))
+    assert pgnum is not None and pgnum.get(qn("w:start")) == "1"
+    frefs = [r for r in body_sect.xpath("w:footerReference") if r.get(qn("w:type")) == "default"]
+    assert len(frefs) == 1
+    assert "PAGE" in chk.sections[-1].footer.paragraphs[0]._p.xml  # 页码域随页脚落正文节
+
+
+def test_assemble_cover_only_falls_back_titlepg(env):
+    """退化树（封面后零正文节点，无处插分节）：回落「首页不同」保封面页
+    不带页脚——整节分页机制只在确有正文时分节，成功行也不报告页码语义。"""
+    _seed_dir_artifact(env, {
+        "response_documents": [
+            {"name": "技术部分", "scope": "", "directory": [
+                {"目录名称": "封面", "level": 1, "children": [],
+                 "交付形态": "正文编写", "来源位置": []},
+            ]}
+        ]
+    })
+    assert docx_section_create.invoke({"path": "body/封面", "title": "封面"}).startswith("[已创建]")
+    r = docx_assemble_volume.invoke({})
+    assert r.startswith("[已合册]"), r
+    assert "封面/目录不编页码" not in r  # 实际分节才报告页码语义
+    chk = Document(str(_abs(env, "body/整本-技术部分.docx")))
+    assert len(chk.sections) == 1
     assert chk.sections[0].different_first_page_header_footer is True
-    assert "PAGE" in chk.sections[0].footer.paragraphs[0]._p.xml  # 默认页脚仍在
 
 
 def test_assemble_cover_missing_reported(env):
@@ -1577,6 +1607,22 @@ def test_assemble_mechanical_toc_and_front_matter(env):
     assert any(t.strip() == "第一章\u3000技术方案" for t in texts)
     assert any(t.strip() == "1.1 项目理解与需求分析" for t in texts)
     assert any("附件：资质证书复印件" in t and "（另附）" in t for t in texts)
+    # 页码分节（2026-11-20 拍板）：分节符落目录页之后、第一章之前——封面/
+    # 编制索引/目录页整节不编页码，正文节页码自 1 重起
+    assert len(chk.sections) == 2
+    break_i = next(
+        i for i, p in enumerate(chk.paragraphs)
+        if p._p.find(qn("w:pPr")) is not None
+        and p._p.find(qn("w:pPr")).find(qn("w:sectPr")) is not None
+    )
+    ch1_real_i = next(  # 真章标题（目录条目里也有同名文本，须按样式区分）
+        i for i, p in enumerate(chk.paragraphs)
+        if p.text.startswith("第一章　技术方案") and p.style.name == "Heading 1"
+    )
+    assert toc_i < break_i < ch1_real_i
+    assert not chk.sections[0]._sectPr.xpath("w:headerReference|w:footerReference")
+    pg = chk.sections[-1]._sectPr.find(qn("w:pgNumType"))
+    assert pg is not None and pg.get(qn("w:start")) == "1"
 
 
 def test_assemble_toc_node_with_file_unnumbered(env):
