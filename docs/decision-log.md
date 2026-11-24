@@ -175,6 +175,7 @@
 - L2593-2594 ~~钥匙串用 macOS `security` CLI 子进程~~（2026-08-29 已移除：Key 改存 app.db，见铁则 2；
 - L2595-2623 客户端版本检查+更新提示一期（2026-09-15，Rust 壳+前端，零新依赖；含版本号同源修复）：
 - L2953-2972 安装包 CI 直传阿里云 OSS（2026-09-20，官网下载直链自动化；release job 尾步，取代手工 sync-release）：
+- L3131-3147 撤安装包 OSS 镜像（2026-11-24，分发收窄为 GitHub Releases 唯一通道；含官网下载页直链改指与 0.2.4 补齐）：
 
 ---
 
@@ -3127,3 +3128,21 @@
     content、extract 不改，统一失效只多一次廉价 refetch 换时序鲁棒；不另起 hook——翻转
     时机与 toast 同源，少一处状态）。验证=vitest 345 绿 + 实机：40 章长文档上传后在
     「整理中…」窗口点开详情，落定后正文自动渲染（第 1/2/3 章…），全程不刷新页面。
+
+  - **撤安装包 OSS 镜像——分发收窄为 GitHub Releases 唯一通道（2026-11-24，用户
+    拍板「OSS 成本太高、不划算」）**：动因=官网下载直链走阿里云 OSS+CDN，80MB 级
+    安装包 × 每版 × 全量下载的 CDN 流量费持续累积，而 release job 本就把全产物挂在
+    GitHub Release（托管免费）——镜像层是纯重复付费。改四件：①release.yml 删尾步
+    「同步安装包到阿里云 OSS」，timeout 45→15min（45 是跨洋慢传年代的遗留，runner→
+    GitHub 资产上传是内网速度）；②删 `scripts/upload_release_oss.cjs`（签名/CDN 刷新
+    与官网仓 deploy-oss.js 同源，git 历史可取）；③GitHub Secrets 两枚 OSS Key 删除
+    （仅该步消费）；④官网仓下载页直链+SHA256SUMS 链接改指对应 tag 的 GitHub 资产
+    地址，删 `tools/sync-release.js`/`tools/prune-dl.js`（镜像与 dl/ 清理随之失义，
+    下载页 sync 标记区改手工维护），两仓 AGENTS.md 与 docs/packaging.md 同步改写。
+    顺带补欠账：线上 version.json 早已升 0.2.4（随 11-19 发版部署）而下载页停在
+    0.2.3——本次一并把下载页升到 0.2.4（文件名/大小/SHA256 取自 v0.2.4 Release）。
+    明确保留：客户端更新源仍=官网 `release/version.json`（静态小文件，与安装包流量
+    不是一个量级）；OSS 已归档 `dl/` 旧对象不删（旧书签直链不断，存储费忽略不计）；
+    官网整站部署仍走 deploy-oss.js。已知代价=GitHub 资产直连在国内可能慢（成本优先，
+    用户明示接受）。验证=deploy 后 curl 实测下载页三条直链与 SHA256SUMS 指向正确、
+    GitHub 资产 URL 302→200 可达。

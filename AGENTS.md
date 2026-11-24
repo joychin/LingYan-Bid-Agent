@@ -38,8 +38,8 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
 其余顶层目录：`demo/`（演示录制脱敏数据包，全虚构主体「星灵创科/云澜市」；
 `record_env.sh on|off` 用整目录换出/还原 `sidecar/data/` 的方式切真实态与演示态、
 配方在 `demo/README.md`——**演示态里别干真活**，演示态期间的写入随 off 一并销毁；
-`seed_demo.py` 灌库一次、可反复 on 复录）；`scripts/`（`set_version.py` 版本号覆写、
-`upload_release_oss.cjs` 发版 OSS 直传）。`kb-test/`、`gui-test-screenshots/`、`out/`
+`seed_demo.py` 灌库一次、可反复 on 复录）；`scripts/`（`set_version.py` 版本号覆写）。
+`kb-test/`、`gui-test-screenshots/`、`out/`
 等是 gitignore 的本地测试/产物目录，不属仓库结构。
 
 三条铁律：
@@ -491,11 +491,10 @@ sidecar/         Python sidecar（FastAPI + uvicorn），装配 DeepAgents
     **客户端版本检查+更新提示一期**（2026-09-15，Rust 两命令 `check_latest_version`/
     `open_download_page` + 前端 `lib/updateCheck.ts`，详情与更新源三层取值见
     docs/packaging.md §9）：应用内自动更新是二期、与签名公证绑定。**发版除推 tag 外
-    必做一步=更新官网 `version.json`**（漏更=客户端不提示新版）。**安装包 CI 直传
-    OSS**（2026-09-20 起）：release job 尾步把安装包写进阿里云 OSS `dl/`（版本化归档
-    +稳定别名+latest.json+刷 CDN，官网下载直链；Secrets `OSS_ACCESS_KEY_ID`/
-    `OSS_ACCESS_KEY_SECRET`，实现在 `scripts/upload_release_oss.cjs`；官网仓
-    sync-release.js 全量同步降级为备用）。
+    必做一步=更新官网 `version.json` 与下载页**（漏更=客户端不提示新版）。**安装包
+    分发=GitHub Releases 唯一通道**（2026-11-24 撤 OSS 镜像：官网下载页直链改指对应
+    tag 的 GitHub 资产、CI 不再写 OSS；2026-09-20~11-24 曾直传阿里云 OSS `dl/`，
+    沿革见 decision-log「打包」章，`upload_release_oss.cjs` 已删、git 历史可取）。
   - 已装插件仅三枚官方 plumbing：`tauri-plugin-single-instance`（须第一个注册——GUI 双开会撞
     agent.db 单库 checkpoint，二次启动聚焦已有窗口，不做互斥协调）+ `tauri-plugin-window-state`
     （记住窗口大小/位置）+ `tauri-plugin-shell`（2026-09-07 打包分发：bundled 模式经
