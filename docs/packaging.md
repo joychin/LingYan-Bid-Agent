@@ -247,8 +247,9 @@ Word 修订与批注作者）与 `identifier` 全部去掉了旧名。
 `dl/`（版本化归档 + `dl/<去版本号名>` 稳定别名 + `dl/latest.json` 清单 + 刷 CDN，
 实现在 `scripts/upload_release_oss.cjs`，Secrets `OSS_ACCESS_KEY_ID` /
 `OSS_ACCESS_KEY_SECRET`）——因 CDN 下载流量成本不划算整体撤除（动因与沿革见
-decision-log「打包」章；脚本已删，git 历史可取）。OSS 上已归档的 `dl/` 旧对象
-未删除，历史直链仍可访问。
+decision-log「打包」章；脚本已删，git 历史可取）。`dl/` 历史镜像对象已于
+2026-11-25 应用户要求整体清空（删前核验 GitHub Releases 权威副本齐全），
+旧 `dl/` 直链自此 404；官网 deploy-oss.js 的 KEEP 名单保留 `dl/` 条目作防御。
 
 官网侧发版手工步骤（详见官网仓 AGENTS.md）：① 更新 `release/version.json`
 ② 更新下载页的版本行/文件名/大小/SHA256/直链 ③ `node tools/deploy-oss.js`
